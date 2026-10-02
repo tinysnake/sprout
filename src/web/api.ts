@@ -22,6 +22,7 @@ import { TaskRecoveryRefusal } from '../task/environment-lifecycle.ts';
 import type { OperatorSessionService, AuthenticatedBrowserSession } from '../auth/service.ts';
 import { composeApiRouters, type ApiRouter } from './router.ts';
 import type { WorkerGateway } from '../worker/gateway.ts';
+import { WORKER_DIAGNOSTICS } from '../worker/diagnostics.ts';
 import {
   summarizeRunHistory,
   toMessageView,
@@ -45,6 +46,9 @@ export * from './views.ts';
 
 /** The single machine-authenticated Worker upgrade path (ADR-0012). */
 export const WORKER_CONNECT_PATH = '/api/worker/connect';
+
+/** Allow a remote close acknowledgement, without holding Core shutdown indefinitely. */
+export const WORKER_CONNECTION_SHUTDOWN_DEADLINE_MS = 5_000;
 
 /**
  * The Web seam for M1.
@@ -143,13 +147,21 @@ export function createRunApi(options: RunApiOptions): RunApi {
     });
   });
 
+  let shuttingDown = false;
+  let closing: Promise<void> | undefined;
+  let workerSockets: WebSocketServer | undefined;
   // The machine-authentication boundary (#115). A Worker initiates this upgrade
   // off-loopback only over WSS; loopback may use WS. It is handled before the
   // browser `request` path and never reads a cookie, CSRF token, or Human actor.
   if (options.workerGateway !== undefined) {
     const gateway = options.workerGateway;
     const wss = new WebSocketServer({ noServer: true });
+    workerSockets = wss;
     server.on('upgrade', (request, socket, head) => {
+      if (shuttingDown) {
+        socket.destroy();
+        return;
+      }
       const url = new URL(request.url ?? '/', 'http://localhost');
       if (url.pathname !== WORKER_CONNECT_PATH) {
         socket.destroy();
@@ -1006,20 +1018,48 @@ export function createRunApi(options: RunApiOptions): RunApi {
           resolve({ port: typeof address === 'object' && address ? address.port : port });
         });
       }),
-    close: () =>
-      new Promise((resolve, reject) => {
-        // End every open event stream first: `server.close` waits for existing
-        // connections, and an SSE stream never ends by itself.
+    close: () => {
+      closing ??= (async () => {
+        shuttingDown = true;
+        // End SSE and stop the listener before destroying ordinary HTTP sockets.
+        // closeAllConnections does not cover upgraded Worker WebSockets.
         for (const stream of streams) stream.end();
         streams.clear();
         unsubscribeRunEvents();
+        const httpClosed = new Promise<void>((resolve, reject) => {
+          if (!server.listening) return resolve();
+          server.close((error) => (error ? reject(error) : resolve()));
+        });
         server.closeAllConnections?.();
-        // A transport that never listened (construction refused, or the caller
-        // closed before opening the surface) has nothing to stop.
-        if (!server.listening) return resolve();
-        server.close((error) => (error ? reject(error) : resolve()));
-      }),
+        await Promise.all([httpClosed, closeWorkerSockets(workerSockets)]);
+      })();
+      return closing;
+    },
   };
+}
+
+/** Release accepted and handshaking sockets before HTTP shutdown can finish. */
+async function closeWorkerSockets(wss: WebSocketServer | undefined): Promise<void> {
+  if (wss === undefined || wss.clients.size === 0) return;
+  const pending = new Set(wss.clients);
+  await new Promise<void>((resolve) => {
+    // Five seconds matches the reconnect-observation drain's budget: allow a
+    // short network delay, then release a peer that never acknowledges close.
+    const deadline = setTimeout(() => {
+      process.stderr.write(`[worker] shutdown deadline exceeded; terminating ${pending.size} connection(s)\n`);
+      for (const socket of pending) socket.terminate();
+    }, WORKER_CONNECTION_SHUTDOWN_DEADLINE_MS);
+    for (const socket of pending) {
+      socket.once('close', () => {
+        pending.delete(socket);
+        if (pending.size === 0) {
+          clearTimeout(deadline);
+          resolve();
+        }
+      });
+      socket.close(1001, WORKER_DIAGNOSTICS.coreGoingAway);
+    }
+  });
 }
 
 /** `undefined` when absent, `null` when the request asked to clear it. */

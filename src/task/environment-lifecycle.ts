@@ -8,7 +8,7 @@
  */
 
 import { sanitizeOperatorText } from '../environment/privacy.ts';
-import type { AgentRegistry } from '../agent/registry.ts';
+import type { AgentDefinition, AgentRegistry } from '../agent/registry.ts';
 import type { EnvironmentPreference } from '../environment/model.ts';
 import type { AcquireLeaseFailure, AcquireLeaseResult, EnvironmentPool, LeaseState } from '../environment/pool.ts';
 import { createIdFactory, type IdFactory } from '../ids.ts';
@@ -115,6 +115,8 @@ export interface TaskEnvironmentLifecycleOptions {
   readonly store: TaskStore;
   readonly pool: EnvironmentPool;
   readonly agents: AgentRegistry;
+  /** Current portable Agent identity, shared with ordinary run admission. */
+  readonly resolveAgent?: (agentId: string) => Promise<AgentDefinition | undefined>;
   readonly projects: ProjectRegistry;
   readonly runs: TaskEnvironmentRunner;
   readonly worker?: TaskContextWorker;
@@ -157,7 +159,7 @@ export interface TaskEnvironmentLifecycleOptions {
 export class TaskEnvironmentLifecycle {
   readonly #store: TaskStore;
   readonly #pool: EnvironmentPool;
-  readonly #agents: AgentRegistry;
+  readonly #resolveAgent: (agentId: string) => Promise<AgentDefinition | undefined>;
   readonly #projects: ProjectRegistry;
   readonly #runs: TaskEnvironmentRunner;
   readonly #worker: TaskContextWorker;
@@ -173,7 +175,7 @@ export class TaskEnvironmentLifecycle {
   constructor(options: TaskEnvironmentLifecycleOptions) {
     this.#store = options.store;
     this.#pool = options.pool;
-    this.#agents = options.agents;
+    this.#resolveAgent = options.resolveAgent ?? (async (agentId) => options.agents.get(agentId));
     this.#projects = options.projects;
     this.#runs = options.runs;
     this.#worker = options.worker ?? noOpTaskContextWorker;
@@ -208,7 +210,8 @@ export class TaskEnvironmentLifecycle {
     if (!await this.#agentEligible(input.contextAgentId, task.projectId, input.environmentInstanceId)) {
       throw new Error(`agent ${input.contextAgentId} is not eligible on environment ${input.environmentInstanceId}`);
     }
-    const contextAgent = this.#agents.get(input.contextAgentId)!;
+    const contextAgent = await this.#resolveAgent(input.contextAgentId);
+    if (!contextAgent) throw new Error(`unknown agent: ${input.contextAgentId}`);
     const acquired = this.#pool.reserveTaskLease({
       instanceId: input.environmentInstanceId, capability: contextAgent.capability, holderId: task.id,
       taskId: task.id, ttlMs: this.#leaseTtlMs,
@@ -259,7 +262,7 @@ export class TaskEnvironmentLifecycle {
     if (task.environmentLifecycleState === undefined) {
       const agentId = options.agentId ?? task.assignedAgentId;
       if (!agentId) throw new Error(`task ${taskId} has no assigned agent; assign one or name an agent to begin`);
-      const agent = this.#agents.get(agentId);
+      const agent = await this.#resolveAgent(agentId);
       if (!agent) throw new Error(`unknown agent: ${agentId}`);
       const project = this.#projects.get(task.projectId);
       if (!project || !project.memberships.some((member) => member.agentId === agentId)) {
@@ -974,7 +977,7 @@ export class TaskEnvironmentLifecycle {
 
   async #agentEligible(agentId: string, projectId: string, environmentInstanceId: string): Promise<boolean> {
     const project = this.#projects.get(projectId);
-    const agent = this.#agents.get(agentId);
+    const agent = await this.#resolveAgent(agentId);
     if (!project || !agent || !project.availableEnvironmentInstanceIds.includes(environmentInstanceId)
       || !project.memberships.some(member => member.agentId === agentId)
       || this.#pool.requiresLease(environmentInstanceId, agent.capability) !== true) return false;

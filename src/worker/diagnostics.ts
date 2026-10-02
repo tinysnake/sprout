@@ -33,6 +33,7 @@ export const WORKER_DIAGNOSTICS = {
   resumeRefused: 'the engine refused the saved session',
   turnFailed: 'the engine turn failed',
   channelClosed: 'the Environment Worker channel closed',
+  coreGoingAway: 'the Sprout instance is going away; the Worker connection closed',
   contractAgentsMd: 'project contract delivery: engine instruction file',
   contractSproutFile: 'project contract delivery: Sprout-owned instruction file',
   contractEngineHook: 'project contract delivery: engine configuration hook',

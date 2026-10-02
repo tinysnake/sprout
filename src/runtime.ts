@@ -69,6 +69,7 @@ import type { AgentRun } from './run/model.ts';
 import { RunOrchestrator } from './run/orchestrator.ts';
 import {
   RunReconnectRetry,
+  RunReconnectRetryShutdownError,
   type RunReconnectRetryReconcileResult,
 } from './run/reconnect-retry.ts';
 import type { RunReconnectRetryStore } from './run/reconnect-retry-store.ts';
@@ -992,29 +993,31 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
      */
     let recovery: EnvironmentRecoveryService;
 
+    const resolveAgent = async (agentId: string): Promise<AgentDefinition | undefined> => {
+      const durable = await agentService.get(agentId);
+      if (durable === undefined) return agents.get(agentId);
+      if (durable.status !== 'active') return undefined;
+      const configuration = currentConfiguration(durable);
+      const seed = agents.get(agentId);
+      return {
+        id: durable.id,
+        name: durable.displayName,
+        engine: configuration.options[0]!.engine,
+        capability: seed?.capability ?? 'agent-run',
+        workOptions: configuration.options,
+        configurationVersion: configuration.version,
+        ...(configuration.instructions !== undefined ? { instructions: configuration.instructions } : {}),
+        ...(seed?.workingDirectory !== undefined ? { workingDirectory: seed.workingDirectory } : {}),
+      };
+    };
+
     const orchestrator = new RunOrchestrator({
       // Resolved per run *for the resolved instance*, so a worker that died is
       // replaced before the next run instead of failing it against a dead channel
       // (ADR-0003), and so execution follows the leased instance (F1, #18).
       engines: (requestedInstanceId) => runtimeEnvironment.adapters(requestedInstanceId),
       agents,
-      resolveAgent: async (agentId) => {
-        const durable = await agentService.get(agentId);
-        if (durable === undefined) return agents.get(agentId);
-        if (durable.status !== 'active') return undefined;
-        const configuration = currentConfiguration(durable);
-        const seed = agents.get(agentId);
-        return {
-          id: durable.id,
-          name: durable.displayName,
-          engine: configuration.options[0]!.engine,
-          capability: seed?.capability ?? 'agent-run',
-          workOptions: configuration.options,
-          configurationVersion: configuration.version,
-          ...(configuration.instructions !== undefined ? { instructions: configuration.instructions } : {}),
-          ...(seed?.workingDirectory !== undefined ? { workingDirectory: seed.workingDirectory } : {}),
-        };
-      },
+      resolveAgent,
       // Observed engine facts (#87) per instance, so run admission can take the
       // Agent's first compatible work option before any engine accepts the
       // work (#90, ADR-0008). The facts are the readiness store's durable
@@ -1080,6 +1083,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       store: stores.tasks,
       pool,
       agents,
+      resolveAgent,
       projects,
       runs: orchestrator,
       worker: {
@@ -1396,7 +1400,11 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       onRetrySettled: (input) => collaboration.projectRetryReply(input),
     });
     noteRunReconnectRetry = (acceptedInstanceId) =>
-      runReconnectRetry.noteEnvironmentState(acceptedInstanceId).then(() => undefined);
+      runReconnectRetry.noteEnvironmentState(acceptedInstanceId)
+        .then(() => undefined)
+        .catch((error: unknown) => {
+          if (!(error instanceof RunReconnectRetryShutdownError)) throw error;
+        });
     const enrollmentEnvironment = new EnrollmentWorkerPort({
       gateway: workerGateway,
       ...(options.onWorkerLog !== undefined ? { onLog: options.onWorkerLog } : {}),
@@ -1792,7 +1800,19 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         createTaskProposalRouter({ proposals: taskProposals }),
         createUsageRouter({ usage: usageService }),
         createTaskAdmissionRouter({ admissions: taskAdmissions }),
-        createTaskControlRouter({ controls: taskControls }),
+        createTaskControlRouter({
+          controls: taskControls,
+          recover: async (taskId, input) => {
+            const task = await tasks.get(taskId);
+            if (environmentSource !== 'enrollment' || task?.environmentLeaseId === undefined ||
+                task.environmentLifecycleState !== 'recovery') {
+              return taskControls.recoverForHuman(taskId, input);
+            }
+            if (input.action === 'resume') await recovery.resume(task.environmentLeaseId, { reason: input.reason });
+            else await recovery.discard(task.environmentLeaseId, { reason: input.reason });
+            return (await tasks.get(taskId))!;
+          },
+        }),
         // The read-only Feed/Attention projection (#103) through the same
         // additive seam: one GET snapshot, no dismiss or snooze command.
         createFeedRouter({ feed }),
@@ -1971,8 +1991,13 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       },
 
       async close(): Promise<void> {
-        // End every open event stream before anything else: `server.close` waits
-        // for existing connections, and an SSE stream never ends by itself.
+        // Stop reconnect observations as shutdown starts. Drain concurrently
+        // with transport and Worker teardown so only the remaining store wait
+        // consumes the reconnect queue's bounded deadline.
+        const reconnectRetryDrain = runReconnectRetry.stopAcceptingAndDrain();
+        // The API ends SSE and releases upgraded Worker sockets with a bounded
+        // going-away handshake before awaiting HTTP close. Keep the gateway and
+        // stores alive here so channel-loss observers can preserve recovery.
         await api.close();
         // The enrollment-backed connections are owned by the gateway; the port
         // stops reaching them before they are torn down.
@@ -1983,6 +2008,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         // destroyed here: `rm` is the only irrecoverable action (#4), so its
         // lifecycle is an explicit operator decision rather than a side effect.
         if (environment !== undefined) await environment.close();
+        await reconnectRetryDrain;
         activeStores.close();
       },
     };

@@ -75,7 +75,15 @@ test('authenticated reconnect replays only retained evidence, not the interrupte
     assert.equal((await h.runtime.stores.recovery.workerRunReceipt?.(id, runId))?.pending, false);
     assert.equal((await h.runtime.orchestrator.load(runId))?.recoveredEvents?.length, 1);
     assert.equal(h.runtime.pool.getLease(begun.environmentLeaseId!)?.state, 'recovering');
-    await h.runtime.recovery.resume(begun.environmentLeaseId!);
+    const resumed = await fetch(`${h.base}/api/tasks/${task.id}/recovery`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: h.cookie, 'x-sprout-csrf': h.csrf },
+      body: JSON.stringify({ action: 'resume', reason: 'Human resumes synchronized Task recovery' }),
+    });
+    assert.equal(resumed.status, 200);
+    assert.equal((await h.runtime.recovery.listForEnvironment(INSTANCE_ID))
+      .find(record => record.leaseId === begun.environmentLeaseId)?.phase, 'resolved',
+    'the Task control resolves the Environment recovery record with the held lease');
     assert.equal((await h.runtime.tasks.get(task.id))?.environmentLifecycleState, 'blocked');
     assert.equal(h.runtime.pool.getLease(begun.environmentLeaseId!)?.state, 'active');
     assert.equal(slow.sessions[0]?.prompts.length, 1, 'no turn replay');
@@ -182,6 +190,13 @@ test('a recycled Task context cannot authorize ordinary recovery even when works
     const recovery = (await h.runtime.recovery.forLease(begun.environmentLeaseId!))!;
     assert.equal(recovery.evidence?.taskContextPrepared, false);
     assert.equal(h.runtime.pool.getLease(begun.environmentLeaseId!)?.state, 'recovering');
-    await assert.rejects(h.runtime.recovery.resume(begun.environmentLeaseId!), /safe held context/);
+    const refused = await fetch(`${h.base}/api/tasks/${task.id}/recovery`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: h.cookie, 'x-sprout-csrf': h.csrf },
+      body: JSON.stringify({ action: 'resume', reason: 'Unsafe context cannot resume' }),
+    });
+    assert.equal(refused.status, 409);
+    assert.match((await refused.json() as { error: string }).error, /safe held context/);
+    assert.equal(h.runtime.pool.getLease(begun.environmentLeaseId!)?.state, 'recovering');
   } finally { await h.close(); }
 });

@@ -64,7 +64,7 @@ export class WorkerClient implements EngineAdapter {
   readonly id: string;
   readonly capabilities: EngineCapabilities;
   readonly #transport: JsonRpcTransport;
-  /** Live sessions, so a dead channel can fail their in-flight turns. */
+  /** Live sessions, so a dead channel can interrupt their in-flight turns. */
   readonly #live = new Set<(reason: string) => void>();
   #closed = false;
 
@@ -281,10 +281,11 @@ class WorkerEngineSession implements EngineSession {
       }
       finish(sanitizeEngineTurnResult(params.result));
     });
-    // A dead channel must fail the turn: the worker can never report on it again,
-    // so waiting for a settlement that cannot arrive would hang the run.
+    // Channel loss interrupts unfinished work (ADR-0009). This settles the
+    // Core's wait without claiming the remote engine stopped; recovery still
+    // requires the Worker's retained settlement and engine fence.
     const offClosed = this.#watchChannel(() => {
-      finish({ status: 'failed', message: WORKER_DIAGNOSTICS.channelClosed });
+      finish({ status: 'interrupted' });
     });
 
     void this.#transport

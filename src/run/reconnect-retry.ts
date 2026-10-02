@@ -75,6 +75,35 @@ const ENVIRONMENT_DISCONNECTED_FAILURE =
   /^no available environment for capability: [A-Za-z0-9_-]+$/;
 
 /**
+ * Maximum wait budget for reconnect observations. Runtime starts this drain
+ * alongside Web and Worker teardown, leaving five seconds for ordinary store
+ * latency while keeping the retry queue from extending operator shutdown
+ * indefinitely after those longer lifecycle waits have already begun.
+ */
+export const RUN_RECONNECT_RETRY_SHUTDOWN_DEADLINE_MS = 5_000;
+
+export class RunReconnectRetryShutdownError extends Error {
+  constructor() {
+    super('reconnect observation stopped during runtime shutdown');
+    this.name = 'RunReconnectRetryShutdownError';
+  }
+}
+
+/** Guard store ports so an abandoned pass cannot resume durable work post-close. */
+function guardedPort<T extends object>(port: T, assertOpen: () => void): T {
+  return new Proxy(port, {
+    get(target, property) {
+      const member = Reflect.get(target, property, target) as unknown;
+      if (typeof member !== 'function') return member;
+      return (...args: unknown[]) => {
+        assertOpen();
+        return Reflect.apply(member, target, args);
+      };
+    },
+  });
+}
+
+/**
  * Whether one durable run record is eligible for the bounded reconnect retry.
  *
  * Deliberately a pure function of the run record: eligibility is durable, so
@@ -176,12 +205,16 @@ export class RunReconnectRetry {
   readonly #clock: { now(): number };
   /** One serialized chain: observations, settlements, and passes never race. */
   #chain: Promise<unknown> = Promise.resolve();
+  #acceptingObservations = true;
+  #abandonPendingObservations = false;
+  #pendingObservations = 0;
+  #inFlightObservations = 0;
   /** Accepted transitions witnessed while an armed Project grants the instance. */
   readonly #pendingConnections = new Map<string, Set<string>>();
 
   constructor(options: RunReconnectRetryOptions) {
-    this.#store = options.store;
-    this.#runs = options.runs;
+    this.#store = guardedPort(options.store, () => this.#assertStoreAccessAllowed());
+    this.#runs = guardedPort(options.runs, () => this.#assertStoreAccessAllowed());
     this.#projects = options.projects;
     this.#isConnected = options.isConnected;
     this.#canAdmitWork = options.canAdmitWork;
@@ -228,11 +261,63 @@ export class RunReconnectRetry {
     return this.#enqueue(() => this.#pass());
   }
 
+  /**
+   * Stop accepting observations and wait up to the shutdown deadline for work
+   * already accepted. Runtime starts this alongside transport teardown and
+   * closes stores only after this promise settles.
+   */
+  async stopAcceptingAndDrain(
+    timeoutMs = RUN_RECONNECT_RETRY_SHUTDOWN_DEADLINE_MS,
+  ): Promise<void> {
+    this.#acceptingObservations = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const drained = await Promise.race([
+      this.#chain.then(() => true),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+    if (timer !== undefined) clearTimeout(timer);
+    if (drained || this.#pendingObservations === 0) return;
+
+    // Mark the active pass as abandoned before returning. Its guarded ports
+    // reject any later store/run operation, and queued passes reject without
+    // starting, so closing stores cannot turn a late continuation into access
+    // to a closed handle.
+    this.#abandonPendingObservations = true;
+    const abandoned = this.#pendingObservations;
+    const queued = Math.max(0, abandoned - this.#inFlightObservations);
+    process.stderr.write(
+      `[run-retry] shutdown deadline exceeded; abandoned ${abandoned} pending observation(s) ` +
+      `(${this.#inFlightObservations} in flight, ${queued} queued)\n`,
+    );
+  }
+
+  #assertStoreAccessAllowed(): void {
+    if (this.#abandonPendingObservations) {
+      throw new RunReconnectRetryShutdownError();
+    }
+  }
+
   #enqueue<T>(fn: () => Promise<T>): Promise<T> {
-    const result = this.#chain.then(fn, fn);
+    if (!this.#acceptingObservations) {
+      return Promise.reject(new RunReconnectRetryShutdownError());
+    }
+    this.#pendingObservations += 1;
+    const result = this.#chain.then(async () => {
+      if (this.#abandonPendingObservations) {
+        throw new RunReconnectRetryShutdownError();
+      }
+      this.#inFlightObservations += 1;
+      try {
+        return await fn();
+      } finally {
+        this.#inFlightObservations -= 1;
+      }
+    });
     this.#chain = result.then(
-      () => undefined,
-      () => undefined,
+      () => { this.#pendingObservations -= 1; },
+      () => { this.#pendingObservations -= 1; },
     );
     return result;
   }

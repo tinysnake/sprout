@@ -1,3 +1,4 @@
+import { EnvironmentRecoveryError } from '../environment/recovery-service.ts';
 import { TaskControlError, type TaskControlService } from '../task/control-service.ts';
 import type { Task } from '../task/model.ts';
 import { TaskProposalError } from '../task/proposal-model.ts';
@@ -12,7 +13,11 @@ function json(context: ApiRequestContext, status: number, body: unknown): boolea
 }
 
 /** Protected Human intervention and validation commands for begun Tasks. */
-export function createTaskControlRouter(options: { readonly controls: TaskControlService }): ApiRouter {
+export function createTaskControlRouter(options: {
+  readonly controls: TaskControlService;
+  /** Resolve Environment proof and decision history together with the Task holder. */
+  readonly recover?: (taskId: string, input: { action: 'resume' | 'discard'; reason: string }) => Promise<Task>;
+}): ApiRouter {
   const { controls } = options;
   return {
     name: 'task-controls',
@@ -91,7 +96,9 @@ export function createTaskControlRouter(options: { readonly controls: TaskContro
             if (body.action !== 'resume' && body.action !== 'discard') {
               return json(context, 400, { code: 'invalid-command', error: 'action must be resume or discard' });
             }
-            task = await controls.recoverForHuman(taskId, { action: body.action, reason: body.reason });
+            task = await (options.recover ?? controls.recoverForHuman.bind(controls))(taskId, {
+              action: body.action, reason: body.reason,
+            });
             break;
         }
         if (task === undefined) return json(context, 400, { code: 'invalid-command', error: 'unsupported Task control' });
@@ -108,6 +115,7 @@ export function createTaskControlRouter(options: { readonly controls: TaskContro
             : ['membership-required', 'authority-required', 'agent-read-only'].includes(error.code) ? 403 : 409;
           return json(context, status, { code: error.code, error: error.message });
         }
+        if (error instanceof EnvironmentRecoveryError) return json(context, 409, { code: error.code, error: error.message });
         if (error instanceof TaskRecoveryRefusal) return json(context, 409, { code: error.code, error: error.message });
         return json(context, 409, { code: 'lifecycle-conflict', error: 'the Task command could not be completed' });
       }

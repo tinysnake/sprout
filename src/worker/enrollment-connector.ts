@@ -19,6 +19,7 @@
  */
 
 import { lstatSync, readFileSync } from 'node:fs';
+import { WORKER_DIAGNOSTICS } from './diagnostics.ts';
 import type { Duplex } from 'node:stream';
 
 import {
@@ -170,7 +171,14 @@ export async function connectWorkerEnrollment(
   const stream = await new Promise<WorkerDuplex>((resolve, reject) => {
     socket.on('open', () => {
       const duplex = createWebSocketStream(socket) as unknown as WorkerDuplex;
-      socket.on('close', () => duplex.destroy());
+      socket.on('close', (code, reason) => {
+        // Only a known product reason leaves this boundary; remote close text
+        // may contain secrets or host details and must never reach diagnostics.
+        if (code === 1001 && reason.toString() === WORKER_DIAGNOSTICS.coreGoingAway) {
+          options.log?.(WORKER_DIAGNOSTICS.coreGoingAway);
+        }
+        duplex.destroy();
+      });
       resolve(duplex);
     });
     socket.on('error', (error: Error) => reject(error));
