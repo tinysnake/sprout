@@ -121,6 +121,24 @@ Tasks page remains #102.
 
 ## Task control boundary (#101)
 
+Task leases remain exclusive while blocked or awaiting validation (ADR-0005).
+Before competing Message/run acquisition or a new Task reservation, the runtime
+revalidates an overdue Task lease through the Task lifecycle. It moves the same
+holder and lease into retained recovery, records the `lease-overdue` cause, and
+opens the existing Human recovery controls. Expiry never recycles a workspace,
+releases a lease, or completes a Task. Human Resume refreshes the deadline and
+restores the prior held state without replay. Discard follows ordinary cleanup;
+Force Release remains the risk-acknowledged emergency action in recovery
+(ADR-0009). This check is demand-driven at competing acquisition, not a periodic
+heartbeat or a release-on-block policy.
+
+Environment-class run-failure notices disclose only bounded, sanitized
+product-owned lease-conflict reasons. They direct the Human to Environments
+recovery or to Tasks → select the holding Task → enter a reason → Discard Task.
+Arbitrary engine diagnostics remain withheld. The active Task lease panel also
+links directly to the holding Task's Human controls; Force Release stays gated
+on recovery rather than becoming ordinary active-work preemption.
+
 Once begun, the protected Task controls remain independent of proposal approval:
 
 - `POST /api/tasks/:id/content` accepts `{ expectedContentVersion, content,

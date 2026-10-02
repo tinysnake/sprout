@@ -814,13 +814,22 @@ export class RunOrchestrator {
         return this.#finish(initial, 'failed', { status: 'failed', message: `task lease is not active for run ${initial.id}` }, 'admission');
       }
     }
-    const acquired = nestedTaskLease ? undefined : this.#pool.acquireLease({
-      instanceId: initial.environmentInstanceId,
-      capability: agent.capability,
-      holderId: agent.id,
-      runId: initial.id,
-      ttlMs: this.#leaseTtlMs,
-    });
+    let acquired: ReturnType<EnvironmentPool['acquireLease']> | undefined;
+    try {
+      acquired = nestedTaskLease ? undefined : await this.#pool.acquireLeaseRevalidated({
+        instanceId: initial.environmentInstanceId,
+        capability: agent.capability,
+        holderId: agent.id,
+        runId: initial.id,
+        ttlMs: this.#leaseTtlMs,
+      });
+    } catch {
+      // Failed durable holder reconciliation is still an Environment admission
+      // failure. Never leave a queued run or expose storage/Worker diagnostics.
+      return this.#finish(initial, 'failed', {
+        status: 'failed', message: 'environment recovery could not be recorded',
+      }, 'environment');
+    }
     if (acquired !== undefined && !acquired.ok) {
       const instanceId = initial.environmentInstanceId;
       const busyMessage =

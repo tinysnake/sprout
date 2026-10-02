@@ -130,6 +130,7 @@ export class EnvironmentPool {
   readonly #store: LeaseStore | undefined;
   readonly #clock: Clock;
   readonly #idFactory: () => string;
+  #revalidateTaskLease: ((lease: EnvironmentLease) => Promise<void>) | undefined;
   /**
    * The dynamic eligibility gate (E2). `undefined` means every present instance
    * is eligible; a set means exactly those instances are.
@@ -235,6 +236,30 @@ export class EnvironmentPool {
    */
   acquireLease(request: AcquireLeaseRequest): AcquireLeaseResult {
     return this.#acquireLease(request, true);
+  }
+
+  /** The Task lifecycle owns durable recovery; the pool never releases overdue Task work. */
+  setTaskLeaseRevalidator(revalidate: (lease: EnvironmentLease) => Promise<void>): void {
+    this.#revalidateTaskLease = revalidate;
+  }
+
+  /** Revalidate an overdue Task holder before admitting competing production work. */
+  async revalidateTaskLease(instanceId: string): Promise<void> {
+    const lease = this.#lease(instanceId);
+    if (lease?.holderKind === 'task' && lease.state === 'active' && lease.expiresAt <= this.#clock.now()) {
+      await this.#revalidateTaskLease?.(lease);
+    }
+  }
+
+  async acquireLeaseRevalidated(request: AcquireLeaseRequest): Promise<AcquireLeaseResult> {
+    await this.revalidateTaskLease(request.instanceId);
+    // Opening recovery can remove the instance from the eligible catalog. Keep
+    // its decisive conflict rather than degrading it to unknown-capability.
+    const held = this.#lease(request.instanceId);
+    if (held?.state === 'recovering') {
+      return { ok: false, reason: 'conflict', heldBy: held.holderId, state: held.state, leaseId: held.id };
+    }
+    return this.acquireLease(request);
   }
 
   /** Reserve a Task lease for the lifecycle's atomic begin transaction. */
@@ -353,10 +378,11 @@ export class EnvironmentPool {
   }
 
   /** Resume a retained Task lease. Run leases must resolve recovery by release. */
-  resumeTaskLease(leaseId: string): EnvironmentLease | undefined {
+  resumeTaskLease(leaseId: string, ttlMs = 300_000): EnvironmentLease | undefined {
     const lease = this.#leases.get(leaseId);
     if (!lease || lease.holderKind !== 'task' || lease.state !== 'recovering') return undefined;
-    const active: EnvironmentLease = { ...lease, state: 'active' };
+    const active: EnvironmentLease = { ...lease, state: 'active',
+      expiresAt: this.#clock.now() + ttlMs };
     this.#leases.set(active.id, active);
     this.#store?.save(active);
     return active;

@@ -298,6 +298,26 @@ test('Feed counts projection-provided enrollment cards and distinguishes empty a
   }
 });
 
+test('Production Web: an active Task lease links to its Human controls without offering premature Force Release', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    await router.push('/manage/environments/env-ready');
+    await router.isReady();
+    app.mount(dom.window.document.getElementById('app')!);
+    await new Promise(resolve => setTimeout(resolve, 80));
+    const box = dom.window.document.querySelector('.active-lease-box');
+    assert.ok(box);
+    const controlLink = box.querySelector('a.task-controls-link');
+    assert.ok(controlLink, 'held work has a route to the authoritative Human controls');
+    assert.match(controlLink.getAttribute('href') ?? '', /\/project\/tasks\/101$/);
+    assert.match(box.textContent ?? '', /enter a reason.*Discard Task/);
+    assert.equal(box.querySelector('.force-release-btn'), null);
+    app.unmount();
+  } finally { await cleanup(); }
+});
+
 test('Production Web: capability permission toggling and unbind workspace', async () => {
   const { dom, vite, cleanup } = await setupProductionDom();
   try {

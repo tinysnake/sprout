@@ -136,6 +136,7 @@ export interface TaskEnvironmentLifecycleOptions {
     readonly leaseId: string;
     readonly hadActiveRun: boolean;
     readonly runId?: string;
+    readonly cause?: 'lease-overdue';
   }) => Promise<void>;
   /**
    * How the Environment domain resolves a permanent Force Release (#88).
@@ -185,6 +186,14 @@ export class TaskEnvironmentLifecycle {
     this.#onRecovery = options.onRecovery;
     this.#forceReleaseLease = options.forceReleaseLease;
     this.#faults = options.faults;
+    this.#pool.setTaskLeaseRevalidator(async (lease) => {
+      const task = await this.#require(lease.taskId ?? lease.holderId);
+      if (task.environmentLeaseId !== lease.id || isTerminalTaskStatus(task.status)) {
+        throw new Error('Overdue Task lease requires reconciliation of its durable holder');
+      }
+      if (task.environmentLifecycleState === 'recovery') return;
+      await this.#toRecovery(task, task.environmentLifecycleState ?? 'beginning', task.activeRunId !== undefined, false, 'lease-overdue');
+    });
   }
 
   /** Agents that are current Project members and can run on this eligible Environment. */
@@ -212,6 +221,7 @@ export class TaskEnvironmentLifecycle {
     }
     const contextAgent = await this.#resolveAgent(input.contextAgentId);
     if (!contextAgent) throw new Error(`unknown agent: ${input.contextAgentId}`);
+    await this.#pool.revalidateTaskLease(input.environmentInstanceId);
     const acquired = this.#pool.reserveTaskLease({
       instanceId: input.environmentInstanceId, capability: contextAgent.capability, holderId: task.id,
       taskId: task.id, ttlMs: this.#leaseTtlMs,
@@ -276,6 +286,7 @@ export class TaskEnvironmentLifecycle {
       // Reserve only in memory. The following store operation commits the
       // beginning intent and this Task lease in one SQLite transaction, so no
       // durable state can expose a live lease with no owning Task binding.
+      await this.#pool.revalidateTaskLease(resolution.instanceId);
       const acquired = this.#pool.reserveTaskLease({
         instanceId: resolution.instanceId, capability: agent.capability, holderId: task.id,
         taskId: task.id, ttlMs: this.#leaseTtlMs,
@@ -436,7 +447,7 @@ export class TaskEnvironmentLifecycle {
     if (action === 'discard' && task.environmentLifecycleState === 'discarded') return task;
     if (task.environmentLifecycleState !== 'recovery') throw new TaskRecoveryRefusal('not-awaiting-recovery', `task ${taskId} is not awaiting recovery`);
     if (task.recoveryState === 'ending') {
-      if (!task.environmentLeaseId || !this.#pool.resumeTaskLease(task.environmentLeaseId)) throw new TaskRecoveryRefusal('lease-cannot-resume', `task ${taskId} lease cannot resume`);
+      if (!task.environmentLeaseId || !this.#pool.resumeTaskLease(task.environmentLeaseId, this.#leaseTtlMs)) throw new TaskRecoveryRefusal('lease-cannot-resume', `task ${taskId} lease cannot resume`);
       return this.#recycleThenRelease(task);
     }
     if (action === 'discard') {
@@ -445,7 +456,7 @@ export class TaskEnvironmentLifecycle {
       await this.#store.save(ending);
       return this.#recycleThenRelease(ending);
     }
-    if (!task.environmentLeaseId || !this.#pool.resumeTaskLease(task.environmentLeaseId)) throw new TaskRecoveryRefusal('lease-cannot-resume', `task ${taskId} lease cannot resume`);
+    if (!task.environmentLeaseId || !this.#pool.resumeTaskLease(task.environmentLeaseId, this.#leaseTtlMs)) throw new TaskRecoveryRefusal('lease-cannot-resume', `task ${taskId} lease cannot resume`);
     if (task.recoveryState === 'beginning') {
       try {
         await this.#prepare(task, task.admission?.contextAgentId ?? task.assignedAgentId!);
@@ -483,7 +494,7 @@ export class TaskEnvironmentLifecycle {
     if (!['idle', 'blocked', 'awaiting-validation'].includes(task.recoveryState ?? '') || task.activeRunId) {
       throw new Error('Task has active or unproven work');
     }
-    if (!task.environmentLeaseId || !this.#pool.resumeTaskLease(task.environmentLeaseId)) {
+    if (!task.environmentLeaseId || !this.#pool.resumeTaskLease(task.environmentLeaseId, this.#leaseTtlMs)) {
       throw new Error('Task lease cannot be restored');
     }
     await this.#store.save(omit({ ...task, environmentLifecycleState: task.recoveryState!,
@@ -909,7 +920,7 @@ export class TaskEnvironmentLifecycle {
     }
   }
 
-  async #toRecovery(task: Task, prior: NonNullable<Task['environmentLifecycleState']>, hadActiveRun = false, retry = false): Promise<void> {
+  async #toRecovery(task: Task, prior: NonNullable<Task['environmentLifecycleState']>, hadActiveRun = false, retry = false, cause?: 'lease-overdue'): Promise<void> {
     if (task.environmentLeaseId) this.#pool.markRecovering(task.environmentLeaseId);
     const recovering: Task = { ...task, environmentLifecycleState: 'recovery', recoveryState: prior, updatedAt: this.#clock.now() };
     const saved = await this.#store.saveIfUnchanged(recovering, {
@@ -920,7 +931,7 @@ export class TaskEnvironmentLifecycle {
       const current = await this.#require(task.id);
       if (isTerminalTaskStatus(current.status) || current.environmentLifecycleState === 'recovery') return;
       if (retry) throw new Error('Task changed repeatedly during recovery protection; reconciliation is required');
-      return this.#toRecovery(current, current.environmentLifecycleState ?? prior, current.activeRunId !== undefined, true);
+      return this.#toRecovery(current, current.environmentLifecycleState ?? prior, current.activeRunId !== undefined, true, cause);
     }
     // The durable recovery record (#88) is opened after the Task state is durable,
     // so the record always describes a Task that really entered recovery. A
@@ -929,6 +940,7 @@ export class TaskEnvironmentLifecycle {
     if (this.#onRecovery !== undefined && task.environmentLeaseId !== undefined) {
       try {
         await this.#onRecovery({ taskId: task.id, leaseId: task.environmentLeaseId, hadActiveRun,
+          ...(cause !== undefined ? { cause } : {}),
           ...(hadActiveRun && task.activeRunId !== undefined ? { runId: task.activeRunId } : {}) });
       } catch (error) {
         process.stderr.write(
