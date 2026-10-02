@@ -154,7 +154,12 @@ export class SqliteStore {
 
   constructor(options: SqliteStoreOptions) {
     this.db = new DatabaseSync(options.filename);
-    configureProductSqliteConnection(this.db);
+    try {
+      configureProductSqliteConnection(this.db);
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
     const previousVersion = getSchemaVersion(this.db);
     const previouslyEmpty = isDatabaseEmpty(this.db);
     try {
