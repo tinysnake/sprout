@@ -391,6 +391,67 @@ test('Task run audit pages a large event stream without hiding its final result'
   } finally { app?.unmount(); await cleanup(); }
 });
 
+function retainedAuditRun(audit: HTMLElement): RunView | undefined {
+  // The audit stays mounted on collapse, so DOM removal cannot prove payload release.
+  const component = (audit as HTMLElement & {
+    __vueParentComponent?: { setupState: { run?: RunView } };
+  }).__vueParentComponent;
+  assert.ok(component, 'inspect the mounted audit owner');
+  return component.setupState.run;
+}
+
+test('Task run audit releases its payload on collapse and reloads the selected page', async () => {
+  const { doc, vite, cleanup } = await setupHarness();
+  let app: { unmount(): void } | undefined;
+  try {
+    let reads = 0;
+    ({ app } = await mountTasks(vite, doc, [], overview, { async getRun() {
+      reads += 1;
+      return auditRun({ events: Array.from({ length: 120 }, (_, index) => ({
+        type: 'tool-output', text: `Read ${reads}, event ${index}: ${'x'.repeat(1_500)}`,
+      })) });
+    } }));
+    const audit = await openCompletedAudit(doc);
+    assert.equal(retainedAuditRun(audit)?.events.length, 120, 'the expanded audit owns the fetched payload');
+    clickButton(doc, 'Next events');
+    await settle();
+    clickButton(doc, 'Hide activity');
+    await settle();
+    assert.ok(retainedAuditRun(audit) === undefined, 'collapse releases the full run, including events and result');
+    clickButton(doc, 'Show activity');
+    await settle();
+    assert.equal(reads, 2, 'expansion fetches a fresh run');
+    assert.match(audit.textContent ?? '', /Events 51–100 of 120/);
+    assert.match(audit.textContent ?? '', /Read 2, event 50:/);
+    assert.equal(audit.querySelectorAll('[data-run-event]').length, 50);
+    assert.match(audit.querySelector('[data-run-result]')?.textContent ?? '', /The requested change is ready/);
+  } finally { app?.unmount(); await cleanup(); }
+});
+
+test('Task run audit discards a payload that finishes loading after collapse', async () => {
+  const { doc, vite, cleanup } = await setupHarness();
+  let app: { unmount(): void } | undefined;
+  try {
+    let finishRead!: (value: RunView) => void;
+    let reads = 0;
+    ({ app } = await mountTasks(vite, doc, [], overview, { getRun() {
+      reads += 1;
+      return reads === 1 ? new Promise<RunView>((resolve) => { finishRead = resolve; }) : Promise.resolve(auditRun());
+    } }));
+    const audit = await openCompletedAudit(doc);
+    assert.match(audit.textContent ?? '', /Loading run activity/);
+    clickButton(doc, 'Hide activity');
+    await settle();
+    finishRead(auditRun());
+    await settle();
+    assert.ok(retainedAuditRun(audit) === undefined, 'a late response must not restore a collapsed payload');
+    clickButton(doc, 'Show activity');
+    await settle();
+    assert.equal(reads, 2);
+    assert.match(audit.querySelector('[data-run-result]')?.textContent ?? '', /The requested change is ready/);
+  } finally { app?.unmount(); await cleanup(); }
+});
+
 test('Task run audit retries a failed load and refreshes the run after settlement', async () => {
   const { doc, vite, cleanup } = await setupHarness();
   let app: { unmount(): void } | undefined;

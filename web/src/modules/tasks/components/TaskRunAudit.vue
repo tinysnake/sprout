@@ -28,7 +28,10 @@ async function load() {
   loading.value = true;
   error.value = '';
   try {
-    run.value = await inspector.getRun(props.runId);
+    const loaded = await inspector.getRun(props.runId);
+    // A read may finish after collapse; closed audits must not regain payloads.
+    if (!expanded.value) return;
+    run.value = loaded;
     page.value = Math.min(page.value, Math.max(0, Math.ceil(run.value.events.length / PAGE_SIZE) - 1));
   } catch {
     error.value = 'Unable to load run activity. Retry to read the latest run.';
@@ -40,6 +43,12 @@ async function load() {
 function toggle() {
   expanded.value = !expanded.value;
   if (expanded.value) void load();
+  else {
+    run.value = undefined;
+    // Recompute cached content now, since the collapsed template no longer reads it.
+    void visibleEvents.value;
+    void resultText.value;
+  }
 }
 
 function eventTime(event: RunView['events'][number]): string {
