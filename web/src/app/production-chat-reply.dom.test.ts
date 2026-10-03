@@ -582,6 +582,12 @@ test('Chat shows the active Agent identity, offers Human Stop, accepts the next 
   try {
     await page.push(`/project/chat/${page.server.directScopeId}?project=${PROJECT_ID}`);
     await waitForEnabledComposer(page);
+    const idleComposer = page.doc.querySelector('.chat-composer');
+    assert.ok(idleComposer);
+    assert.equal(page.doc.querySelector('.chat-stop-run'), null, 'Stop is hidden before a run starts');
+    assert.equal(page.doc.querySelector('.chat-run-actions'), null, 'no empty action bar changes the idle layout');
+    assert.ok(idleComposer.previousElementSibling?.querySelector('.chat-messages-body'),
+      'the idle composer follows the message area directly');
     await sendInComposer(page, 'Start a long direct chat run.');
 
     const status = await waitFor('the Agent working indicator', () => {
@@ -605,6 +611,13 @@ test('Chat shows the active Agent identity, offers Human Stop, accepts the next 
     assert.match(rehydrated.textContent ?? '', new RegExp(`@${AGENT_NAME} is working`));
     const stop = page.doc.querySelector('.chat-stop-run') as HTMLButtonElement | null;
     assert.ok(stop, 'Human Stop is available on the active Chat run');
+    const composer = page.doc.querySelector('.chat-composer');
+    assert.ok(composer);
+    const actions = stop.closest('.chat-run-actions');
+    assert.ok(actions, 'Stop belongs to the composer action bar');
+    assert.equal(actions.parentElement, composer.parentElement, 'the action bar and composer share a container');
+    assert.equal(composer.previousElementSibling, actions, 'Stop sits immediately above the composer');
+    assert.equal(rehydrated.querySelector('.chat-stop-run'), null, 'Stop is removed from the working strip under the title');
     stop.click();
 
     await waitFor('the working indicator to clear after settlement', () =>
@@ -612,6 +625,11 @@ test('Chat shows the active Agent identity, offers Human Stop, accepts the next 
     await waitFor('the interruption Project event', () =>
       [...page.doc.querySelectorAll('[data-event-id]')].find((row) => (row.textContent ?? '').includes('Agent run interrupted for')));
     assert.equal(page.doc.querySelector('.chat-working-state'), null, 'the indicator clears after settlement');
+    assert.equal(page.doc.querySelector('.chat-stop-run'), null, 'Stop clears when no run remains');
+    assert.equal(page.doc.querySelector('.chat-run-actions'), null, 'the action bar leaves no idle layout gap');
+    assert.equal(page.doc.querySelector('.chat-composer'), composer, 'settlement preserves the composer');
+    assert.ok(composer.previousElementSibling?.querySelector('.chat-messages-body'),
+      'the composer returns directly below the message area');
     await sendInComposer(page, 'Send the next message immediately.');
     const reply = await waitFor('the reply to the next message', () => messageElement(page, 'The next message was admitted.'));
     assert.equal(authorOf(reply), `@${AGENT_NAME}`);
