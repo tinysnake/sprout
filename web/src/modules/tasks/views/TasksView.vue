@@ -225,7 +225,9 @@ const selectedCompletionClaim = computed(() => {
 });
 const canSubmitCompletionClaim = computed(() => {
   const task = selectedTask.value?.task;
-  return Boolean(task && !terminalTask.value && taskContent.value?.lead.memberKind === 'human'
+  const lead = taskContent.value?.lead;
+  return Boolean(task && !terminalTask.value
+    && (lead?.memberKind === 'human' || (lead?.memberKind === 'agent' && currentHuman.value !== undefined))
     && task.environmentLifecycleState === 'idle' && task.activeRunId === undefined
     && task.pendingCompletionClaimId === undefined);
 });
@@ -337,6 +339,7 @@ function formatTime(at: number | undefined): string {
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(at));
 }
 function actionLabel(event: TaskControlEvent): string {
+  if (event.action === 'completion-claimed' && event.substitutedFor) return 'Human-substituted completion claim submitted';
   const labels: Record<string, string> = {
     'content-revised': 'Task content revised', 'pause-requested': 'Pause requested', paused: 'Task paused',
     'interrupt-requested': 'Interrupt requested', resumed: 'Task resumed', 'subordinate-run-stop-requested': 'Run stop requested',
@@ -954,7 +957,7 @@ onMounted(() => { void loadIndex(); });
             </section>
 
             <section v-if="canSubmitCompletionClaim" class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 sm:p-5 flex flex-col gap-3">
-              <div><h3 class="font-bold">Submit Task completion claim</h3><p class="mt-1 text-xs text-[var(--text-secondary)]">The Human Task lead can report the outcome and evidence for the current content version. A separate validation decision is still required.</p></div>
+              <div><h3 class="font-bold">{{ taskContent?.lead.memberKind === 'agent' ? 'Human-substituted completion claim' : 'Submit Task completion claim' }}</h3><p class="mt-1 text-xs text-[var(--text-secondary)]">{{ taskContent?.lead.memberKind === 'agent' ? 'A Human may submit a Human-substituted claim on this Agent-led Task. A separate validation decision is still required.' : 'The Human Task lead can report the outcome and evidence for the current content version. A separate validation decision is still required.' }}</p></div>
               <label class="flex flex-col gap-1 text-xs">Outcome summary<textarea v-model="completionOutcome" class="min-h-20 rounded border bg-[var(--bg-surface)] p-3 text-sm" required /></label>
               <label class="flex flex-col gap-1 text-xs">Validation evidence, one per line<textarea v-model="completionEvidence" class="min-h-20 rounded border bg-[var(--bg-surface)] p-3 text-sm" required /></label>
               <label class="flex flex-col gap-1 text-xs">Durable changes, one per line<textarea v-model="completionChanges" class="min-h-20 rounded border bg-[var(--bg-surface)] p-3 text-sm" /></label>
@@ -964,7 +967,7 @@ onMounted(() => { void loadIndex(); });
             </section>
 
             <section v-if="selectedCompletionClaim" class="rounded border border-[var(--yellow-attention-border)] bg-[var(--bg-surface)] p-4 sm:p-5 flex flex-col gap-3">
-              <div class="flex flex-wrap items-center justify-between gap-2"><h3 class="font-bold">Completion claim · {{ selectedCompletionClaim.recommendedDisposition }}</h3><Badge :variant="selectedTask.task.pendingCompletionClaimId ? 'warning' : 'secondary'">{{ selectedTask.task.pendingCompletionClaimId ? 'Awaiting validation' : 'Reviewed claim' }}</Badge></div>
+              <div class="flex flex-wrap items-center justify-between gap-2"><h3 class="font-bold">Completion claim · {{ selectedCompletionClaim.recommendedDisposition }}</h3><Badge :variant="selectedTask.task.pendingCompletionClaimId ? 'warning' : 'secondary'">{{ selectedTask.task.pendingCompletionClaimId ? 'Awaiting validation' : 'Reviewed claim' }}</Badge><Badge v-if="selectedCompletionClaim.substitutedFor" variant="secondary">Human-substituted</Badge></div>
               <p class="text-sm">{{ selectedCompletionClaim.outcomeSummary }}</p>
               <p class="text-xs text-[var(--text-muted)]">Submitted by {{ actorName(selectedCompletionClaim.actor) }} · Task content v{{ selectedCompletionClaim.contentVersion }} · {{ formatTime(selectedCompletionClaim.at) }}</p>
               <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm"><div><h4 class="text-xs font-bold uppercase text-[var(--text-muted)]">Validation evidence</h4><ul class="mt-2 list-disc pl-5"><li v-for="item in selectedCompletionClaim.validationEvidence" :key="item">{{ item }}</li></ul></div><div><h4 class="text-xs font-bold uppercase text-[var(--text-muted)]">Durable changes</h4><ul class="mt-2 list-disc pl-5"><li v-for="item in selectedCompletionClaim.durableChanges" :key="item">{{ item }}</li><li v-if="!selectedCompletionClaim.durableChanges.length" class="list-none text-[var(--text-muted)]">None reported</li></ul></div><div class="md:col-span-2"><h4 class="text-xs font-bold uppercase text-[var(--text-muted)]">Known limitations</h4><ul class="mt-2 list-disc pl-5"><li v-for="item in selectedCompletionClaim.limitations" :key="item">{{ item }}</li><li v-if="!selectedCompletionClaim.limitations.length" class="list-none text-[var(--text-muted)]">None reported</li></ul></div></div>

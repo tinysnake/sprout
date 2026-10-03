@@ -95,6 +95,8 @@ export interface TaskCompletionClaim {
   readonly id: string;
   readonly contentVersion: number;
   readonly actor: TaskActor;
+  /** Set when a Human submits on behalf of an Agent Task lead. */
+  readonly substitutedFor?: TaskActor;
   readonly at: number;
   readonly outcomeSummary: string;
   readonly validationEvidence: readonly string[];
@@ -119,7 +121,7 @@ export type TaskControlEvent =
   | { readonly action: 'subordinate-run-stop-requested'; readonly actor: TaskActor; readonly at: number; readonly runId: string; readonly reason: string }
   | { readonly action: 'blocker-raised'; readonly actor: TaskActor; readonly at: number; readonly blocker: TaskBlocker }
   | { readonly action: 'blocker-cleared'; readonly actor: TaskActor; readonly at: number; readonly reason: string }
-  | { readonly action: 'completion-claimed'; readonly actor: TaskActor; readonly at: number; readonly claimId: string }
+  | { readonly action: 'completion-claimed'; readonly actor: TaskActor; readonly at: number; readonly claimId: string; readonly substitutedFor?: TaskActor }
   | { readonly action: 'validation-accepted' | 'validation-corrected'; readonly actor: TaskActor; readonly at: number; readonly claimId: string; readonly reason: string }
   | { readonly action: 'end-requested'; readonly actor: TaskActor; readonly at: number; readonly disposition: 'completed' | 'cancelled'; readonly reason: string }
   | { readonly action: 'recovery-requested'; readonly actor: TaskActor; readonly at: number; readonly recoveryAction: 'resume' | 'discard'; readonly reason: string };

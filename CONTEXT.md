@@ -177,7 +177,7 @@ One durable version of a Task's goal, constraints, and validation criteria. A Hu
 _Avoid_: Prompt, Agent memory
 
 **Task lead**:
-A Human or Agent Project member entrusted by a Human at Task begin to coordinate work within the Task's current content, Project permissions, and selected Environment instance. An Agent Task lead may initiate sequential agent runs, stop runs it initiated, report blockers, and make a Task completion claim, but cannot approve, pause, validate, end, or recover the Task.
+A Human or Agent Project member entrusted by a Human at Task begin to coordinate work within the Task's current content, Project permissions, and selected Environment instance. An Agent Task lead may initiate sequential agent runs, stop runs it initiated, report blockers, and make a Task completion claim, but cannot approve, pause, validate, end, or recover the Task. For an Agent-led Task, the authorized Human may submit a marked substitute claim if the lead has not filed one.
 _Avoid_: Task owner, scheduler
 
 **Task begin**:
@@ -197,7 +197,7 @@ A routable reason that prevents Task advancement and names the required next act
 _Avoid_: Prose-only wait, Task pause
 
 **Task completion claim**:
-The Task lead's fact-form request for human validation, containing an outcome summary, validation evidence, durable changes, known limitations, and a proposed disposition. It does not complete the Task or release its Task lease.
+A fact-form request for Human validation from the Task lead, or a marked Human substitute on an Agent-led Task whose lead has not filed a claim. It contains an outcome summary, validation evidence, durable changes, known limitations, and a proposed disposition, and it does not complete the Task or release its Task lease.
 _Avoid_: Task completion, Agent final answer
 
 **Task validation**:

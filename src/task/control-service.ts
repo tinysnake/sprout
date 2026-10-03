@@ -123,7 +123,7 @@ export class TaskControlService {
 
   async submitCompletionClaim(taskId: string, actorInput: TaskActor, input: unknown): Promise<Task> {
     const task = await this.#task(taskId);
-    const actor = await this.#authorizeLead(task, actorInput);
+    const actor = await this.#authorizeCompletionClaim(task, actorInput);
     const claimInput = validateClaim(input);
     const links = (await this.#tasks.getWithRuns(taskId))?.runs ?? [];
     const contentVersion = links.at(-1)?.contentVersion ?? task.admission?.contentVersion;
@@ -219,6 +219,18 @@ export class TaskControlService {
     await this.#proposals.authorizeActor(task.projectId, actor);
     const lead = task.admission?.lead;
     if (!lead || !sameActor(lead, actor)) throw new TaskControlError('authority-required', 'only the current Task lead may submit this action');
+    return actor;
+  }
+
+  async #authorizeCompletionClaim(task: Task, input: TaskActor): Promise<TaskActor> {
+    const actor = actorSnapshot(input);
+    await this.#proposals.authorizeActor(task.projectId, actor);
+    const admission = task.admission;
+    const lead = admission?.lead;
+    const isLead = lead !== undefined && sameActor(lead, actor);
+    const isHumanSubstitute = admission !== undefined && lead?.memberKind === 'agent'
+      && actor.memberKind === 'human' && sameActor(admission.approvedBy, actor);
+    if (!isLead && !isHumanSubstitute) throw new TaskControlError('authority-required', 'Task lead authority is required');
     return actor;
   }
 

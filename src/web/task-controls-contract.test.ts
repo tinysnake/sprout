@@ -75,6 +75,77 @@ test('authenticated Pause and Interrupt route stop an active Task run and preser
   } finally { await runtime.close(); }
 });
 
+test('authenticated Human may submit a marked substitute claim for an Agent-led Task and accept it to completion', async () => {
+  const credential = randomBytes(32).toString('base64url');
+  const { runtime } = await build({
+    configuration: { operatorCredential: credential }, listen: false,
+    environment: scriptedEnvironment({ adapters: new Map([['scripted', new ScriptedEngineAdapter({ turns: [
+      { events: [], result: { status: 'completed', text: 'The bounded Agent work is complete.' } },
+    ] })]]) }),
+  });
+  const { port } = await runtime.api.listen(Number(process.env.TASK_SUBSTITUTION_PORT ?? 0));
+  const base = new URL('http://localhost');
+  base.port = String(port);
+  try {
+    const signIn = await fetch(new URL('/api/auth/session', base), {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ credential }),
+    });
+    const cookie = (signIn.headers.get('set-cookie') ?? '').split(';', 1)[0]!;
+    const { csrfToken } = await signIn.json() as { csrfToken: string };
+    const post = (path: string, body: unknown) => fetch(new URL(path, base), {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie, 'x-sprout-csrf': csrfToken }, body: JSON.stringify(body),
+    });
+    const proposalResponse = await post(`/api/projects/${PROJECT_ID}/task-proposals`, content);
+    assert.equal(proposalResponse.status, 201);
+    const { proposal } = await proposalResponse.json() as { proposal: { id: string; revision: number } };
+    const begunResponse = await post(`/api/task-proposals/${proposal.id}/begin`, {
+      expectedRevision: proposal.revision, environmentInstanceId: INSTANCE_ID,
+      lead: { memberId: 'scout', memberKind: 'agent' }, reason: 'Human approval of Agent-led work',
+    });
+    assert.equal(begunResponse.status, 201);
+    const { task } = await begunResponse.json() as { task: TaskView };
+    const leaseId = (await runtime.tasks.get(task.id))!.environmentLeaseId!;
+    let current = await runtime.tasks.get(task.id);
+    for (let attempt = 0; attempt < 500 && current?.environmentLifecycleState !== 'idle'; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      current = await runtime.tasks.get(task.id);
+    }
+    assert.equal(current?.environmentLifecycleState, 'idle', 'the initial Agent-lead run settles before the claim');
+    assert.equal(current?.activeRunId, undefined);
+
+    const claimBody = {
+      outcomeSummary: 'The approved work is complete', validationEvidence: ['Completion criteria passed'],
+      durableChanges: ['The deliverable is present'], limitations: [], recommendedDisposition: 'complete',
+    };
+    await assert.rejects(
+      runtime.taskControls.submitCompletionClaim(task.id, { memberId: 'scribe', memberKind: 'agent' }, claimBody),
+      /Task lead authority is required/,
+    );
+    const claimResponse = await post(`/api/tasks/${task.id}/completion-claims`, claimBody);
+    assert.equal(claimResponse.status, 200);
+    const pending = (await claimResponse.json() as { task: TaskView }).task;
+    const claim = pending.completionClaims?.find((item) => item.id === pending.pendingCompletionClaimId);
+    assert.equal(pending.environmentLifecycleState, 'awaiting-validation');
+    assert.deepEqual(claim?.actor, { memberId: 'operator', memberKind: 'human' });
+    assert.deepEqual(claim?.substitutedFor, { memberId: 'scout', memberKind: 'agent' });
+    assert.deepEqual(pending.controlHistory?.at(-1), {
+      action: 'completion-claimed', actor: { memberId: 'operator', memberKind: 'human' },
+      at: claim?.at, claimId: claim?.id, substitutedFor: { memberId: 'scout', memberKind: 'agent' },
+    });
+    assert.equal(runtime.pool.getLease(leaseId)?.state, 'active');
+
+    const accepted = await post(`/api/tasks/${task.id}/validation`, {
+      claimId: pending.pendingCompletionClaimId, decision: 'accept', reason: 'Human verified the claim evidence',
+    });
+    assert.equal(accepted.status, 200);
+    const completed = (await accepted.json() as { task: TaskView }).task;
+    assert.equal(completed.status, 'done');
+    assert.equal(completed.endDisposition, 'completed');
+    assert.equal(completed.environmentLifecycleState, 'ended');
+    assert.equal(runtime.pool.getLease(leaseId)?.state, 'released');
+  } finally { await runtime.close(); }
+});
+
 test('authenticated Task controls preserve authority, validation recovery, privacy, and safe terminal ordering over HTTP', async () => {
   const credential = randomBytes(32).toString('base64url');
   let cleanupUnavailable = true;
