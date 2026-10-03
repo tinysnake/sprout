@@ -95,6 +95,68 @@ test('authenticated reconnect replays only retained evidence, not the interrupte
   } finally { reopened.close(); }
 });
 
+test('authenticated recovery Discard releases the lease and admits a successor Task', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-e5-discard-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const h = await readinessWorkflowHarness({ backend: 'sqlite', directory: dir, engineId: 'scripted' });
+  try {
+    const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+    const key = join(dir, 'worker-key.pem');
+    const journalPath = join(dir, 'worker-recovery.json');
+    const engineAdapter = new ScriptedEngineAdapter({ turns: [{
+      events: [{ type: 'notice', text: 'retained recovery evidence' }],
+      result: { status: 'completed', text: 'interrupted result' }, settleAfterMs: 60_000,
+    }] });
+    const first = await h.connect(enrollmentId, key, {
+      engines: new Map([['scripted', engineAdapter]]),
+      readiness: scriptedStartupReadiness,
+      recoveryJournal: new WorkerRecoveryJournal(journalPath, 1),
+    });
+    await waitFor(() => h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible === true, 'eligible Worker');
+    const project = await h.runtime.projectService.create({ id: 'discard-project', displayName: 'Project', goal: 'Test recovery Discard',
+      agentMemberships: [{ agentId: 'scout' }] });
+    await h.runtime.projectAccess.grant({ projectId: project.id, environmentInstanceId: INSTANCE_ID,
+      selection: { kind: 'default' } });
+    const task = await h.runtime.tasks.create({ projectId: project.id, title: 'Recovering Task', goal: 'Release recovery lease', assignedAgentId: 'scout' });
+    const begun = await h.runtime.tasks.begin(task.id);
+    await h.runtime.tasks.advance(task.id, { prompt: 'one scripted turn' });
+    await waitFor(() => engineAdapter.sessions[0]?.prompts.length === 1, 'scripted turn started');
+    testComposition(h.runtime).workerGateway.liveFor(INSTANCE_ID)!.close();
+    await waitFor(async () => (await h.runtime.recovery.forLease(begun.environmentLeaseId!)) !== undefined,
+      'recovering lease protected');
+    await waitFor(() => (JSON.parse(readFileSync(journalPath, 'utf8')) as { engineStopped: boolean }).engineStopped,
+      'Worker fenced engine on channel loss');
+    await h.connect(enrollmentId, key, {
+      engines: new Map([['scripted', new ScriptedEngineAdapter({ turns: [] })]]),
+      readiness: scriptedStartupReadiness,
+      recoveryJournal: new WorkerRecoveryJournal(journalPath, first.epoch + 1),
+    });
+    await waitFor(async () => {
+      const evidence = (await h.runtime.recovery.forLease(begun.environmentLeaseId!))?.evidence;
+      return evidence?.turnSettlementObserved === true && evidence.engineSessionStopped === true && evidence.taskContextPrepared === true;
+    }, 'synchronized recovery evidence');
+    assert.equal((await h.runtime.recovery.forLease(begun.environmentLeaseId!))?.phase, 'recovery');
+    assert.equal(h.runtime.pool.getLease(begun.environmentLeaseId!)?.state, 'recovering');
+
+    const discarded = await fetch(`${h.base}/api/tasks/${task.id}/recovery`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: h.cookie, 'x-sprout-csrf': h.csrf },
+      body: JSON.stringify({ action: 'discard', reason: 'Human discards synchronized Task recovery' }),
+    });
+    assert.equal(discarded.status, 200);
+    assert.equal((await h.runtime.tasks.get(task.id))?.environmentLifecycleState, 'discarded');
+    assert.equal((await h.runtime.tasks.get(task.id))?.status, 'cancelled');
+    assert.equal(h.runtime.pool.getLease(begun.environmentLeaseId!)?.state, 'released');
+    await waitFor(() => h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible === true,
+      'recovery release restores Environment eligibility');
+    const successor = await h.runtime.tasks.create({ projectId: project.id, title: 'Successor', goal: 'Use released Environment', assignedAgentId: 'scout' });
+    const successorBegun = await h.runtime.tasks.begin(successor.id);
+    assert.equal(successorBegun.environmentInstanceId, INSTANCE_ID,
+      'a successor Task acquires the same Environment after recovery Discard');
+    assert.equal(h.runtime.pool.getLease(successorBegun.environmentLeaseId!)?.state, 'active');
+  } finally { await h.close(); }
+});
+
 test('SQLite reopen restores an idle Task only after the same Worker proves its held context', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'sprout-e5-idle-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

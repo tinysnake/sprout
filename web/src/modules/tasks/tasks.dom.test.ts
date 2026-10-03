@@ -117,6 +117,7 @@ function appServices(conflictCodes: readonly string[] = [], snapshot = overview)
     task('awaiting-validation', 'awaiting-validation', { pendingCompletionClaimId: 'claim-a', completionClaims: [{ id: 'claim-a', contentVersion: 1, actor: { memberId: 'agent-a', memberKind: 'agent' }, at: time, outcomeSummary: 'The validation path is ready.', validationEvidence: ['Acceptance evidence is available.'], durableChanges: ['Task page rendered.'], limitations: [], recommendedDisposition: 'complete' }] }),
     task('ending', 'ending', { endDisposition: 'completed' }),
     task('recovery', 'recovery', { recoveryState: 'idle' }),
+    task('recovery-ending', 'recovery', { recoveryState: 'ending', endDisposition: 'completed' }),
     task('completed', 'ended', { status: 'done', endDisposition: 'completed' }),
     task('cancelled', 'discarded', { status: 'cancelled', endDisposition: 'cancelled', pauseState: 'paused', blocker: { reason: 'The approval was pending when the Task ended.', requiredAction: 'Record approval.', responsible: { kind: 'external-condition', condition: 'Approval arrives.' }, nextAdvancer: { memberId: 'agent-a', memberKind: 'agent' }, createdBy: { memberId: 'operator', memberKind: 'human' }, createdAt: time } }),
   ];
@@ -960,15 +961,34 @@ test('Project Tasks exposes authorized proposal, intervention, validation, disca
     assert.ok(calls.includes('discard:run-idle'));
 
     await openTaskRecord(router, 'recovery');
-    await enterField(doc, dom, 'Reason for this action', 'Retry after checking recovery facts.');
+    const recoveryBanner = doc.querySelector<HTMLElement>('[aria-labelledby="task-recovery-title"]');
+    assert.ok(recoveryBanner, 'recovery banner names the inline recovery controls');
+    assert.ok([...recoveryBanner.querySelectorAll('button')].some((button) => button.textContent?.includes('Resume Task recovery')),
+      'recovery banner contains its Resume action');
+    assert.ok([...recoveryBanner.querySelectorAll('button')].some((button) => button.textContent?.includes('Discard through recovery')),
+      'recovery banner contains its Discard action');
+    await enterField(doc, dom, 'Reason for recovery decision', 'Retry after checking recovery facts.');
     clickButton(doc, 'Resume Task recovery');
     await settle(180);
     assert.ok(calls.includes('recover:recovery:resume'));
     await openTaskRecord(router, 'recovery');
-    await enterField(doc, dom, 'Reason for this action', 'Abandon the Task during recovery.');
+    await enterField(doc, dom, 'Reason for recovery decision', 'Abandon the Task during recovery.');
     clickButton(doc, 'Discard through recovery');
     await settle(180);
     assert.ok(calls.includes('recover:recovery:discard'));
+
+    await openTaskRecord(router, 'recovery-ending');
+    const endingRecoveryBanner = doc.querySelector<HTMLElement>('[aria-labelledby="task-recovery-title"]');
+    assert.ok(endingRecoveryBanner);
+    assert.ok([...endingRecoveryBanner.querySelectorAll('button')].some((button) => button.textContent?.includes('Retry safe Task end')),
+      'recovery with an accepted end disposition can retry that safe end');
+    assert.equal([...endingRecoveryBanner.querySelectorAll('button')].some((button) => /Resume|Discard/.test(button.textContent ?? '')), false,
+      'recovery with an accepted end disposition cannot promise Resume or Discard');
+    assert.match(endingRecoveryBanner.textContent ?? '', /finish the recorded completed disposition/);
+    await enterField(doc, dom, 'Reason for recovery decision', 'Finish the accepted completion cleanup.');
+    clickButton(doc, 'Retry safe Task end');
+    await settle(180);
+    assert.ok(calls.includes('end:recovery-ending'));
 
     await openTaskRecord(router, 'ending');
     await enterField(doc, dom, 'Reason for this action', 'Retry accepted completion cleanup.');
