@@ -525,6 +525,7 @@ test('explicit indexes keep their names, tables, and column order', async () => 
         { name: 'conversation_scopes_project', tbl: 'conversation_scopes' },
         { name: 'run_reconnect_triggers_project_idx', tbl: 'run_reconnect_triggers' },
         { name: 'run_reconnect_retries_retry_idx', tbl: 'run_reconnect_retries' },
+        { name: 'collaboration_messages_scope_order', tbl: 'collaboration_messages' },
         { name: 'project_events_project', tbl: 'project_events' },
         { name: 'collaboration_routing_windows_project', tbl: 'collaboration_routing_windows' },
         { name: 'collaboration_routing_batches_project', tbl: 'collaboration_routing_batches' },
