@@ -19,6 +19,7 @@ import EmptyState from '../../../primitives/EmptyState.vue';
 import { useUnreadState } from '../unread-state.ts';
 import UnreadBadge from '../UnreadBadge.vue';
 import { newDeliveryKey } from '../../../utils/delivery-key.ts';
+import { messageDateSeparators } from '../date-separators.ts';
 
 const route = useRoute();
 const router = useRouter();
@@ -109,6 +110,9 @@ const timeline = computed<ChatTimelineItem[]>(() => [
   ...activeMessages.value.map((message) => ({ kind: 'message' as const, message })),
   ...events.value.filter((event) => activeScope.value?.kind === 'project' || event.originScopeIds?.includes(activeScopeId.value)).map((event) => ({ kind: 'event' as const, event })),
 ].sort((a, b) => (a.kind === 'message' ? a.message.createdAt : a.event.createdAt) - (b.kind === 'message' ? b.message.createdAt : b.event.createdAt)));
+const dateSeparators = computed(() => messageDateSeparators(
+  timeline.value.flatMap((entry) => entry.kind === 'message' ? [entry.message] : []), Date.now(),
+));
 const activeChatRuns = computed(() => activeRuns.value.filter((run) => run.status === 'queued' || run.status === 'running'));
 const canSend = computed(() => !!service && !!activeScope.value && !archivedDirectAgent.value && !detailLoading.value && activeRunsKnown.value && !activeRunsLoading.value && activeChatRuns.value.length === 0 && inspection.value?.scope.id === activeScope.value.id && inspection.value.state.writable && presentation.value.controlAvailable && !sending.value);
 // A background read may refuse Send, but must not interrupt draft entry.
@@ -625,7 +629,13 @@ onUnmounted(() => { window.removeEventListener('resize', onResize); generation++
           <div v-if="showAdmissionNotice" class="chat-detail-loading pointer-events-none absolute right-3 top-2 z-20 max-w-[min(20rem,calc(100%-1.5rem))] rounded border border-[var(--yellow-attention-border)] bg-[var(--bg-surface)] p-3 text-xs text-[var(--text-primary)] shadow-lg" aria-hidden="true">Checking conversation admission…</div>
           <div class="chat-messages-body flex flex-1 flex-col gap-3 overflow-y-auto px-4 pb-4 pt-4" :aria-busy="detailLoading">
           <div v-if="!timeline.length" class="chat-empty-state m-auto text-center text-xs text-[var(--text-muted)]"><Icon name="chat" :size="22" class="mx-auto mb-2" /><strong class="block">No messages yet in this conversation scope.</strong><p>Send a message or @mention a project agent below to begin collaboration.</p></div>
-          <div v-for="entry in timeline" :key="entry.kind === 'message' ? entry.message.id : entry.event.id" :data-message-id="entry.kind === 'message' ? entry.message.id : undefined" :data-event-id="entry.kind === 'event' ? entry.event.id : undefined" :data-targeted="isTargetEntry(entry) ? (entry.kind === 'message' ? 'message' : 'event') : undefined" :tabindex="isTargetEntry(entry) ? -1 : undefined"
+          <template v-for="entry in timeline" :key="entry.kind === 'message' ? entry.message.id : entry.event.id">
+          <div v-if="entry.kind === 'message' && dateSeparators.has(entry.message.id)" class="chat-date-separator flex items-center gap-3 py-2 text-xs font-medium text-[var(--text-secondary)]">
+            <span class="h-px flex-1 bg-[var(--border-subtle)]" aria-hidden="true" />
+            <span>{{ dateSeparators.get(entry.message.id) }}</span>
+            <span class="h-px flex-1 bg-[var(--border-subtle)]" aria-hidden="true" />
+          </div>
+          <div :data-message-id="entry.kind === 'message' ? entry.message.id : undefined" :data-event-id="entry.kind === 'event' ? entry.event.id : undefined" :data-targeted="isTargetEntry(entry) ? (entry.kind === 'message' ? 'message' : 'event') : undefined" :tabindex="isTargetEntry(entry) ? -1 : undefined"
             class="chat-msg max-w-[90%] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-xs" :class="[entry.kind === 'message' && entry.message.authorKind === 'human' ? 'self-end' : 'self-start', isTargetEntry(entry) ? 'ring-2 ring-[var(--accent-primary)]' : '']">
             <div class="flex items-center justify-between gap-3">
               <strong class="text-[var(--text-primary)]">{{ entry.kind === 'event' ? 'Project event' : entry.message.authorKind === 'human' ? 'Human Operator' : `@${agentName(entry.message.authorId)}` }}</strong>
@@ -660,6 +670,7 @@ onUnmounted(() => { window.removeEventListener('resize', onResize); generation++
             <p class="mt-1 whitespace-pre-wrap break-words leading-relaxed text-[var(--text-primary)]">{{ entry.kind === 'message' ? entry.message.body : entry.event.summary }}</p>
             <p v-if="entry.kind === 'event' && (entry.event.kind === 'agent-run-failure' || entry.event.kind === 'agent-run-interruption')" class="mt-1 whitespace-pre-wrap break-words" :class="entry.event.kind === 'agent-run-failure' ? 'text-[var(--red-action)]' : 'text-[var(--text-secondary)]'">{{ entry.event.detail ?? (entry.event.kind === 'agent-run-failure' ? 'No error outcome was recorded.' : 'The interruption outcome is unavailable.') }}</p>
           </div>
+          </template>
           </div>
         </div>
         <div v-if="activeChatRuns.length" class="chat-run-actions flex flex-col gap-2 border-t border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-xs">
