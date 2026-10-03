@@ -81,7 +81,11 @@ instance, an Agent Task lead may:
 - state a routable blocker and its required next action; and
 - submit a Task completion claim for Human validation.
 
-When the Task lead is an Agent and has not filed a pending claim, the authorized Human may submit a Human-substituted completion claim. It records the Human as actor and the Agent lead as the substituted lead; validation and safe Task end remain Human-controlled.
+**Amendment (2026-10-04; #196, Owner ruling: Option A):** When the Task lead
+is an Agent and has not filed a pending claim, the authorized Human may submit
+a Human-substituted completion claim. It records the Human as actor and the
+Agent lead as the substituted lead; validation and safe Task end remain
+Human-controlled.
 
 Every deliberate advance records its initiator, target Agent, reason, and Task
 content version. The automatic initial run following approve-and-begin records
