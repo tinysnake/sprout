@@ -472,17 +472,33 @@ export class TaskEnvironmentLifecycle {
       return this.#recycleThenRelease(ending);
     }
     if (!task.environmentLeaseId || !this.#pool.resumeTaskLease(task.environmentLeaseId, this.#leaseTtlMs)) throw new TaskRecoveryRefusal('lease-cannot-resume', `task ${taskId} lease cannot resume`);
+    const persistResumedTask = async (resumed: Task): Promise<Task> => {
+      try {
+        await this.#store.save(resumed);
+        return resumed;
+      } catch (error) {
+        try {
+          const recovering = this.#pool.markRecovering(task.environmentLeaseId!);
+          if (recovering?.state !== 'recovering') throw new Error('Task lease could not return to recovery');
+        } catch (restoreError) {
+          throw new AggregateError(
+            [error, restoreError],
+            'Task resume failed and its lease could not return to recovery.',
+          );
+        }
+        throw error;
+      }
+    };
     if (task.recoveryState === 'beginning') {
       try {
         await this.#prepare(task, task.admission?.contextAgentId ?? task.assignedAgentId!);
       } catch (error) { await this.#toRecovery(task, 'beginning'); throw error; }
       const resumed = omit({ ...task, status: 'in-progress' as const, environmentLifecycleState: 'idle' as const, updatedAt: this.#clock.now() }, 'recoveryState');
-      await this.#store.save(resumed); return resumed;
+      return persistResumedTask(resumed);
     }
     if (!task.activeRunId && ['idle', 'blocked', 'awaiting-validation'].includes(task.recoveryState ?? '')) {
       const restored = omit({ ...task, environmentLifecycleState: task.recoveryState!, updatedAt: this.#clock.now() }, 'recoveryState');
-      await this.#store.save(restored);
-      return restored;
+      return persistResumedTask(restored);
     }
     // A lost nested session is a visible interrupted fact, never an automatic relaunch.
     const requestedPause = task.pauseState === 'requested'
@@ -499,7 +515,7 @@ export class TaskEnvironmentLifecycle {
         controlHistory: [...(task.controlHistory ?? []), { action: 'paused' as const, actor: requestedPause.actor, at: this.#clock.now(), reason: requestedPause.reason }] } : {}),
       updatedAt: this.#clock.now(),
     }, 'recoveryState'), 'activeRunId');
-    await this.#store.save(resumed); return resumed;
+    return persistResumedTask(resumed);
   }
 
   /** No turn was active: restore exactly the prior held state, without replay. */
