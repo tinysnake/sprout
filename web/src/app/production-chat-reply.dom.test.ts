@@ -116,7 +116,12 @@ async function waitFor<T>(label: string, probe: () => Probe<T>, timeoutMs = 8_00
 
 interface SseObservation {
   runEvents: number;
+  runStatuses: string[];
   firstRunEventAt?: number;
+}
+
+interface PageOptions {
+  readonly suppressRunEvents?: boolean;
 }
 
 interface Page {
@@ -141,10 +146,10 @@ interface Page {
  * HTTP/SSE routes of the running API (Node has no browser cookie jar, so the
  * wrapper attaches the cookie the production sign-in captured).
  */
-async function startPage(turns: readonly ScriptedTurn[]): Promise<Page> {
+async function startPage(turns: readonly ScriptedTurn[], options: PageOptions = {}): Promise<Page> {
   const server = await buildReplyProjectionApi({ turns });
   const harness = await setupHarness();
-  const sse: SseObservation = { runEvents: 0 };
+  const sse: SseObservation = { runEvents: 0, runStatuses: [] };
   const requestGates = new Map<string, {
     readonly wait: Promise<void>;
     started(): void;
@@ -214,7 +219,11 @@ async function startPage(turns: readonly ScriptedTurn[]): Promise<Page> {
             if (eventName === 'run') {
               sse.runEvents += 1;
               sse.firstRunEventAt ??= Date.now();
-              for (const listener of listeners.get('run') ?? []) listener({ data, lastEventId });
+              const status = (JSON.parse(data) as { readonly status?: unknown }).status;
+              if (typeof status === 'string') sse.runStatuses.push(status);
+              if (!options.suppressRunEvents) {
+                for (const listener of listeners.get('run') ?? []) listener({ data, lastEventId });
+              }
             } else if (eventName === 'message') {
               source.onmessage?.({ data, lastEventId } as MessageEvent<string>);
             }
@@ -469,6 +478,83 @@ test('a live engine reply renders in the Project channel through the run follow-
   }
 });
 
+test('a 9-second Chat run appears promptly after admission while message refresh is already in flight', async () => {
+  const page = await startPage([
+    {
+      events: [{ type: 'notice', text: 'PRIVATE_ENGINE_PROGRESS' }],
+      result: { status: 'completed', text: 'short run' },
+      settleAfterMs: 9_000,
+    },
+  ], { suppressRunEvents: true });
+  let messagesGate: ReturnType<Page['holdPath']> | undefined;
+  try {
+    await page.push(`/project/chat/${page.server.directScopeId}?project=${PROJECT_ID}`);
+    await waitForEnabledComposer(page);
+
+    // Hold the background catch-up inside refreshMessages. When the send's own
+    // refresh reaches the same in-flight guard, only a refresh tied directly to
+    // postMessage admission can observe the new run before the 15s poll.
+    messagesGate = page.holdPath('/api/messages');
+    page.setVisibilityState('visible');
+    await messagesGate.waitForRequests(1);
+
+    const sentAt = Date.now();
+    await sendInComposer(page, 'Start a nine second run while refresh is busy.');
+    await waitFor('the admitted Chat run', async () =>
+      (await page.server.collaboration.activeChatRunsForScope(page.server.directScopeId)).length ? true : null);
+    const status = await waitFor('the working strip after admission', () => {
+      const row = page.doc.querySelector('.chat-working-state');
+      return row && row.textContent?.includes(AGENT_NAME) ? row : null;
+    }, 2_500);
+
+    assert.ok(Date.now() - sentAt < 2_500, 'the strip renders well before the run settles');
+    assert.match(status.textContent ?? '', new RegExp(`@${AGENT_NAME} is working`));
+    assert.ok(page.doc.querySelector('.chat-stop-run'), 'Stop is available for the active short run');
+    assert.equal((page.doc.querySelector('.chat-composer input') as HTMLInputElement).disabled, false,
+      'the Human can keep drafting while the active run blocks submission');
+    assert.equal((page.doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, true,
+      'Send remains disabled while the admitted run is active');
+    assert.equal(page.sse.runEvents > 0, true, 'the server emitted a run event even though this test drops its delivery');
+  } finally {
+    messagesGate?.release();
+    await page.close();
+  }
+});
+
+test('a newly running Chat run on SSE triggers an active-run refresh independently of message refresh', async () => {
+  const page = await startPage([
+    {
+      events: [{ type: 'notice', text: 'PRIVATE_ENGINE_PROGRESS' }],
+      result: { status: 'completed', text: 'SSE run' },
+      settleAfterMs: 9_000,
+    },
+  ]);
+  let messagesGate: ReturnType<Page['holdPath']> | undefined;
+  let activeRunsGate: ReturnType<Page['holdPath']> | undefined;
+  try {
+    await page.push(`/project/chat/${page.server.directScopeId}?project=${PROJECT_ID}`);
+    await waitForEnabledComposer(page);
+    messagesGate = page.holdPath('/api/messages');
+    page.setVisibilityState('visible');
+    await messagesGate.waitForRequests(1);
+
+    const activeRunsPath = `/api/chat/scopes/${encodeURIComponent(page.server.directScopeId)}/active-runs`;
+    activeRunsGate = page.holdPath(activeRunsPath);
+    await sendInComposer(page, 'Check the new run SSE refresh.');
+    await waitFor('the admitted run event', () => page.sse.runStatuses.includes('running') ? true : null);
+    await waitFor('the admission and SSE active-run reads', () => activeRunsGate && activeRunsGate.requestCount() >= 2 ? true : null, 2_500);
+    activeRunsGate.release();
+    activeRunsGate = undefined;
+
+    const status = await waitFor('the working strip after the run event', () => page.doc.querySelector('.chat-working-state'));
+    assert.match(status.textContent ?? '', new RegExp(`@${AGENT_NAME} is working`));
+  } finally {
+    messagesGate?.release();
+    activeRunsGate?.release();
+    await page.close();
+  }
+});
+
 test('Chat shows the active Agent identity, offers Human Stop, accepts the next message, and refreshes on refocus', async () => {
   const page = await startPage([
     {
@@ -503,6 +589,8 @@ test('Chat shows the active Agent identity, offers Human Stop, accepts the next 
       return row && row.textContent?.includes(AGENT_NAME) ? row : null;
     });
     assert.match(status.textContent ?? '', new RegExp(`@${AGENT_NAME} is working`));
+    assert.ok(page.sse.runStatuses.includes('running'), 'the new Chat run reaches the browser stream as running after its queued record');
+    assert.equal(page.sse.runStatuses.includes('queued'), false, 'the initial queued admission is not published as an SSE run transition');
     assert.doesNotMatch(status.textContent ?? '', /PRIVATE_ENGINE_PROGRESS|prompt|model|engine/);
     assert.equal((page.doc.querySelector('.chat-composer input') as HTMLInputElement).disabled, false,
       'the Human can continue drafting while an active run blocks submission');

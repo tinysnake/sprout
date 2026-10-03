@@ -78,6 +78,7 @@ const refreshTimers = new Set<ReturnType<typeof setTimeout>>();
 // The Message port has no arrival signal. Observe the selected Project at a
 // bounded cadence while visible; run-coupled replies keep their fast follow-ups.
 const CHAT_POLL_MS = 15000;
+const CHAT_ADMISSION_RUN_RETRY_MS = [250, 750, 1500] as const;
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 let refreshInFlight = false;
 const requestedScopeId = computed(() => typeof route.params['scopeId'] === 'string' ? route.params['scopeId'] as string : '');
@@ -183,6 +184,25 @@ async function refreshActiveRuns() {
     }
   } finally {
     if (token === activeRunGeneration && scopeId === activeScopeId.value) activeRunsLoading.value = false;
+  }
+}
+async function refreshActiveRunsAfterSend(scopeId: string, admittedRunIds: readonly string[]) {
+  const admittedRunIsActive = () => activeRuns.value.some((run) => admittedRunIds.includes(run.id));
+  await refreshActiveRuns();
+  if (admittedRunIds.length === 0 || admittedRunIsActive()) return;
+
+  for (const delay of CHAT_ADMISSION_RUN_RETRY_MS) {
+    if (!sending.value || activeScopeId.value !== scopeId) return;
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        refreshTimers.delete(timer);
+        resolve();
+      }, delay);
+      refreshTimers.add(timer);
+    });
+    if (!sending.value || activeScopeId.value !== scopeId) return;
+    await refreshActiveRuns();
+    if (admittedRunIsActive()) return;
   }
 }
 async function projectMessages(scopeList: readonly ConversationScopeView[]) {
@@ -437,9 +457,13 @@ async function sendMessage() {
   sending.value = true;
   actionError.value = '';
   try {
-    await service.postMessage(pendingDelivery);
+    const delivery = await service.postMessage(pendingDelivery);
     pendingDelivery = null;
     if (newMessage.value.trim() === body) newMessage.value = '';
+    // The run admission is returned with the Message, before slower timeline
+    // reads. Read active status now even if refreshMessages is already in flight;
+    // bounded retries cover a status projection that trails admission briefly.
+    await refreshActiveRunsAfterSend(scopeId, delivery.admittedRunIds);
     await refreshMessages();
     announcer.announce(`Message sent to ${title(activeScope.value)}.`);
   } catch { actionError.value = 'Message was not sent. Check the connection and retry; it was not queued.'; announcer.announce(actionError.value); }
@@ -517,8 +541,10 @@ onMounted(() => { announcer.announce('Project chat view.'); void loadProject(); 
   document.addEventListener('visibilitychange', onVisibilityChange);
   onVisibilityChange();
   unsubRuns = service?.subscribeRunStatuses(() => {
-    void refreshMessages();
+    // A new run first reaches this stream as `running`; the orchestrator's
+    // initial queued record is durable but not published as a run event.
     void refreshActiveRuns();
+    void refreshMessages();
     // Run settlement can reach the event stream just before its reply projection.
     for (const delay of [400, 1500]) {
       const timer = setTimeout(() => { refreshTimers.delete(timer); void refreshMessages(); }, delay);
