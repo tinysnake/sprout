@@ -514,11 +514,16 @@ test('production page composition shares one transport, CSRF token, connection s
     assert.equal(calls.find((call) => call.path === '/api/tasks/task-1/pause')?.csrf, 'test-csrf-token',
       'the session adapter installs CSRF proof used by the Task adapter');
 
+    await options.runService!.getRun('run-audit');
+    assert.ok(calls.some((call) => call.path === '/api/runs/run-audit' && call.method === 'GET'),
+      'the production run inspector uses the shared transport and existing route');
+
     authenticationRevoked = true;
     const authRequired = (error: unknown) => error instanceof transportModule.BrowserRequestError
       && error.kind === 'authentication-required';
     await assert.rejects(options.feedService!.load(), authRequired);
     await assert.rejects(options.taskService!.listTasks('project-1'), authRequired);
+    await assert.rejects(options.runService!.getRun('run-audit'), authRequired);
     await assert.rejects(options.chatService!.listScopes('project-1'), authRequired);
     await assert.rejects(options.settingsService!.loadSettings(), authRequired);
     await assert.rejects(options.operatorSession!.listSessions(), authRequired);

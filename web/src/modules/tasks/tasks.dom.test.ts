@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { JSDOM } from 'jsdom';
-import type { TaskView, TaskWithRunsView } from '../../../../src/web/views.ts';
+import type { RunView, TaskView, TaskWithRunsView } from '../../../../src/web/views.ts';
 import type { TaskProposal } from '../../../../src/task/proposal-model.ts';
 import { BrowserRequestError } from '../../transport/browser-transport.ts';
 import type { TaskBlockerInput, TaskBrowserAdapter } from '../../adapters/task-api.ts';
@@ -215,11 +215,11 @@ function appServices(conflictCodes: readonly string[] = [], snapshot = overview)
   return { api, projects, allTasks, calls, blockerCalls, beginInputs };
 }
 
-async function mountTasks(vite: { ssrLoadModule: (path: string) => Promise<unknown> }, doc: Document, codes: readonly string[] = [], snapshot = overview) {
+async function mountTasks(vite: { ssrLoadModule: (path: string) => Promise<unknown> }, doc: Document, codes: readonly string[] = [], snapshot = overview, runService?: { getRun(id: string): Promise<RunView> }) {
   const { createSproutApp } = await vite.ssrLoadModule('/src/app/main.ts') as typeof import('../../app/main.ts');
   const { api, projects, calls, blockerCalls, beginInputs } = appServices(codes, snapshot);
   const connectionSource = createShellConnectionController({ status: 'online', connection: 'online', loading: false });
-  const { app, router } = createSproutApp({ routerBase: '/app/', taskService: api, projectService: projects, connectionSource });
+  const { app, router } = createSproutApp({ routerBase: '/app/', taskService: api, projectService: projects, connectionSource, runService });
   await router.push(`/project/tasks?project=${projectId}`);
   await router.isReady();
   app.mount(doc.querySelector('#app')!);
@@ -252,7 +252,7 @@ function clickButton(doc: Document, text: string): HTMLButtonElement {
   return button;
 }
 
-test('Project Tasks renders distinct production lifecycle states and withholds run summaries', async () => {
+test('Project Tasks renders distinct production lifecycle states and keeps activity collapsed initially', async () => {
   const { doc, vite, mount, cleanup } = await setupHarness();
   try {
     const { app, router, calls } = await mountTasks(vite, doc);
@@ -266,13 +266,13 @@ test('Project Tasks renders distinct production lifecycle states and withholds r
     doc.querySelector<HTMLButtonElement>('[data-record-kind="task"][data-record-id="run-running"]')?.click();
     await settle();
     assert.match(doc.body.textContent ?? '', /Run timeline/);
-    assert.match(doc.body.textContent ?? '', /Curated run facts only/);
+    assert.match(doc.body.textContent ?? '', /Autonomous execution audit/);
     assert.doesNotMatch(doc.body.textContent ?? '', /PRIVATE-RUN-PROMPT|PRIVATE-RUN-EVENT|PRIVATE-RUN-SUMMARY/);
     assert.ok(doc.querySelector('#advance-target-agent') === null, 'a running Task cannot admit another run');
     doc.querySelector<HTMLButtonElement>('[data-record-kind="task"][data-record-id="completed"]')?.click();
     await settle();
     assert.match(doc.body.textContent ?? '', /Run timeline/);
-    assert.doesNotMatch(doc.body.textContent ?? '', /PRIVATE-RUN-SUMMARY/, 'settled run summaries stay outside the Task page');
+    assert.doesNotMatch(doc.body.textContent ?? '', /PRIVATE-RUN-SUMMARY/, 'settled run activity loads only on expansion');
 
     await router.push({ name: 'project-task-proposal', params: { proposalId: 'proposal-a' }, query: { project: projectId } });
     await settle();
@@ -284,6 +284,134 @@ test('Project Tasks renders distinct production lifecycle states and withholds r
   } finally {
     await cleanup();
   }
+});
+
+function auditRun(changes: Partial<RunView> = {}): RunView {
+  return {
+    id: 'run-settled', agentId: 'agent-a', taskId: 'completed', prompt: 'PROMPT-NOT-ACTIVITY',
+    status: 'completed', handOffAttached: false, createdAt: time, completedAt: time + 562_000,
+    events: [{ type: 'tool-call', name: 'inspect', detail: 'Checked the Task acceptance criteria.' },
+      { type: 'tool-output', text: 'Validation passed.', time: '09:22' }],
+    result: { status: 'completed', text: 'The requested change is ready.\nEvidence recorded.' },
+    tokenUsage: { promptTokens: 100, completionTokens: 50, totalTokens: 150 },
+    ...changes,
+  };
+}
+
+async function openCompletedAudit(doc: Document) {
+  doc.querySelector<HTMLButtonElement>('[data-record-id="completed"]')?.click();
+  await settle();
+  const audit = doc.querySelector<HTMLElement>('[data-run-audit="run-settled"]');
+  assert.ok(audit, 'each Task run has an inline audit');
+  clickButton(doc, 'Show activity');
+  await settle();
+  return audit;
+}
+
+test('Task run expansion loads ordered activity and final result with duration and tokens', async () => {
+  const { doc, vite, cleanup } = await setupHarness();
+  let app: { unmount(): void } | undefined;
+  try {
+    const requested: string[] = [];
+    ({ app } = await mountTasks(vite, doc, [], overview, { async getRun(id) { requested.push(id); return auditRun(); } }));
+    assert.deepEqual(requested, [], 'activity is not eagerly fetched');
+    const audit = await openCompletedAudit(doc);
+    assert.deepEqual(requested, ['run-settled']);
+    const lines = [...audit.querySelectorAll('[data-run-event]')].map((line) => line.textContent ?? '');
+    assert.equal(lines.length, 2);
+    assert.match(lines[0]!, /\[time unavailable\].*tool-call/s);
+    assert.match(lines[0]!, /inspect.*Checked the Task acceptance criteria\./s);
+    assert.match(lines[1]!, /\[09:22\].*Validation passed\./s);
+    assert.match(audit.textContent ?? '', /completed.*9m 22s.*150 tokens/s);
+    assert.match(audit.textContent ?? '', /The requested change is ready\.\nEvidence recorded\./);
+    assert.doesNotMatch(doc.body.textContent ?? '', /PROMPT-NOT-ACTIVITY/);
+    const target = doc.querySelector<HTMLAnchorElement>('[data-task-run-target="run-settled"]');
+    assert.match(target?.getAttribute('href') ?? '', /manage\/agents\/agent-a\?run=run-settled/);
+    clickButton(doc, 'Hide activity');
+    await settle();
+    assert.equal(audit.querySelector('[data-run-event]'), null, 'collapse removes activity rows');
+  } finally { app?.unmount(); await cleanup(); }
+});
+
+test('Task run audit explains absent events, result, duration and usage', async () => {
+  const { doc, vite, cleanup } = await setupHarness();
+  let app: { unmount(): void } | undefined;
+  try {
+    ({ app } = await mountTasks(vite, doc, [], overview, { async getRun() {
+      return auditRun({ events: [], result: undefined, completedAt: undefined, tokenUsage: undefined, status: 'running' });
+    } }));
+    const audit = await openCompletedAudit(doc);
+    assert.match(audit.textContent ?? '', /No activity events recorded/);
+    assert.match(audit.textContent ?? '', /No final result recorded/);
+    assert.match(audit.textContent ?? '', /Duration unavailable/);
+    assert.match(audit.textContent ?? '', /Tokens unavailable/);
+  } finally { app?.unmount(); await cleanup(); }
+});
+
+test('Task run audit renders hostile event and final result content as text', async () => {
+  const { doc, vite, cleanup } = await setupHarness();
+  let app: { unmount(): void } | undefined;
+  try {
+    const hostile = '<img src=x onerror="alert(1)"><script>alert(2)</script>';
+    ({ app } = await mountTasks(vite, doc, [], overview, { async getRun() {
+      return auditRun({ events: [{ type: 'tool-call', name: hostile, detail: hostile }, { type: 'notice', text: hostile }], result: { status: 'failed', message: hostile } });
+    } }));
+    const audit = await openCompletedAudit(doc);
+    assert.ok(audit.querySelector('[data-run-event]')?.textContent?.includes(hostile));
+    assert.ok(audit.querySelector('[data-run-result]')?.textContent?.includes(hostile));
+    assert.equal(audit.querySelector('img, script'), null);
+  } finally { app?.unmount(); await cleanup(); }
+});
+
+test('Task run audit pages a large event stream without hiding its final result', async () => {
+  const { doc, vite, cleanup } = await setupHarness();
+  let app: { unmount(): void } | undefined;
+  try {
+    const events = Array.from({ length: 120 }, (_, index) => ({ type: 'tool-output', text: `Event ${index}: ${'x'.repeat(1_500)}` }));
+    assert.ok(JSON.stringify(events).length > 180_000);
+    ({ app } = await mountTasks(vite, doc, [], overview, { async getRun() { return auditRun({ events }); } }));
+    const audit = await openCompletedAudit(doc);
+    assert.equal(audit.querySelectorAll('[data-run-event]').length, 50);
+    assert.match(audit.textContent ?? '', /Events 1–50 of 120/);
+    assert.doesNotMatch(audit.textContent ?? '', /Event 50:/);
+    clickButton(doc, 'Next events');
+    await settle();
+    assert.equal(audit.querySelectorAll('[data-run-event]').length, 50);
+    assert.match(audit.textContent ?? '', /Events 51–100 of 120/);
+    assert.match(audit.textContent ?? '', /Event 50:/);
+    assert.doesNotMatch(audit.textContent ?? '', /Event 0:/);
+    clickButton(doc, 'Next events');
+    await settle();
+    assert.equal(audit.querySelectorAll('[data-run-event]').length, 20);
+    assert.match(audit.textContent ?? '', /Event 119:/);
+    assert.match(audit.querySelector('[data-run-result]')?.textContent ?? '', /The requested change is ready/);
+    clickButton(doc, 'Previous events');
+    await settle();
+    assert.match(audit.textContent ?? '', /Events 51–100 of 120/);
+  } finally { app?.unmount(); await cleanup(); }
+});
+
+test('Task run audit retries a failed load and refreshes the run after settlement', async () => {
+  const { doc, vite, cleanup } = await setupHarness();
+  let app: { unmount(): void } | undefined;
+  try {
+    let reads = 0;
+    ({ app } = await mountTasks(vite, doc, [], overview, { async getRun() {
+      reads += 1;
+      if (reads === 1) throw new Error('Run read failed');
+      return reads === 2 ? auditRun({ status: 'running', result: undefined, completedAt: undefined }) : auditRun();
+    } }));
+    const audit = await openCompletedAudit(doc);
+    assert.match(audit.querySelector('[role="alert"]')?.textContent ?? '', /Unable to load run activity/);
+    clickButton(doc, 'Retry activity');
+    await settle();
+    assert.match(audit.textContent ?? '', /running/);
+    assert.match(audit.textContent ?? '', /No final result recorded/);
+    clickButton(doc, 'Refresh run');
+    await settle();
+    assert.match(audit.textContent ?? '', /completed.*9m 22s/s);
+    assert.match(audit.querySelector('[data-run-result]')?.textContent ?? '', /The requested change is ready/);
+  } finally { app?.unmount(); await cleanup(); }
 });
 
 test('Project Tasks creates proposals through validation and the production adapter', async () => {
