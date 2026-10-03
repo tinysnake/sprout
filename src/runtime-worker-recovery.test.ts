@@ -157,6 +157,83 @@ test('authenticated recovery Discard releases the lease and admits a successor T
   } finally { await h.close(); }
 });
 
+test('authenticated completed end retry resolves Environment recovery and restores eligibility', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-e5-completed-end-recovery-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const h = await readinessWorkflowHarness({ backend: 'sqlite', directory: dir, engineId: 'scripted' });
+  try {
+    const enrollmentId = (await h.runtime.enrollments.list())[0]!.id;
+    const journalPath = join(dir, 'worker-recovery.json');
+    await h.connect(enrollmentId, join(dir, 'worker-key.pem'), {
+      engines: new Map([['scripted', new ScriptedEngineAdapter({ turns: [] })]]),
+      readiness: scriptedStartupReadiness,
+      recoveryJournal: new WorkerRecoveryJournal(journalPath, 1),
+    });
+    await waitFor(() => h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible === true, 'eligible Worker');
+
+    const project = await h.runtime.projectService.create({ id: 'completed-end-recovery-project', displayName: 'Project', goal: 'Test completed recovery',
+      agentMemberships: [{ agentId: 'scout' }] });
+    await h.runtime.projectAccess.grant({ projectId: project.id, environmentInstanceId: INSTANCE_ID,
+      selection: { kind: 'default' } });
+    const human = { memberId: 'operator', memberKind: 'human' as const };
+    const proposal = await h.runtime.taskProposals.propose(project.id, human, {
+      title: 'Completed recovery', goal: 'Finish the accepted Task end', constraints: [], validationCriteria: ['The accepted end finishes safely.'],
+    });
+    const admission = await h.runtime.taskAdmissions.beginProposal(proposal.id, human, {
+      expectedRevision: proposal.revision, environmentInstanceId: INSTANCE_ID, lead: human,
+    });
+    const task = admission.task;
+    const acceptedAt = Date.now();
+    const endRequested = {
+      ...task,
+      status: 'in-progress' as const,
+      environmentLifecycleState: 'recovery' as const,
+      recoveryState: 'ending' as const,
+      endDisposition: 'completed' as const,
+      completionClaims: [{ id: 'completed-recovery-claim', contentVersion: task.admission!.contentVersion, actor: human, at: acceptedAt,
+        outcomeSummary: 'The accepted work is complete.', validationEvidence: ['Acceptance criteria passed.'], durableChanges: [], limitations: [], recommendedDisposition: 'complete' as const }],
+      controlHistory: [
+        { action: 'validation-accepted' as const, actor: human, at: acceptedAt, claimId: 'completed-recovery-claim', reason: 'Human accepted the completion evidence.' },
+        { action: 'end-requested' as const, actor: human, at: acceptedAt, disposition: 'completed' as const, reason: 'Human accepted the completion evidence.' },
+      ],
+      updatedAt: acceptedAt,
+    };
+    await h.runtime.stores.tasks.save(endRequested);
+    const leaseId = task.environmentLeaseId!;
+    // Let the authenticated Worker acceptance's initial recovery snapshot pass
+    // finish before installing this already-reconnected recovery fixture.
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    await h.runtime.recovery.open({ leaseId, cause: 'worker-channel-lost', hadActiveRun: true });
+    const enrollment = (await h.runtime.enrollments.get(enrollmentId))!;
+    await h.runtime.recovery.observeReconnect(leaseId, {
+      enrollmentId, workerIdentityDigest: enrollment.worker.identityDigest, environmentInstanceId: INSTANCE_ID,
+      identityVerified: true, protocolCompatible: true, permissionsAllowed: true, hadActiveRun: true,
+    });
+    await h.runtime.recovery.synchronizeEvidence(leaseId, { hadActiveRun: true, evidence: {
+      retainedEventCount: 0, turnSettlementObserved: true, engineSessionStopped: true,
+      taskContextRecycled: false, taskContextPrepared: true,
+    } });
+    assert.equal((await h.runtime.recovery.forLease(leaseId))?.phase, 'recovery');
+    await waitFor(() => h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible === false,
+      'open recovery makes the Environment ineligible');
+
+    const retried = await fetch(`${h.base}/api/tasks/${task.id}/end`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: h.cookie, 'x-sprout-csrf': h.csrf },
+      body: JSON.stringify({ reason: 'Human retries the accepted completed end' }),
+    });
+    assert.equal(retried.status, 200, await retried.text());
+    assert.equal((await h.runtime.tasks.get(task.id))?.environmentLifecycleState, 'ended');
+    assert.equal(h.runtime.pool.getLease(leaseId)?.state, 'released');
+    assert.equal((await h.runtime.recovery.listForEnvironment(INSTANCE_ID))
+      .find(record => record.leaseId === leaseId)?.phase, 'resolved',
+      'the completed end retry must resolve its Environment recovery record');
+    await waitFor(() => h.runtime.environmentCatalog.entry(INSTANCE_ID)?.eligible === true,
+      'resolved recovery restores Environment eligibility');
+  } finally { await h.close(); }
+});
+
+
 test('SQLite reopen restores an idle Task only after the same Worker proves its held context', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'sprout-e5-idle-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

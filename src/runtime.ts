@@ -1822,6 +1822,16 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         createTaskAdmissionRouter({ admissions: taskAdmissions }),
         createTaskControlRouter({
           controls: taskControls,
+          end: async (taskId, input) => {
+            const task = await tasks.get(taskId);
+            if (environmentSource === 'enrollment' && task?.environmentLeaseId !== undefined &&
+                task.environmentLifecycleState === 'recovery' && task.recoveryState === 'ending' &&
+                task.endDisposition === 'completed') {
+              await recovery.resume(task.environmentLeaseId, { reason: input.reason });
+              return (await tasks.get(taskId))!;
+            }
+            return taskControls.endForHuman(taskId, input);
+          },
           recover: async (taskId, input) => {
             const task = await tasks.get(taskId);
             if (environmentSource !== 'enrollment' || task?.environmentLeaseId === undefined ||
