@@ -452,6 +452,36 @@ test('Task run audit discards a payload that finishes loading after collapse', a
   } finally { app?.unmount(); await cleanup(); }
 });
 
+for (const staleOutcome of ['success', 'failure'] as const) {
+  test(`Task run audit ignores stale ${staleOutcome} after collapse and reopen during a read`, async () => {
+    const { doc, vite, cleanup } = await setupHarness();
+    let app: { unmount(): void } | undefined;
+    try {
+      const pending: { resolve(value: RunView): void; reject(reason: Error): void }[] = [];
+      ({ app } = await mountTasks(vite, doc, [], overview, { getRun() {
+        return new Promise<RunView>((resolve, reject) => { pending.push({ resolve, reject }); });
+      } }));
+      const audit = await openCompletedAudit(doc);
+      clickButton(doc, 'Hide activity');
+      await settle();
+      clickButton(doc, 'Show activity');
+      await settle();
+      assert.equal(pending.length, 2, 'reopening starts a fresh read before the old one settles');
+      if (staleOutcome === 'success') pending[0]!.resolve(auditRun({ result: 'STALE-RESULT' }));
+      else pending[0]!.reject(new Error('Stale read failed'));
+      await settle();
+      assert.ok(retainedAuditRun(audit) === undefined, 'the obsolete request cannot own the reopened audit');
+      assert.equal(audit.querySelector('[role="alert"]'), null, 'obsolete errors cannot affect the new read');
+      assert.equal(audit.querySelector('[aria-busy]')?.getAttribute('aria-busy'), 'true', 'obsolete completion cannot end the new loading state');
+      pending[1]!.resolve(auditRun({ result: 'FRESH-RESULT' }));
+      await settle();
+      assert.match(audit.querySelector('[data-run-result]')?.textContent ?? '', /FRESH-RESULT/);
+      assert.doesNotMatch(audit.textContent ?? '', /STALE-RESULT/);
+      assert.equal(audit.querySelector('[aria-busy]')?.getAttribute('aria-busy'), 'false');
+    } finally { app?.unmount(); await cleanup(); }
+  });
+}
+
 test('Task run audit retries a failed load and refreshes the run after settlement', async () => {
   const { doc, vite, cleanup } = await setupHarness();
   let app: { unmount(): void } | undefined;

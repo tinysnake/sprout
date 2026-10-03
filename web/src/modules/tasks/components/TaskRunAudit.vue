@@ -11,6 +11,7 @@ const run = ref<RunView>();
 const loading = ref(false);
 const error = ref('');
 const page = ref(0);
+let readGeneration = 0;
 // Fixed pages keep the DOM bounded even after reading every event in a long run.
 const PAGE_SIZE = 50;
 const visibleEvents = computed(() => run.value?.events.slice(page.value * PAGE_SIZE, (page.value + 1) * PAGE_SIZE) ?? []);
@@ -25,18 +26,21 @@ const duration = computed(() => {
 async function load() {
   if (loading.value) return;
   if (!inspector) { error.value = 'Run activity is unavailable.'; return; }
+  const generation = ++readGeneration;
   loading.value = true;
   error.value = '';
   try {
     const loaded = await inspector.getRun(props.runId);
-    // A read may finish after collapse; closed audits must not regain payloads.
-    if (!expanded.value) return;
+    // Collapse invalidates the read even if the audit has already reopened.
+    if (generation !== readGeneration || !expanded.value) return;
     run.value = loaded;
     page.value = Math.min(page.value, Math.max(0, Math.ceil(run.value.events.length / PAGE_SIZE) - 1));
   } catch {
-    error.value = 'Unable to load run activity. Retry to read the latest run.';
+    if (generation === readGeneration) {
+      error.value = 'Unable to load run activity. Retry to read the latest run.';
+    }
   } finally {
-    loading.value = false;
+    if (generation === readGeneration) loading.value = false;
   }
 }
 
@@ -44,6 +48,8 @@ function toggle() {
   expanded.value = !expanded.value;
   if (expanded.value) void load();
   else {
+    readGeneration += 1;
+    loading.value = false;
     run.value = undefined;
     // Recompute cached content now, since the collapsed template no longer reads it.
     void visibleEvents.value;
