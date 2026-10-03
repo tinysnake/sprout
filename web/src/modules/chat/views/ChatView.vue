@@ -613,9 +613,8 @@ onUnmounted(() => { window.removeEventListener('resize', onResize); generation++
           <Button v-if="activeScope" variant="secondary" size="icon" class="chat-info-btn h-10 w-10 shrink-0" title="Conversation Information" aria-label="Conversation Information" @click="infoOpen = true"><Icon name="info" :size="16" /></Button>
         </header>
         <div v-if="activeChatRuns.length" class="chat-working-state flex flex-col gap-2 border-b border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-xs" role="status" aria-live="polite">
-          <div v-for="run in activeChatRuns" :key="run.id" class="flex items-center justify-between gap-3">
+          <div v-for="run in activeChatRuns" :key="run.id" class="flex items-center gap-3">
             <span class="flex min-w-0 items-center gap-2 text-[var(--text-primary)]"><span class="h-2 w-2 shrink-0 animate-pulse rounded-full bg-[var(--accent-primary)]" aria-hidden="true" /><span class="truncate">@{{ agentName(run.agentId) }} is working</span></span>
-            <Button variant="secondary" size="sm" class="chat-stop-run min-h-11 shrink-0" :disabled="!presentation.controlAvailable || project?.status !== 'active' || stoppingRunIds.has(run.id)" :aria-label="`Stop @${agentName(run.agentId)}`" @click="stopChatRun(run)">{{ stoppingRunIds.has(run.id) ? 'Stopping…' : 'Stop' }}</Button>
           </div>
         </div>
         <div v-if="inspection && !inspection.state.writable" class="chat-readonly-banner flex items-center justify-between gap-2 border-b border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-xs" role="status"><span><Icon name="alert" :size="14" /> {{ readOnlyReason(inspection.state.reason) }}</span><Button v-if="inspection.state.reason === 'working-group-disbanded' && project?.status === 'active'" variant="secondary" size="sm" class="min-h-11 shrink-0" :disabled="!presentation.controlAvailable || managingGroup" @click="restoreGroup">Restore WG</Button></div>
@@ -661,6 +660,12 @@ onUnmounted(() => { window.removeEventListener('resize', onResize); generation++
             <p class="mt-1 whitespace-pre-wrap break-words leading-relaxed text-[var(--text-primary)]">{{ entry.kind === 'message' ? entry.message.body : entry.event.summary }}</p>
             <p v-if="entry.kind === 'event' && (entry.event.kind === 'agent-run-failure' || entry.event.kind === 'agent-run-interruption')" class="mt-1 whitespace-pre-wrap break-words" :class="entry.event.kind === 'agent-run-failure' ? 'text-[var(--red-action)]' : 'text-[var(--text-secondary)]'">{{ entry.event.detail ?? (entry.event.kind === 'agent-run-failure' ? 'No error outcome was recorded.' : 'The interruption outcome is unavailable.') }}</p>
           </div>
+          </div>
+        </div>
+        <div v-if="activeChatRuns.length" class="chat-run-actions flex flex-col gap-2 border-t border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-xs">
+          <div v-for="run in activeChatRuns" :key="run.id" class="flex items-center justify-end gap-3">
+            <span class="min-w-0 truncate text-[var(--text-primary)]">@{{ agentName(run.agentId) }}</span>
+            <Button variant="secondary" size="sm" class="chat-stop-run min-h-11 shrink-0" :disabled="!presentation.controlAvailable || project?.status !== 'active' || stoppingRunIds.has(run.id)" :aria-label="`Stop @${agentName(run.agentId)}`" @click="stopChatRun(run)">{{ stoppingRunIds.has(run.id) ? 'Stopping…' : 'Stop' }}</Button>
           </div>
         </div>
         <form class="chat-composer flex items-center gap-2 border-t border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3" @submit.prevent="sendMessage">
