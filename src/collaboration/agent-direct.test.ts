@@ -15,7 +15,7 @@ import { InMemoryCollaborationStore } from './store.ts';
 import { buildCollaborationScopes } from './scope-harness.ts';
 import { createAgentDirectMessageSender } from './agent-direct.ts';
 
-async function build(t: import('node:test').TestContext, eligible = true) {
+async function build(t: import('node:test').TestContext, eligible = true, stopDuringOpen: false | 'openDirect' | 'scopeState' = false) {
   const projects = new ProjectRegistry([{ id: 'project', goal: '', rules: [], availableEnvironmentInstanceIds: ['instance', 'second'], memberships: ['scout', 'forge'].map(agentId => ({ agentId, responsibilities: [], collaborationInstructions: '' })) }]);
   const scopes = buildCollaborationScopes({ projects });
   const store = new InMemoryCollaborationStore();
@@ -30,8 +30,12 @@ async function build(t: import('node:test').TestContext, eligible = true) {
       const completion = (async () => {
         assert.equal(typeof request.sendDirectMessage, 'function');
         const command = { recipientId: 'forge', body: 'help', deliveryKey: 'one', awaitReply: true };
-        const url = request.instructions?.match(/http:\/\/127\.0\.0\.1:\d+\/direct-message/)?.[0];
-        const token = request.instructions?.match(/Bearer ([a-f0-9]+)/)?.[1];
+        if (stopDuringOpen) {
+          await assert.rejects(request.sendDirectMessage!(command), /no longer active/);
+          return { status: 'completed' as const, text: 'refused' };
+        }
+        const url = request.sessionEnvironment?.SPROUT_AGENT_MESSAGE_URL;
+        const token = request.sessionEnvironment?.SPROUT_AGENT_MESSAGE_TOKEN;
         assert.ok(url); assert.ok(token);
         assert.equal((await fetch(url, { method: 'POST', body: '{}' })).status, 403);
         const send = async (input: unknown) => {
@@ -57,13 +61,28 @@ async function build(t: import('node:test').TestContext, eligible = true) {
   let coordinator: CollaborationCoordinator;
   const runs: RunOrchestrator = new RunOrchestrator({
     agents: new AgentRegistry(['scout', 'forge'].map(id => ({ id, name: id, engine: 'scripted', capability: 'investigate', workingDirectory: '/srv/work' }))),
-    projects, store: new InMemoryRunStore(), engines: connected.adapters,
+    projects, store: new InMemoryRunStore(), engines: stopDuringOpen ? new Map([['scripted', engine]]) : connected.adapters,
     pool: new EnvironmentPool({ definitions: [{ id: 'definition', platform: 'macos', capabilities: [{ name: 'investigate', requiresLease: true }] }], instances: eligible ? [{ id: 'instance', definitionId: 'definition' }, { id: 'second', definitionId: 'definition' }] : [] }),
-    directMessages: run => createAgentDirectMessageSender({ run, runs, scopes: scopes.scopes, collaboration: coordinator }),
+    directMessages: (run, assertActive) => createAgentDirectMessageSender({ run, assertActive, runs, scopes: scopes.scopes, collaboration: coordinator }),
   });
+  let stop: Promise<unknown> | undefined;
+  if (stopDuringOpen) {
+    const requestStop = async () => {
+      const active = (await runs.list()).find(run => run.agentId === 'scout' && run.status === 'running');
+      assert.ok(active);
+      stop = runs.stop(active.id);
+    };
+    if (stopDuringOpen === 'openDirect') {
+      const original = scopes.scopes.openDirect.bind(scopes.scopes);
+      scopes.scopes.openDirect = async input => { await requestStop(); return original(input); };
+    } else {
+      const original = scopes.scopes.scopeState.bind(scopes.scopes);
+      scopes.scopes.scopeState = async (scopeId, actorId) => { await requestStop(); return original(scopeId, actorId); };
+    }
+  }
   coordinator = new CollaborationCoordinator({ scopes: scopes.scopes, store, runs });
   t.after(async () => { await worker.shutdown(); transport.close(); });
-  return { runs, transport: worker.transport, coordinator, scopes, engine, delivery: () => delivery as { authorId: string; wakes: { reason: string; status: string }[]; admittedRunIds: string[] }, sender: createAgentDirectMessageSender };
+  return { runs, stop: () => stop, transport: worker.transport, coordinator, scopes, engine, delivery: () => delivery as { authorId: string; wakes: { reason: string; status: string }[]; admittedRunIds: string[] }, sender: createAgentDirectMessageSender };
 }
 
 test('protected two-Agent explicit DM resolves its author, deduplicates, and never routes projected replies', async t => {
@@ -102,3 +121,16 @@ test('server-bound sender rejects author selection and reports unavailable recip
   assert.match(result.runs[0]?.failure ?? '', /environment/i);
   assert.equal(h.engine.requests.length, 0, 'no engine work without an eligible environment');
 });
+
+for (const lookup of ['openDirect', 'scopeState'] as const) {
+  test(`Stop during ${lookup} refuses in-flight send without persisting or admitting`, async t => {
+    const h = await build(t, true, lookup);
+    const run = await h.runs.submit({ agentId: 'scout', projectId: 'project', prompt: 'start', environmentPreference: { kind: 'instance', id: 'second' } });
+    const settled = await h.runs.waitFor(run.id);
+    await h.stop();
+    assert.deepEqual(await h.coordinator.listMessages(), [], 'no Message persisted');
+    assert.equal(h.engine.requests.length, 1, 'no recipient admitted');
+    assert.equal((await h.runs.list()).length, 1, 'no recipient Run created');
+    assert.equal(settled.result?.status, 'completed', 'engine observed truthful refusal');
+  });
+}

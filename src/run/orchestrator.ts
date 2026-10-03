@@ -103,7 +103,7 @@ export interface RunOrchestratorOptions {
    * stays ignorant of the Task service's shape.
    */
   readonly onTaskRunSettled?: TaskRunObserver;
-  readonly directMessages?: (run: AgentRun) => NonNullable<import('../engine/port.ts').StartSessionRequest['sendDirectMessage']>;
+  readonly directMessages?: (run: AgentRun, assertActive: () => void) => NonNullable<import('../engine/port.ts').StartSessionRequest['sendDirectMessage']>;
   readonly leaseTtlMs?: number;
   /** Wait before a bounded engine retry; injectable for deterministic tests. */
   readonly retryBackoff?: (failedAttempt: number) => Promise<void>;
@@ -1065,8 +1065,11 @@ export class RunOrchestrator {
         runId: running.id,
         ...(this.#directMessages !== undefined && running.projectId !== undefined ? {
           sendDirectMessage: async (input: import('../engine/port.ts').AgentDirectMessageInput) => {
-            if (this.#runs.get(running.id)?.status !== 'running' || this.#stopRequests.has(running.id)) throw new Error('Agent message capability is no longer active');
-            return this.#directMessages!(running)(input);
+            const assertActive = () => {
+              if (this.#runs.get(running.id)?.status !== 'running' || this.#stopRequests.has(running.id)) throw new Error('Agent message capability is no longer active');
+            };
+            assertActive();
+            return this.#directMessages!(running, assertActive)(input);
           },
         } : {}),
         workingDirectory,

@@ -60,7 +60,7 @@ export interface CodexAdapterOptions {
    */
   readonly sandbox?: CodexSandboxMode;
   /** Overrides for tests; production uses the real child process. */
-  readonly spawnProcess?: (binaryPath: string, args: readonly string[]) => CodexProcess;
+  readonly spawnProcess?: (binaryPath: string, args: readonly string[], env?: NodeJS.ProcessEnv) => CodexProcess;
 }
 
 export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
@@ -95,9 +95,11 @@ export class CodexEngineAdapter implements EngineAdapter {
     // resolved before spawn rather than relying on PATH.
     const binaryPath = realpathSync(this.#options.binaryPath);
     const args = ['app-server', '--listen', 'stdio://', ...(this.#options.args ?? [])];
+    const env = request.sessionEnvironment === undefined ? this.#options.env
+      : { ...(this.#options.env ?? globalThis.process.env), ...request.sessionEnvironment };
     const process = this.#options.spawnProcess
-      ? this.#options.spawnProcess(binaryPath, args)
-      : spawnCodex(binaryPath, args, this.#options.env);
+      ? this.#options.spawnProcess(binaryPath, args, env)
+      : spawnCodex(binaryPath, args, env);
 
     const transport = new LineJsonRpcTransport({
       input: process.stdout,

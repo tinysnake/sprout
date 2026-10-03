@@ -287,6 +287,7 @@ export class EnvironmentWorker {
     try {
       session = await adapter.startSession({
         ...(sendDirectMessage !== undefined ? { sendDirectMessage } : {}),
+        ...(bridge !== undefined ? { sessionEnvironment: bridge.environment } : {}),
         agentId: params.agentId,
         workingDirectory: params.projectWorkspaceId === undefined
           ? params.workingDirectory

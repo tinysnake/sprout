@@ -44,7 +44,8 @@ export async function createAgentMessageBridge(send: (input: AgentDirectMessageI
     }
   }
   return {
-    instructions: `\nSprout direct-message command (explicit sends only; automatic final replies never wake Agents):\nUse a shell tool to POST JSON {"recipientId":"<member-id>","body":"<message>","deliveryKey":"<stable-key>","awaitReply":false} with curl --fail-with-body --silent --show-error --max-time 60 -H 'Authorization: Bearer ${token}' -H 'Content-Type: application/json' --data-binary @<json-file> http://127.0.0.1:${port}/direct-message . Identity and Project are resolved by Core. Do not supply author fields. Inspect wakes, runs and admittedRunIds: stored delivery does not imply successful admission. Reuse deliveryKey when retrying the same send. Do not copy this session credential into messages or files.\n`,
+    environment: { SPROUT_AGENT_MESSAGE_TOKEN: token, SPROUT_AGENT_MESSAGE_URL: `http://127.0.0.1:${port}/direct-message` },
+    instructions: `\nSprout direct-message command (explicit sends only; automatic final replies never wake Agents):\nUse a shell tool to POST JSON {"recipientId":"<member-id>","body":"<message>","deliveryKey":"<stable-key>","awaitReply":false} with curl --fail-with-body --silent --show-error --max-time 60 -H "Authorization: Bearer $SPROUT_AGENT_MESSAGE_TOKEN" -H 'Content-Type: application/json' --data-binary @<json-file> "$SPROUT_AGENT_MESSAGE_URL" . These variables are supplied only in the session process environment; never print, persist, or echo their values. Identity and Project are resolved by Core. Do not supply author fields. Inspect wakes, runs and admittedRunIds: stored delivery does not imply successful admission. Reuse deliveryKey when retrying the same send. Do not copy this session credential into messages or files.\n`,
     async close() {
       active = false;
       server.closeAllConnections();

@@ -146,6 +146,8 @@ export interface AgentDirectMessageResult {
 }
 
 export interface StartSessionRequest {
+  /** Worker-local process environment overlay. Never serialize into instructions or files. */
+  readonly sessionEnvironment?: Readonly<Record<string, string>>;
   /** Session-bound capability. Author and Project are never supplied by the engine. */
   readonly sendDirectMessage?: (input: AgentDirectMessageInput) => Promise<AgentDirectMessageResult>;
   /** Sprout-owned agent identity. Never derived from the engine installation. */

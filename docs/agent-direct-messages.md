@@ -10,9 +10,14 @@ Production execution carries this capability over the authenticated Environment
 Worker channel. The Worker adds a session-local shell command to the engine's
 standing instructions. Its local bridge requires a random session credential,
 accepts bounded JSON requests, and closes on session close, startup failure, or
-Worker shutdown. Core also refuses sends once the Run settles or stop is
-requested. Credentials and host-local bridge locations are not persisted in
-Core's Run instructions, Messages, or browser views. The bridge grants no Task
+Worker shutdown. The command references `SPROUT_AGENT_MESSAGE_TOKEN` and
+`SPROUT_AGENT_MESSAGE_URL`; the Worker supplies their values only through the
+engine process environment. Adapters must never write that environment overlay
+to instruction files or standing context. Core refuses sends once the Run
+settles or stop is requested, rechecking after scope lookups immediately before
+durable Message persistence (and before duplicate-delivery admission).
+Credentials and host-local bridge locations are not persisted in Core's Run
+instructions, workspace instruction files, Messages, or browser views. The bridge grants no Task
 approval, membership, environment permission, or other Human authority.
 
 Use one stable delivery key for one intended send and reuse it on retry. Keys are

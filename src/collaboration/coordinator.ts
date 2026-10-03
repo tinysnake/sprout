@@ -280,6 +280,8 @@ export interface CollaborationCoordinatorOptions {
 
 /** A request to post one durable Message and wake whoever it addresses. */
 export interface DeliverInput {
+  /** Optional runtime authority fence, checked after lookups before durable delivery. */
+  readonly assertActive?: () => void;
   /** The conversation scope the Message is posted to. */
   readonly scopeId: string;
   readonly author: MessageAuthor;
@@ -480,8 +482,10 @@ export class CollaborationCoordinator {
       // still pending is admitted now: idempotency must not leave addressed work
       // unwoken just because an earlier process died between persist and admit.
       // Admission is a compare-and-set, so this cannot double-admit a wake.
+      const pending = (await this.#store.listWakeRequests()).filter((wake) => wake.inputId === existing.id);
+      input.assertActive?.();
       const admittedRunIds = await this.#admitAll(
-        (await this.#store.listWakeRequests()).filter((wake) => wake.inputId === existing.id),
+        pending,
         { kind: 'input', input: existing },
         input.awaitReply !== false,
       );
@@ -521,6 +525,7 @@ export class CollaborationCoordinator {
     // two can never leave an eligible input outside every window.
     const collect =
       plan.batchEligible === true ? { intervalMs: routingPolicy.intervalMs } : undefined;
+    input.assertActive?.();
     const stored = await this.#store.postMessage({
       message,
       plan,

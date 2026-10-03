@@ -8,6 +8,8 @@ export function createAgentDirectMessageSender(options: {
   readonly runs: Pick<import('../run/orchestrator.ts').RunOrchestrator, 'load'>;
   readonly scopes: ConversationScopeService;
   readonly collaboration: CollaborationCoordinator;
+  /** Recheck Run authority after all scope awaits, immediately before persistence. */
+  readonly assertActive?: () => void;
 }): (input: AgentDirectMessageInput) => Promise<AgentDirectMessageResult> {
   return async input => {
     if (!input || typeof input !== 'object' || Object.keys(input).some(key => !['recipientId', 'body', 'deliveryKey', 'awaitReply'].includes(key))) {
@@ -21,7 +23,9 @@ export function createAgentDirectMessageSender(options: {
     const members = await options.scopes.projectMembers(projectId);
     if (!members?.some(m => m.memberId === agentId && m.memberKind === 'agent' && m.endedAt === undefined)) throw new Error('sender is not a current Project Agent');
     const scope = await options.scopes.openDirect({ projectId, participants: [agentId, input.recipientId] });
+    options.assertActive?.();
     const delivered = await options.collaboration.deliver({
+      ...(options.assertActive !== undefined ? { assertActive: options.assertActive } : {}),
       scopeId: scope.id, author: { id: agentId, kind: 'agent' }, body: input.body,
       recipients: [input.recipientId], deliveryKey: `agent-direct:${JSON.stringify([projectId, agentId, input.deliveryKey])}`,
       awaitReply: input.awaitReply ?? false,

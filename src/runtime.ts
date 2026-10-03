@@ -1015,7 +1015,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     };
 
     const orchestrator: RunOrchestrator = new RunOrchestrator({
-      directMessages: run => createAgentDirectMessageSender({ run, runs: orchestrator, scopes: conversationScopes, collaboration }),
+      directMessages: (run, assertActive) => createAgentDirectMessageSender({ run, assertActive, runs: orchestrator, scopes: conversationScopes, collaboration }),
       // Resolved per run *for the resolved instance*, so a worker that died is
       // replaced before the next run instead of failing it against a dead channel
       // (ADR-0003), and so execution follows the leased instance (F1, #18).
