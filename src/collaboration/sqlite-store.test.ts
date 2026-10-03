@@ -126,6 +126,28 @@ test('a repeated delivery key inserts nothing and returns the stored input', asy
   });
 });
 
+test('SQLite Message pages use stable createdAt/id ordering and exclusive backward cursors', async () => {
+  await withDatabase(async (store) => {
+    for (const id of ['msg-a', 'msg-b', 'msg-c', 'msg-d', 'msg-e']) {
+      await store.postMessage({
+        message: message({ id, createdAt: 10, deliveryKey: `delivery-${id}` }),
+        plan: { inputId: id, decisions: [], observations: [] },
+        now: 10,
+      });
+    }
+    const newest = await store.listMessagesPage({ scopeId: 'dm-1', limit: 2 });
+    assert.deepEqual(newest?.messages.map((row) => row.id), ['msg-d', 'msg-e']);
+    assert.equal(newest?.hasOlder, true);
+    const older = await store.listMessagesPage({ scopeId: 'dm-1', limit: 2, before: 'msg-d' });
+    assert.deepEqual(older?.messages.map((row) => row.id), ['msg-b', 'msg-c']);
+    assert.equal(older?.hasOlder, true);
+    const empty = await store.listMessagesPage({ scopeId: 'dm-1', limit: 2, before: 'msg-a' });
+    assert.equal(empty?.messages.length, 0);
+    assert.equal(await store.listMessagesPage({ scopeId: 'other-scope', limit: 2, before: 'msg-d' }), undefined);
+    assert.equal(await store.listMessagesPage({ scopeId: 'dm-1', limit: 2, before: 'missing' }), undefined);
+  });
+});
+
 test('only one of two admissions wins the same wake', async () => {
   await withDatabase(async (store) => {
     await store.postMessage({ message: message(), plan: plan('msg-1', 'scout'), now: 1 });

@@ -14,6 +14,90 @@ import { createRunApi } from './api.ts';
 
 import { withServer, buildWithCollaboration, buildObservableCollaboration } from './api-harness.ts';
 
+async function messageHistory(count: number) {
+  const context = buildWithCollaboration();
+  const { port } = await context.api.listen(0);
+  const scopeId = await context.scopes.channel('project-sprout');
+  for (let index = 0; index < count; index += 1) {
+    await context.collaboration.deliver({
+      scopeId,
+      author: { id: 'human-lead', kind: 'human' },
+      body: `history message ${index}`,
+      deliveryKey: `history-${index}`,
+      awaitReply: false,
+    });
+  }
+  return { context, base: `http://127.0.0.1:${port}`, scopeId };
+}
+
+test('GET /api/messages returns a bounded newest window with the legacy response shape', async () => {
+  const { context, base, scopeId } = await messageHistory(55);
+  try {
+    const response = await fetch(`${base}/api/messages?scopeId=${encodeURIComponent(scopeId)}`);
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { messages: { id: string }[] };
+    const durable = [...await context.collaboration.listMessages({ scopeId })]
+      .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+    assert.equal(body.messages.length, 50, 'the documented default window is bounded');
+    assert.deepEqual(body.messages.map((message) => message.id), durable.slice(-50).map((message) => message.id));
+    assert.deepEqual(Object.keys(body), ['messages'], 'existing callers keep the response shape');
+  } finally {
+    await context.api.close();
+  }
+});
+
+test('GET /api/messages before cursor returns the preceding page with an exclusive boundary', async () => {
+  const { context, base, scopeId } = await messageHistory(8);
+  try {
+    const durable = [...await context.collaboration.listMessages({ scopeId })]
+      .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+    const response = await fetch(`${base}/api/messages?scopeId=${encodeURIComponent(scopeId)}&limit=3`);
+    const newest = (await response.json()) as { messages: { id: string }[] };
+    const olderResponse = await fetch(`${base}/api/messages?scopeId=${encodeURIComponent(scopeId)}&limit=3&before=${encodeURIComponent(newest.messages[0]!.id)}`);
+    const older = (await olderResponse.json()) as { messages: { id: string }[] };
+    assert.equal(olderResponse.status, 200);
+    assert.deepEqual(older.messages.map((message) => message.id), durable.slice(-6, -3).map((message) => message.id));
+    assert.ok(older.messages.every((message) => message.id !== newest.messages[0]?.id), 'the cursor row is exclusive');
+  } finally {
+    await context.api.close();
+  }
+});
+
+test('GET /api/messages returns an empty page before the oldest message', async () => {
+  const { context, base, scopeId } = await messageHistory(4);
+  try {
+    const durable = await context.collaboration.listMessages({ scopeId });
+    const oldest = [...durable].sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))[0]!;
+    const response = await fetch(`${base}/api/messages?scopeId=${encodeURIComponent(scopeId)}&limit=3&before=${encodeURIComponent(oldest.id)}`);
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json() as { messages: unknown[] }).messages, []);
+  } finally {
+    await context.api.close();
+  }
+});
+
+test('GET /api/messages reports an unknown backward cursor as a truthful 404', async () => {
+  const { context, base, scopeId } = await messageHistory(2);
+  try {
+    const response = await fetch(`${base}/api/messages?scopeId=${encodeURIComponent(scopeId)}&before=missing-message-cursor`);
+    assert.equal(response.status, 404);
+    assert.match((await response.json() as { error: string }).error, /missing-message-cursor/);
+  } finally {
+    await context.api.close();
+  }
+});
+
+test('GET /api/messages caps a requested limit at the documented maximum', async () => {
+  const { context, base, scopeId } = await messageHistory(105);
+  try {
+    const response = await fetch(`${base}/api/messages?scopeId=${encodeURIComponent(scopeId)}&limit=1000`);
+    assert.equal(response.status, 200);
+    assert.equal((await response.json() as { messages: unknown[] }).messages.length, 100);
+  } finally {
+    await context.api.close();
+  }
+});
+
 test('a message delivered over the API wakes its recipient and a reply is projected', async () => {
   const context = buildWithCollaboration();
   const { port } = await context.api.listen(0);

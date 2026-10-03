@@ -46,6 +46,11 @@ export function useTimelineScroll(
     hasNewEntries.value = false;
     alignBottom();
   }
+  /** Mark ids as already-seen history (older-page prepends) so the arrival
+   *  watcher below never treats backward paging as a live arrival. */
+  function noteHistory(ids: readonly string[]) {
+    for (const id of ids) seen.add(id);
+  }
   watch([selection, viewport, content, hasTarget], () => {
     epoch++;
     cancelFrame();
@@ -72,5 +77,5 @@ export function useTimelineScroll(
     else hasNewEntries.value = true;
   }, { flush: 'post' });
   onScopeDispose(() => { epoch++; cancelFrame(); observer?.disconnect(); });
-  return { viewport, content, hasNewEntries, onScroll, jumpToLatest };
+  return { viewport, content, hasNewEntries, onScroll, jumpToLatest, noteHistory };
 }

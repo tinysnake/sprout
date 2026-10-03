@@ -12,6 +12,7 @@ import type { CollaborationCoordinator } from '../collaboration/coordinator.ts';
 import { MessageDeliveryError } from '../collaboration/coordinator.ts';
 import type { MessageAuthor } from '../collaboration/model.ts';
 import { ProjectEventError } from '../collaboration/events.ts';
+import { DEFAULT_MESSAGE_PAGE_SIZE, MAX_MESSAGE_PAGE_SIZE } from '../collaboration/store.ts';
 import { ConversationScopeError } from '../conversation/model.ts';
 import type { ConversationScopeService } from '../conversation/service.ts';
 import { redactSensitiveText } from '../environment/privacy.ts';
@@ -400,16 +401,35 @@ export function createRunApi(options: RunApiOptions): RunApi {
       return;
     }
 
-    // GET /api/messages — the durable conversation, newest last; optionally
-    // restricted to one conversation scope with ?scopeId=.
+    // GET /api/messages — a bounded newest window, or a preceding page when
+    // ?before=<messageId> is supplied. Ordering is (createdAt, id).
     if (request.method === 'GET' && url.pathname === '/api/messages' && collaboration) {
-      const scopeId = url.searchParams.get('scopeId');
-      const messages = await collaboration.listMessages(
-        scopeId !== null && scopeId !== '' ? { scopeId } : undefined,
-      );
-      sendJson(response, 200, {
-        messages: messages.map(toMessageView),
+      const rawScopeId = url.searchParams.get('scopeId');
+      const scopeId = rawScopeId !== null && rawScopeId !== '' ? rawScopeId : undefined;
+      const rawLimit = url.searchParams.get('limit');
+      let limit = DEFAULT_MESSAGE_PAGE_SIZE;
+      if (rawLimit !== null) {
+        if (!/^[1-9]\d*$/.test(rawLimit) || !Number.isSafeInteger(Number(rawLimit))) {
+          sendJson(response, 400, { error: 'limit must be a positive integer' });
+          return;
+        }
+        limit = Math.min(Number(rawLimit), MAX_MESSAGE_PAGE_SIZE);
+      }
+      const rawBefore = url.searchParams.get('before');
+      if (rawBefore === '') {
+        sendJson(response, 400, { error: 'before must name a message cursor' });
+        return;
+      }
+      const page = await collaboration.listMessagesPage({
+        ...(scopeId !== undefined ? { scopeId } : {}),
+        limit,
+        ...(rawBefore !== null ? { before: rawBefore } : {}),
       });
+      if (page === undefined) {
+        sendJson(response, 404, { error: `unknown message cursor: ${rawBefore}` });
+        return;
+      }
+      sendJson(response, 200, { messages: page.messages.map(toMessageView) });
       return;
     }
 

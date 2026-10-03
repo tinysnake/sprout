@@ -1,11 +1,16 @@
 import type { MessageView, ProjectEventView, WakeView } from '../../../src/web/views.ts';
 import type { BrowserTransport, BrowserTransportState } from '../transport/browser-transport.ts';
 
+export interface MessagePageOptions {
+  readonly limit?: number;
+  readonly before?: string;
+}
+
 /** The browser only submits Human messages. Server authority resolves the author when authenticated. */
 export interface MessageBrowserAdapter {
   state(): BrowserTransportState;
   subscribeState(listener: (state: BrowserTransportState) => void): () => void;
-  listMessages(scopeId?: string): Promise<readonly MessageView[]>;
+  listMessages(scopeId?: string, options?: MessagePageOptions): Promise<readonly MessageView[]>;
   postMessage(input: { readonly scopeId: string; readonly body: string; readonly deliveryKey: string }): Promise<{
     readonly message: MessageView;
     readonly duplicate: boolean;
@@ -21,9 +26,13 @@ export function createMessageBrowserAdapter(transport: BrowserTransport): Messag
   return {
     state: () => transport.state(),
     subscribeState: (listener) => transport.subscribeState(listener),
-    async listMessages(scopeId) {
-      const query = scopeId === undefined ? '' : `?scopeId=${encodeURIComponent(scopeId)}`;
-      const response = await transport.request<{ readonly messages: readonly MessageView[] }>(`/api/messages${query}`);
+    async listMessages(scopeId, options) {
+      const query = new URLSearchParams();
+      if (scopeId !== undefined) query.set('scopeId', scopeId);
+      if (options?.limit !== undefined) query.set('limit', String(options.limit));
+      if (options?.before !== undefined) query.set('before', options.before);
+      const suffix = query.size === 0 ? '' : `?${query.toString()}`;
+      const response = await transport.request<{ readonly messages: readonly MessageView[] }>(`/api/messages${suffix}`);
       return response.messages;
     },
     postMessage(input) {

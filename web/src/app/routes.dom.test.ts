@@ -641,6 +641,72 @@ test('Project Chat groups scopes, preserves empty and read-only history, and aut
   } finally { await cleanup(); }
 });
 
+test('Project Chat pages older messages on scroll, anchors the viewport, and appends live arrivals', async () => {
+  const { vite, doc, dom, mount, cleanup } = await setupHarness();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
+    const { FixtureChatService } = (await vite.ssrLoadModule('/src/modules/chat/adapters/fixture-adapter.ts')) as typeof import('../modules/chat/adapters/fixture-adapter.ts');
+    const fixture = new FixtureChatService();
+    for (let index = 0; index < 260; index += 1) fixture.pushIdleMessage('dm-architect', `Older page item ${index}`);
+    const requests: { readonly scopeId?: string; readonly limit?: number; readonly before?: string }[] = [];
+    const listMessages = fixture.listMessages.bind(fixture);
+    fixture.listMessages = async (scopeId, options) => {
+      requests.push({ ...(scopeId === undefined ? {} : { scopeId }), ...(options?.limit === undefined ? {} : { limit: options.limit }), ...(options?.before === undefined ? {} : { before: options.before }) });
+      const rows = [...await listMessages(scopeId)].sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+      const end = options?.before === undefined ? rows.length : rows.findIndex((message) => message.id === options.before);
+      if (end < 0) return [];
+      const limit = options?.limit ?? rows.length;
+      return rows.slice(Math.max(0, end - limit), end);
+    };
+    const originalRect = dom.window.HTMLElement.prototype.getBoundingClientRect;
+    dom.window.HTMLElement.prototype.getBoundingClientRect = function () {
+      const element = this as HTMLElement;
+      if (element.classList.contains('chat-messages-body')) return { x: 0, y: 0, top: 0, right: 400, bottom: 400, left: 0, width: 400, height: 400, toJSON: () => ({}) } as DOMRect;
+      if (element.dataset['messageId'] || element.dataset['eventId']) {
+        const viewport = doc.querySelector('.chat-messages-body') as HTMLElement | null;
+        const rows = [...(viewport?.querySelectorAll('[data-message-id], [data-event-id]') ?? [])];
+        const top = rows.indexOf(element) * 40 - (viewport?.scrollTop ?? 0);
+        return { x: 0, y: top, top, right: 400, bottom: top + 30, left: 0, width: 400, height: 30, toJSON: () => ({}) } as DOMRect;
+      }
+      return originalRect.call(this);
+    };
+    const { app, router } = createSproutApp({ ...(await deterministicAppOptions(vite)), chatService: fixture });
+    await router.push('/project/chat/dm-architect');
+    app.mount(mount);
+    await settle(180);
+    const viewport = doc.querySelector('.chat-messages-body') as HTMLElement;
+    const oldestNewestPage = doc.querySelector('[data-message-id]') as HTMLElement;
+    assert.ok(oldestNewestPage);
+    assert.equal(oldestNewestPage.getBoundingClientRect().top, 0);
+    assert.doesNotMatch(viewport.textContent ?? '', /Older page item 0/, 'open renders only the newest page');
+    assert.ok(requests.some((request) => request.scopeId === 'dm-architect' && request.limit === 50 && request.before === undefined));
+
+    viewport.scrollTop = 0;
+    viewport.dispatchEvent(new dom.window.Event('scroll'));
+    await settle(120);
+    assert.ok(requests.some((request) => request.scopeId === 'dm-architect' && request.limit === 50 && request.before === oldestNewestPage.dataset['messageId']));
+    assert.match(viewport.textContent ?? '', /Older page item 162/, 'scrolling to the top renders the prior page');
+    assert.equal(oldestNewestPage.getBoundingClientRect().top, 0, 'the previously visible first row stays anchored');
+
+    for (const oldestVisibleItem of ['112', '62']) {
+      viewport.scrollTop = 0;
+      viewport.dispatchEvent(new dom.window.Event('scroll'));
+      await settle(120);
+      assert.match(viewport.textContent ?? '', new RegExp(`Older page item ${oldestVisibleItem}`));
+    }
+    assert.equal(viewport.querySelectorAll('[data-message-id]').length, 200, 'the view retains no more than 200 Messages for the scope');
+    assert.match(viewport.querySelector('.chat-history-limit')?.textContent ?? '', /latest 200 messages/);
+
+    await fixture.pushIncoming('dm-architect', 'Live arrival while paging');
+    await settle(180);
+    assert.match(viewport.textContent ?? '', /Live arrival while paging/);
+    assert.equal(viewport.querySelector('[data-message-id]:last-of-type')?.textContent?.includes('Live arrival while paging'), true,
+      'a live arrival appends after the retained pages');
+    app.unmount();
+    dom.window.HTMLElement.prototype.getBoundingClientRect = originalRect;
+  } finally { await cleanup(); }
+});
+
 test('Working Group details edit content and disband without erasing history', async () => {
   const { vite, doc, dom, mount, cleanup } = await setupHarness();
   try {

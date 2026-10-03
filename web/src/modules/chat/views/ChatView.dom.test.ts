@@ -83,21 +83,30 @@ async function paint() {
 function message(id: string, scopeId = 'channel', authorKind: 'human' | 'agent' = 'agent'): MessageView {
   return { id, scopeId, projectId: 'project', channel: scopeId, recipients: [], authorId: authorKind === 'human' ? 'operator' : 'agent', authorKind, body: id, createdAt: Number(id.replace(/\D/g, '')) || 1 };
 }
-async function page(query = '') {
+async function page(query = '', options: { channelMessages?: number } = {}) {
   frames.clear(); extraHeight = 0; scrollWrites = 0;
   dom.window.document.body.innerHTML = '<div id="app"></div>';
   const scopes: ConversationScopeView[] = [
     { id: 'channel', projectId: 'project', kind: 'project', createdAt: 1, updatedAt: 1 },
     { id: 'direct', projectId: 'project', kind: 'direct', participants: ['operator', 'agent'], createdAt: 1, updatedAt: 1 },
   ];
-  let messages = Array.from({ length: 8 }, (_, i) => message(`message-${i + 1}`));
+  let messages = Array.from({ length: options.channelMessages ?? 8 }, (_, i) => message(`message-${i + 1}`));
   messages.push(...Array.from({ length: 5 }, (_, i) => message(`direct-${i + 1}`, 'direct')));
   let events: ProjectEventView[] = [];
   const state = () => ({ status: 'online' as const, connection: 'online' as const, loading: false });
   const service = {
     state, subscribeState: () => () => {},
     listScopes: async () => scopes.map((scope) => ({ ...scope })),
-    listMessages: async (id?: string) => messages.filter((item) => item.scopeId === id).map((item) => ({ ...item })),
+    listMessages: async (id?: string, options?: { limit?: number; before?: string }) => {
+      const rows = messages.filter((item) => item.scopeId === id)
+        .sort((left, right) => left.createdAt - right.createdAt || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+      if (options?.before !== undefined) {
+        const index = rows.findIndex((item) => item.id === options.before);
+        const older = index < 0 ? [] : rows.slice(0, index);
+        return (options.limit !== undefined ? older.slice(-options.limit) : older).map((item) => ({ ...item }));
+      }
+      return (options?.limit !== undefined ? rows.slice(-options.limit) : rows).map((item) => ({ ...item }));
+    },
     listProjectEvents: async () => events.map((item) => ({ ...item })),
     listRoutingBatches: async () => ({ batches: [], windows: [] }),
     listActiveRuns: async () => [],
@@ -205,6 +214,21 @@ test('late image or code sizing keeps bottom alignment but respects reading hist
     p.scroll(100); extraHeight += 200;
     for (const observer of observers) observer.deliver(); await paint();
     assert.equal(p.list.scrollTop, 100);
+  } finally { p.close(); }
+});
+test('older-page prepend is history, not a live arrival; a later append still raises jump to latest', async () => {
+  const p = await page('', { channelMessages: 55 });
+  try {
+    // 55 messages; the newest window loads 50 so hasOlder is true and entry lands at bottom.
+    assert.equal(p.list.scrollTop, bottom(p.list), 'entry opens at the bottom');
+    p.scroll(0); // reading at the top triggers the older-page fetch
+    await flush(); await paint();
+    const rows = p.list.querySelectorAll('.chat-msg').length;
+    assert.equal(rows, 55, 'older page was prepended into the loaded window');
+    assert.equal(p.button(), null, 'prepend must not raise jump-to-latest (history is not an arrival)');
+    assert.equal(p.list.scrollTop, 0, 'reading position stays where the operator left it');
+    await p.append('agent');
+    assert.ok(p.button(), 'a live arrival while scrolled up still raises jump-to-latest');
   } finally { p.close(); }
 });
 test('queued old-scope layout work is invalidated by scope switch and unmount', async () => {
