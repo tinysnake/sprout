@@ -7,6 +7,74 @@ import type { TaskView } from './views.ts';
 
 const content = { title: 'Operator-controlled Task', goal: 'Verify safe intervention', constraints: ['Preserve work'], validationCriteria: ['Evidence reviewed'] };
 
+test('authenticated Pause and Interrupt route stop an active Task run and preserve its Task lease', async () => {
+  const credential = randomBytes(32).toString('base64url');
+  let engineInterrupts = 0;
+  const adapter = new ScriptedEngineAdapter({
+    turns: [{ events: [], result: { status: 'completed', text: 'The run should be stopped first.' }, settleAfterMs: 30_000 }],
+    onInterrupt: () => { engineInterrupts += 1; },
+  });
+  const { runtime } = await build({
+    configuration: { operatorCredential: credential }, listen: false,
+    environment: scriptedEnvironment({ adapters: new Map([['scripted', adapter]]) }),
+  });
+  const { port } = await runtime.api.listen(Number(process.env.TASK_STOP_PORT ?? 0));
+  const base = new URL('http://localhost');
+  base.port = String(port);
+  try {
+    const signIn = await fetch(new URL('/api/auth/session', base), {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ credential }),
+    });
+    const cookie = (signIn.headers.get('set-cookie') ?? '').split(';', 1)[0]!;
+    const { csrfToken } = await signIn.json() as { csrfToken: string };
+    const post = (path: string, body: unknown) => fetch(new URL(path, base), {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie, 'x-sprout-csrf': csrfToken }, body: JSON.stringify(body),
+    });
+    const proposalResponse = await post(`/api/projects/${PROJECT_ID}/task-proposals`, content);
+    assert.equal(proposalResponse.status, 201);
+    const { proposal } = await proposalResponse.json() as { proposal: { id: string; revision: number } };
+    const begunResponse = await post(`/api/task-proposals/${proposal.id}/begin`, {
+      expectedRevision: proposal.revision, environmentInstanceId: INSTANCE_ID,
+      lead: { memberId: 'operator', memberKind: 'human' }, reason: 'Human approval',
+    });
+    assert.equal(begunResponse.status, 201);
+    const { task } = await begunResponse.json() as { task: TaskView };
+    const leaseId = task.environmentLeaseId!;
+    const { runId } = await runtime.tasks.advanceWithAttribution(task.id, {
+      agentId: 'scout', actor: { memberId: 'operator', memberKind: 'human' },
+      reason: 'Start a bounded active run', contentVersion: 1,
+    });
+    let liveRun = await runtime.orchestrator.load(runId);
+    for (let attempt = 0; attempt < 500 && liveRun?.status !== 'running'; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      liveRun = await runtime.orchestrator.load(runId);
+    }
+    assert.equal(liveRun?.status, 'running', 'the scripted engine has an active session before interruption');
+    const directInterruptResponse = await post(`/api/tasks/${task.id}/interrupt`, { reason: 'Attempt an interrupt without a Pause request' });
+    assert.equal(directInterruptResponse.status, 409, 'the existing Interrupt route is gated until a Pause request exists');
+    assert.equal(engineInterrupts, 0, 'a refused direct Interrupt leaves the live engine session running');
+
+    const pauseResponse = await post(`/api/tasks/${task.id}/pause`, { reason: 'Stop the current run before review' });
+    assert.equal(pauseResponse.status, 200);
+    assert.equal(((await pauseResponse.json()) as { task: TaskView }).task.pauseState, 'requested');
+    const interruptResponse = await post(`/api/tasks/${task.id}/interrupt`, { reason: 'Stop the current run before review' });
+    assert.equal(interruptResponse.status, 200);
+    const stoppedTask = (await interruptResponse.json() as { task: TaskView }).task;
+    const stoppedRun = await runtime.orchestrator.load(runId);
+    assert.equal(engineInterrupts, 1, 'the route reaches the live EngineSession interrupt');
+    assert.equal(stoppedRun?.status, 'stopped');
+    assert.equal(stoppedRun?.result?.status, 'interrupted');
+    assert.equal(stoppedTask.activeRunId, undefined);
+    assert.equal(stoppedTask.status, 'in-progress');
+    assert.equal(stoppedTask.pauseState, 'paused');
+    assert.equal(stoppedTask.environmentLifecycleState, 'idle');
+    assert.equal(runtime.pool.getLease(leaseId)?.state, 'active', 'stopping a run does not release the Task-held lease');
+    assert.deepEqual(stoppedTask.controlHistory?.filter((event) => ['pause-requested', 'interrupt-requested', 'paused'].includes(event.action)).map((event) => event.action), [
+      'pause-requested', 'interrupt-requested', 'paused',
+    ]);
+  } finally { await runtime.close(); }
+});
+
 test('authenticated Task controls preserve authority, validation recovery, privacy, and safe terminal ordering over HTTP', async () => {
   const credential = randomBytes(32).toString('base64url');
   let cleanupUnavailable = true;
