@@ -471,15 +471,15 @@ export class TaskEnvironmentLifecycle {
       await this.#store.save(ending);
       return this.#recycleThenRelease(ending);
     }
-    if (!task.environmentLeaseId || !this.#pool.resumeTaskLease(task.environmentLeaseId, this.#leaseTtlMs)) throw new TaskRecoveryRefusal('lease-cannot-resume', `task ${taskId} lease cannot resume`);
+    const leaseBeforeResume = task.environmentLeaseId ? this.#pool.getLease(task.environmentLeaseId) : undefined;
+    if (!leaseBeforeResume || !this.#pool.resumeTaskLease(task.environmentLeaseId!, this.#leaseTtlMs)) throw new TaskRecoveryRefusal('lease-cannot-resume', `task ${taskId} lease cannot resume`);
     const persistResumedTask = async (resumed: Task): Promise<Task> => {
       try {
         await this.#store.save(resumed);
         return resumed;
       } catch (error) {
         try {
-          const recovering = this.#pool.markRecovering(task.environmentLeaseId!);
-          if (recovering?.state !== 'recovering') throw new Error('Task lease could not return to recovery');
+          this.#pool.restoreLease(leaseBeforeResume);
         } catch (restoreError) {
           throw new AggregateError(
             [error, restoreError],
@@ -525,11 +525,26 @@ export class TaskEnvironmentLifecycle {
     if (!['idle', 'blocked', 'awaiting-validation'].includes(task.recoveryState ?? '') || task.activeRunId) {
       throw new Error('Task has active or unproven work');
     }
-    if (!task.environmentLeaseId || !this.#pool.resumeTaskLease(task.environmentLeaseId, this.#leaseTtlMs)) {
+    if (!task.environmentLeaseId) throw new Error('Task lease cannot be restored');
+    const leaseId = task.environmentLeaseId;
+    const leaseBeforeResume = this.#pool.getLease(leaseId);
+    if (!leaseBeforeResume || !this.#pool.resumeTaskLease(leaseId, this.#leaseTtlMs)) {
       throw new Error('Task lease cannot be restored');
     }
-    await this.#store.save(omit({ ...task, environmentLifecycleState: task.recoveryState!,
-      updatedAt: this.#clock.now() }, 'recoveryState'));
+    try {
+      await this.#store.save(omit({ ...task, environmentLifecycleState: task.recoveryState!,
+        updatedAt: this.#clock.now() }, 'recoveryState'));
+    } catch (error) {
+      try {
+        this.#pool.restoreLease(leaseBeforeResume);
+      } catch (restoreError) {
+        throw new AggregateError(
+          [error, restoreError],
+          'Task recovery clearing failed and its lease could not be restored.',
+        );
+      }
+      throw error;
+    }
   }
 
   /** A lost Worker protects even an idle Task's preserved workspace. */

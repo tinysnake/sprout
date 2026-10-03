@@ -163,6 +163,31 @@ function crashLifecycleChild(filename: string, boundary: 'begin' | 'end'): void 
   assert.equal(child.status, exitCode, String(child.stderr));
 }
 
+test('clearIdleRecovery restores the exact lease when Task persistence fails', async () => {
+  let now = 100;
+  const store = new InMemoryTaskStore();
+  const pool = new EnvironmentPool({
+    definitions: [definition], instances: [instance], clock: { now: () => now }, idFactory: () => 'lease-1',
+  });
+  const scenario = build({ store, pool });
+  await store.create(task());
+  const begun = await scenario.lifecycle.begin('task-1');
+  await scenario.lifecycle.workerChannelLost('task-1');
+  const taskBefore = await store.get('task-1');
+  const leaseBefore = pool.getLease(begun.environmentLeaseId!);
+  assert.equal(taskBefore?.environmentLifecycleState, 'recovery');
+  assert.equal(leaseBefore?.state, 'recovering');
+
+  now = 101;
+  store.save = async () => { throw new Error('task store is locked'); };
+
+  await assert.rejects(scenario.lifecycle.clearIdleRecovery('task-1'), /task store is locked/);
+
+  assert.deepEqual(pool.getLease(begun.environmentLeaseId!), leaseBefore, 'failed recovery clearing must restore the exact lease');
+  assert.deepEqual(await store.get('task-1'), taskBefore, 'failed recovery clearing must leave the Task in recovery');
+});
+
+
 test('overdue blocked Task lease enters retained recovery before competing acquisition', async () => {
   let now = 1;
   const pool = new EnvironmentPool({ definitions: [definition], instances: [instance], clock: { now: () => now }, idFactory: () => 'lease-1' });
