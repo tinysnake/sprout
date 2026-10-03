@@ -15,6 +15,39 @@ let readGeneration = 0;
 // Fixed pages keep the DOM bounded even after reading every event in a long run.
 const PAGE_SIZE = 50;
 const visibleEvents = computed(() => run.value?.events.slice(page.value * PAGE_SIZE, (page.value + 1) * PAGE_SIZE) ?? []);
+const expandedGroups = ref(new Set<number>());
+type RunEvent = RunView['events'][number];
+type ActivityEntry = { start: number; event: RunEvent } | { start: number; events: RunEvent[] };
+
+function isProminentEvent(event: RunEvent): boolean {
+  // Engine messages are assistant output. Notices also include routine reasoning,
+  // so only the shipped tool-failure and run-retry warnings stay prominent.
+  // Run lifecycle status, final result and failure remain visible below the stream.
+  return event.type === 'message' || (event.type === 'notice' && (
+    event['text'] === 'tool failed' || (typeof event['text'] === 'string' &&
+      /^Engine request failed temporarily; retrying \(attempt \d+ of \d+\)\.$/.test(event['text']))
+  ));
+}
+
+const activityEntries = computed(() => {
+  const entries: ActivityEntry[] = [];
+  visibleEvents.value.forEach((event, index) => {
+    const start = page.value * PAGE_SIZE + index;
+    if (isProminentEvent(event)) entries.push({ start, event });
+    else {
+      const previous = entries.at(-1);
+      if (previous && 'events' in previous) previous.events.push(event);
+      else entries.push({ start, events: [event] });
+    }
+  });
+  return entries;
+});
+
+function toggleGroup(start: number) {
+  if (expandedGroups.value.has(start)) expandedGroups.value.delete(start);
+  else expandedGroups.value.add(start);
+}
+
 const eventCount = computed(() => run.value?.events.length ?? 0);
 const duration = computed(() => {
   const value = run.value;
@@ -53,6 +86,7 @@ function toggle() {
     run.value = undefined;
     // Recompute cached content now, since the collapsed template no longer reads it.
     void visibleEvents.value;
+    void activityEntries.value;
     void resultText.value;
   }
 }
@@ -116,10 +150,23 @@ const resultText = computed(() => {
         <template v-else>
           <p class="text-xs text-[var(--text-muted)]" role="status">Events {{ page * PAGE_SIZE + 1 }}–{{ Math.min((page + 1) * PAGE_SIZE, eventCount) }} of {{ eventCount }} · Recorded order</p>
           <ol class="max-h-80 overflow-y-auto rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 text-xs font-mono" aria-label="Run activity events" tabindex="0">
-            <li v-for="(event, index) in visibleEvents" :key="page * PAGE_SIZE + index" data-run-event class="border-b border-[var(--border-subtle)] py-2 last:border-0">
-              <span class="text-[var(--text-muted)]">[{{ eventTime(event) }}] {{ event.type }}</span>
-              <p class="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ eventText(event) }}</p>
-            </li>
+            <template v-for="entry in activityEntries" :key="entry.start">
+              <li v-if="'event' in entry" data-run-event class="border-b border-[var(--border-subtle)] py-2 last:border-0">
+                <span class="text-[var(--text-muted)]">[{{ eventTime(entry.event) }}] {{ entry.event.type }}</span>
+                <p class="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ eventText(entry.event) }}</p>
+              </li>
+              <li v-else data-run-event-group class="border-b border-[var(--border-subtle)] py-2 last:border-0">
+                <Button variant="ghost" size="sm" class="min-h-[44px]" :aria-expanded="expandedGroups.has(entry.start)" :aria-controls="`run-activity-${runId}-group-${entry.start}`" @click="toggleGroup(entry.start)">
+                  Supporting activity · {{ entry.events.length }} {{ entry.events.length === 1 ? 'event' : 'events' }} · {{ expandedGroups.has(entry.start) ? 'Hide' : 'Show' }}
+                </Button>
+                <ol v-if="expandedGroups.has(entry.start)" :id="`run-activity-${runId}-group-${entry.start}`" class="pl-3" aria-label="Supporting activity events">
+                  <li v-for="(event, index) in entry.events" :key="entry.start + index" data-run-event class="border-b border-[var(--border-subtle)] py-2 last:border-0">
+                    <span class="text-[var(--text-muted)]">[{{ eventTime(event) }}] {{ event.type }}</span>
+                    <p class="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ eventText(event) }}</p>
+                  </li>
+                </ol>
+              </li>
+            </template>
           </ol>
           <div v-if="eventCount > PAGE_SIZE" class="flex flex-wrap gap-2">
             <Button variant="secondary" size="sm" class="min-h-[44px]" :disabled="page === 0" @click="page -= 1">Previous events</Button>

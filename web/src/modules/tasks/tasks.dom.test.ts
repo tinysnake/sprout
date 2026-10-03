@@ -309,6 +309,10 @@ async function openCompletedAudit(doc: Document) {
   return audit;
 }
 
+function expandSupportingGroups(audit: HTMLElement) {
+  for (const button of audit.querySelectorAll<HTMLButtonElement>('[data-run-event-group] button[aria-expanded="false"]')) button.click();
+}
+
 test('Task run expansion loads ordered activity and final result with duration and tokens', async () => {
   const { doc, vite, cleanup } = await setupHarness();
   let app: { unmount(): void } | undefined;
@@ -318,6 +322,10 @@ test('Task run expansion loads ordered activity and final result with duration a
     assert.deepEqual(requested, [], 'activity is not eagerly fetched');
     const audit = await openCompletedAudit(doc);
     assert.deepEqual(requested, ['run-settled']);
+    assert.equal(audit.querySelectorAll('[data-run-event]').length, 0, 'tool activity starts collapsed');
+    assert.match(audit.querySelector('[data-run-event-group]')?.textContent ?? '', /Supporting activity.*2 events/s);
+    expandSupportingGroups(audit);
+    await settle();
     const lines = [...audit.querySelectorAll('[data-run-event]')].map((line) => line.textContent ?? '');
     assert.equal(lines.length, 2);
     assert.match(lines[0]!, /\[time unavailable\].*tool-call/s);
@@ -331,6 +339,81 @@ test('Task run expansion loads ordered activity and final result with duration a
     clickButton(doc, 'Hide activity');
     await settle();
     assert.equal(audit.querySelector('[data-run-event]'), null, 'collapse removes activity rows');
+  } finally { app?.unmount(); await cleanup(); }
+});
+
+test('Task run audit keeps assistant output and critical notices visible among collapsed supporting groups', async () => {
+  const { doc, vite, cleanup } = await setupHarness();
+  let app: { unmount(): void } | undefined;
+  try {
+    const events = [
+      { type: 'tool-call', name: 'inspect', detail: 'HIDDEN-CALL' },
+      { type: 'tool-output', text: 'HIDDEN-OUTPUT' },
+      { type: 'notice', text: 'reasoning' },
+      { type: 'message', text: 'ASSISTANT-PROGRESS', final: false },
+      { type: 'notice', text: 'Engine request failed temporarily; retrying (attempt 2 of 3).' },
+      { type: 'notice', text: 'tool failed' },
+      { type: 'notice', text: 'HIDDEN-ROUTINE-NOTICE' },
+      { type: 'future-event', text: 'HIDDEN-UNKNOWN' },
+      { type: 'message', text: 'ASSISTANT-FINAL', final: true },
+    ];
+    ({ app } = await mountTasks(vite, doc, [], overview, { async getRun() { return auditRun({ events, failure: 'VISIBLE-FAILURE' }); } }));
+    const audit = await openCompletedAudit(doc);
+    const groups = [...audit.querySelectorAll('[data-run-event-group]')];
+    assert.equal(groups.length, 2);
+    assert.match(groups[0]!.textContent ?? '', /Supporting activity.*3 events/s);
+    assert.match(groups[1]!.textContent ?? '', /Supporting activity.*2 events/s);
+    assert.equal(audit.querySelectorAll('[data-run-event]').length, 4);
+    assert.match(audit.textContent ?? '', /ASSISTANT-PROGRESS.*retrying.*tool failed.*ASSISTANT-FINAL/s);
+    assert.match(audit.textContent ?? '', /VISIBLE-FAILURE/);
+    assert.doesNotMatch(audit.textContent ?? '', /HIDDEN-|reasoning/);
+    const button = groups[0]!.querySelector<HTMLButtonElement>('button');
+    assert.ok(button);
+    assert.equal(button.getAttribute('aria-expanded'), 'false');
+    button.click();
+    await settle();
+    assert.equal(button.getAttribute('aria-expanded'), 'true');
+    const target = doc.getElementById(button.getAttribute('aria-controls')!);
+    assert.ok(target, 'expansion controls the group event list');
+    assert.match(target.textContent ?? '', /HIDDEN-CALL.*HIDDEN-OUTPUT.*reasoning/s);
+    assert.doesNotMatch(audit.textContent ?? '', /HIDDEN-ROUTINE-NOTICE|HIDDEN-UNKNOWN/);
+    const lines = [...audit.querySelectorAll('[data-run-event]')].map((line) => line.textContent ?? '');
+    assert.equal(lines.length, 7);
+    assert.match(lines[0]!, /HIDDEN-CALL/);
+    assert.match(lines[3]!, /ASSISTANT-PROGRESS/);
+    button.click();
+    await settle();
+    assert.equal(audit.querySelectorAll('[data-run-event]').length, 4);
+    assert.doesNotMatch(audit.textContent ?? '', /HIDDEN-/);
+  } finally { app?.unmount(); await cleanup(); }
+});
+
+test('Task run audit preserves local group expansion when a refreshed stream grows', async () => {
+  const { doc, vite, cleanup } = await setupHarness();
+  let app: { unmount(): void } | undefined;
+  try {
+    let reads = 0;
+    ({ app } = await mountTasks(vite, doc, [], overview, { async getRun() {
+      reads += 1;
+      return auditRun({ events: [
+        { type: 'tool-call', name: 'inspect', detail: 'OPEN-GROUP' },
+        { type: 'message', text: `ASSISTANT-READ-${reads}`, final: false },
+        ...Array.from({ length: reads }, (_, index) => ({ type: 'tool-output', text: `CLOSED-GROUP-${index}` })),
+      ] });
+    } }));
+    const audit = await openCompletedAudit(doc);
+    audit.querySelector<HTMLButtonElement>('[data-run-event-group] button')!.click();
+    await settle();
+    clickButton(doc, 'Refresh run');
+    await settle();
+    const buttons = [...audit.querySelectorAll<HTMLButtonElement>('[data-run-event-group] button')];
+    assert.deepEqual(buttons.map((button) => button.getAttribute('aria-expanded')), ['true', 'false']);
+    assert.match(audit.textContent ?? '', /OPEN-GROUP.*ASSISTANT-READ-2/s);
+    assert.match(buttons[1]!.textContent ?? '', /2 events/);
+    assert.doesNotMatch(audit.textContent ?? '', /CLOSED-GROUP-/);
+    buttons[1]!.click();
+    await settle();
+    assert.match(audit.textContent ?? '', /CLOSED-GROUP-0.*CLOSED-GROUP-1/s);
   } finally { app?.unmount(); await cleanup(); }
 });
 
@@ -358,6 +441,8 @@ test('Task run audit renders hostile event and final result content as text', as
       return auditRun({ events: [{ type: 'tool-call', name: hostile, detail: hostile }, { type: 'notice', text: hostile }], result: { status: 'failed', message: hostile } });
     } }));
     const audit = await openCompletedAudit(doc);
+    expandSupportingGroups(audit);
+    await settle();
     assert.ok(audit.querySelector('[data-run-event]')?.textContent?.includes(hostile));
     assert.ok(audit.querySelector('[data-run-result]')?.textContent?.includes(hostile));
     assert.equal(audit.querySelector('img, script'), null);
@@ -372,10 +457,17 @@ test('Task run audit pages a large event stream without hiding its final result'
     assert.ok(JSON.stringify(events).length > 180_000);
     ({ app } = await mountTasks(vite, doc, [], overview, { async getRun() { return auditRun({ events }); } }));
     const audit = await openCompletedAudit(doc);
+    assert.equal(audit.querySelectorAll('[data-run-event]').length, 0);
+    assert.match(audit.querySelector('[data-run-event-group]')?.textContent ?? '', /50 events/);
+    expandSupportingGroups(audit);
+    await settle();
     assert.equal(audit.querySelectorAll('[data-run-event]').length, 50);
     assert.match(audit.textContent ?? '', /Events 1–50 of 120/);
     assert.doesNotMatch(audit.textContent ?? '', /Event 50:/);
     clickButton(doc, 'Next events');
+    await settle();
+    assert.equal(audit.querySelectorAll('[data-run-event]').length, 0, 'each page starts collapsed');
+    expandSupportingGroups(audit);
     await settle();
     assert.equal(audit.querySelectorAll('[data-run-event]').length, 50);
     assert.match(audit.textContent ?? '', /Events 51–100 of 120/);
@@ -383,12 +475,17 @@ test('Task run audit pages a large event stream without hiding its final result'
     assert.doesNotMatch(audit.textContent ?? '', /Event 0:/);
     clickButton(doc, 'Next events');
     await settle();
+    assert.equal(audit.querySelectorAll('[data-run-event]').length, 0);
+    assert.match(audit.querySelector('[data-run-event-group]')?.textContent ?? '', /20 events/);
+    expandSupportingGroups(audit);
+    await settle();
     assert.equal(audit.querySelectorAll('[data-run-event]').length, 20);
     assert.match(audit.textContent ?? '', /Event 119:/);
     assert.match(audit.querySelector('[data-run-result]')?.textContent ?? '', /The requested change is ready/);
     clickButton(doc, 'Previous events');
     await settle();
     assert.match(audit.textContent ?? '', /Events 51–100 of 120/);
+    assert.equal(audit.querySelectorAll('[data-run-event]').length, 50, 'returning to a page preserves its expansion');
   } finally { app?.unmount(); await cleanup(); }
 });
 
@@ -415,6 +512,8 @@ test('Task run audit releases its payload on collapse and reloads the selected p
     const audit = await openCompletedAudit(doc);
     assert.equal(retainedAuditRun(audit)?.events.length, 120, 'the expanded audit owns the fetched payload');
     clickButton(doc, 'Next events');
+    await settle();
+    expandSupportingGroups(audit);
     await settle();
     clickButton(doc, 'Hide activity');
     await settle();
