@@ -388,6 +388,13 @@ export class EnvironmentPool {
     return active;
   }
 
+  /** Restore a lease snapshot verbatim after a compensated lifecycle write. */
+  restoreLease(lease: EnvironmentLease): EnvironmentLease {
+    this.#leases.set(lease.id, lease);
+    this.#store?.save(lease);
+    return lease;
+  }
+
   /** Look up any lease by id regardless of state. */
   getLease(leaseId: string): EnvironmentLease | undefined {
     return this.#leases.get(leaseId);
