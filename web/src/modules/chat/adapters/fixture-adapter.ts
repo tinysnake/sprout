@@ -151,9 +151,18 @@ export class FixtureChatService implements ChatService {
     this.#scopes[index] = updated;
     return updated;
   }
-  async listMessages(scopeId?: string) { return this.#messages.filter((message) => !scopeId || message.scopeId === scopeId); }
+  async listMessages(scopeId?: string, options?: { readonly limit?: number; readonly before?: string }) {
+    const rows = this.#messages.filter((message) => scopeId === undefined || message.scopeId === scopeId)
+      .sort((left, right) => left.createdAt - right.createdAt || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+    if (options === undefined) return rows;
+    const end = options.before === undefined ? rows.length : rows.findIndex((message) => message.id === options.before);
+    if (end < 0) return [];
+    const limit = options.limit ?? rows.length;
+    return rows.slice(Math.max(0, end - limit), end);
+  }
   async postMessage(input: { readonly scopeId: string; readonly body: string; readonly deliveryKey: string }) {
-    const message = makeMessage(`msg-sent-${input.deliveryKey}`, input.scopeId, input.body, at + 50 + this.#messages.length);
+    const lastCreatedAt = Math.max(...this.#messages.map((message) => message.createdAt));
+    const message = makeMessage(`msg-sent-${input.deliveryKey}`, input.scopeId, input.body, lastCreatedAt + 1);
     this.#messages.push(message);
     return { message, duplicate: false, wakes: [], admittedRunIds: [] };
   }
@@ -180,13 +189,15 @@ export class FixtureChatService implements ChatService {
   }
   subscribeRunStatuses(listener: (run: { readonly id: string; readonly status: RunView['status'] }) => void) { this.#listeners.add(listener); return () => this.#listeners.delete(listener); }
   async pushIncoming(scopeId: string, body: string) {
-    this.#messages.push(makeMessage(`incoming-${this.#messages.length}`, scopeId, body, at + 100 + this.#messages.length, 'programmer', 'agent'));
+    const lastCreatedAt = Math.max(...this.#messages.map((message) => message.createdAt));
+    this.#messages.push(makeMessage(`incoming-${this.#messages.length}`, scopeId, body, lastCreatedAt + 1, 'programmer', 'agent'));
     const run = await this.getRunStatus('run-projected');
     for (const listener of this.#listeners) listener(run);
   }
   // Idle arrivals are durable but have no run-status signal.
   pushIdleMessage(scopeId: string, body: string) {
-    this.#messages.push(makeMessage(`idle-${this.#messages.length}`, scopeId, body, at + 200 + this.#messages.length, 'programmer', 'agent'));
+    const lastCreatedAt = Math.max(...this.#messages.map((message) => message.createdAt));
+    this.#messages.push(makeMessage(`idle-${this.#messages.length}`, scopeId, body, lastCreatedAt + 1, 'programmer', 'agent'));
   }
   pushIdleEvent(summary: string) {
     // Stable identity independent of how many authored events the fixture

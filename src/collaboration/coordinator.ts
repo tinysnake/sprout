@@ -912,6 +912,11 @@ export class CollaborationCoordinator {
     );
   }
 
+  /** Bounded, stable page for the browser conversation view. */
+  async listMessagesPage(query: { readonly scopeId?: string; readonly limit: number; readonly before?: string }) {
+    return this.#store.listMessagesPage(query);
+  }
+
   /** Durable state for observability: every Project event on record. */
   async listEvents(projectId?: string): Promise<readonly ProjectEvent[]> {
     const events = await this.#store.listEvents(projectId);

@@ -28,6 +28,8 @@ import type {
 import {
   type AdmitWakeResult,
   type CollaborationStore,
+  type MessagePage,
+  type MessagePageQuery,
   type PostMessageResult,
   type PublishEventResult,
   type RoutingWindowCollect,
@@ -131,6 +133,8 @@ export class SqliteCollaborationStore implements CollaborationStore {
         in_reply_to TEXT,
         created_at INTEGER NOT NULL
       );
+      CREATE INDEX IF NOT EXISTS collaboration_messages_scope_order
+        ON collaboration_messages(scope_id, created_at, id);
       CREATE TABLE IF NOT EXISTS collaboration_wake_requests (
         id TEXT PRIMARY KEY,
         input_id TEXT NOT NULL,
@@ -493,9 +497,35 @@ export class SqliteCollaborationStore implements CollaborationStore {
 
   async listMessages(): Promise<readonly Message[]> {
     const rows = this.#db
-      .prepare('SELECT * FROM collaboration_messages ORDER BY created_at ASC')
+      .prepare('SELECT * FROM collaboration_messages ORDER BY created_at ASC, id ASC')
       .all() as unknown as MessageRow[];
     return rows.map(toMessage);
+  }
+
+  async listMessagesPage(query: MessagePageQuery): Promise<MessagePage | undefined> {
+    const cursor = query.before === undefined
+      ? undefined
+      : this.#db.prepare('SELECT id, scope_id AS scopeId, created_at AS createdAt FROM collaboration_messages WHERE id = ?')
+          .get(query.before) as { readonly id: string; readonly scopeId: string; readonly createdAt: number } | undefined;
+    if (query.before !== undefined && (!cursor || (query.scopeId !== undefined && cursor.scopeId !== query.scopeId))) return undefined;
+
+    const conditions: string[] = [];
+    const parameters: (string | number)[] = [];
+    if (query.scopeId !== undefined) {
+      conditions.push('scope_id = ?');
+      parameters.push(query.scopeId);
+    }
+    if (cursor !== undefined) {
+      conditions.push('(created_at < ? OR (created_at = ? AND id < ?))');
+      parameters.push(cursor.createdAt, cursor.createdAt, cursor.id);
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const rows = this.#db.prepare(
+      `SELECT * FROM collaboration_messages ${where} ORDER BY created_at DESC, id DESC LIMIT ?`,
+    ).all(...parameters, query.limit + 1) as unknown as MessageRow[];
+    const hasOlder = rows.length > query.limit;
+    const messages = rows.slice(0, query.limit).map(toMessage).reverse();
+    return { messages, hasOlder };
   }
 
   async resolveAttention(input: ResolveCollaborationAttention): Promise<void> {

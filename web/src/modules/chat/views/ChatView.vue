@@ -75,6 +75,10 @@ let activeRunScopeId = '';
 let inspectedScopeKey = '';
 let unsubRuns: (() => void) | undefined;
 const refreshTimers = new Set<ReturnType<typeof setTimeout>>();
+type ChatMessagePageState = { readonly hasOlder: boolean; readonly loading: boolean; readonly limited: boolean };
+const messagePages = ref<Record<string, ChatMessagePageState>>({});
+const CHAT_MESSAGE_PAGE_SIZE = 50;
+const CHAT_MESSAGE_MEMORY_LIMIT = 200;
 // The Message port has no arrival signal. Observe the selected Project at a
 // bounded cadence while visible; run-coupled replies keep their fast follow-ups.
 const CHAT_POLL_MS = 15000;
@@ -105,10 +109,15 @@ const archivedDirectAgent = computed(() => {
   return scope?.kind === 'direct' ? agents.value.find((agent) => agent.status === 'archived' && scope.participants.includes(agent.id)) : undefined;
 });
 const activeMessages = computed(() => messages.value.filter((m) => m.scopeId === activeScope.value?.id));
+function compareStableId(left: string, right: string) { return left < right ? -1 : left > right ? 1 : 0; }
 const timeline = computed<ChatTimelineItem[]>(() => [
   ...activeMessages.value.map((message) => ({ kind: 'message' as const, message })),
   ...events.value.filter((event) => activeScope.value?.kind === 'project' || event.originScopeIds?.includes(activeScopeId.value)).map((event) => ({ kind: 'event' as const, event })),
-].sort((a, b) => (a.kind === 'message' ? a.message.createdAt : a.event.createdAt) - (b.kind === 'message' ? b.message.createdAt : b.event.createdAt)));
+].sort((a, b) => {
+  const aTime = a.kind === 'message' ? a.message.createdAt : a.event.createdAt;
+  const bTime = b.kind === 'message' ? b.message.createdAt : b.event.createdAt;
+  return aTime - bTime || compareStableId(a.kind === 'message' ? a.message.id : a.event.id, b.kind === 'message' ? b.message.id : b.event.id);
+}));
 const activeChatRuns = computed(() => activeRuns.value.filter((run) => run.status === 'queued' || run.status === 'running'));
 const canSend = computed(() => !!service && !!activeScope.value && !archivedDirectAgent.value && !detailLoading.value && activeRunsKnown.value && !activeRunsLoading.value && activeChatRuns.value.length === 0 && inspection.value?.scope.id === activeScope.value.id && inspection.value.state.writable && presentation.value.controlAvailable && !sending.value);
 // A background read may refuse Send, but must not interrupt draft entry.
@@ -206,8 +215,68 @@ async function refreshActiveRunsAfterSend(scopeId: string, admittedRunIds: reado
   }
 }
 async function projectMessages(scopeList: readonly ConversationScopeView[]) {
-  if (!service) return [];
-  return (await Promise.all(scopeList.map((scope) => service.listMessages(scope.id)))).flat();
+  if (!service) return { messages: [] as MessageView[], hasOlder: {} as Record<string, boolean> };
+  const pages = await Promise.all(scopeList.map(async (scope) => {
+    const rows = await service!.listMessages(scope.id, { limit: CHAT_MESSAGE_PAGE_SIZE });
+    return { scopeId: scope.id, rows, hasOlder: rows.length === CHAT_MESSAGE_PAGE_SIZE };
+  }));
+  return {
+    messages: pages.flatMap((page) => page.rows),
+    hasOlder: Object.fromEntries(pages.map((page) => [page.scopeId, page.hasOlder])),
+  };
+}
+function mergeMessageWindows(current: readonly MessageView[], incoming: readonly MessageView[], forProjectId: string) {
+  const messagesById = new Map<string, MessageView>();
+  for (const message of [...current, ...incoming]) if (message.projectId === forProjectId) messagesById.set(message.id, message);
+  const byScope = new Map<string, MessageView[]>();
+  for (const message of messagesById.values()) byScope.set(message.scopeId, [...(byScope.get(message.scopeId) ?? []), message]);
+  return [...byScope.values()].flatMap((rows) => rows
+    .sort((left, right) => left.createdAt - right.createdAt || compareStableId(left.id, right.id))
+    .slice(-CHAT_MESSAGE_MEMORY_LIMIT));
+}
+function onMessagesScroll(event: Event) {
+  const viewport = event.currentTarget as HTMLElement;
+  if (viewport.scrollTop <= 40) void loadOlderMessages(viewport);
+}
+/** #201 paging stays isolated from #200's independent bottom-stick behaviour. */
+async function loadOlderMessages(viewport: HTMLElement) {
+  const scopeId = activeScopeId.value;
+  const state = messagePages.value[scopeId];
+  if (!service || !scopeId || !state?.hasOlder || state.loading) return;
+  const loaded = activeMessages.value;
+  if (loaded.length === 0) return;
+  if (loaded.length >= CHAT_MESSAGE_MEMORY_LIMIT) {
+    messagePages.value = { ...messagePages.value, [scopeId]: { hasOlder: false, loading: false, limited: true } };
+    return;
+  }
+  const cursor = [...loaded].sort((left, right) => left.createdAt - right.createdAt || compareStableId(left.id, right.id))[0]!.id;
+  const token = generation;
+  const anchor = [...viewport.querySelectorAll<HTMLElement>('[data-message-id], [data-event-id]')]
+    .find((row) => row.getBoundingClientRect().bottom > viewport.getBoundingClientRect().top);
+  const anchorId = anchor?.dataset['messageId'] ?? anchor?.dataset['eventId'];
+  const anchorTop = anchor?.getBoundingClientRect().top;
+  messagePages.value = { ...messagePages.value, [scopeId]: { ...state, loading: true } };
+  try {
+    const older = await service.listMessages(scopeId, { limit: CHAT_MESSAGE_PAGE_SIZE, before: cursor });
+    if (token !== generation || scopeId !== activeScopeId.value) return;
+    messages.value = mergeMessageWindows(messages.value, older, projectId.value);
+    const retained = messages.value.filter((message) => message.scopeId === scopeId).length;
+    const limited = retained >= CHAT_MESSAGE_MEMORY_LIMIT && (older.length === CHAT_MESSAGE_PAGE_SIZE || state.hasOlder);
+    messagePages.value = {
+      ...messagePages.value,
+      [scopeId]: { hasOlder: older.length === CHAT_MESSAGE_PAGE_SIZE && !limited, loading: false, limited },
+    };
+    await nextTick();
+    if (token !== generation || scopeId !== activeScopeId.value || anchorId === undefined || anchorTop === undefined) return;
+    const currentAnchor = [...viewport.querySelectorAll<HTMLElement>('[data-message-id], [data-event-id]')]
+      .find((row) => row.dataset['messageId'] === anchorId || row.dataset['eventId'] === anchorId);
+    if (currentAnchor) viewport.scrollTop += currentAnchor.getBoundingClientRect().top - anchorTop;
+  } catch {
+    if (token === generation && scopeId === activeScopeId.value) actionError.value = 'Older messages could not be loaded. Scroll up to retry.';
+  } finally {
+    const latest = messagePages.value[scopeId];
+    if (latest?.loading) messagePages.value = { ...messagePages.value, [scopeId]: { ...latest, loading: false } };
+  }
 }
 function selectProject(id: string) {
   if (id !== projectId.value) void router.push({ name: 'project-chat', query: { ...route.query, project: id } });
@@ -225,12 +294,15 @@ async function loadProject() {
     if (!projectId.value || !listed.some((p) => p.id === projectId.value)) { error.value = 'Project Not Found. Choose a Project from Overview.'; scopes.value = []; return; }
     const selectedId = projectId.value;
     const scopeList = await service.listScopes(selectedId);
-    const [allMessages, projectEvents, routing] = await Promise.all([
+    const [messageWindow, projectEvents, routing] = await Promise.all([
       projectMessages(scopeList), service.listProjectEvents(selectedId), service.listRoutingBatches(selectedId),
     ]);
     if (token !== generation) return;
     scopes.value = scopeList;
-    messages.value = allMessages.filter((m) => m.projectId === selectedId);
+    messages.value = mergeMessageWindows([], messageWindow.messages, selectedId);
+    messagePages.value = Object.fromEntries(scopeList.map((scope) => [scope.id, {
+      hasOlder: messageWindow.hasOlder[scope.id] ?? false, loading: false, limited: false,
+    }]));
     events.value = projectEvents;
     for (const event of projectEvents) knownEvents.add(event.id);
     batches.value = routing.batches;
@@ -246,12 +318,22 @@ async function refreshMessages() {
   const token = generation;
   try {
     const scopeList = await service.listScopes(id);
-    const [all, projectEvents] = await Promise.all([projectMessages(scopeList), service.listProjectEvents(id)]);
+    const [window, projectEvents] = await Promise.all([projectMessages(scopeList), service.listProjectEvents(id)]);
     if (token !== generation || id !== projectId.value || document.visibilityState === 'hidden') return;
-    const incoming = all.filter((m) => m.projectId === id && !messages.value.some((old) => old.id === m.id) && m.authorKind !== 'human');
+    const all = window.messages;
+    const incoming = all.filter((m) => !messages.value.some((old) => old.id === m.id) && m.authorKind !== 'human');
     const newEvents = projectEvents.filter((event) => !knownEvents.has(event.id));
     scopes.value = scopeList;
-    messages.value = all.filter((m) => m.projectId === id);
+    messages.value = mergeMessageWindows(messages.value, all, id);
+    messagePages.value = Object.fromEntries(scopeList.map((scope) => {
+      const previous = messagePages.value[scope.id];
+      const limited = previous?.limited ?? false;
+      return [scope.id, {
+        hasOlder: !limited && ((previous?.hasOlder ?? false) || (window.hasOlder[scope.id] ?? false)),
+        loading: previous?.loading ?? false,
+        limited,
+      } satisfies ChatMessagePageState];
+    }));
     events.value = projectEvents;
     for (const event of newEvents) knownEvents.add(event.id);
     await unreadState?.refresh();
@@ -623,7 +705,9 @@ onUnmounted(() => { window.removeEventListener('resize', onResize); generation++
         <div class="relative flex min-h-0 flex-1 flex-col">
           <!-- Admission covers messages without allocating a row or intercepting input. -->
           <div v-if="showAdmissionNotice" class="chat-detail-loading pointer-events-none absolute right-3 top-2 z-20 max-w-[min(20rem,calc(100%-1.5rem))] rounded border border-[var(--yellow-attention-border)] bg-[var(--bg-surface)] p-3 text-xs text-[var(--text-primary)] shadow-lg" aria-hidden="true">Checking conversation admission…</div>
-          <div class="chat-messages-body flex flex-1 flex-col gap-3 overflow-y-auto px-4 pb-4 pt-4" :aria-busy="detailLoading">
+          <div class="chat-messages-body flex flex-1 flex-col gap-3 overflow-y-auto px-4 pb-4 pt-4" :aria-busy="detailLoading || messagePages[activeScopeId]?.loading" @scroll="onMessagesScroll">
+          <div v-if="messagePages[activeScopeId]?.loading" class="chat-older-loading text-center text-[10px] text-[var(--text-muted)]" role="status">Loading older messages…</div>
+          <div v-if="messagePages[activeScopeId]?.limited" class="chat-history-limit text-center text-[10px] text-[var(--text-muted)]" role="note">The latest 200 messages are retained in this view.</div>
           <div v-if="!timeline.length" class="chat-empty-state m-auto text-center text-xs text-[var(--text-muted)]"><Icon name="chat" :size="22" class="mx-auto mb-2" /><strong class="block">No messages yet in this conversation scope.</strong><p>Send a message or @mention a project agent below to begin collaboration.</p></div>
           <div v-for="entry in timeline" :key="entry.kind === 'message' ? entry.message.id : entry.event.id" :data-message-id="entry.kind === 'message' ? entry.message.id : undefined" :data-event-id="entry.kind === 'event' ? entry.event.id : undefined" :data-targeted="isTargetEntry(entry) ? (entry.kind === 'message' ? 'message' : 'event') : undefined" :tabindex="isTargetEntry(entry) ? -1 : undefined"
             class="chat-msg max-w-[90%] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-xs" :class="[entry.kind === 'message' && entry.message.authorKind === 'human' ? 'self-end' : 'self-start', isTargetEntry(entry) ? 'ring-2 ring-[var(--accent-primary)]' : '']">

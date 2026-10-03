@@ -40,6 +40,20 @@ import type {
   RoutingWindow,
 } from './routing.ts';
 
+export const DEFAULT_MESSAGE_PAGE_SIZE = 50;
+export const MAX_MESSAGE_PAGE_SIZE = 100;
+
+export interface MessagePageQuery {
+  readonly scopeId?: string;
+  readonly limit: number;
+  readonly before?: string;
+}
+
+export interface MessagePage {
+  readonly messages: readonly Message[];
+  readonly hasOlder: boolean;
+}
+
 export interface CollaborationStore {
   /**
    * Persist a Message and its wake requests by idempotency key.
@@ -76,6 +90,7 @@ export interface CollaborationStore {
   getMessage(messageId: string): Promise<Message | undefined>;
   getMessageByDeliveryKey(deliveryKey: string): Promise<Message | undefined>;
   listMessages(): Promise<readonly Message[]>;
+  listMessagesPage(query: MessagePageQuery): Promise<MessagePage | undefined>;
   /** Counts only messages after the Human's durable per-scope cursor, excluding their own input. */
   unreadCount(scopeId: string, humanId: string): Promise<number>;
   /** Acknowledge through an observed message; never advance over an unseen arrival. */
@@ -428,7 +443,17 @@ export class InMemoryCollaborationStore implements CollaborationStore {
   }
 
   async listMessages(): Promise<readonly Message[]> {
-    return [...this.#messages.values()].sort((a, b) => a.createdAt - b.createdAt);
+    return [...this.#messages.values()].sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  }
+
+  async listMessagesPage(query: MessagePageQuery): Promise<MessagePage | undefined> {
+    const messages = [...this.#messages.values()]
+      .filter((message) => query.scopeId === undefined || message.scopeId === query.scopeId)
+      .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    const end = query.before === undefined ? messages.length : messages.findIndex((message) => message.id === query.before);
+    if (query.before !== undefined && end < 0) return undefined;
+    const start = Math.max(0, end - query.limit);
+    return { messages: messages.slice(start, end), hasOlder: start > 0 };
   }
 
   async resolveAttention(input: ResolveCollaborationAttention): Promise<void> {
