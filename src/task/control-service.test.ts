@@ -340,6 +340,28 @@ test('accepted completion recovery preserves its intent even when recovery is su
   assert.equal(recycles, 2);
 });
 
+test('cancelled Task end recovery retries through the Human recovery Discard command', async () => {
+  let recycles = 0;
+  const worker: TaskContextWorker = {
+    prepare: async () => ({ bootstrapInstructions: '' }),
+    recycle: async () => { recycles += 1; if (recycles === 1) throw new Error('cleanup unavailable'); },
+  };
+  const s = await scenario({ worker });
+  await assert.rejects(s.controls.discardForHuman('task-1', { reason: 'discard unfinished Task' }), /cleanup unavailable/);
+  const recovering = await s.tasks.get('task-1');
+  assert.equal(recovering?.environmentLifecycleState, 'recovery');
+  assert.equal(recovering?.recoveryState, 'ending');
+  assert.equal(recovering?.endDisposition, 'cancelled');
+  assert.equal(s.pool.getLease(s.begun.environmentLeaseId!)?.state, 'recovering');
+
+  const discarded = await s.controls.recoverForHuman('task-1', { action: 'discard', reason: 'retry cancellation cleanup' });
+  assert.equal(discarded.status, 'cancelled');
+  assert.equal(discarded.environmentLifecycleState, 'discarded');
+  assert.equal(discarded.endDisposition, 'cancelled');
+  assert.equal(s.pool.getLease(s.begun.environmentLeaseId!)?.state, 'released');
+  assert.equal(recycles, 2);
+});
+
 test('Force Release without a lease-release capability preserves unfinished recovery instead of recording cancellation', async () => {
   const s = await scenario({ forceRelease: false });
   await s.lifecycle.workerChannelLost('task-1');

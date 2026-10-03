@@ -15,6 +15,8 @@ function json(context: ApiRequestContext, status: number, body: unknown): boolea
 /** Protected Human intervention and validation commands for begun Tasks. */
 export function createTaskControlRouter(options: {
   readonly controls: TaskControlService;
+  /** Route a completed end retry through Environment recovery when required. */
+  readonly end?: (taskId: string, input: { reason: string }) => Promise<Task>;
   /** Resolve Environment proof and decision history together with the Task holder. */
   readonly recover?: (taskId: string, input: { action: 'resume' | 'discard'; reason: string }) => Promise<Task>;
 }): ApiRouter {
@@ -62,7 +64,7 @@ export function createTaskControlRouter(options: {
             else if (action === 'resume') task = await controls.resumeForHuman(taskId, { reason: body.reason });
             else if (action === 'cancel-pause') task = await controls.cancelPauseForHuman(taskId, { reason: body.reason });
             else if (action === 'clear-blocker') task = await controls.clearBlockerForHuman(taskId, { reason: body.reason });
-            else if (action === 'end') task = await controls.endForHuman(taskId, { reason: body.reason });
+            else if (action === 'end') task = await (options.end ?? controls.endForHuman.bind(controls))(taskId, { reason: body.reason });
             else task = await controls.discardForHuman(taskId, { reason: body.reason });
             break;
           case 'blockers':
