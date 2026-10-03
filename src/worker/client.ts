@@ -10,6 +10,7 @@ import type {
 } from '../engine/port.ts';
 import { EngineResumeRefusedError } from '../engine/port.ts';
 import { EventQueue } from '../engine/event-queue.ts';
+import { redactSensitiveText } from '../environment/privacy.ts';
 import { JsonRpcError, type JsonRpcTransport } from '../engine/jsonrpc.ts';
 import {
   WORKER_ERROR_CODES,
@@ -55,6 +56,29 @@ export interface WorkerClientOptions {
   /** The environment instance this worker serves. */
   readonly environmentInstanceId: string;
   readonly engines: readonly WorkerEngineDeclaration[];
+}
+
+const messageCapabilities = new WeakMap<JsonRpcTransport, Map<string, NonNullable<StartSessionRequest['sendDirectMessage']>>>();
+function messageRegistry(transport: JsonRpcTransport) {
+  let registry = messageCapabilities.get(transport);
+  if (registry) return registry;
+  registry = new Map();
+  messageCapabilities.set(transport, registry);
+  const capabilities = registry;
+  transport.onServerRequest(message => {
+    if (message.method !== WORKER_METHODS.directMessage) return;
+    const params = message.params as { sessionId?: string; input?: import('../engine/port.ts').AgentDirectMessageInput } | null;
+    void (async () => {
+      try {
+        const send = typeof params?.sessionId === 'string' ? capabilities.get(params.sessionId) : undefined;
+        if (!send || !params?.input) throw new Error('Agent message capability is unavailable');
+        transport.respond(message.id, await send(params.input));
+      } catch (error) {
+        transport.respondError(message.id, -32000, redactSensitiveText(error instanceof Error ? error.message : 'Agent direct-message delivery refused'));
+      }
+    })();
+  });
+  return registry;
 }
 
 /** Raised when the channel to a worker dies while a session is still live. */
@@ -134,6 +158,7 @@ export class WorkerClient implements EngineAdapter {
         {
           engine: this.id,
           agentId: request.agentId,
+          ...(request.sendDirectMessage !== undefined ? { directMessagesEnabled: true } : {}),
           ...(request.runId !== undefined ? { runId: request.runId } : {}),
           workingDirectory: request.workingDirectory,
           ...(request.model !== undefined ? { model: request.model } : {}),
@@ -161,7 +186,11 @@ export class WorkerClient implements EngineAdapter {
       throw new Error(WORKER_DIAGNOSTICS.sessionStartFailed);
     }
 
-    return new WorkerEngineSession(
+    const registry = messageRegistry(this.#transport);
+    if (request.sendDirectMessage) registry.set(started.sessionId, request.sendDirectMessage);
+    const removeMessageHandler = () => { registry.delete(started.sessionId); this.#live.delete(removeMessageHandler); };
+    this.#live.add(removeMessageHandler);
+    const session = new WorkerEngineSession(
       {
         transport: this.#transport,
         sessionId: started.sessionId,
@@ -177,6 +206,9 @@ export class WorkerClient implements EngineAdapter {
         return () => this.#live.delete(handler);
       },
     );
+    const close = session.close.bind(session);
+    session.close = async () => { removeMessageHandler(); await close(); };
+    return session;
   }
 }
 

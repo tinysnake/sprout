@@ -15,6 +15,7 @@ import type { AgentRunEvent, EngineTurnResult, StandingInstructionsChannel, Stre
  */
 
 export const WORKER_METHODS = {
+  directMessage: 'agent/direct-message',
   /** Identify the worker and the engines it can host. */
   info: 'worker/info',
   /** Execute the Worker-owned, non-inference readiness probe. */
@@ -170,6 +171,7 @@ export interface WorkerInfo {
 }
 
 export interface StartSessionParams {
+  readonly directMessagesEnabled?: boolean;
   /** Which engine the worker should host for this session. */
   readonly engine: string;
   readonly agentId: string;

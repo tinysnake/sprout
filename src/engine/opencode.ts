@@ -116,7 +116,8 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
     return new OpenCodeSession({
       binaryPath,
       workingDirectory: request.workingDirectory,
-      options: this.#options,
+      options: request.sessionEnvironment === undefined ? this.#options
+        : { ...this.#options, env: { ...(this.#options.env ?? process.env), ...request.sessionEnvironment } },
       sessionId: `oc-${++this.#sessionCounter}-${Date.now().toString(36)}`,
       ...(delivery !== undefined ? { contractDelivery: delivery } : {}),
       ...(contractEnv !== undefined ? { contractEnv } : {}),

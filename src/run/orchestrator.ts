@@ -103,6 +103,7 @@ export interface RunOrchestratorOptions {
    * stays ignorant of the Task service's shape.
    */
   readonly onTaskRunSettled?: TaskRunObserver;
+  readonly directMessages?: (run: AgentRun, assertActive: () => void) => NonNullable<import('../engine/port.ts').StartSessionRequest['sendDirectMessage']>;
   readonly leaseTtlMs?: number;
   /** Wait before a bounded engine retry; injectable for deterministic tests. */
   readonly retryBackoff?: (failedAttempt: number) => Promise<void>;
@@ -217,6 +218,7 @@ type SessionAttempt =
     };
 
 export class RunOrchestrator {
+  readonly #directMessages: RunOrchestratorOptions['directMessages'];
   readonly #engines: RunOrchestratorOptions['engines'];
   readonly #agents: AgentRegistry;
   readonly #resolveAgent: (agentId: string) => Promise<AgentDefinition | undefined>;
@@ -256,6 +258,7 @@ export class RunOrchestrator {
   readonly #ids: IdFactory;
 
   constructor(options: RunOrchestratorOptions) {
+    this.#directMessages = options.directMessages;
     this.#engines = options.engines;
     this.#agents = options.agents;
     this.#resolveAgent = options.resolveAgent ?? (async (id) => this.#agents.get(id));
@@ -1060,6 +1063,15 @@ export class RunOrchestrator {
       session = await adapter.startSession({
         agentId: agent.id,
         runId: running.id,
+        ...(this.#directMessages !== undefined && running.projectId !== undefined ? {
+          sendDirectMessage: async (input: import('../engine/port.ts').AgentDirectMessageInput) => {
+            const assertActive = () => {
+              if (this.#runs.get(running.id)?.status !== 'running' || this.#stopRequests.has(running.id)) throw new Error('Agent message capability is no longer active');
+            };
+            assertActive();
+            return this.#directMessages!(running, assertActive)(input);
+          },
+        } : {}),
         workingDirectory,
         ...(option.workModel !== '' ? { model: option.workModel } : {}),
         ...(option.effort !== '' ? { effort: option.effort } : {}),

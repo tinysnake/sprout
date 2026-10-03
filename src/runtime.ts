@@ -97,6 +97,7 @@ import { isTerminalTaskStatus } from './task/model.ts';
 import type { TaskStore } from './task/store.ts';
 import type { WorkerInfo, WorkerReadinessProbeResult } from './worker/protocol.ts';
 import type { ValidateWorkspaceParams, ValidateWorkspaceResult } from './worker/protocol.ts';
+import { createAgentDirectMessageSender } from './collaboration/agent-direct.ts';
 import { createRunApi, type RunApi } from './web/api.ts';
 import { createEnvironmentRouter } from './web/environment-router.ts';
 import { createAgentRouter } from './web/agent-router.ts';
@@ -1013,7 +1014,8 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       };
     };
 
-    const orchestrator = new RunOrchestrator({
+    const orchestrator: RunOrchestrator = new RunOrchestrator({
+      directMessages: (run, assertActive) => createAgentDirectMessageSender({ run, assertActive, runs: orchestrator, scopes: conversationScopes, collaboration }),
       // Resolved per run *for the resolved instance*, so a worker that died is
       // replaced before the next run instead of failing it against a dead channel
       // (ADR-0003), and so execution follows the leased instance (F1, #18).

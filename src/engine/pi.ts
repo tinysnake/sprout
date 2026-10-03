@@ -44,6 +44,7 @@ export interface PiAdapterOptions {
   readonly spawnProcess?: (
     binaryPath: string,
     args: readonly string[],
+    env?: NodeJS.ProcessEnv,
   ) => PiSpawnedProcess;
 }
 
@@ -83,7 +84,8 @@ export class PiEngineAdapter implements EngineAdapter {
       ...(request.model !== undefined ? { model: request.model } : {}),
       ...(request.effort !== undefined ? { effort: request.effort } : {}),
       ...(request.instructions !== undefined ? { instructions: request.instructions } : {}),
-      options: this.#options,
+      options: request.sessionEnvironment === undefined ? this.#options
+        : { ...this.#options, env: { ...(this.#options.env ?? process.env), ...request.sessionEnvironment } },
     });
   }
 }
@@ -158,7 +160,7 @@ export class PiSession implements EngineSession {
     // Named `turnProcess`, not `process`: shadowing the global would break the
     // stderr forwarding below.
     const turnProcess = this.#options.spawnProcess
-      ? this.#options.spawnProcess(this.#binaryPath, args)
+      ? this.#options.spawnProcess(this.#binaryPath, args, this.#options.env)
       : spawnPi(this.#binaryPath, args, this.#workingDirectory, this.#options.env, prompt);
     this.#current = turnProcess;
 
