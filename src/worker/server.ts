@@ -30,6 +30,7 @@ import {
   type WorkerReadinessProbeParams,
   type WorkerReadinessProbeResult,
 } from './protocol.ts';
+import { createAgentMessageBridge } from './agent-message-bridge.ts';
 import { WorkerWorkspace } from './workspace.ts';
 import type { WorkerRecoveryJournal } from './recovery-journal.ts';
 import {
@@ -77,6 +78,7 @@ export interface EnvironmentWorkerOptions {
   readonly recoveryJournal?: WorkerRecoveryJournal;
 }
 interface LiveSession {
+  readonly closeMessageBridge?: () => Promise<void>;
   readonly engine: string;
   readonly session: EngineSession;
   readonly events: EventSink;
@@ -274,24 +276,38 @@ export class EnvironmentWorker {
     // Fence conservatively before an engine can start, not after it returns.
     this.#options.recoveryJournal?.engineStarted();
 
-    const session = await adapter.startSession({
-      agentId: params.agentId,
-      workingDirectory: params.projectWorkspaceId === undefined
-        ? params.workingDirectory
-        : await this.#requireWorkspace().projectWorkingDirectory(
-          params.projectWorkspaceId,
-          params.projectWorkspacePath,
-          params.projectWorkspaceKind,
-        ),
-      ...(params.model !== undefined ? { model: params.model } : {}),
-      ...(params.effort !== undefined ? { effort: params.effort } : {}),
-      ...(params.instructions !== undefined ? { instructions: params.instructions } : {}),
-      ...(params.resumeSessionKey !== undefined
-        ? { resumeSessionKey: params.resumeSessionKey }
-        : {}),
-    });
-
+    let messagesActive = true;
+    const sendDirectMessage = params.directMessagesEnabled ? async (input: import('../engine/port.ts').AgentDirectMessageInput) => {
+      if (!messagesActive || this.#closed || !this.#sessions.has(sessionId)) throw new Error('Agent message capability expired');
+      return this.#transport.request<import('../engine/port.ts').AgentDirectMessageResult>(WORKER_METHODS.directMessage, { sessionId, input });
+    } : undefined;
     const sessionId = `session-${this.#options.recoveryJournal?.snapshot().epoch ?? 'local'}-${++this.#counter}`;
+    const bridge = sendDirectMessage ? await createAgentMessageBridge(sendDirectMessage) : undefined;
+    let session: EngineSession;
+    try {
+      session = await adapter.startSession({
+        ...(sendDirectMessage !== undefined ? { sendDirectMessage } : {}),
+        agentId: params.agentId,
+        workingDirectory: params.projectWorkspaceId === undefined
+          ? params.workingDirectory
+          : await this.#requireWorkspace().projectWorkingDirectory(
+            params.projectWorkspaceId,
+            params.projectWorkspacePath,
+            params.projectWorkspaceKind,
+          ),
+        ...(params.model !== undefined ? { model: params.model } : {}),
+        ...(params.effort !== undefined ? { effort: params.effort } : {}),
+        ...(params.instructions !== undefined || bridge !== undefined ? { instructions: (params.instructions ?? '') + (bridge?.instructions ?? '') } : {}),
+        ...(params.resumeSessionKey !== undefined
+          ? { resumeSessionKey: params.resumeSessionKey }
+          : {}),
+      });
+    } catch (error) {
+      messagesActive = false;
+      await bridge?.close();
+      throw error;
+    }
+
     // Every contract delivery is reported, not just a refusal. An operator must
     // be able to tell from the log whether the contract reached the engine and
     // through which mechanism, for every mechanism — including the two ordinary
@@ -302,6 +318,7 @@ export class EnvironmentWorker {
       this.#options.onLog?.(contractDeliveryDiagnostic(delivery));
     }
     this.#sessions.set(sessionId, {
+      ...(bridge !== undefined ? { closeMessageBridge: async () => { messagesActive = false; await bridge.close(); } } : {}),
       engine: params.engine,
       runId: params.runId,
       session,
@@ -414,6 +431,7 @@ export class EnvironmentWorker {
   async #closeSession(params: CloseParams): Promise<Record<string, never>> {
     const live = this.#sessions.get(params.sessionId);
     if (live) {
+      await live.closeMessageBridge?.();
       await live.session.close();
       if (live.running !== undefined) await settleOrTimeout([live.running]);
       this.#sessions.delete(params.sessionId);
@@ -439,6 +457,7 @@ export class EnvironmentWorker {
     let fenced = true;
     const running: Promise<void>[] = [];
     for (const [sessionId, live] of this.#sessions) {
+      await live.closeMessageBridge?.();
       this.#sessions.delete(sessionId);
       if (live.running !== undefined) running.push(live.running);
       await live.session.close().catch(() => { fenced = false; });

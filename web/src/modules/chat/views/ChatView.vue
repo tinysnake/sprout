@@ -121,7 +121,8 @@ function title(scope: ConversationScopeView): string {
   if (scope.kind === 'project') return '#general';
   if (scope.kind === 'working-group') return scope.content.versions.find((v) => v.version === scope.content.currentVersion)?.displayName ?? scope.id;
   const humanIds = new Set(project.value && currentVersion(project.value)?.memberships.filter((m) => m.memberKind === 'human').map((m) => m.memberId));
-  return `@${agentName(scope.participants.find((p) => !humanIds.has(p)) ?? scope.participants[1] ?? scope.id)}`;
+  const agentParticipants = scope.participants.filter(p => !humanIds.has(p));
+  return agentParticipants.map(id => `@${agentName(id)}`).join(' ↔ ') || scope.id;
 }
 function agentName(id: string) { return agents.value.find((agent) => agent.id === id)?.displayName ?? id; }
 function kindLabel(scope: ConversationScopeView) { return scope.kind === 'project' ? 'Project channel' : scope.kind === 'working-group' ? 'Working group' : 'Direct message'; }
@@ -629,6 +630,7 @@ onUnmounted(() => { window.removeEventListener('resize', onResize); generation++
           <div v-for="entry in timeline" :key="entry.kind === 'message' ? entry.message.id : entry.event.id" :data-message-id="entry.kind === 'message' ? entry.message.id : undefined" :data-event-id="entry.kind === 'event' ? entry.event.id : undefined" :data-targeted="isTargetEntry(entry) ? (entry.kind === 'message' ? 'message' : 'event') : undefined" :tabindex="isTargetEntry(entry) ? -1 : undefined"
             class="chat-msg max-w-[90%] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-xs" :class="[entry.kind === 'message' && entry.message.authorKind === 'human' ? 'self-end' : 'self-start', isTargetEntry(entry) ? 'ring-2 ring-[var(--accent-primary)]' : '']">
             <div class="flex items-center justify-between gap-3">
+              <span v-if="entry.kind === 'message' && entry.message.authorKind === 'agent'" data-author-kind="agent" class="rounded border border-[var(--border-subtle)] px-1 text-[var(--text-secondary)]">Agent</span>
               <strong class="text-[var(--text-primary)]">{{ entry.kind === 'event' ? 'Project event' : entry.message.authorKind === 'human' ? 'Human Operator' : `@${agentName(entry.message.authorId)}` }}</strong>
               <div class="chat-evidence-wrap relative flex items-center gap-1">
                 <button type="button" class="chat-evidence-trigger flex h-9 w-9 items-center justify-center rounded focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]" :aria-label="`Routing and delivery evidence for ${entry.kind === 'message' ? entry.message.id : entry.event.id}`" :aria-expanded="evidenceOpen === (entry.kind === 'message' ? entry.message.id : entry.event.id)" @click.stop="openEvidence(entry.kind === 'message' ? entry.message.id : entry.event.id, entry.kind, $event)"><Icon name="info" :size="14" /></button>

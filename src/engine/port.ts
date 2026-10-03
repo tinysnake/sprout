@@ -128,7 +128,26 @@ export interface TokenUsage {
   readonly totalTokens: number;
 }
 
+export interface AgentDirectMessageInput {
+  readonly recipientId: string;
+  readonly body: string;
+  readonly deliveryKey: string;
+  readonly awaitReply?: boolean;
+}
+
+export interface AgentDirectMessageResult {
+  readonly messageId: string;
+  readonly scopeId: string;
+  readonly authorId: string;
+  readonly duplicate: boolean;
+  readonly admittedRunIds: readonly string[];
+  readonly runs: readonly { readonly id: string; readonly status: string; readonly failure?: string }[];
+  readonly wakes: readonly { readonly agentId: string; readonly reason: string; readonly status: string; readonly detail?: string }[];
+}
+
 export interface StartSessionRequest {
+  /** Session-bound capability. Author and Project are never supplied by the engine. */
+  readonly sendDirectMessage?: (input: AgentDirectMessageInput) => Promise<AgentDirectMessageResult>;
   /** Sprout-owned agent identity. Never derived from the engine installation. */
   readonly agentId: string;
   /** Core-owned run identity, for durable Worker delivery correlation only. */

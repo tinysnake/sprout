@@ -27,6 +27,7 @@ import {
   REPLY_PROJECTION_AGENT_NAME,
   REPLY_PROJECTION_PROJECT_ID,
 } from '../../../src/web/api-harness.ts';
+import { createAgentDirectMessageSender } from '../../../src/collaboration/agent-direct.ts';
 import type { ScriptedTurn } from '../../../src/engine/scripted.ts';
 
 const repoRoot = process.cwd();
@@ -121,6 +122,7 @@ interface SseObservation {
 }
 
 interface PageOptions {
+  readonly beforeMount?: (server: ReplyProjectionApi) => Promise<void>;
   readonly suppressRunEvents?: boolean;
 }
 
@@ -148,6 +150,7 @@ interface Page {
  */
 async function startPage(turns: readonly ScriptedTurn[], options: PageOptions = {}): Promise<Page> {
   const server = await buildReplyProjectionApi({ turns });
+  await options.beforeMount?.(server);
   const harness = await setupHarness();
   const sse: SseObservation = { runEvents: 0, runStatuses: [] };
   const requestGates = new Map<string, {
@@ -453,6 +456,7 @@ test('a live engine reply renders in the Project channel through the run follow-
     const arrivalMs = Date.now() - sentAt;
     assert.ok(arrivalMs < 6_000, `the reply arrived through the run follow-up (${arrivalMs}ms), not the 15s poll`);
     assert.ok(page.sse.runEvents > 0, 'the run follow-up carried run events over the real SSE route');
+    assert.equal(reply.querySelector('[data-author-kind="agent"]')?.textContent, 'Agent');
     assert.equal(authorOf(reply), `@${AGENT_NAME}`, 'the reply is attributed to the Agent, by display name');
     await settle(80);
     assert.ok(
@@ -653,6 +657,33 @@ test('Chat shows the active Agent identity, offers Human Stop, accepts the next 
   }
 });
 
+test('Human Chat reads an Agent pair with both names and both authors while send remains refused', async () => {
+  let scopeId = '';
+  const page = await startPage([{ events: [], result: { status: 'completed', text: 'Scout answers Forge.' } }], { beforeMount: async server => {
+    const command = async (path: string, body: unknown) => fetch(`${server.base}${path}`, {
+      method: 'POST', headers: { cookie: server.cookie, 'x-sprout-csrf': server.csrf, 'content-type': 'application/json' }, body: JSON.stringify(body),
+    });
+    assert.equal((await command('/api/agents', { id: 'forge', displayName: 'Forge', workOptions: [{ engine: 'scripted', workModel: 'scripted-model', effort: 'standard' }] })).status, 201);
+    assert.equal((await command(`/api/projects/${PROJECT_ID}/memberships`, { agentId: 'forge' })).status, 200);
+    const send = createAgentDirectMessageSender({ run: { agentId: 'forge', projectId: PROJECT_ID }, runs: server.orchestrator, scopes: server.scopes, collaboration: server.collaboration });
+    const delivered = await send({ recipientId: AGENT_ID, body: 'Forge asks Scout.', deliveryKey: 'pair-attribution', awaitReply: true });
+    scopeId = delivered.scopeId;
+  } });
+  try {
+    await page.push(`/project/chat/${scopeId}?project=${PROJECT_ID}`);
+    const input = await waitFor('Agent-authored direct input', () => messageElement(page, 'Forge asks Scout.'));
+    const reply = await waitFor('recipient Agent reply', () => messageElement(page, 'Scout answers Forge.'));
+    assert.equal(authorOf(input), '@Forge');
+    assert.equal(authorOf(reply), `@${AGENT_NAME}`);
+    assert.equal(input.querySelector('[data-author-kind="agent"]')?.textContent, 'Agent');
+    assert.equal(reply.querySelector('[data-author-kind="agent"]')?.textContent, 'Agent');
+    const scopeButton = page.doc.querySelector(`[data-scope-id="${scopeId}"]`);
+    assert.match(scopeButton?.textContent ?? '', /@Forge/);
+    assert.match(scopeButton?.textContent ?? '', new RegExp(`@${AGENT_NAME}`));
+    assert.equal((page.doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, true);
+  } finally { await page.close(); }
+});
+
 test('the reply renders with attribution and projected evidence in the Working group and the direct scope', async () => {
   const page = await startPage([
     {
@@ -696,6 +727,7 @@ test('the reply renders with attribution and projected evidence in the Working g
     await sendInComposer(page, 'Answer me directly on the live path.');
     const directInput = await waitFor('the direct input', () => messageElement(page, 'Answer me directly on the live path'));
     const directReply = await waitFor('the direct reply', () => messageElement(page, 'Direct reply.'));
+    assert.equal(directReply.querySelector('[data-author-kind="agent"]')?.textContent, 'Agent');
     assert.equal(authorOf(directReply), `@${AGENT_NAME}`, 'the direct reply is attributed to the Agent');
     const directPopup = await openEvidence(page, directReply);
     await waitFor('the direct projected evidence', () => directPopup.getAttribute('data-evidence-state') === 'projected' ? true : null);
