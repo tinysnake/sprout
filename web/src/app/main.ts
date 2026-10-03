@@ -16,7 +16,7 @@ import { ProductionChatService } from '../modules/chat/adapters/production-adapt
 import { createConversationBrowserAdapter } from '../adapters/conversation-api.js';
 import { createMessageBrowserAdapter } from '../adapters/message-api.js';
 import { createRoutingBrowserAdapter } from '../adapters/routing-api.js';
-import { createRunBrowserAdapter } from '../adapters/run-api.js';
+import { createRunBrowserAdapter, RUN_INSPECTOR, type RunBrowserAdapter } from '../adapters/run-api.js';
 import { createTaskBrowserAdapter, type TaskBrowserAdapter } from '../adapters/task-api.js';
 import { createFeedBrowserAdapter, type FeedBrowserAdapter } from '../adapters/feed-api.js';
 import { FEED_API } from '../views/feed-port.js';
@@ -61,6 +61,8 @@ export interface SproutAppOptions {
   projectService?: ProjectManagementService;
   /** Production Task proposal, run-history, lease, and control authority. */
   taskService?: TaskBrowserAdapter;
+  /** Read-only inspector for activity and final results of Task-linked runs. */
+  runService?: Pick<RunBrowserAdapter, 'getRun'>;
   /** Production read-only Attention, in-flight work, scope, and activity authority. */
   feedService?: FeedBrowserAdapter;
   /** Production Chat authority; tests inject a fixture explicitly, never by default. */
@@ -106,6 +108,9 @@ export function createSproutApp(options: SproutAppOptions = {}) {
   }
   if (options.taskService) {
     app.provide(TASKS_API, options.taskService);
+  }
+  if (options.runService) {
+    app.provide(RUN_INSPECTOR, options.runService);
   }
   if (options.feedService) {
     app.provide(FEED_API, options.feedService);
@@ -155,12 +160,13 @@ export function createProductionAppOptions(transport = createBrowserTransport())
     environments: environmentService,
   });
   const taskService = createTaskBrowserAdapter(transport);
+  const runService = createRunBrowserAdapter(transport);
   const feedService = createFeedBrowserAdapter(transport);
   const chatService = new ProductionChatService({
     conversations: createConversationBrowserAdapter(transport),
     messages: createMessageBrowserAdapter(transport),
     routing: createRoutingBrowserAdapter(transport),
-    runs: createRunBrowserAdapter(transport),
+    runs: runService,
   });
   const operatorApi = createOperatorBrowserAdapter(transport);
   const settingsService = new ProductionSettingsService(
@@ -176,6 +182,7 @@ export function createProductionAppOptions(transport = createBrowserTransport())
     agentService,
     projectService,
     taskService,
+    runService,
     feedService,
     chatService,
     usageService,

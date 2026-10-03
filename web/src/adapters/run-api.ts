@@ -1,3 +1,4 @@
+import type { InjectionKey } from 'vue';
 import type { RunHistoryTotals, RunView } from '../../../src/web/views.ts';
 import type { BrowserTransport, BrowserTransportState } from '../transport/browser-transport.ts';
 
@@ -15,6 +16,9 @@ export interface RunBrowserAdapter {
   stopChatRun(scopeId: string, id: string): Promise<{ readonly id: string; readonly status: RunView['status'] }>;
   subscribeRuns(listener: (run: RunView) => void): () => void;
 }
+
+/** Read-only run inspector, provided over the shared authenticated transport. */
+export const RUN_INSPECTOR: InjectionKey<Pick<RunBrowserAdapter, 'getRun'>> = Symbol('sprout.run.inspector');
 
 export function createRunBrowserAdapter(transport: BrowserTransport): RunBrowserAdapter {
   return {
