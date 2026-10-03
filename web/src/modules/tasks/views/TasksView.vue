@@ -62,6 +62,7 @@ const beginLeadKey = ref('');
 const controlReason = ref('');
 const advanceTargetId = ref('');
 const stopRunId = ref('');
+const stopActiveRunId = ref('');
 const taskTitle = ref('');
 const taskGoal = ref('');
 const taskConstraints = ref('');
@@ -655,6 +656,19 @@ async function taskControl(action: 'pause' | 'interrupt' | 'resume' | 'clear-blo
     else await currentApi.discard(task.id, controlReason.value.trim());
   });
 }
+async function stopActiveRun(): Promise<void> {
+  const currentApi = api.value;
+  const task = selectedTask.value?.task;
+  const runId = stopActiveRunId.value;
+  if (!currentApi || !task || !runId || task.activeRunId !== runId
+    || task.pauseState === 'requested' || actionReasonRequired.value) return;
+  const reason = controlReason.value.trim();
+  const stopped = await perform('Active Agent run stopped. The unfinished Task remains paused with its Environment lease held.', async () => {
+    await currentApi.pause(task.id, reason);
+    await currentApi.interrupt(task.id, reason);
+  });
+  if (stopped) stopActiveRunId.value = '';
+}
 async function addBlocker(): Promise<void> {
   const currentApi = api.value;
   const task = selectedTask.value?.task;
@@ -771,6 +785,7 @@ watch(() => [openTaskId.value, openProposalId.value, selectedProjectId.value] as
 });
 watch(() => [openTaskId.value, openProposalId.value] as const, async ([taskId, proposalId]) => {
   stopRunId.value = '';
+  stopActiveRunId.value = '';
   if (!taskId && !proposalId) return;
   focusSelectedRecord = true;
   await nextTick();
@@ -957,8 +972,16 @@ onMounted(() => { void loadIndex(); });
 
             <section class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 sm:p-5 flex flex-col gap-3">
               <div><h3 class="font-bold">Human Task controls</h3><p class="text-xs text-[var(--text-secondary)] mt-1">Each command is sent once. Refresh shows the latest Task and lease facts before another decision.</p></div>
-              <label class="flex flex-col gap-1 text-xs">Reason for this action<input v-model="controlReason" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3 text-sm" /></label>
+              <label class="flex flex-col gap-1 text-xs">Reason for this action<input v-model="controlReason" :aria-describedby="actionReasonRequired ? 'task-control-reason-hint' : undefined" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3 text-sm" /></label>
+              <p v-if="actionReasonRequired" id="task-control-reason-hint" class="text-xs text-[var(--text-secondary)]" role="status">Enter a reason to enable actions that require one.</p>
               <div class="flex flex-wrap gap-2">
+                <template v-if="selectedTask.task.environmentLifecycleState === 'running' && selectedTask.task.activeRunId && selectedTask.task.pauseState !== 'requested'">
+                  <Button v-if="stopActiveRunId !== selectedTask.task.activeRunId" data-action="stop-active-run" variant="ghost" size="sm" class="min-h-[44px] text-[var(--red-action)]" :disabled="!canControl || actionReasonRequired" @click="stopActiveRunId = selectedTask.task.activeRunId!">Stop active run</Button>
+                  <div v-else class="flex flex-col items-start gap-2" role="group" aria-label="Confirm stop for active Agent run">
+                    <p class="text-xs text-[var(--text-secondary)]">This settles the active Agent run as stopped. The Task remains unfinished and paused, and its Environment lease stays held. Resume the Task to admit another run.</p>
+                    <div class="flex flex-wrap gap-2"><Button variant="ghost" size="sm" class="min-h-[44px] text-[var(--red-action)]" :disabled="!canControl || actionReasonRequired" @click="stopActiveRun">Confirm stop active run</Button><Button variant="ghost" size="sm" class="min-h-[44px]" @click="stopActiveRunId = ''">Cancel stop</Button></div>
+                  </div>
+                </template>
                 <Button v-if="selectedTask.task.activeRunId && selectedTask.task.pauseState !== 'requested'" variant="secondary" size="sm" class="min-h-[44px]" :disabled="!canControl || actionReasonRequired" @click="taskControl('pause')">Pause Task</Button>
                 <Button v-if="selectedTask.task.pauseState === 'requested' && selectedTask.task.activeRunId" variant="secondary" size="sm" class="min-h-[44px]" :disabled="!canControl || actionReasonRequired" @click="taskControl('interrupt')">Interrupt active run</Button>
                 <Button v-if="!terminalTask && selectedTask.task.pauseState === 'paused' && !selectedTask.task.activeRunId" variant="primary" size="sm" class="min-h-[44px]" :disabled="!canControl || actionReasonRequired" @click="taskControl('resume')">Resume Task</Button>

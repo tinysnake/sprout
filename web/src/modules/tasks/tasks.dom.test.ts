@@ -130,6 +130,7 @@ function appServices(conflictCodes: readonly string[] = [], snapshot = overview)
   )]));
   let nextConflict = 0;
   const calls: string[] = [];
+  const controlInputs: Array<{ readonly action: 'pause' | 'interrupt'; readonly taskId: string; readonly reason: string }> = [];
   const blockerCalls: TaskBlockerInput[] = [];
   const proposalRows = [proposal];
   const beginInputs: unknown[] = [];
@@ -163,8 +164,8 @@ function appServices(conflictCodes: readonly string[] = [], snapshot = overview)
       return { task: allTasks.find((entry) => entry.id === id)!, runId: 'run-next', advance: { runId: 'run-next', agentId: 'agent-a', sequence: 2, linkedAt: time } };
     },
     async reviseTaskContent() { calls.push('revise-content'); return allTasks[1]!; },
-    async pause(id: string) { calls.push(`pause:${id}`); return allTasks[0]!; },
-    async interrupt(id: string) { calls.push(`interrupt:${id}`); return allTasks[0]!; },
+    async pause(id: string, reason: string) { calls.push(`pause:${id}`); controlInputs.push({ action: 'pause', taskId: id, reason }); return allTasks[0]!; },
+    async interrupt(id: string, reason: string) { calls.push(`interrupt:${id}`); controlInputs.push({ action: 'interrupt', taskId: id, reason }); return allTasks[0]!; },
     async stopSubordinate(id: string, input: { runId: string }) {
       calls.push(`stop-subordinate:${id}:${input.runId}`);
       const detail = details.get(id);
@@ -212,19 +213,19 @@ function appServices(conflictCodes: readonly string[] = [], snapshot = overview)
     async listProjects() { return [project]; },
     async loadOverview() { return snapshot; },
   } as unknown as ProjectManagementService;
-  return { api, projects, allTasks, calls, blockerCalls, beginInputs };
+  return { api, projects, allTasks, calls, controlInputs, blockerCalls, beginInputs };
 }
 
 async function mountTasks(vite: { ssrLoadModule: (path: string) => Promise<unknown> }, doc: Document, codes: readonly string[] = [], snapshot = overview) {
   const { createSproutApp } = await vite.ssrLoadModule('/src/app/main.ts') as typeof import('../../app/main.ts');
-  const { api, projects, calls, blockerCalls, beginInputs } = appServices(codes, snapshot);
+  const { api, projects, calls, controlInputs, blockerCalls, beginInputs } = appServices(codes, snapshot);
   const connectionSource = createShellConnectionController({ status: 'online', connection: 'online', loading: false });
   const { app, router } = createSproutApp({ routerBase: '/app/', taskService: api, projectService: projects, connectionSource });
   await router.push(`/project/tasks?project=${projectId}`);
   await router.isReady();
   app.mount(doc.querySelector('#app')!);
   await settle();
-  return { app, router, calls, blockerCalls, beginInputs };
+  return { app, router, calls, controlInputs, blockerCalls, beginInputs };
 }
 
 async function enterField(doc: Document, dom: JSDOM, labelText: string, value: string): Promise<void> {
@@ -601,6 +602,50 @@ test('Project Tasks creates and renders each blocker responsibility kind', async
   }
 });
 
+test('running Tasks expose a reason-gated, confirmed one-step stop for the active run', async () => {
+  const { dom, doc, vite, cleanup } = await setupHarness();
+  try {
+    const { app, router, calls, controlInputs } = await mountTasks(vite, doc);
+    await openTaskRecord(router, 'run-running');
+    let stop = [...doc.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent?.trim() === 'Stop active run');
+    assert.ok(stop, 'a running Task exposes an active-run stop control');
+    assert.equal(stop.disabled, true, 'the stop control requires an action reason');
+    assert.match(doc.body.textContent ?? '', /Enter a reason to enable actions that require one/);
+    assert.ok([...doc.querySelectorAll<HTMLButtonElement>('button')].some((button) => button.textContent?.trim() === 'Pause Task'));
+    assert.equal([...doc.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent?.trim() === 'Interrupt active run'), undefined,
+      'the pause-requested Interrupt remains specific to its existing window');
+
+    await enterField(doc, dom, 'Reason for this action', 'Stop the active turn before the review.');
+    stop = [...doc.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent?.trim() === 'Stop active run');
+    assert.ok(stop && !stop.disabled, 'a reason enables the active-run stop control');
+    stop.click();
+    await settle();
+    const confirmation = doc.querySelector<HTMLElement>('[aria-label="Confirm stop for active Agent run"]');
+    assert.ok(confirmation, 'the initial action opens an explicit confirmation');
+    assert.match(confirmation.textContent ?? '', /Task remains unfinished and paused/);
+    assert.match(confirmation.textContent ?? '', /Environment lease stays held/);
+    assert.deepEqual(calls.filter((call) => call.startsWith('pause:') || call.startsWith('interrupt:')), [],
+      'opening confirmation does not submit either server action');
+    clickButton(doc, 'Cancel stop');
+    await settle();
+    assert.equal(doc.querySelector('[aria-label="Confirm stop for active Agent run"]'), null);
+
+    clickButton(doc, 'Stop active run');
+    await settle();
+    clickButton(doc, 'Confirm stop active run');
+    await settle(180);
+    assert.deepEqual(calls.filter((call) => call.startsWith('pause:') || call.startsWith('interrupt:')),
+      ['pause:run-running', 'interrupt:run-running'], 'one confirmation requests Pause then immediately interrupts the current run');
+    assert.deepEqual(controlInputs.map(({ action, taskId, reason }) => ({ action, taskId, reason })), [
+      { action: 'pause', taskId: 'run-running', reason: 'Stop the active turn before the review.' },
+      { action: 'interrupt', taskId: 'run-running', reason: 'Stop the active turn before the review.' },
+    ]);
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
 test('Project Tasks exposes authorized proposal, intervention, validation, discard, and recovery actions', async () => {
   const { dom, doc, vite, cleanup } = await setupHarness();
   try {
@@ -632,6 +677,8 @@ test('Project Tasks exposes authorized proposal, intervention, validation, disca
     assert.ok(calls.includes('pause:run-running'));
 
     await openTaskRecord(router, 'pause-requested');
+    assert.equal([...doc.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent?.trim() === 'Stop active run'), undefined,
+      'Pause-requested Tasks retain the existing Interrupt control instead of showing a second stop path');
     await enterField(doc, dom, 'Reason for this action', 'The active run must stop now.');
     clickButton(doc, 'Interrupt active run');
     await settle(180);
