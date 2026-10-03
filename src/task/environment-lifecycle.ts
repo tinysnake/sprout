@@ -686,18 +686,31 @@ export class TaskEnvironmentLifecycle {
 
   async submitCompletionClaim(taskId: string, claim: TaskCompletionClaim): Promise<Task> {
     const task = await this.#require(taskId);
-    if (task.admission !== undefined && (claim.actor.memberId !== task.admission.lead.memberId
-      || claim.actor.memberKind !== task.admission.lead.memberKind)) throw new Error('Task lead authority is required');
+    const lead = task.admission?.lead;
+    const isLead = lead !== undefined && claim.actor.memberId === lead.memberId
+      && claim.actor.memberKind === lead.memberKind;
+    const isHumanSubstitute = task.admission !== undefined && lead?.memberKind === 'agent'
+      && claim.actor.memberKind === 'human' && claim.actor.memberId === task.admission.approvedBy.memberId;
+    if (task.admission !== undefined && !isLead && !isHumanSubstitute) throw new Error('Task lead authority is required');
+    if (claim.substitutedFor !== undefined && (!isHumanSubstitute || lead === undefined
+      || claim.substitutedFor.memberId !== lead.memberId || claim.substitutedFor.memberKind !== lead.memberKind)) {
+      throw new Error('Task lead authority is required');
+    }
     if (task.activeRunId !== undefined || !['idle', 'blocked'].includes(task.environmentLifecycleState ?? '')
       || task.blocker !== undefined || task.pendingCompletionClaimId !== undefined) {
       throw new Error(`task ${taskId} cannot accept a completion claim in its current lifecycle`);
     }
     this.#assertActiveTaskLease(task);
+    const recordedClaim: TaskCompletionClaim = isHumanSubstitute && lead !== undefined
+      ? { ...claim, substitutedFor: { ...lead } } : claim;
     const next: Task = {
       ...task,
       status: 'in-progress', environmentLifecycleState: 'awaiting-validation',
-      completionClaims: [...(task.completionClaims ?? []), claim], pendingCompletionClaimId: claim.id,
-      controlHistory: [...(task.controlHistory ?? []), { action: 'completion-claimed', actor: claim.actor, at: claim.at, claimId: claim.id }],
+      completionClaims: [...(task.completionClaims ?? []), recordedClaim], pendingCompletionClaimId: claim.id,
+      controlHistory: [...(task.controlHistory ?? []), {
+        action: 'completion-claimed', actor: claim.actor, at: claim.at, claimId: claim.id,
+        ...(isHumanSubstitute && lead !== undefined ? { substitutedFor: { ...lead } } : {}),
+      }],
       updatedAt: claim.at,
     };
     await this.#saveControlTransition(task, next, 'completion claim');

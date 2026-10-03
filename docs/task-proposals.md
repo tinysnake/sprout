@@ -191,7 +191,10 @@ Once begun, the protected Task controls remain independent of proposal approval:
 
 All routes derive the Human from the authenticated operator boundary and reject
 caller-supplied actors. Agent Task leads receive only internal bounded
-advancement, subordinate stop, blocker, and completion-claim capabilities.
+advancement, subordinate stop, blocker, and completion-claim capabilities. When
+an Agent lead has not filed a pending claim, the authorized Human may submit a
+Human-substituted claim that records both the Human actor and substituted Agent
+lead. It follows the same lifecycle gates and Human validation and safe-end flow.
 Task, nested-run, pause/validation, and Environment lease state remain distinct;
 terminal `done` or `cancelled` is not recorded until normal context cleanup and
 lease release have committed together. A lost cleanup acknowledgement can be

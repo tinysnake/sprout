@@ -81,6 +81,8 @@ instance, an Agent Task lead may:
 - state a routable blocker and its required next action; and
 - submit a Task completion claim for Human validation.
 
+When the Task lead is an Agent and has not filed a pending claim, the authorized Human may submit a Human-substituted completion claim. It records the Human as actor and the Agent lead as the substituted lead; validation and safe Task end remain Human-controlled.
+
 Every deliberate advance records its initiator, target Agent, reason, and Task
 content version. The automatic initial run following approve-and-begin records
 its actor, target, and content version, and carries a reason only when the Human
@@ -106,7 +108,7 @@ The authority boundary is explicit rather than inferred from status names:
 | Advance with an eligible Agent | Human or Task lead within the approved boundary |
 | Stop an active nested run | Human, or the Task lead for a run it initiated |
 | State a Task blocker | Human or Task lead |
-| Make a Task completion claim | Task lead |
+| Make a Task completion claim | Task lead; Human may submit a substitute claim on an Agent-led Task |
 | Pause or resume a Task | Human only |
 | Validate, correct, end, recover, discard, or Force Release a Task | Human only |
 
@@ -148,10 +150,12 @@ responsible Human, Agent, external condition, or recovery mechanism, and who
 will advance the Task when that condition changes. A prose-only or ownerless
 blocked state is not accepted. Blocked Tasks keep their Task lease.
 
-A Task lead's completion claim contains a fact-form outcome summary, acceptance
-or validation evidence, durable changes or artifacts, known limitations and
-remaining risks, and a recommended disposition. It excludes private reasoning
-and raw transcripts. The Task then awaits Human validation with its lease held.
+A completion claim contains a fact-form outcome summary, acceptance or
+validation evidence, durable changes or artifacts, known limitations and
+remaining risks, and a recommended disposition. An Agent-led Task may receive a
+Human-substituted claim when its lead has not filed one; the claim records both
+the Human actor and substituted Agent lead. Claims exclude private reasoning and
+raw transcripts. The Task then awaits Human validation with its lease held.
 
 The Human may accept the claim or record a correction. Correction returns the
 Task to deliberate advancement on the same Environment instance and lease.

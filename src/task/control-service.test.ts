@@ -102,6 +102,35 @@ test('terminal completion retains prior pause state, so the browser must gate Re
   assert.equal(completed.pauseState, 'paused');
 });
 
+test('Human may submit a marked substitute claim for an Agent-led Task while other Agents remain rejected', async () => {
+  const s = await scenario();
+  const claimInput = {
+    outcomeSummary: 'The approved work is complete', validationEvidence: ['Completion criteria passed'],
+    durableChanges: ['The deliverable is present'], limitations: [], recommendedDisposition: 'complete' as const,
+  };
+
+  await assert.rejects(
+    s.controls.submitCompletionClaim('task-1', { memberId: 'other-agent', memberKind: 'agent' }, claimInput),
+    /Task lead authority is required/,
+  );
+  const pending = await s.controls.submitCompletionClaimForHuman('task-1', claimInput);
+  const claim = pending.completionClaims?.[0];
+  assert.equal(pending.environmentLifecycleState, 'awaiting-validation');
+  assert.deepEqual(claim?.actor, human);
+  assert.deepEqual(claim?.substitutedFor, lead);
+  assert.equal(pending.pendingCompletionClaimId, 'claim-1');
+  assert.deepEqual(pending.controlHistory?.at(-1), {
+    action: 'completion-claimed', actor: human, at: 50, claimId: 'claim-1', substitutedFor: lead,
+  });
+
+  const completed = await s.controls.validateForHuman('task-1', {
+    claimId: 'claim-1', decision: 'accept', reason: 'The evidence satisfies the acceptance criteria',
+  });
+  assert.equal(completed.status, 'done');
+  assert.equal(completed.endDisposition, 'completed');
+  assert.equal(completed.environmentLifecycleState, 'ended');
+});
+
 test('lower lifecycle and service seams reject Agent escalation into Human Task controls', async () => {
   const s = await scenario();
   for (const attempt of [

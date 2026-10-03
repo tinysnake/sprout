@@ -107,7 +107,22 @@ function appServices(conflictCodes: readonly string[] = [], snapshot = overview)
   const humanLedIdle = { ...idle, admission: { ...idle.admission!, lead: { memberId: 'operator', memberKind: 'human' as const } } };
   const humanLedRunning = task('run-running', 'running', { activeRunId: 'run-private', status: 'in-progress' });
   const humanLedRunningWithLead = { ...humanLedRunning, admission: { ...humanLedRunning.admission!, lead: { memberId: 'operator', memberKind: 'human' as const } } };
+  const agentLedAwaiting = task('agent-led-awaiting', 'awaiting-validation', {
+    pendingCompletionClaimId: 'claim-substitute',
+    completionClaims: [{
+      id: 'claim-substitute', contentVersion: 1, actor: { memberId: 'operator', memberKind: 'human' },
+      substitutedFor: { memberId: 'agent-a', memberKind: 'agent' }, at: time,
+      outcomeSummary: 'The Agent-led work is ready for review.', validationEvidence: ['Acceptance evidence is available.'],
+      durableChanges: ['Task page rendered.'], limitations: [], recommendedDisposition: 'complete',
+    }],
+    controlHistory: [{
+      action: 'completion-claimed', actor: { memberId: 'operator', memberKind: 'human' }, at: time,
+      claimId: 'claim-substitute', substitutedFor: { memberId: 'agent-a', memberKind: 'agent' },
+    }],
+  });
   const allTasks = [
+    task('agent-led-idle', 'idle'),
+    agentLedAwaiting,
     humanLedRunningWithLead,
     humanLedIdle,
     task('run-not-owned', 'running', { activeRunId: 'run-human-initiated', status: 'in-progress' }),
@@ -779,6 +794,25 @@ test('Project Tasks confirms a Task lead stop only for a run attributed to that 
     await openTaskRecord(router, 'run-not-owned');
     assert.equal(doc.querySelector('[data-action="stop-subordinate"]'), null,
       'a run initiated by someone other than the Task lead has no stop control');
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Project Tasks renders and marks Human-substituted completion claims for Agent-led Tasks', async () => {
+  const { dom, doc, vite, cleanup } = await setupHarness();
+  try {
+    const { app, router } = await mountTasks(vite, doc);
+    await openTaskRecord(router, 'agent-led-idle');
+    const claimSection = [...doc.querySelectorAll('section')].find((section) =>
+      section.querySelector('h3')?.textContent?.includes('Human-substituted completion claim'));
+    assert.ok(claimSection, 'an eligible Agent-led Task exposes a Human-substituted claim section');
+    assert.match(claimSection.textContent ?? '', /Human may submit a Human-substituted claim on this Agent-led Task/i);
+
+    await openTaskRecord(router, 'agent-led-awaiting');
+    assert.match(doc.body.textContent ?? '', /Human-substituted/);
+    assert.match(doc.body.textContent ?? '', /Human-substituted completion claim submitted/);
     app.unmount();
   } finally {
     await cleanup();
