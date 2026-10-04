@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
+import { existsSync } from 'node:fs';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { appendFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -78,6 +79,10 @@ class CdpClient {
   }
 }
 const base = Number(process.env.PORT ?? process.env.DEV_PIPELINE_PORT_BASE ?? 42960);
+const browserBinary = process.env.SPROUT_HEADLESS_BROWSER ?? '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge';
+const browserSkip = existsSync(browserBinary)
+  ? false
+  : 'Chromium is not installed; run `npx playwright install chromium` and set SPROUT_HEADLESS_BROWSER to its executable path to enable browser checks';
 let vite: ViteDevServer;
 let browser: ChildProcess;
 let profile: string;
@@ -91,6 +96,7 @@ async function until<T>(probe: () => Promise<T>, label: string): Promise<T> {
   throw new Error(`Timed out waiting for ${label}`);
 }
 before(async () => {
+  if (browserSkip) return;
   vite = await createServer({
     server: { host: '127.0.0.1', port: base, strictPort: true, proxy: {}, hmr: false, ws: false },
     plugins: [{ name: 'chat-motion-fixture', configureServer(server) {
@@ -109,7 +115,7 @@ before(async () => {
   assert.ok(js.includes('animate-pulse') && js.includes('motion-reduce:animate-none'), 'dev-served ChatView carries motion classes');
   assert.ok(css.includes('@keyframes pulse') && css.includes('prefers-reduced-motion'), 'dev-served CSS contains pulse and reduced-motion rules');
   profile = await mkdtemp(join(tmpdir(), 'sprout-chat-motion-'));
-  browser = spawn(process.env.SPROUT_HEADLESS_BROWSER ?? '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge', [
+  browser = spawn(browserBinary, [
     '--headless=new', '--no-first-run', '--no-default-browser-check', `--remote-debugging-port=${base + 1}`, `--user-data-dir=${profile}`, 'about:blank',
   ], { stdio: 'ignore', timeout: 120000 });
   const pages = await until(async () => {
@@ -133,7 +139,7 @@ after(async () => {
 });
 
 for (const motion of ['no-preference', 'reduce']) {
-  test(`dev CSS preserves truthful run state with ${motion} motion`, async () => {
+  test(`dev CSS preserves truthful run state with ${motion} motion`, { skip: browserSkip }, async () => {
     await client.call('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: motion }] });
     await client.evaluate('window.setRunStatus("completed")');
     assert.equal(await client.evaluate('document.querySelector(".chat-run-indicator") !== null'), false);
