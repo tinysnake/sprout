@@ -871,7 +871,7 @@ test('Project Tasks filters with a dropdown and keeps task switching inside Chat
     const split = doc.querySelector('[data-task-layout="split"]')!;
     const list = doc.querySelector('aside[aria-label="Project Task list"]')!;
     assert.ok(root.classList.contains('h-full') && root.classList.contains('min-h-0'));
-    assert.ok(split.classList.contains('flex-1') && split.classList.contains('min-h-[520px]') && split.classList.contains('overflow-hidden'));
+    assert.ok(split.classList.contains('flex-1') && split.classList.contains('min-h-0') && split.classList.contains('overflow-hidden'));
     assert.ok(list.classList.contains('min-h-0'));
     assert.equal(list.classList.contains('border'), false, 'filter and list have no parent container chrome');
     assert.ok(list.querySelector('.overflow-y-auto'));

@@ -842,7 +842,9 @@ onMounted(() => { void loadIndex(); });
       </div>
       <div v-else-if="loading" class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-6 text-sm text-[var(--text-secondary)]" role="status" aria-live="polite">Loading Project Tasks and current lifecycle facts…</div>
       <EmptyState v-else-if="projects.length === 0" icon="project" title="No Projects yet" description="Create or select a Project before proposing or beginning Task work." />
-      <div v-else class="grid flex-1 min-h-[520px] grid-rows-[minmax(0,1fr)] grid-cols-1 lg:grid-cols-[minmax(17rem,0.85fr)_minmax(0,2fr)] gap-4 min-w-0 overflow-hidden" data-task-layout="split">
+      <!-- The two-column desktop layout keeps its floor; phone panes shrink
+           inside the shell content box so their scrollers clear navigation. -->
+      <div v-else class="grid flex-1 min-h-0 lg:min-h-[520px] grid-rows-[minmax(0,1fr)] grid-cols-1 lg:grid-cols-[minmax(17rem,0.85fr)_minmax(0,2fr)] gap-4 min-w-0 overflow-hidden" data-task-layout="split">
         <aside class="flex flex-col min-h-0 min-w-0 overflow-hidden" :class="hasDetail ? 'hidden lg:flex' : 'flex'" aria-label="Project Task list">
           <div class="shrink-0 pb-3 flex flex-col gap-2">
             <div class="flex items-center justify-between gap-2">
