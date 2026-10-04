@@ -14,8 +14,29 @@ const page = ref(0);
 let readGeneration = 0;
 // Fixed pages keep the DOM bounded even after reading every event in a long run.
 const PAGE_SIZE = 50;
-const visibleEvents = computed(() => run.value?.events.slice(page.value * PAGE_SIZE, (page.value + 1) * PAGE_SIZE) ?? []);
-// Recorded positions are stable across refreshes of the append-only event stream.
+type AuditEntry = {
+  readonly position: number;
+  readonly event: RunView['events'][number];
+  replyText?: string;
+};
+// Coalesce streamed reply chunks before paging; row positions stay stable as the append-only stream grows.
+const auditEntries = computed(() => {
+  const entries: AuditEntry[] = [];
+  run.value?.events.forEach((event) => {
+    const previous = entries.at(-1);
+    if (event.type === 'message' && previous?.event.type === 'message') {
+      previous.replyText = `${previous.replyText ?? ''}${eventText(event)}`;
+      return;
+    }
+    entries.push({
+      position: entries.length,
+      event,
+      ...(event.type === 'message' ? { replyText: eventText(event) } : {}),
+    });
+  });
+  return entries;
+});
+const visibleEvents = computed(() => auditEntries.value.slice(page.value * PAGE_SIZE, (page.value + 1) * PAGE_SIZE));
 // Retain only disclosure keys here, never event payloads.
 const expandedRows = ref(new Set<number>());
 const statusExpanded = ref(false);
@@ -23,9 +44,10 @@ const resultExpanded = ref(false);
 const failureExpanded = ref(false);
 const eventTexts = computed(() => {
   const texts = new Map<number, string>();
-  visibleEvents.value.forEach((event, index) => {
-    const position = page.value * PAGE_SIZE + index;
-    if (event.type === 'message' || expandedRows.value.has(position)) texts.set(position, eventText(event));
+  visibleEvents.value.forEach((entry) => {
+    if (entry.event.type === 'message' || expandedRows.value.has(entry.position)) {
+      texts.set(entry.position, entry.replyText ?? eventText(entry.event));
+    }
   });
   return texts;
 });
@@ -42,7 +64,7 @@ function toggleResult() {
   void resultText.value;
 }
 
-const eventCount = computed(() => run.value?.events.length ?? 0);
+const eventCount = computed(() => auditEntries.value.length);
 const duration = computed(() => {
   const value = run.value;
   if (!value || value.completedAt === undefined) return 'Duration unavailable';
@@ -61,7 +83,7 @@ async function load() {
     // Collapse invalidates the read even if the audit has already reopened.
     if (generation !== readGeneration || !expanded.value) return;
     run.value = loaded;
-    page.value = Math.min(page.value, Math.max(0, Math.ceil(run.value.events.length / PAGE_SIZE) - 1));
+    page.value = Math.min(page.value, Math.max(0, Math.ceil(eventCount.value / PAGE_SIZE) - 1));
   } catch {
     if (generation === readGeneration) {
       error.value = 'Unable to load run activity. Retry to read the latest run.';
@@ -150,19 +172,19 @@ const resultText = computed(() => {
         <p v-if="loading || error" class="text-xs text-[var(--text-muted)]">Showing the last loaded run.</p>
         <p v-if="!eventCount" class="text-xs text-[var(--text-muted)]">No activity events recorded.</p>
         <template v-else>
-          <p class="text-xs text-[var(--text-muted)]" role="status">Events {{ page * PAGE_SIZE + 1 }}–{{ Math.min((page + 1) * PAGE_SIZE, eventCount) }} of {{ eventCount }} · Recorded order</p>
+          <p class="text-xs text-[var(--text-muted)]" role="status">Entries {{ page * PAGE_SIZE + 1 }}–{{ Math.min((page + 1) * PAGE_SIZE, eventCount) }} of {{ eventCount }} · Recorded order</p>
           <ol class="max-h-80 overflow-y-auto rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 text-xs font-mono" aria-label="Run activity events" tabindex="0">
-            <li v-for="(event, index) in visibleEvents" :key="page * PAGE_SIZE + index" data-run-event class="border-b border-[var(--border-subtle)] py-2 last:border-0">
-              <template v-if="event.type === 'message'">
-                <span class="text-[var(--text-muted)]">[{{ eventTime(event) }}] {{ event.type }}</span>
-                <p class="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ eventTexts.get(page * PAGE_SIZE + index) }}</p>
+            <li v-for="entry in visibleEvents" :key="entry.position" data-run-event class="border-b border-[var(--border-subtle)] py-2 last:border-0">
+              <template v-if="entry.event.type === 'message'">
+                <span class="text-[var(--text-muted)]">[{{ eventTime(entry.event) }}] {{ entry.event.type }}</span>
+                <p class="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ eventTexts.get(entry.position) }}</p>
               </template>
               <template v-else>
-                <Button variant="ghost" size="sm" class="min-h-[44px] max-w-full whitespace-normal text-left [overflow-wrap:anywhere]" :aria-expanded="expandedRows.has(page * PAGE_SIZE + index)" :aria-controls="`run-activity-${runId}-event-${page * PAGE_SIZE + index}`" @click="toggleRow(page * PAGE_SIZE + index)">
-                  [{{ eventTime(event) }}] {{ event.type }} · {{ expandedRows.has(page * PAGE_SIZE + index) ? 'Hide' : 'Show' }}
+                <Button variant="ghost" size="sm" class="min-h-[44px] max-w-full whitespace-normal text-left [overflow-wrap:anywhere]" :aria-expanded="expandedRows.has(entry.position)" :aria-controls="`run-activity-${runId}-event-${entry.position}`" @click="toggleRow(entry.position)">
+                  [{{ eventTime(entry.event) }}] {{ entry.event.type }} · {{ expandedRows.has(entry.position) ? 'Hide' : 'Show' }}
                 </Button>
-                <div :id="`run-activity-${runId}-event-${page * PAGE_SIZE + index}`" :hidden="!expandedRows.has(page * PAGE_SIZE + index)">
-                  <p v-if="expandedRows.has(page * PAGE_SIZE + index)" class="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ eventTexts.get(page * PAGE_SIZE + index) }}</p>
+                <div :id="`run-activity-${runId}-event-${entry.position}`" :hidden="!expandedRows.has(entry.position)">
+                  <p v-if="expandedRows.has(entry.position)" class="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ eventTexts.get(entry.position) }}</p>
                 </div>
               </template>
             </li>

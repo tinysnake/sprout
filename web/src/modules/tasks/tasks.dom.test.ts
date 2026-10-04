@@ -525,6 +525,44 @@ test('Task run audit renders hostile event and final result content as text', as
   } finally { app?.unmount(); await cleanup(); }
 });
 
+test('Task run audit coalesces streamed replies before paging and counts activity entries', async () => {
+  const { doc, vite, cleanup } = await setupHarness();
+  let app: { unmount(): void } | undefined;
+  try {
+    const events = Array.from({ length: 18 }, (_, index) => [
+      { type: 'message', text: `reply-${index}-` },
+      { type: 'message', text: `chunk-${index}` },
+      { type: 'tool-call', name: `tool-${index}`, detail: `TOOL-${index}` },
+      { type: 'notice', text: `NOTICE-${index}` },
+    ]).flat();
+    ({ app } = await mountTasks(vite, doc, [], overview, { async getRun() { return auditRun({ events }); } }));
+    const audit = await openCompletedAudit(doc);
+    let rows = [...audit.querySelectorAll('[data-run-event]')];
+    assert.equal(rows.length, 50, 'the first page contains 50 coalesced activity entries');
+    assert.match(audit.textContent ?? '', /Entries 1–50 of 54/);
+    assert.match(rows[0]!.textContent ?? '', /\[time unavailable\] message.*reply-0-chunk-0/s);
+    assert.equal(rows[0]!.querySelector('button'), null, 'merged replies stay visible without a disclosure control');
+    assert.match(rows[1]!.textContent ?? '', /tool-call/);
+    assert.match(rows[2]!.textContent ?? '', /notice/);
+    assert.equal(rows.filter(row => !row.querySelector('button')).length, 17, 'one always-visible reply entry per chunk pair');
+    assert.equal(rows.filter(row => row.querySelector('button[aria-expanded="false"]')).length, 33, 'tools and notices retain individual collapsed rows');
+    assert.doesNotMatch(audit.textContent ?? '', /NOTICE-16/);
+
+    clickButton(doc, 'Next events');
+    await settle();
+    rows = [...audit.querySelectorAll('[data-run-event]')];
+    assert.equal(rows.length, 4);
+    assert.match(audit.textContent ?? '', /Entries 51–54 of 54/);
+    assert.match(rows[0]!.textContent ?? '', /notice/);
+    assert.match(rows[1]!.textContent ?? '', /reply-17-chunk-17/);
+    assert.match(rows[2]!.textContent ?? '', /tool-call/);
+    assert.match(rows[3]!.textContent ?? '', /notice/);
+    rows[0]!.querySelector<HTMLButtonElement>('button')!.click();
+    await settle();
+    assert.match(rows[0]!.textContent ?? '', /NOTICE-16/);
+  } finally { app?.unmount(); await cleanup(); }
+});
+
 test('Task run audit pages 50 rows and restores each row expansion when returning', async () => {
   const { doc, vite, cleanup } = await setupHarness();
   let app: { unmount(): void } | undefined;
@@ -538,7 +576,7 @@ test('Task run audit pages 50 rows and restores each row expansion when returnin
     audit.querySelector<HTMLButtonElement>('[data-run-event] button')!.click();
     expandSummaryRows(audit);
     await settle();
-    assert.match(audit.textContent ?? '', /Events 1–50 of 120/);
+    assert.match(audit.textContent ?? '', /Entries 1–50 of 120/);
     assert.match(audit.textContent ?? '', /Event 0:/);
     assert.doesNotMatch(audit.textContent ?? '', /Event 1:|Event 50:/);
     clickButton(doc, 'Next events');
@@ -547,7 +585,7 @@ test('Task run audit pages 50 rows and restores each row expansion when returnin
     assert.equal(audit.querySelectorAll('[data-run-event] button[aria-expanded="false"]').length, 50);
     audit.querySelector<HTMLButtonElement>('[data-run-event] button')!.click();
     await settle();
-    assert.match(audit.textContent ?? '', /Events 51–100 of 120/);
+    assert.match(audit.textContent ?? '', /Entries 51–100 of 120/);
     assert.match(audit.textContent ?? '', /Event 50:/);
     assert.doesNotMatch(audit.textContent ?? '', /Event 0:|Event 51:/);
     clickButton(doc, 'Next events');
@@ -560,7 +598,7 @@ test('Task run audit pages 50 rows and restores each row expansion when returnin
     assert.match(audit.querySelector('[data-run-result]')?.textContent ?? '', /The requested change is ready/);
     clickButton(doc, 'Previous events');
     await settle();
-    assert.match(audit.textContent ?? '', /Events 51–100 of 120/);
+    assert.match(audit.textContent ?? '', /Entries 51–100 of 120/);
     assert.equal(audit.querySelectorAll('[data-run-event] button[aria-expanded="true"]').length, 1);
     assert.match(audit.textContent ?? '', /Event 50:/);
     assert.doesNotMatch(audit.textContent ?? '', /Event 51:/);
@@ -623,7 +661,7 @@ test('Task run audit releases its payload on collapse and reloads the selected p
     clickButton(doc, 'Show activity');
     await settle();
     assert.equal(reads, 2, 'expansion fetches a fresh run');
-    assert.match(audit.textContent ?? '', /Events 51–100 of 120/);
+    assert.match(audit.textContent ?? '', /Entries 51–100 of 120/);
     assert.match(audit.textContent ?? '', /Read 2, event 50:/);
     assert.equal(audit.querySelectorAll('[data-run-event]').length, 50);
     assert.match(audit.querySelector('[data-run-result]')?.textContent ?? '', /The requested change is ready/);
