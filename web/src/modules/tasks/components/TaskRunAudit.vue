@@ -15,37 +15,31 @@ let readGeneration = 0;
 // Fixed pages keep the DOM bounded even after reading every event in a long run.
 const PAGE_SIZE = 50;
 const visibleEvents = computed(() => run.value?.events.slice(page.value * PAGE_SIZE, (page.value + 1) * PAGE_SIZE) ?? []);
-const expandedGroups = ref(new Set<number>());
-type RunEvent = RunView['events'][number];
-type ActivityEntry = { start: number; event: RunEvent } | { start: number; events: RunEvent[] };
-
-function isProminentEvent(event: RunEvent): boolean {
-  // Engine messages are assistant output. Notices also include routine reasoning,
-  // so only the shipped tool-failure and run-retry warnings stay prominent.
-  // Run lifecycle status, final result and failure remain visible below the stream.
-  return event.type === 'message' || (event.type === 'notice' && (
-    event['text'] === 'tool failed' || (typeof event['text'] === 'string' &&
-      /^Engine request failed temporarily; retrying \(attempt \d+ of \d+\)\.$/.test(event['text']))
-  ));
-}
-
-const activityEntries = computed(() => {
-  const entries: ActivityEntry[] = [];
+// Recorded positions are stable across refreshes of the append-only event stream.
+// Retain only disclosure keys here, never event payloads.
+const expandedRows = ref(new Set<number>());
+const statusExpanded = ref(false);
+const resultExpanded = ref(false);
+const failureExpanded = ref(false);
+const eventTexts = computed(() => {
+  const texts = new Map<number, string>();
   visibleEvents.value.forEach((event, index) => {
-    const start = page.value * PAGE_SIZE + index;
-    if (isProminentEvent(event)) entries.push({ start, event });
-    else {
-      const previous = entries.at(-1);
-      if (previous && 'events' in previous) previous.events.push(event);
-      else entries.push({ start, events: [event] });
-    }
+    const position = page.value * PAGE_SIZE + index;
+    if (event.type === 'message' || expandedRows.value.has(position)) texts.set(position, eventText(event));
   });
-  return entries;
+  return texts;
 });
 
-function toggleGroup(start: number) {
-  if (expandedGroups.value.has(start)) expandedGroups.value.delete(start);
-  else expandedGroups.value.add(start);
+function toggleRow(position: number) {
+  if (expandedRows.value.has(position)) expandedRows.value.delete(position);
+  else expandedRows.value.add(position);
+  // Evict collapsed row content even before the template updates.
+  void eventTexts.value;
+}
+
+function toggleResult() {
+  resultExpanded.value = !resultExpanded.value;
+  void resultText.value;
 }
 
 const eventCount = computed(() => run.value?.events.length ?? 0);
@@ -86,7 +80,7 @@ function toggle() {
     run.value = undefined;
     // Recompute cached content now, since the collapsed template no longer reads it.
     void visibleEvents.value;
-    void activityEntries.value;
+    void eventTexts.value;
     void resultText.value;
   }
 }
@@ -111,6 +105,7 @@ function eventText(event: RunView['events'][number]): string {
 }
 
 const resultText = computed(() => {
+  if (!resultExpanded.value) return '';
   const result = run.value?.result;
   if (result === undefined || result === null) return '';
   if (typeof result === 'string') return result;
@@ -130,9 +125,6 @@ const resultText = computed(() => {
       <Button variant="secondary" size="sm" class="min-h-[44px]" :aria-expanded="expanded" :aria-controls="`run-activity-${runId}`" @click="toggle">
         {{ expanded ? 'Hide activity' : 'Show activity' }}
       </Button>
-      <p v-if="run" class="text-xs text-[var(--text-secondary)]">
-        {{ run.status }} · {{ duration }} · {{ run.tokenUsage ? `${run.tokenUsage.totalTokens.toLocaleString('en-US')} tokens` : 'Tokens unavailable' }}
-      </p>
     </div>
     <div v-if="expanded" :id="`run-activity-${runId}`" class="mt-3 flex flex-col gap-3" :aria-busy="loading">
       <p v-if="loading" role="status" class="text-xs text-[var(--text-secondary)]">Loading run activity…</p>
@@ -141,6 +133,16 @@ const resultText = computed(() => {
         <Button v-if="inspector" variant="secondary" size="sm" class="mt-2 min-h-[44px]" :disabled="loading" @click="load">Retry activity</Button>
       </div>
       <template v-if="run">
+        <section data-run-status class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3">
+          <Button variant="ghost" size="sm" class="min-h-[44px]" :aria-expanded="statusExpanded" :aria-controls="`run-activity-${runId}-status`" @click="statusExpanded = !statusExpanded">
+            Run status · {{ statusExpanded ? 'Hide' : 'Show' }}
+          </Button>
+          <div :id="`run-activity-${runId}-status`" :hidden="!statusExpanded">
+            <p v-if="statusExpanded" class="mt-2 text-xs text-[var(--text-secondary)]">
+              {{ run.status }} · {{ duration }} · {{ run.tokenUsage ? `${run.tokenUsage.totalTokens.toLocaleString('en-US')} tokens` : 'Tokens unavailable' }}
+            </p>
+          </div>
+        </section>
         <div class="flex flex-wrap items-center justify-between gap-2">
           <h4 class="text-xs font-bold">Activity stream</h4>
           <Button variant="ghost" size="sm" class="min-h-[44px]" :disabled="loading" @click="load">Refresh run</Button>
@@ -150,23 +152,20 @@ const resultText = computed(() => {
         <template v-else>
           <p class="text-xs text-[var(--text-muted)]" role="status">Events {{ page * PAGE_SIZE + 1 }}–{{ Math.min((page + 1) * PAGE_SIZE, eventCount) }} of {{ eventCount }} · Recorded order</p>
           <ol class="max-h-80 overflow-y-auto rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 text-xs font-mono" aria-label="Run activity events" tabindex="0">
-            <template v-for="entry in activityEntries" :key="entry.start">
-              <li v-if="'event' in entry" data-run-event class="border-b border-[var(--border-subtle)] py-2 last:border-0">
-                <span class="text-[var(--text-muted)]">[{{ eventTime(entry.event) }}] {{ entry.event.type }}</span>
-                <p class="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ eventText(entry.event) }}</p>
-              </li>
-              <li v-else data-run-event-group class="border-b border-[var(--border-subtle)] py-2 last:border-0">
-                <Button variant="ghost" size="sm" class="min-h-[44px]" :aria-expanded="expandedGroups.has(entry.start)" :aria-controls="`run-activity-${runId}-group-${entry.start}`" @click="toggleGroup(entry.start)">
-                  Supporting activity · {{ entry.events.length }} {{ entry.events.length === 1 ? 'event' : 'events' }} · {{ expandedGroups.has(entry.start) ? 'Hide' : 'Show' }}
+            <li v-for="(event, index) in visibleEvents" :key="page * PAGE_SIZE + index" data-run-event class="border-b border-[var(--border-subtle)] py-2 last:border-0">
+              <template v-if="event.type === 'message'">
+                <span class="text-[var(--text-muted)]">[{{ eventTime(event) }}] {{ event.type }}</span>
+                <p class="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ eventTexts.get(page * PAGE_SIZE + index) }}</p>
+              </template>
+              <template v-else>
+                <Button variant="ghost" size="sm" class="min-h-[44px] max-w-full whitespace-normal text-left [overflow-wrap:anywhere]" :aria-expanded="expandedRows.has(page * PAGE_SIZE + index)" :aria-controls="`run-activity-${runId}-event-${page * PAGE_SIZE + index}`" @click="toggleRow(page * PAGE_SIZE + index)">
+                  [{{ eventTime(event) }}] {{ event.type }} · {{ expandedRows.has(page * PAGE_SIZE + index) ? 'Hide' : 'Show' }}
                 </Button>
-                <ol v-if="expandedGroups.has(entry.start)" :id="`run-activity-${runId}-group-${entry.start}`" class="pl-3" aria-label="Supporting activity events">
-                  <li v-for="(event, index) in entry.events" :key="entry.start + index" data-run-event class="border-b border-[var(--border-subtle)] py-2 last:border-0">
-                    <span class="text-[var(--text-muted)]">[{{ eventTime(event) }}] {{ event.type }}</span>
-                    <p class="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ eventText(event) }}</p>
-                  </li>
-                </ol>
-              </li>
-            </template>
+                <div :id="`run-activity-${runId}-event-${page * PAGE_SIZE + index}`" :hidden="!expandedRows.has(page * PAGE_SIZE + index)">
+                  <p v-if="expandedRows.has(page * PAGE_SIZE + index)" class="whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ eventTexts.get(page * PAGE_SIZE + index) }}</p>
+                </div>
+              </template>
+            </li>
           </ol>
           <div v-if="eventCount > PAGE_SIZE" class="flex flex-wrap gap-2">
             <Button variant="secondary" size="sm" class="min-h-[44px]" :disabled="page === 0" @click="page -= 1">Previous events</Button>
@@ -174,10 +173,23 @@ const resultText = computed(() => {
           </div>
         </template>
         <section data-run-result class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3">
-          <h4 class="text-xs font-bold">Final result</h4>
-          <p v-if="resultText" class="mt-2 text-sm whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ resultText }}</p>
-          <p v-else class="mt-2 text-xs text-[var(--text-muted)]">No final result recorded.</p>
-          <p v-if="run.failure" class="mt-2 text-sm whitespace-pre-wrap break-words [overflow-wrap:anywhere]">Failure: {{ run.failure }}</p>
+          <Button variant="ghost" size="sm" class="min-h-[44px]" :aria-expanded="resultExpanded" :aria-controls="`run-activity-${runId}-result`" @click="toggleResult">
+            Final result · {{ resultExpanded ? 'Hide' : 'Show' }}
+          </Button>
+          <div :id="`run-activity-${runId}-result`" :hidden="!resultExpanded">
+            <template v-if="resultExpanded">
+              <p v-if="resultText" class="mt-2 text-sm whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ resultText }}</p>
+              <p v-else class="mt-2 text-xs text-[var(--text-muted)]">No final result recorded.</p>
+            </template>
+          </div>
+        </section>
+        <section v-if="run.failure" data-run-failure class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3">
+          <Button variant="ghost" size="sm" class="min-h-[44px]" :aria-expanded="failureExpanded" :aria-controls="`run-activity-${runId}-failure`" @click="failureExpanded = !failureExpanded">
+            Failure · {{ failureExpanded ? 'Hide' : 'Show' }}
+          </Button>
+          <div :id="`run-activity-${runId}-failure`" :hidden="!failureExpanded">
+            <p v-if="failureExpanded" class="mt-2 text-sm whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ run.failure }}</p>
+          </div>
         </section>
       </template>
     </div>
