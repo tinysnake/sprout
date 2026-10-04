@@ -780,7 +780,8 @@ onUnmounted(() => { window.removeEventListener('resize', onResize); generation++
         </div>
         <div v-if="activeChatRuns.length" class="chat-run-actions flex flex-col gap-2 border-t border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-xs">
           <div v-for="run in activeChatRuns" :key="run.id" class="flex items-center justify-end gap-3">
-            <span class="chat-run-indicator flex min-w-0 items-center gap-2 text-[var(--text-primary)]"><span class="h-2 w-2 shrink-0 animate-pulse rounded-full bg-[var(--accent-primary)] motion-reduce:animate-none" aria-hidden="true" /><span class="truncate">@{{ agentName(run.agentId) }} · {{ run.status === 'queued' ? 'starting…' : 'working…' }}</span></span>
+            <!-- Hollow while starting, filled while working; the static ring survives reduced motion. -->
+            <span class="chat-run-indicator flex min-w-0 items-center gap-2 text-[var(--text-primary)]"><span class="h-2 w-2 shrink-0 animate-pulse rounded-full ring-2 ring-[var(--accent-primary)] ring-offset-2 ring-offset-[var(--bg-surface-elevated)] motion-reduce:animate-none" :class="run.status === 'running' ? 'bg-[var(--accent-primary)]' : 'bg-transparent'" aria-hidden="true" /><span class="truncate">@{{ agentName(run.agentId) }} · {{ run.status === 'queued' ? 'starting…' : 'working…' }}</span></span>
             <Button variant="secondary" size="sm" class="chat-stop-run min-h-11 shrink-0" :disabled="!presentation.controlAvailable || project?.status !== 'active' || stoppingRunIds.has(run.id)" :aria-label="`Stop @${agentName(run.agentId)}`" @click="stopChatRun(run)">{{ stoppingRunIds.has(run.id) ? 'Stopping…' : 'Stop' }}</Button>
           </div>
         </div>

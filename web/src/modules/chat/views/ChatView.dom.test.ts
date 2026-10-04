@@ -166,48 +166,60 @@ after(async () => {
   }
 });
 
-test('composer shows truthful run motion and removes it on settlement without duplicate live announcements', async () => {
-  const p = await page();
-  const doc = dom.window.document;
-  try {
-    const composer = doc.querySelector('.chat-composer');
-    assert.equal(doc.querySelector('.chat-run-actions'), null, 'idle composer has no action bar');
-    for (const [status, label, announcement] of [
-      ['queued', '@agent · starting…', '@agent is starting…'],
-      ['running', '@agent · working…', '@agent is working'],
-    ] as const) {
-      await p.setRunStatus(status);
-      const actions = doc.querySelector('.chat-run-actions');
-      assert.ok(actions);
-      assert.equal(composer?.previousElementSibling, actions, 'status stays beside Stop above the input');
-      const indicator = actions.querySelector('.chat-run-indicator');
-      assert.ok(indicator, 'active run has a dynamic composer indicator');
-      assert.equal(indicator.textContent?.trim(), label);
-      const dot = indicator.querySelector('[aria-hidden="true"]');
-      assert.ok(dot);
-      for (const className of ['h-2', 'w-2', 'rounded-full', 'bg-[var(--accent-primary)]', 'animate-pulse', 'motion-reduce:animate-none']) {
-        assert.ok(dot.classList.contains(className), `indicator includes ${className}`);
+for (const reducedMotion of [false, true]) {
+  test(`composer distinguishes active states without motion (${reducedMotion ? 'reduce' : 'no-preference'}) and removes them on settlement`, async () => {
+    const originalMedia = Object.getOwnPropertyDescriptor(dom.window, 'matchMedia');
+    Object.defineProperty(dom.window, 'matchMedia', { configurable: true, value: (query: string) => ({ matches: reducedMotion && query === '(prefers-reduced-motion: reduce)' }) });
+    const p = await page();
+    const doc = dom.window.document;
+    try {
+      const composer = doc.querySelector('.chat-composer');
+      assert.equal(doc.querySelector('.chat-run-actions'), null, 'idle composer has no action bar');
+      for (const [status, label, announcement] of [
+        ['queued', '@agent · starting…', '@agent is starting…'],
+        ['running', '@agent · working…', '@agent is working'],
+      ] as const) {
+        await p.setRunStatus(status);
+        const actions = doc.querySelector('.chat-run-actions');
+        assert.ok(actions);
+        assert.equal(composer?.previousElementSibling, actions, 'status stays beside Stop above the input');
+        const indicator = actions.querySelector('.chat-run-indicator');
+        assert.ok(indicator, 'active run has a dynamic composer indicator');
+        assert.equal(indicator.textContent?.trim(), label);
+        const dot = indicator.querySelector('[aria-hidden="true"]');
+        assert.ok(dot);
+        for (const className of ['h-2', 'w-2', 'shrink-0', 'rounded-full', 'ring-2', 'ring-[var(--accent-primary)]', 'ring-offset-2', 'ring-offset-[var(--bg-surface-elevated)]', 'animate-pulse', 'motion-reduce:animate-none']) {
+          assert.ok(dot.classList.contains(className), `indicator includes ${className}`);
+        }
+        assert.equal(dot.classList.contains('bg-[var(--accent-primary)]'), status === 'running', 'working fills the ring even when motion is disabled');
+        assert.equal(dot.classList.contains('bg-transparent'), status === 'queued', 'starting remains a hollow ring');
+        assert.ok(indicator.classList.contains('min-w-0'));
+        assert.ok(indicator.querySelector('.truncate'), 'status label still truncates at narrow widths');
+        assert.equal(actions.querySelector('[role="status"], [aria-live]'), null, 'composer does not repeat the live announcement');
+        const strip = doc.querySelector('.chat-working-state');
+        assert.ok(strip);
+        assert.equal(strip.getAttribute('role'), 'status');
+        assert.equal(strip.getAttribute('aria-live'), 'polite');
+        assert.equal(strip.textContent?.trim(), announcement);
+        assert.equal(strip.querySelector('.animate-pulse'), null, 'only the composer animates');
+        const stop = actions.querySelector<HTMLButtonElement>('.chat-stop-run');
+        assert.ok(stop);
+        assert.equal(stop.textContent?.trim(), 'Stop');
+        assert.equal(stop.getAttribute('aria-label'), 'Stop @agent');
+        assert.equal(stop.disabled, false);
       }
-      assert.equal(actions.querySelector('[role="status"], [aria-live]'), null, 'composer does not repeat the live announcement');
-      const strip = doc.querySelector('.chat-working-state');
-      assert.ok(strip);
-      assert.equal(strip.getAttribute('role'), 'status');
-      assert.equal(strip.getAttribute('aria-live'), 'polite');
-      assert.equal(strip.textContent?.trim(), announcement);
-      assert.equal(strip.querySelector('.animate-pulse'), null, 'only the composer animates');
-      const stop = actions.querySelector<HTMLButtonElement>('.chat-stop-run');
-      assert.ok(stop);
-      assert.equal(stop.textContent?.trim(), 'Stop');
-      assert.equal(stop.getAttribute('aria-label'), 'Stop @agent');
-      assert.equal(stop.disabled, false);
+      await p.setRunStatus('completed');
+      assert.equal(doc.querySelector('.chat-run-indicator'), null, 'settled run leaves no animated indicator');
+      assert.equal(doc.querySelector('.chat-run-actions'), null, 'settlement removes the entire bar');
+      assert.equal(doc.querySelector('.chat-working-state'), null, 'settlement removes the live strip');
+      assert.equal(doc.querySelector('.chat-composer'), composer, 'composer remains mounted');
+    } finally {
+      p.close();
+      if (originalMedia) Object.defineProperty(dom.window, 'matchMedia', originalMedia);
+      else Reflect.deleteProperty(dom.window, 'matchMedia');
     }
-    await p.setRunStatus('completed');
-    assert.equal(doc.querySelector('.chat-run-indicator'), null, 'settled run leaves no animated indicator');
-    assert.equal(doc.querySelector('.chat-run-actions'), null, 'settlement removes the entire bar');
-    assert.equal(doc.querySelector('.chat-working-state'), null, 'settlement removes the live strip');
-    assert.equal(doc.querySelector('.chat-composer'), composer, 'composer remains mounted');
-  } finally { p.close(); }
-});
+  });
+}
 
 function phoneViewport(width = 390, coarse = false) {
   const viewport = new dom.window.EventTarget();
