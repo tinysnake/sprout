@@ -14,6 +14,7 @@ import { useRoute } from 'vue-router';
 import { useAppStore } from '../stores/app.js';
 import { useShellConnection } from './use-shell-connection.js';
 import { useConnectionNotice } from './use-connection-notice.js';
+import { useVisualViewport } from './use-visual-viewport.ts';
 import { buildNavigation, type NavigationIndicators } from './navigation.js';
 import { useAnnouncer, useAnnouncerMessage } from '../primitives/announcer.js';
 import DesktopSidebar from './DesktopSidebar.vue';
@@ -38,6 +39,7 @@ function refreshUnread() { if (document.visibilityState !== 'hidden') void unrea
 onMounted(() => { refreshUnread(); if (unread) unreadTimer = setInterval(refreshUnread, 15000); document.addEventListener('visibilitychange', refreshUnread); });
 onUnmounted(() => { if (unreadTimer) clearInterval(unreadTimer); document.removeEventListener('visibilitychange', refreshUnread); });
 const appStore = useAppStore();
+const { root: shellRoot, viewportStyle } = useVisualViewport();
 const route = useRoute();
 const connection = useShellConnection();
 
@@ -70,7 +72,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="sprout-app-shell flex h-screen w-full bg-[var(--bg-app)] text-[var(--text-primary)] overflow-hidden font-sans">
+  <div ref="shellRoot" :style="viewportStyle" class="sprout-app-shell flex h-screen w-full bg-[var(--bg-app)] text-[var(--text-primary)] overflow-hidden font-sans">
     <!-- Shared shell and navigation announcement region. -->
     <div
       class="shell-announcer sr-only"
@@ -86,7 +88,7 @@ onMounted(() => {
 
     <DesktopSidebar :indicators="liveIndicators" />
 
-    <div class="flex-1 flex flex-col min-w-0 h-screen overflow-hidden">
+    <div class="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
       <ReturnContextBanner />
 
       <!-- Phone brand and connection state (visible only below md) -->
