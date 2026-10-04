@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
 import { JSDOM } from 'jsdom';
 import type { MessageView, ProjectEventView } from '../../../../../src/web/views.ts';
-import type { ChatService } from '../types.ts';
+import type { ActiveChatRun, ChatService } from '../types.ts';
 import type { ConversationScopeView } from '../../../adapters/conversation-api.ts';
 
 // Vue renders the real ChatView. JSDOM supplies events; only layout measurements,
@@ -93,6 +93,8 @@ async function page(query = '', options: { channelMessages?: number } = {}) {
   let messages = Array.from({ length: options.channelMessages ?? 8 }, (_, i) => message(`message-${i + 1}`));
   messages.push(...Array.from({ length: 5 }, (_, i) => message(`direct-${i + 1}`, 'direct')));
   let events: ProjectEventView[] = [];
+  let activeRuns: readonly ActiveChatRun[] = [];
+  let runStatusListener: Parameters<ChatService['subscribeRunStatuses']>[0] | undefined;
   const state = () => ({ status: 'online' as const, connection: 'online' as const, loading: false });
   const service = {
     state, subscribeState: () => () => {},
@@ -109,9 +111,9 @@ async function page(query = '', options: { channelMessages?: number } = {}) {
     },
     listProjectEvents: async () => events.map((item) => ({ ...item })),
     listRoutingBatches: async () => ({ batches: [], windows: [] }),
-    listActiveRuns: async () => [],
+    listActiveRuns: async () => activeRuns,
     inspectScope: async (id: string) => ({ scope: scopes.find((scope) => scope.id === id)!, state: { scopeId: id, writable: true }, context: { scopeId: id, projectId: 'project', kind: 'project', project: { contentVersion: 1, goal: '', rules: [] } } }),
-    subscribeRunStatuses: () => () => {},
+    subscribeRunStatuses: (listener) => { runStatusListener = listener; return () => { runStatusListener = undefined; }; },
     postMessage: async (input: { scopeId: string; body: string }) => {
       const sent = message('message-20', input.scopeId, 'human'); messages.push(sent);
       return { message: sent, admittedRunIds: [] };
@@ -131,6 +133,11 @@ async function page(query = '', options: { channelMessages?: number } = {}) {
   let closed = false;
   return {
     list, router,
+    async setRunStatus(status: 'queued' | 'running' | 'completed') {
+      activeRuns = status === 'completed' ? [] : [{ id: 'chat-run', agentId: 'agent', status }];
+      runStatusListener?.({ id: 'chat-run', status });
+      await flush();
+    },
     button: () => dom.window.document.querySelector<HTMLButtonElement>('.chat-jump-latest'),
     scroll(top: number) { list.scrollTop = top; list.dispatchEvent(new dom.window.Event('scroll')); },
     async refresh() { dom.window.document.dispatchEvent(new dom.window.Event('visibilitychange')); await flush(); },
@@ -149,6 +156,49 @@ after(async () => {
   for (const [key, original] of originals) {
     if (original) Object.defineProperty(globalThis, key, original); else Reflect.deleteProperty(globalThis, key);
   }
+});
+
+test('composer shows truthful run motion and removes it on settlement without duplicate live announcements', async () => {
+  const p = await page();
+  const doc = dom.window.document;
+  try {
+    const composer = doc.querySelector('.chat-composer');
+    assert.equal(doc.querySelector('.chat-run-actions'), null, 'idle composer has no action bar');
+    for (const [status, label, announcement] of [
+      ['queued', '@agent · starting…', '@agent is starting…'],
+      ['running', '@agent · working…', '@agent is working'],
+    ] as const) {
+      await p.setRunStatus(status);
+      const actions = doc.querySelector('.chat-run-actions');
+      assert.ok(actions);
+      assert.equal(composer?.previousElementSibling, actions, 'status stays beside Stop above the input');
+      const indicator = actions.querySelector('.chat-run-indicator');
+      assert.ok(indicator, 'active run has a dynamic composer indicator');
+      assert.equal(indicator.textContent?.trim(), label);
+      const dot = indicator.querySelector('[aria-hidden="true"]');
+      assert.ok(dot);
+      for (const className of ['h-2', 'w-2', 'rounded-full', 'bg-[var(--accent-primary)]', 'animate-pulse', 'motion-reduce:animate-none']) {
+        assert.ok(dot.classList.contains(className), `indicator includes ${className}`);
+      }
+      assert.equal(actions.querySelector('[role="status"], [aria-live]'), null, 'composer does not repeat the live announcement');
+      const strip = doc.querySelector('.chat-working-state');
+      assert.ok(strip);
+      assert.equal(strip.getAttribute('role'), 'status');
+      assert.equal(strip.getAttribute('aria-live'), 'polite');
+      assert.equal(strip.textContent?.trim(), announcement);
+      assert.equal(strip.querySelector('.animate-pulse'), null, 'only the composer animates');
+      const stop = actions.querySelector<HTMLButtonElement>('.chat-stop-run');
+      assert.ok(stop);
+      assert.equal(stop.textContent?.trim(), 'Stop');
+      assert.equal(stop.getAttribute('aria-label'), 'Stop @agent');
+      assert.equal(stop.disabled, false);
+    }
+    await p.setRunStatus('completed');
+    assert.equal(doc.querySelector('.chat-run-indicator'), null, 'settled run leaves no animated indicator');
+    assert.equal(doc.querySelector('.chat-run-actions'), null, 'settlement removes the entire bar');
+    assert.equal(doc.querySelector('.chat-working-state'), null, 'settlement removes the live strip');
+    assert.equal(doc.querySelector('.chat-composer'), composer, 'composer remains mounted');
+  } finally { p.close(); }
 });
 
 test('opening a conversation aligns its rendered history to the bottom', async () => {
