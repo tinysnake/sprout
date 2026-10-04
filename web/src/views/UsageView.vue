@@ -539,7 +539,7 @@ const timeRangeLabels: Record<string, string> = {
 
 <template>
   <div class="usage-view flex flex-col min-h-full bg-[var(--bg-app)]">
-    <div class="p-4 sm:p-6 pb-28 md:pb-16 w-full max-w-[1920px] mx-auto flex flex-col gap-6 min-w-0">
+    <div class="p-4 sm:p-6 pb-16 w-full max-w-[1920px] mx-auto flex flex-col gap-6 min-w-0">
       <!-- 1. Header (matches prototype & routes expectations) -->
       <header class="usage-page-header">
         <div>
