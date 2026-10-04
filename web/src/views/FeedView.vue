@@ -450,7 +450,7 @@ onMounted(() => {
 
 <template>
   <div class="feed-view min-h-full bg-[var(--bg-app)]" :data-state="pageState" :aria-busy="loading">
-    <div class="mx-auto flex w-full max-w-[1920px] flex-col gap-4 p-4 pb-28 sm:p-6 md:pb-8">
+    <div class="mx-auto flex w-full max-w-[1920px] flex-col gap-4 p-4 sm:p-6 pb-8">
       <header class="flex flex-col gap-3 border-b border-[var(--border-subtle)] pb-4 sm:flex-row sm:items-center sm:justify-between">
         <div class="min-w-0">
           <h1 ref="heading" tabindex="-1" class="flex items-center gap-2 text-lg font-bold text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-[var(--border-focus)] sm:text-xl">

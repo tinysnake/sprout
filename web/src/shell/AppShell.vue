@@ -125,7 +125,7 @@ onMounted(() => {
           <span data-testid="shell-connection-notice">{{ presentation.announce }}</span>
         </div>
         <main id="sprout-main-content" tabindex="-1"
-          class="flex-1 overflow-y-auto pb-16 md:pb-0 focus-visible:outline-none">
+          class="shell-main min-h-0 flex-1 overflow-y-auto focus-visible:outline-none">
           <slot />
         </main>
       </div>
@@ -134,3 +134,36 @@ onMounted(() => {
     <MobileBottomNav :indicators="liveIndicators" />
   </div>
 </template>
+
+<style>
+/* A deterministic border-box: 64px includes the border, ordinary padding and
+   the 44px navigation targets. The safe area enlarges both nav and clearance.
+   Full-height pages resolve against main's content box, so their nested
+   scrollers, Chat composer/run actions and Task rows share this inset once. */
+.sprout-app-shell {
+  --mobile-nav-height: 64px;
+  --shell-bottom-inset: calc(var(--mobile-nav-height) + env(safe-area-inset-bottom, 0px));
+}
+
+.shell-main {
+  box-sizing: border-box;
+  padding-bottom: var(--shell-bottom-inset);
+  scroll-padding-bottom: var(--shell-bottom-inset);
+}
+
+.mobile-bottom-nav {
+  box-sizing: border-box;
+  height: var(--shell-bottom-inset);
+  padding-bottom: calc(4px + env(safe-area-inset-bottom, 0px));
+}
+
+.mobile-bottom-nav .bottom-nav-item {
+  white-space: nowrap;
+}
+
+@media (min-width: 768px) {
+  .sprout-app-shell {
+    --shell-bottom-inset: 0px;
+  }
+}
+</style>

@@ -145,6 +145,64 @@ test('the Shell composes a desktop sidebar and a phone bottom navigation from on
 });
 
 
+test('the Shell reserves the same safe-area inset as the fixed phone navigation', async () => {
+  const { vite, doc, dom, mountInto, cleanup } = await setupHarness();
+  try {
+    const source = await readFile(`${repoRoot}/web/src/shell/AppShell.vue`, 'utf8');
+    const style = doc.createElement('style');
+    // JSDOM does not load SFC styles through Vite's SSR module loader.
+    style.textContent = source.match(/<style>([\s\S]*?)<\/style>/)?.[1] ?? '';
+    doc.head.append(style);
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
+    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    await router.push('/project/tasks');
+    await router.isReady();
+    mountInto(app);
+    try {
+      await settle();
+      const main = doc.querySelector<HTMLElement>('#sprout-main-content')!;
+      const nav = doc.querySelector<HTMLElement>('.mobile-bottom-nav')!;
+      const shell = doc.querySelector<HTMLElement>('.sprout-app-shell')!;
+      assert.equal(dom.window.getComputedStyle(main).paddingBottom, 'var(--shell-bottom-inset)',
+        'every slotted page receives the navigation inset at its scroll boundary');
+      assert.equal(dom.window.getComputedStyle(main).scrollPaddingBottom, 'var(--shell-bottom-inset)',
+        'focus and scrollIntoView keep page actions above the fixed navigation');
+      assert.equal(dom.window.getComputedStyle(nav).height, 'var(--shell-bottom-inset)',
+        'navigation border-box height and main padding have one source of truth');
+      assert.match(dom.window.getComputedStyle(shell).getPropertyValue('--shell-bottom-inset'),
+        /calc\(var\(--mobile-nav-height\) \+ env\(safe-area-inset-bottom,\s*0px\)\)/);
+      assert.equal(main.classList.contains('min-h-0'), true, 'the scroll region can shrink above the nav');
+      assert.match(style.textContent!, /@media\s*\(min-width:\s*768px\)[\s\S]*--shell-bottom-inset:\s*0px/,
+        'the hidden desktop nav reserves no space');
+    } finally { app.unmount(); }
+  } finally { await cleanup(); }
+});
+
+
+test('the Settings session tail uses shell clearance without a second mobile navigation gap', async () => {
+  const { vite, doc, mountInto, cleanup } = await setupHarness();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
+    const { FixtureSettingsService } = (await vite.ssrLoadModule('/src/modules/settings/adapters/fixture-adapter.ts')) as typeof import('../modules/settings/adapters/fixture-adapter.ts');
+    const { app, router } = createSproutApp({ routerBase: '/app/', settingsService: new FixtureSettingsService() });
+    await router.push('/manage/settings');
+    await router.isReady();
+    mountInto(app);
+    try {
+      await settle();
+      const page = doc.querySelector('.settings-view')!;
+      const tailAction = page.querySelector('.session-revoke-btn');
+      assert.ok(tailAction, 'a real session-tail action is mounted inside the shell main');
+      assert.equal(tailAction.closest('#sprout-main-content'), doc.getElementById('sprout-main-content'));
+      assert.equal(page.firstElementChild?.classList.contains('pb-28'), false,
+        'the page does not add its own mobile navigation compensation');
+      assert.equal(page.firstElementChild?.classList.contains('pb-16'), true,
+        'ordinary page spacing is the same on phone and desktop');
+    } finally { app.unmount(); }
+  } finally { await cleanup(); }
+});
+
+
 test('the phone header states connection status in text and offers the theme control', async () => {
   const { vite, doc, mountInto, cleanup } = await setupHarness();
   try {

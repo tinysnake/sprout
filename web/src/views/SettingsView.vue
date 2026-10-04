@@ -255,7 +255,7 @@ function handleStatusKey(e: KeyboardEvent, tab: SettingsCategoryTab) {
 
 <template>
   <div class="settings-view flex flex-col min-h-full bg-[var(--bg-app)]">
-    <div class="p-4 sm:p-6 pb-28 md:pb-16 w-full max-w-[1920px] mx-auto flex flex-col gap-6">
+    <div class="p-4 sm:p-6 pb-16 w-full max-w-[1920px] mx-auto flex flex-col gap-6">
 
       <!-- 1. Header & Boundary Note (Authoritative Product Prototype IA) -->
       <header class="settings-page-header border-b border-[var(--border-subtle)] pb-4 flex flex-col gap-2.5">
