@@ -676,7 +676,7 @@ onUnmounted(() => { window.removeEventListener('resize', onResize); generation++
         <Button variant="primary" size="sm" class="chat-not-found-return min-h-11" @click="closeScope">Back to Conversations</Button>
       </EmptyState>
     </div>
-    <div v-else class="flex min-h-[520px] flex-1 overflow-hidden rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] shadow-xs md:flex-row" data-chat-layout="split">
+    <div v-else class="chat-layout flex min-h-0 md:min-h-[520px] flex-1 overflow-hidden rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] shadow-xs md:flex-row" data-chat-layout="split">
       <aside class="w-full shrink-0 flex-col gap-1 overflow-y-auto bg-[var(--bg-surface-elevated)] p-3 md:w-72 md:border-r lg:w-80" :class="requestedScopeId ? 'hidden md:flex' : 'flex'" aria-label="Conversation scopes">
         <div class="flex items-center justify-between px-2 pb-2 text-[11px] font-bold uppercase tracking-wider text-[var(--text-muted)]">
           <span>Conversations &amp; Groups</span><span>{{ scopes.length }} Scopes</span>
@@ -704,7 +704,7 @@ onUnmounted(() => { window.removeEventListener('resize', onResize); generation++
           </div>
         </template>
       </aside>
-      <section class="min-w-0 flex-1 flex-col" :class="requestedScopeId ? 'flex' : 'hidden md:flex'" aria-label="Conversation detail">
+      <section class="min-h-0 min-w-0 flex-1 flex-col" :class="requestedScopeId ? 'flex' : 'hidden md:flex'" aria-label="Conversation detail">
         <header class="flex min-h-14 items-center justify-between gap-2 border-b border-[var(--border-subtle)] px-3">
           <div class="flex min-w-0 items-center gap-2">
             <button type="button" class="chat-mobile-back min-h-11 rounded px-2 text-xs text-[var(--accent-primary)] md:hidden" @click="closeScope"><Icon name="chevron-left" :size="16" /> Back to Chats</button>
@@ -784,8 +784,8 @@ onUnmounted(() => { window.removeEventListener('resize', onResize); generation++
             <Button variant="secondary" size="sm" class="chat-stop-run min-h-11 shrink-0" :disabled="!presentation.controlAvailable || project?.status !== 'active' || stoppingRunIds.has(run.id)" :aria-label="`Stop @${agentName(run.agentId)}`" @click="stopChatRun(run)">{{ stoppingRunIds.has(run.id) ? 'Stopping…' : 'Stop' }}</Button>
           </div>
         </div>
-        <form class="chat-composer flex items-center gap-2 border-t border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3" @submit.prevent="sendMessage">
-          <input v-model="newMessage" type="text" :disabled="!canEnterText" :aria-label="`Message ${activeScope ? title(activeScope) : 'conversation'}`" :placeholder="activeScope?.kind === 'direct' ? `Message ${title(activeScope)} (deterministic direct wake)…` : activeScope?.kind === 'working-group' ? `Message ${title(activeScope)}…` : 'Message #general… (Use @agent or @all for immediate wake)'" class="min-h-11 min-w-0 flex-1 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 text-xs text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]" />
+        <form class="chat-composer flex shrink-0 items-center gap-2 border-t border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3" @submit.prevent="sendMessage">
+          <input v-model="newMessage" type="text" :disabled="!canEnterText" :aria-label="`Message ${activeScope ? title(activeScope) : 'conversation'}`" :placeholder="activeScope?.kind === 'direct' ? `Message ${title(activeScope)} (deterministic direct wake)…` : activeScope?.kind === 'working-group' ? `Message ${title(activeScope)}…` : 'Message #general… (Use @agent or @all for immediate wake)'" class="min-h-11 min-w-0 flex-1 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 text-base md:text-xs text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]" />
           <Button variant="primary" size="sm" class="min-h-11" type="submit" :disabled="!canSend || !newMessage.trim()">Send</Button>
         </form>
       </section>
@@ -826,3 +826,12 @@ onUnmounted(() => { window.removeEventListener('resize', onResize); generation++
     </ChatDialog>
   </div>
 </template>
+
+<style scoped>
+/* A landscape phone can cross md while its keyboard leaves less than 520px.
+   Touch devices still need a shrinkable pane and a non-zooming editor. */
+@media (pointer: coarse) {
+  .chat-layout { min-height: 0; }
+  .chat-composer input { font-size: 1rem; }
+}
+</style>

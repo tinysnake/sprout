@@ -28,7 +28,7 @@ const globals: Record<string, unknown> = {
   // requested through visibilitychange so tests don't wait for a 15s timer.
   setInterval: () => ++frameId,
   clearInterval: () => {},
-  window: dom.window, document: dom.window.document, history: dom.window.history, location: dom.window.location,
+  window: dom.window, document: dom.window.document, history: dom.window.history, location: dom.window.location, localStorage: dom.window.localStorage,
   ResizeObserver: LayoutObserver,
   requestAnimationFrame: (callback: FrameRequestCallback) => { frames.set(++frameId, callback); return frameId; },
   cancelAnimationFrame: (id: number) => frames.delete(id),
@@ -64,6 +64,9 @@ const vite = await createServer({
 const { createApp, nextTick } = await import('vue');
 const { createRouter, createMemoryHistory } = await import('vue-router');
 const { default: ChatView } = await vite.ssrLoadModule('/src/modules/chat/views/ChatView.vue');
+const { default: AppShell } = await vite.ssrLoadModule('/src/shell/AppShell.vue');
+const { createPinia } = await import('pinia');
+const { h } = await import('vue');
 const { CHAT_SERVICE } = await vite.ssrLoadModule('/src/modules/chat/types.ts');
 const { PROJECT_SERVICE } = await vite.ssrLoadModule('/src/modules/projects/types.ts');
 const { SHELL_CONNECTION_SOURCE } = await vite.ssrLoadModule('/src/shell/use-shell-connection.ts');
@@ -83,7 +86,7 @@ async function paint() {
 function message(id: string, scopeId = 'channel', authorKind: 'human' | 'agent' = 'agent'): MessageView {
   return { id, scopeId, projectId: 'project', channel: scopeId, recipients: [], authorId: authorKind === 'human' ? 'operator' : 'agent', authorKind, body: id, createdAt: Number(id.replace(/\D/g, '')) || 1 };
 }
-async function page(query = '', options: { channelMessages?: number } = {}) {
+async function page(query = '', options: { channelMessages?: number; shell?: boolean } = {}) {
   frames.clear(); extraHeight = 0; scrollWrites = 0;
   dom.window.document.body.innerHTML = '<div id="app"></div>';
   const scopes: ConversationScopeView[] = [
@@ -119,9 +122,14 @@ async function page(query = '', options: { channelMessages?: number } = {}) {
       return { message: sent, admittedRunIds: [] };
     },
   } satisfies Partial<ChatService>;
-  const router = createRouter({ history: createMemoryHistory(), routes: [{ name: 'project-chat-scope', path: '/chat/:scopeId', component: ChatView }] });
+  const router = createRouter({ history: createMemoryHistory(), routes: [
+    { name: 'project-chat-scope', path: '/chat/:scopeId', component: ChatView, meta: { destination: 'project', tab: 'chat' } },
+    ...['feed', 'project-overview', 'project-tasks', 'project-chat', 'environments', 'agents', 'usage', 'settings']
+      .map((name) => ({ name, path: `/${name}`, component: { render: () => null } })),
+  ] });
   await router.push(`/chat/channel?project=project${query}`); await router.isReady();
-  const app = createApp(ChatView);
+  const app = createApp(options.shell ? { render: () => h(AppShell, null, { default: () => h(ChatView) }) } : ChatView);
+  app.use(createPinia());
   app.use(router);
   app.provide(CHAT_SERVICE, service);
   app.provide(PROJECT_SERVICE, { listProjects: async () => [{ id: 'project', displayName: 'Project', status: 'active', content: { currentVersion: 1, versions: [{ version: 1, memberships: [], goal: '', rules: [] }] } }] });
@@ -199,6 +207,141 @@ test('composer shows truthful run motion and removes it on settlement without du
     assert.equal(doc.querySelector('.chat-working-state'), null, 'settlement removes the live strip');
     assert.equal(doc.querySelector('.chat-composer'), composer, 'composer remains mounted');
   } finally { p.close(); }
+});
+
+function phoneViewport(width = 390, coarse = false) {
+  const viewport = new dom.window.EventTarget();
+  const geometry = { height: 800, offsetTop: 0, scale: 1 };
+  Object.defineProperties(viewport, Object.fromEntries(Object.keys(geometry).map((key) => [key, {
+    get: () => geometry[key as keyof typeof geometry], configurable: true,
+  }])));
+  const original = Object.getOwnPropertyDescriptor(dom.window, 'visualViewport');
+  const originalMedia = Object.getOwnPropertyDescriptor(dom.window, 'matchMedia');
+  Object.defineProperty(dom.window, 'matchMedia', { configurable: true, value: (query: string) => ({ matches: coarse && query === '(pointer: coarse)' }) });
+  const originalWidth = dom.window.innerWidth;
+  Object.defineProperty(dom.window, 'visualViewport', { configurable: true, value: viewport });
+  Object.defineProperty(dom.window, 'innerWidth', { configurable: true, value: width });
+  return {
+    viewport, geometry,
+    change(event = 'resize') { viewport.dispatchEvent(new dom.window.Event(event)); },
+    restore() {
+      Object.defineProperty(dom.window, 'innerWidth', { configurable: true, value: originalWidth });
+      if (original) Object.defineProperty(dom.window, 'visualViewport', original);
+      else Reflect.deleteProperty(dom.window, 'visualViewport');
+      if (originalMedia) Object.defineProperty(dom.window, 'matchMedia', originalMedia);
+      else Reflect.deleteProperty(dom.window, 'matchMedia');
+    },
+  };
+}
+
+test('phone keyboard resize constrains the shell and reveals an occluded composer without typing loops', async () => {
+  const vv = phoneViewport();
+  const { viewport, geometry } = vv;
+  const p = await page('', { shell: true });
+  const shell = dom.window.document.querySelector<HTMLElement>('.sprout-app-shell')!;
+  const input = dom.window.document.querySelector<HTMLInputElement>('.chat-composer input')!;
+  let revealCount = 0;
+  let inputBottom = 740;
+  input.getBoundingClientRect = () => ({ top: inputBottom - 44, bottom: inputBottom } as DOMRect);
+  input.scrollIntoView = (options) => {
+    assert.deepEqual(options, { block: 'nearest', inline: 'nearest', behavior: 'instant' });
+    revealCount++; inputBottom = 400;
+  };
+  try {
+    assert.equal(shell.style.height, '800px');
+    assert.ok(shell.querySelector('.h-full'), 'inner shell follows the constrained outer height');
+    const pane = dom.window.document.querySelector('[data-chat-layout="split"]')!;
+    assert.ok(pane.classList.contains('min-h-0'), 'message pane can shrink below the old 520px floor');
+    assert.ok(pane.classList.contains('md:min-h-[520px]'), 'desktop minimum is preserved');
+    input.focus(); await paint();
+    assert.equal(revealCount, 0, 'already visible focus does not move the page');
+    geometry.height = 420;
+    viewport.dispatchEvent(new dom.window.Event('resize'));
+    viewport.dispatchEvent(new dom.window.Event('resize'));
+    await paint();
+    assert.equal(shell.style.height, '420px', 'shell shrinks to the area above the keyboard');
+    assert.equal(revealCount, 1, 'occluded input is revealed after layout shrinks');
+    for (const value of ['a', 'ab', 'abc']) {
+      input.value = value; input.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
+      viewport.dispatchEvent(new dom.window.Event('resize')); await paint();
+    }
+    assert.equal(input.value, 'abc'); assert.equal(dom.window.document.activeElement, input);
+    assert.equal(revealCount, 1, 'typing and unchanged resize events do not jump');
+    assert.equal(frames.size, 0, 'no self-scheduled frame loop');
+    geometry.height = 800; viewport.dispatchEvent(new dom.window.Event('resize')); await paint();
+    assert.equal(shell.style.height, '800px', 'keyboard dismissal restores the frame');
+    geometry.height = 420; viewport.dispatchEvent(new dom.window.Event('resize'));
+    p.close(); await paint();
+    assert.equal(shell.style.height, '800px', 'queued work cannot mutate the removed shell');
+    assert.equal(revealCount, 1);
+    geometry.height = 300;
+    viewport.dispatchEvent(new dom.window.Event('resize'));
+    shell.dispatchEvent(new dom.window.Event('focusin')); await paint();
+    assert.equal(frames.size, 0, 'viewport and focus listeners are removed on teardown');
+  } finally { p.close(); vv.restore(); }
+});
+
+test('phone viewport panning and focus after keyboard opening reveal only the composer', async () => {
+  const vv = phoneViewport();
+  vv.geometry.height = 420;
+  const p = await page('', { shell: true });
+  const input = dom.window.document.querySelector<HTMLInputElement>('.chat-composer input')!;
+  const selector = dom.window.document.querySelector<HTMLSelectElement>('#chat-project-selector')!;
+  let reveals = 0;
+  let top = 10;
+  input.getBoundingClientRect = () => ({ top, bottom: top + 44 } as DOMRect);
+  input.scrollIntoView = () => { reveals++; top = vv.geometry.offsetTop + 20; };
+  selector.getBoundingClientRect = () => ({ top: 900, bottom: 944 } as DOMRect);
+  selector.scrollIntoView = () => { throw new Error('Chat viewport handling must not scroll another focused control'); };
+  try {
+    selector.focus(); vv.geometry.offsetTop = 50; vv.change('scroll'); await paint();
+    assert.equal(reveals, 0);
+    input.focus(); await paint();
+    assert.equal(reveals, 1, 'focus reveals the input when the keyboard is already open');
+    vv.geometry.offsetTop = 100; vv.change('scroll'); await paint();
+    assert.equal(reveals, 2, 'a pan can occlude the input at the visual viewport top');
+    vv.change('scroll'); await paint();
+    assert.equal(reveals, 2, 'unchanged panning does not repeat the scroll');
+    assert.equal(dom.window.document.querySelector<HTMLElement>('.sprout-app-shell')!.style.height, '420px');
+  } finally { p.close(); vv.restore(); }
+});
+
+test('desktop, pinch zoom and browsers without visualViewport keep their CSS frame', async () => {
+  const vv = phoneViewport(1280);
+  const p = await page('', { shell: true });
+  const shell = dom.window.document.querySelector<HTMLElement>('.sprout-app-shell')!;
+  try {
+    vv.geometry.height = 420; vv.change(); await paint();
+    assert.equal(shell.style.height, '', 'desktop viewport resizing does not override h-screen');
+    Object.defineProperty(dom.window, 'innerWidth', { configurable: true, value: 390 });
+    dom.window.dispatchEvent(new dom.window.Event('resize')); await paint();
+    assert.equal(shell.style.height, '420px', 'crossing to the phone layout updates the frame');
+    vv.geometry.scale = 1.5; vv.change(); await paint();
+    assert.equal(shell.style.height, '', 'pinch zoom does not collapse the layout');
+    vv.geometry.scale = 1; vv.change(); await paint();
+    assert.equal(shell.style.height, '420px', 'returning to normal scale restores keyboard sizing');
+  } finally { p.close(); vv.restore(); }
+  const fallbackWidth = dom.window.innerWidth;
+  Object.defineProperty(dom.window, 'innerWidth', { configurable: true, value: 390 });
+  const fallback = await page('', { shell: true });
+  try {
+    dom.window.dispatchEvent(new dom.window.Event('resize')); await paint();
+    assert.equal(dom.window.document.querySelector<HTMLElement>('.sprout-app-shell')!.style.height, '');
+  } finally {
+    fallback.close();
+    Object.defineProperty(dom.window, 'innerWidth', { configurable: true, value: fallbackWidth });
+  }
+});
+
+test('landscape touch devices above the desktop breakpoint still follow keyboard height', async () => {
+  const vv = phoneViewport(844, true);
+  vv.geometry.height = 420;
+  const p = await page('', { shell: true });
+  try {
+    assert.equal(dom.window.document.querySelector<HTMLElement>('.sprout-app-shell')!.style.height, '420px');
+    vv.geometry.height = 300; vv.change(); await paint();
+    assert.equal(dom.window.document.querySelector<HTMLElement>('.sprout-app-shell')!.style.height, '300px');
+  } finally { p.close(); vv.restore(); }
 });
 
 test('opening a conversation aligns its rendered history to the bottom', async () => {
