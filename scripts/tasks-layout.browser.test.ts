@@ -1,6 +1,6 @@
 /// <reference lib="dom" />
 import assert from 'node:assert/strict';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, existsSync } from 'node:fs';
 import { after, before, test } from 'node:test';
 import { chromium, type Browser, type Page } from 'playwright';
 import { createServer, type ViteDevServer } from 'vite';
@@ -32,7 +32,11 @@ window.geometryRouter = router;
 let vite: ViteDevServer;
 let browser: Browser;
 let endpoint: string;
+const chromiumSkip = existsSync(chromium.executablePath())
+  ? false
+  : 'Chromium is not installed; run `npx playwright install chromium` to enable layout checks';
 before(async () => {
+  if (chromiumSkip) return;
   const port = Number(process.env.PORT ?? process.env.DEV_PIPELINE_PORT_BASE ?? 41010);
   vite = await createServer({
     server: { host: '127.0.0.1', port, strictPort: true, proxy: {}, hmr: false },
@@ -101,7 +105,7 @@ async function geometry(page: Page, selector: string) {
 }
 
 for (const [width, height, safe] of [[390, 667, 0], [390, 844, 0], [390, 667, 34], [1280, 900, 0]] as const) {
-  test(`Tasks list and detail tails clear navigation at ${width}×${height}, safe area ${safe}`, async () => {
+  test(`Tasks list and detail tails clear navigation at ${width}×${height}, safe area ${safe}`, { skip: chromiumSkip }, async () => {
     const page = await openPage(width, height, safe);
     try {
       const list = await geometry(page, '[data-record-id="task-19"]');
@@ -136,7 +140,7 @@ for (const [width, height, safe] of [[390, 667, 0], [390, 844, 0], [390, 667, 34
   });
 }
 
-test('active Chat indicator and composer still clear navigation at both phone heights', async () => {
+test('active Chat indicator and composer still clear navigation at both phone heights', { skip: chromiumSkip }, async () => {
   for (const height of [667, 844]) {
     const page = await openPage(390, height, 0);
     try {
