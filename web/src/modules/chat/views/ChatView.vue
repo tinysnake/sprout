@@ -1022,7 +1022,7 @@ onUnmounted(() => { window.removeEventListener('resize', onResize); generation++
           <div v-if="timelinePaging?.loading" class="chat-older-loading text-center text-[10px] text-[var(--text-muted)]" role="status">Loading older chat rows…</div>
           <div v-if="timelinePaging?.limited" class="chat-history-limit text-center text-[10px] text-[var(--text-muted)]" role="note">The latest {{ CHAT_TIMELINE_MEMORY_LIMIT }} chat rows are retained in this view.</div>
           <div v-if="!visibleTimeline.length && !timelinePaging?.loading" class="chat-empty-state m-auto text-center text-xs text-[var(--text-muted)]"><Icon name="chat" :size="22" class="mx-auto mb-2" /><strong class="block">No messages yet in this conversation scope.</strong><p>Send a message or @mention a project agent below to begin collaboration.</p></div>
-          <template v-for="entry in visibleTimeline" :key="entry.kind === 'message' ? entry.message.id : entry.event.id">
+          <template v-for="entry in visibleTimeline" :key="timelineEntryKey(entry)">
           <div v-if="dateSeparators.has(timelineEntryKey(entry))" class="chat-date-separator flex items-center gap-3 py-2 text-xs font-medium text-[var(--text-secondary)]">
             <span class="h-px flex-1 bg-[var(--border-subtle)]" aria-hidden="true" />
             <span>{{ dateSeparators.get(timelineEntryKey(entry)) }}</span>
