@@ -32,12 +32,16 @@ _Avoid_: Project, group
 A temporary collaboration scope within one Project, containing a subset of current Project members together with an optional goal and rules, its own channel, and durable membership history. It may provide context and provenance for work but does not own Tasks, Environment access, Project workspaces, or leases.
 _Avoid_: Project, Task, default group
 
+**Task group**:
+A temporary conversation scope within one Project, bound to exactly one Task and shared by every current Project member. It carries the Task's title, goal, and constraints, and becomes read-only when the Task is terminal while preserving its conversation history.
+_Avoid_: Working group, Task thread, direct message
+
 **Working group channel**:
 The shared conversation whose participants are the current members of one Working group.
 _Avoid_: Project channel, direct message
 
 **Conversation scope**:
-The durable identity and governance of one Project-owned communication context: the one Project channel, one Project-scoped direct conversation, or one Working group channel. It binds its Messages to explicit membership, versioned goal and rules facts, and read-only rules; disbanding or an ended membership renders it read-only without deleting its record or history.
+The durable identity and governance of one Project-owned communication context: the one Project channel, one Project-scoped direct conversation, one Working group channel, or one Task group. It binds its Messages to membership, versioned governing facts, and read-only rules; a terminal Task group preserves its record and history while becoming read-only.
 _Avoid_: Chat room, DM thread, channel list
 
 **Project-scoped direct message**:
@@ -45,7 +49,7 @@ A private conversation between two current members of one Project, governed and 
 _Avoid_: Global direct message, cross-Project direct message
 
 **Message**:
-One durable piece of Human- or Agent-authored conversation in a Project-scoped direct message, Project channel, or Working group channel. A Message may cause routing, but it is not a Task, Agent run, run event, or system-generated Project event.
+One durable piece of Human- or Agent-authored conversation in a Project-scoped direct message, Project channel, Working group channel, or Task group. A Message may cause routing, but it is not a Task, Agent run, run event, or system-generated Project event.
 _Avoid_: Task, prompt, run event
 
 **Project event**:
@@ -77,7 +81,7 @@ The final assistant text from a completed Message-triggered Agent run, persisted
 _Avoid_: Raw run output, Agent-initiated Message
 
 **Project contract**:
-The available Project facts, optional goal and rules, responsibilities, permissions, environment access, and completion guidance presented to Agents collaborating in a Project. A Working group interaction adds that group's current goal and rules without Sprout interpreting conflicts between written rules.
+The available Project facts, optional goal and rules, responsibilities, permissions, environment access, and completion guidance presented to Agents collaborating in a Project. A Working group interaction adds that group's current goal and rules, and a Task group interaction adds its Task's goal and constraints, without Sprout interpreting conflicts between written rules.
 _Avoid_: Prompt, chat agreement
 
 **Project template**:

@@ -8,8 +8,9 @@ import { migrateOrInitializeDatabase } from '../store/schema.ts';
  * SQLite adapter for durable conversation scopes (ticket #95).
  *
  * The whole scope — a Project channel, one Project-scoped direct conversation,
- * or one Working group with its content versions and membership history — is
- * one JSON document keyed by its stable id, like an Agent identity or a
+ * one Working group with its content versions and membership history, or one
+ * Task group bound to a Task — is one JSON document keyed by its stable id,
+ * like an Agent identity or a
  * Project authority record: its append-only versions belong to the scope as a
  * whole and must never be rewritten piecemeal. The document holds only
  * sanitized display name, goal, rules, member ids, actor ids, reasons, and

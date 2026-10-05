@@ -91,6 +91,7 @@ export class TaskAdmissionService {
       }
       const task = await this.#tasks.get(begun.taskId);
       if (!task) throw new TaskAdmissionError('task-not-admitted', 'the begun Task record is unavailable');
+      await this.#lifecycle.ensureTaskGroup(task);
       const repeatedLead = actorSnapshot(input.lead);
       if (!task.admission || task.environmentInstanceId !== input.environmentInstanceId
         || task.admission.lead.memberId !== repeatedLead.memberId || task.admission.lead.memberKind !== repeatedLead.memberKind

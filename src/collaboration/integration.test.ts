@@ -157,6 +157,43 @@ function build(options: {
 }
 
 
+test('parallel Task groups keep Message and Wake records inside their own scope', async (t) => {
+  const harness = build({ turns: [scriptedTurn('Scout task reply.'), scriptedTurn('Forge task reply.')] });
+  t.after(harness.close);
+  const makeGroup = (taskId: string) => harness.scopes.scopes.syncTaskGroup({
+    taskId, projectId: 'project-sprout', title: `Task ${taskId}`,
+    goal: `Goal ${taskId}`, constraints: [`Rule ${taskId}`],
+    lead: { memberId: 'human-lead', kind: 'human' }, contentVersion: 1, status: 'in-progress',
+  });
+  const [first, second] = await Promise.all([makeGroup('parallel-a'), makeGroup('parallel-b')]);
+  assert.ok(first && second);
+  assert.notEqual(first.id, second.id);
+
+  const firstDelivery = await harness.coordinator.deliver({
+    scopeId: first.id, author: { id: 'human-lead', kind: 'human' },
+    body: '@scout handle Task A', deliveryKey: 'task-group-a-message',
+  });
+  const secondDelivery = await harness.coordinator.deliver({
+    scopeId: second.id, author: { id: 'human-lead', kind: 'human' },
+    body: '@forge handle Task B', deliveryKey: 'task-group-b-message',
+  });
+  assert.equal(firstDelivery.message.channel, 'task-group');
+  assert.equal(secondDelivery.message.channel, 'task-group');
+  assert.deepEqual(firstDelivery.wakes.map((wake) => wake.agentId), ['scout']);
+  assert.deepEqual(secondDelivery.wakes.map((wake) => wake.agentId), ['forge']);
+
+  const messages = await harness.sqlite.collaboration.listMessages();
+  const firstMessages = messages.filter((message) => message.scopeId === first.id);
+  const secondMessages = messages.filter((message) => message.scopeId === second.id);
+  assert.deepEqual(firstMessages.map((message) => message.scopeId), [first.id, first.id]);
+  assert.deepEqual(secondMessages.map((message) => message.scopeId), [second.id, second.id]);
+  assert.deepEqual(firstMessages.filter((message) => message.author.kind === 'agent').map((message) => message.inReplyTo), [firstDelivery.message.id]);
+  assert.deepEqual(secondMessages.filter((message) => message.author.kind === 'agent').map((message) => message.inReplyTo), [secondDelivery.message.id]);
+  assert.equal(messages.filter((message) => message.inReplyTo === firstDelivery.message.id).every((message) => message.scopeId === first.id), true);
+  assert.equal(messages.filter((message) => message.inReplyTo === secondDelivery.message.id).every((message) => message.scopeId === second.id), true);
+});
+
+
 test('a direct message wakes its recipient with a contextual prompt and projects one reply', async (t) => {
   const harness = build({ turns: [scriptedTurn('Scout: on it.')] });
   t.after(harness.close);

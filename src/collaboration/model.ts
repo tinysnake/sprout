@@ -9,7 +9,8 @@
  *
  * - A **Message** is one durable piece of Human- or Agent-authored conversation
  *   in exactly one conversation scope: the Project channel, one Project-scoped
- *   direct conversation, or one Working group channel (#95, #96). It is
+ *   direct conversation, one Working group channel, or one Task group (#95,
+ *   #96, #210). It is
  *   deliberately not a Task, a run event, or a system-produced Project event.
  * - A **Project event** is a durable system-produced fact exposed in a
  *   Project. Every event declares one **routing disposition** (ADR-0007); only
@@ -36,7 +37,7 @@
  * The value mirrors `ConversationScopeKind`: a Message lives in exactly one of
  * the three Project-owned communication contexts (#95, ADR-0008).
  */
-export type MessageChannel = 'project' | 'direct' | 'working-group';
+export type MessageChannel = 'project' | 'direct' | 'working-group' | 'task-group';
 
 /** Who authored a Message. */
 export type AuthorKind = 'human' | 'agent';

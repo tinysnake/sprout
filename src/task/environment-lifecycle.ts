@@ -131,6 +131,8 @@ export interface TaskEnvironmentLifecycleOptions {
   readonly projects: ProjectRegistry;
   readonly runs: TaskEnvironmentRunner;
   readonly worker?: TaskContextWorker;
+  /** Keeps each admitted Task's conversation scope aligned with its lifecycle. */
+  readonly taskGroups?: { readonly sync: (task: Task) => Promise<void> };
   readonly ids?: IdFactory;
   readonly clock?: { now(): number };
   readonly leaseTtlMs?: number;
@@ -175,6 +177,7 @@ export class TaskEnvironmentLifecycle {
   readonly #projects: ProjectRegistry;
   readonly #runs: TaskEnvironmentRunner;
   readonly #worker: TaskContextWorker;
+  readonly #taskGroups: NonNullable<TaskEnvironmentLifecycleOptions['taskGroups']> | undefined;
   readonly #ids: IdFactory;
   readonly #clock: { now(): number };
   readonly #leaseTtlMs: number;
@@ -191,6 +194,7 @@ export class TaskEnvironmentLifecycle {
     this.#projects = options.projects;
     this.#runs = options.runs;
     this.#worker = options.worker ?? noOpTaskContextWorker;
+    this.#taskGroups = options.taskGroups;
     this.#ids = options.ids ?? createIdFactory();
     this.#clock = options.clock ?? { now: () => Date.now() };
     this.#leaseTtlMs = options.leaseTtlMs ?? 300_000;
@@ -256,6 +260,7 @@ export class TaskEnvironmentLifecycle {
     this.#faults?.afterBeginningCommit?.();
     this.#pool.adoptLease(acquired.lease);
     try {
+      await this.ensureTaskGroup(beginning);
       await this.#prepare(beginning, input.contextAgentId);
     } catch (error) {
       await this.#toRecovery(beginning, 'beginning');
@@ -327,7 +332,14 @@ export class TaskEnvironmentLifecycle {
     }
     const ready = { ...task, status: 'in-progress' as const, environmentLifecycleState: 'idle' as const, updatedAt: this.#clock.now() };
     await this.#store.save(ready);
+    await this.ensureTaskGroup(ready);
     return ready;
+  }
+
+  /** Ensure the task-group exists for an admitted Task, including safe retries. */
+  async ensureTaskGroup(task: Task): Promise<void> {
+    if (task.admission === undefined || this.#taskGroups === undefined) return;
+    await this.#taskGroups.sync(task);
   }
 
   async advanceRun(taskId: string, agentId: string, input: string, audit?: {
@@ -579,6 +591,7 @@ export class TaskEnvironmentLifecycle {
       }], updatedAt: at,
     };
     await this.#saveControlTransition(task, next, 'content revision');
+    await this.ensureTaskGroup(next);
     return next;
   }
 
@@ -946,6 +959,7 @@ export class TaskEnvironmentLifecycle {
     await this.#store.saveTerminalWithLease(forced, task.environmentLeaseId);
     this.#resolvePauseRetryGate(taskId);
     this.#forceReleaseLease(task.environmentLeaseId);
+    await this.ensureTaskGroup(forced);
     return [...new Set(affectedRunIds)];
   }
 
@@ -973,6 +987,7 @@ export class TaskEnvironmentLifecycle {
       this.#resolvePauseRetryGate(task.id);
       this.#faults?.afterTerminalCommit?.();
       this.#pool.releaseTaskLease(task.environmentLeaseId);
+      await this.ensureTaskGroup(ended);
       return ended;
     } catch (error) {
       if (error instanceof DurableWriteCrash) throw error;
