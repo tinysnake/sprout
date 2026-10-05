@@ -112,6 +112,16 @@ test('human lead is not forcibly delegated and unanswered input signals Attentio
   f.at(TASK_GROUP_IDLE_MS); await f.coordinator.sweepTaskGroups(); await f.coordinator.sweepTaskGroups();
   assert.deepEqual(f.submissions, []); assert.equal(f.calls(), 0);
   assert.equal((await f.store.listEvents()).filter(e => e.kind === TASK_GROUP_ATTENTION_KIND).length, 1);
+  assert.equal((await f.store.listWakeRequests()).length, 0, 'notify-only Human waiting creates no WakeRequest');
+  const agentQuestion = fixture({ lead: { id: 'human', kind: 'human' }, assignedAgentIds: ['a'] });
+  const question = await agentQuestion.send('Please decide this question.', {
+    author: { id: 'a', kind: 'agent' }, kind: 'question',
+  });
+  assert.deepEqual(question.wakes, [], 'a question directed to the Human lead creates no wake');
+  agentQuestion.at(TASK_GROUP_IDLE_MS);
+  await agentQuestion.coordinator.sweepTaskGroups();
+  assert.equal((await agentQuestion.store.listEvents()).filter(e => e.kind === TASK_GROUP_ATTENTION_KIND).length, 1);
+  assert.equal((await agentQuestion.store.listWakeRequests()).length, 0);
   const mentioned = fixture({ lead: { id: 'human', kind: 'human' }, assignedAgentIds: ['a'] });
   await mentioned.send('@b status');
   assert.deepEqual(mentioned.submissions, ['b']); assert.equal(mentioned.calls(), 0);

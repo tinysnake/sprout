@@ -229,7 +229,7 @@ test('Human Task-group posts use the shared wake ladder and every author is excl
   assert.ok(!agentPost.wakes.some((wake) => wake.agentId === 'scout'), 'ADR-0007 sender exclusion applies to a group Agent post');
 });
 
-test('Human-lead waiting publishes one Task-group Attention signal without waking a Human', async (t) => {
+test('human-action-required Task-group events are notify-only and idempotent', async (t) => {
   const harness = build({ turns: [scriptedTurn('must not run')] });
   t.after(harness.close);
   const group = await harness.scopes.scopes.syncTaskGroup({
@@ -238,16 +238,17 @@ test('Human-lead waiting publishes one Task-group Attention signal without wakin
     lead: { memberId: 'human-lead', kind: 'human' }, contentVersion: 1, status: 'in-progress',
   });
   const input = {
-    projectId: 'project-sprout', kind: 'task-group-human-lead-waiting',
-    summary: 'Task group is waiting for its Human lead.',
+    projectId: 'project-sprout', kind: 'task-group-unanswered',
+    summary: 'Task group message needs Human attention.',
     disposition: 'human-action-required' as const,
-    deliveryKey: 'task-group-human-lead-wait:message-1',
+    deliveryKey: 'task-group:message-1:attention',
     originScopeIds: [group.id], originMessageId: 'message-1', awaitReply: false,
   };
   const first = await harness.coordinator.publishEvent(input);
   const retry = await harness.coordinator.publishEvent(input);
 
   assert.equal(first.wakes.length, 0, 'Human attention is notify-only and does not create a WakeRequest');
+  assert.equal((await harness.sqlite.collaboration.listWakeRequests()).length, 0);
   assert.equal(first.admittedRunIds.length, 0);
   assert.equal(retry.duplicate, true);
   assert.equal(retry.event.id, first.event.id);

@@ -73,11 +73,11 @@ test('v28 migration preserves Project events and adds durable conversation origi
     assert.equal((await store.collaboration.getEvent('legacy-event'))?.originMessageId, undefined);
 
     const event = {
-      id: 'task-group-event', projectId: 'project', kind: 'task-group-escalation',
+      id: 'task-group:message-1:attention', projectId: 'project', kind: 'task-group-unanswered',
       summary: 'Task group needs Human attention.',
       producer: { id: 'sprout', kind: 'system' as const },
       disposition: 'human-action-required' as const,
-      responsibleAgentIds: [], deliveryKey: 'task-group-escalation:incident-1',
+      responsibleAgentIds: [], deliveryKey: 'task-group:message-1:attention',
       originScopeIds: ['tg-task-1'], originMessageId: 'message-1', createdAt: 2,
     };
     await store.collaboration.publishEvent({

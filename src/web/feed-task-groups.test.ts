@@ -158,6 +158,55 @@ test('escalation, Human-lead waiting, and Human-directed questions each produce 
   assert.ok(snapshot.attention.every((item) => item.target.surface === 'project-chat' && isFeedDeepLink(item.target)));
 });
 
+test('parallel Task activity keeps each Chat link inside its own Task group', async () => {
+  const secondGroup = {
+    ...group,
+    scopeId: 'tg-task-2',
+    taskId: 'task-2',
+    taskTitle: 'Review the second Task',
+    createdAt: 6,
+  };
+  const firstEvent = groupEvent({
+    id: 'event-task-1', projectId: group.projectId, kind: 'task-group-unanswered',
+    disposition: 'human-action-required', deliveryKey: 'task-group:message-task-1:attention',
+    originScopeIds: [group.scopeId], createdAt: 40,
+  });
+  const secondEvent = groupEvent({
+    id: 'event-task-2', projectId: secondGroup.projectId, kind: 'task-group-unanswered',
+    disposition: 'human-action-required', deliveryKey: 'task-group:message-task-2:attention',
+    originScopeIds: [secondGroup.scopeId], createdAt: 50,
+  });
+  const snapshot = await projectFeed(sources({
+    groups: [group, secondGroup],
+    messages: [
+      taskMessage('message-task-1', 'handoff', 20),
+      { ...taskMessage('message-task-2', 'assignment', 30), scopeId: secondGroup.scopeId },
+      taskMessage('message-task-1-escalation', 'status', 35),
+      { ...taskMessage('message-task-2-escalation', 'status', 45), scopeId: secondGroup.scopeId },
+    ],
+    events: [firstEvent, secondEvent],
+    escalations: [
+      { eventId: firstEvent.id, messageId: 'message-task-1-escalation', scopeId: group.scopeId, projectId: group.projectId, at: 40 },
+      { eventId: secondEvent.id, messageId: 'message-task-2-escalation', scopeId: secondGroup.scopeId, projectId: secondGroup.projectId, at: 50 },
+    ],
+  }));
+
+  const expectedTargets = [
+    [`task-group-created:${group.scopeId}`, group.scopeId, undefined],
+    [`task-group-created:${secondGroup.scopeId}`, secondGroup.scopeId, undefined],
+    ['task-group-message:message-task-1', group.scopeId, 'message-task-1'],
+    ['task-group-message:message-task-2', secondGroup.scopeId, 'message-task-2'],
+    [`event:${firstEvent.id}`, group.scopeId, 'message-task-1-escalation'],
+    [`event:${secondEvent.id}`, secondGroup.scopeId, 'message-task-2-escalation'],
+  ] as const;
+  for (const [id, scopeId, messageId] of expectedTargets) {
+    const item = snapshot.activity.find((candidate) => candidate.id === id);
+    assert.ok(item, `${id} is projected`);
+    assert.deepEqual([item.target?.scopeId, item.target?.messageId], [scopeId, messageId]);
+  }
+  assert.equal(snapshot.activity.filter((item) => item.kind.startsWith('task-group-')).length, expectedTargets.length);
+});
+
 test('a run-lifecycle failure remains one existing #180 Feed event', async () => {
   const run = {
     id: 'run-failed', agentId: 'agent-1', projectId: group.projectId,
