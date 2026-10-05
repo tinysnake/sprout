@@ -46,6 +46,21 @@ test('GET /api/messages returns a bounded newest window with the legacy response
   }
 });
 
+test('GET /api/messages honors limit=5 for a 45-message conversation', async () => {
+  const { context, base, scopeId } = await messageHistory(45);
+  try {
+    const response = await fetch(`${base}/api/messages?scopeId=${encodeURIComponent(scopeId)}&limit=5`);
+    assert.equal(response.status, 200);
+    const body = await response.json() as { messages: { id: string }[] };
+    const durable = [...await context.collaboration.listMessages({ scopeId })]
+      .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+    assert.equal(durable.length, 45);
+    assert.deepEqual(body.messages.map((message) => message.id), durable.slice(-5).map((message) => message.id));
+  } finally {
+    await context.api.close();
+  }
+});
+
 test('GET /api/messages before cursor returns the preceding page with an exclusive boundary', async () => {
   const { context, base, scopeId } = await messageHistory(8);
   try {

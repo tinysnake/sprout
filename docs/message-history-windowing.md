@@ -50,6 +50,8 @@ therefore remain the design authority for this addition.
 ## Verification
 
 Focused server cursor tests live in `src/web/api-messages.test.ts`. Adapter query
-encoding is covered in `web/src/adapters/message-api.test.ts`, and up-scroll,
-viewport anchoring, and arrivals while paging are covered in
-`web/src/app/routes.dom.test.ts`.
+encoding is covered in `web/src/adapters/message-api.test.ts`; production service
+forwarding of both page options is covered in
+`web/src/modules/chat/adapters/production-adapter.test.ts`. Up-scroll, viewport
+anchoring, the memory cap, and arrivals while paging are covered through the
+production Message service and query encoder in `web/src/app/routes.dom.test.ts`.

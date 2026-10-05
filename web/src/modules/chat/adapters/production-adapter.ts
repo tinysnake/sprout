@@ -27,7 +27,7 @@ export class ProductionChatService implements ChatService {
   endWorkingGroupMember: ChatService['endWorkingGroupMember'] = (id, memberId) => this.ports.conversations.endWorkingGroupMember(id, memberId);
   disbandWorkingGroup: ChatService['disbandWorkingGroup'] = (id) => this.ports.conversations.disbandWorkingGroup(id);
   restoreWorkingGroup: ChatService['restoreWorkingGroup'] = (id) => this.ports.conversations.restoreWorkingGroup(id);
-  listMessages: ChatService['listMessages'] = (id) => this.ports.messages.listMessages(id);
+  listMessages: ChatService['listMessages'] = (id, options) => this.ports.messages.listMessages(id, options);
   postMessage: ChatService['postMessage'] = (input) => this.ports.messages.postMessage(input);
   listProjectEvents: ChatService['listProjectEvents'] = (id) => this.ports.messages.listProjectEvents(id);
   messageRouting: ChatService['messageRouting'] = (id) => this.ports.routing.messageRouting(id);

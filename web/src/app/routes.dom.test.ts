@@ -643,6 +643,8 @@ test('Project Chat groups scopes, preserves empty and read-only history, and aut
 
 test('Project Chat pages older messages on scroll, anchors the viewport, and appends live arrivals', async () => {
   const { vite, doc, dom, mount, cleanup } = await setupHarness();
+  let unmount: (() => void) | undefined;
+  const originalRect = dom.window.HTMLElement.prototype.getBoundingClientRect;
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
     const { FixtureChatService } = (await vite.ssrLoadModule('/src/modules/chat/adapters/fixture-adapter.ts')) as typeof import('../modules/chat/adapters/fixture-adapter.ts');
@@ -650,15 +652,34 @@ test('Project Chat pages older messages on scroll, anchors the viewport, and app
     for (let index = 0; index < 260; index += 1) fixture.pushIdleMessage('dm-architect', `Older page item ${index}`);
     const requests: { readonly scopeId?: string; readonly limit?: number; readonly before?: string }[] = [];
     const listMessages = fixture.listMessages.bind(fixture);
-    fixture.listMessages = async (scopeId, options) => {
-      requests.push({ ...(scopeId === undefined ? {} : { scopeId }), ...(options?.limit === undefined ? {} : { limit: options.limit }), ...(options?.before === undefined ? {} : { before: options.before }) });
-      const rows = [...await listMessages(scopeId)].sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
-      const end = options?.before === undefined ? rows.length : rows.findIndex((message) => message.id === options.before);
-      if (end < 0) return [];
-      const limit = options?.limit ?? rows.length;
-      return rows.slice(Math.max(0, end - limit), end);
+    const { ProductionChatService } = await vite.ssrLoadModule('/src/modules/chat/adapters/production-adapter.ts') as typeof import('../modules/chat/adapters/production-adapter.ts');
+    const { createMessageBrowserAdapter } = await vite.ssrLoadModule('/src/adapters/message-api.ts') as typeof import('../adapters/message-api.ts');
+    const { createConversationBrowserAdapter } = await vite.ssrLoadModule('/src/adapters/conversation-api.ts') as typeof import('../adapters/conversation-api.ts');
+    const { createRoutingBrowserAdapter } = await vite.ssrLoadModule('/src/adapters/routing-api.ts') as typeof import('../adapters/routing-api.ts');
+    const { createRunBrowserAdapter } = await vite.ssrLoadModule('/src/adapters/run-api.ts') as typeof import('../adapters/run-api.ts');
+    const transport: import('../transport/browser-transport.ts').BrowserTransport = {
+      state: () => ({ status: 'online', connection: 'online', loading: false }),
+      subscribeState: () => () => {}, setCsrfToken: () => {}, events: () => () => {},
+      async request<T>(path: string): Promise<T> {
+        const query = new URL(path, 'http://sprout.test').searchParams;
+        const scopeId = query.get('scopeId') ?? undefined;
+        const limit = Number(query.get('limit') ?? 50);
+        const before = query.get('before') ?? undefined;
+        requests.push({ ...(scopeId === undefined ? {} : { scopeId }), limit, ...(before === undefined ? {} : { before }) });
+        const rows = [...await listMessages(scopeId)].sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+        const end = before === undefined ? rows.length : rows.findIndex((message) => message.id === before);
+        return { messages: end < 0 ? [] : rows.slice(Math.max(0, end - limit), end) } as T;
+      },
     };
-    const originalRect = dom.window.HTMLElement.prototype.getBoundingClientRect;
+    const production = new ProductionChatService({
+      messages: createMessageBrowserAdapter(transport),
+      conversations: createConversationBrowserAdapter(transport),
+      routing: createRoutingBrowserAdapter(transport),
+      runs: createRunBrowserAdapter(transport),
+    });
+    // Keep deterministic conversation/run fixtures, but send every Message read
+    // through the production service and HTTP query encoder.
+    fixture.listMessages = production.listMessages;
     dom.window.HTMLElement.prototype.getBoundingClientRect = function () {
       const element = this as HTMLElement;
       if (element.classList.contains('chat-messages-body')) return { x: 0, y: 0, top: 0, right: 400, bottom: 400, left: 0, width: 400, height: 400, toJSON: () => ({}) } as DOMRect;
@@ -671,6 +692,7 @@ test('Project Chat pages older messages on scroll, anchors the viewport, and app
       return originalRect.call(this);
     };
     const { app, router } = createSproutApp({ ...(await deterministicAppOptions(vite)), chatService: fixture });
+    unmount = () => app.unmount();
     await router.push('/project/chat/dm-architect');
     app.mount(mount);
     await settle(180);
@@ -702,9 +724,11 @@ test('Project Chat pages older messages on scroll, anchors the viewport, and app
     assert.match(viewport.textContent ?? '', /Live arrival while paging/);
     assert.equal(viewport.querySelector('[data-message-id]:last-of-type')?.textContent?.includes('Live arrival while paging'), true,
       'a live arrival appends after the retained pages');
-    app.unmount();
+  } finally {
+    unmount?.();
     dom.window.HTMLElement.prototype.getBoundingClientRect = originalRect;
-  } finally { await cleanup(); }
+    await cleanup();
+  }
 });
 
 test('Working Group details edit content and disband without erasing history', async () => {
