@@ -169,6 +169,8 @@ export class SqliteCollaborationStore implements CollaborationStore {
         disposition TEXT NOT NULL,
         responsible_agents TEXT NOT NULL,
         delivery_key TEXT NOT NULL UNIQUE,
+        origin_scope_ids TEXT NOT NULL DEFAULT '[]',
+        origin_message_id TEXT,
         created_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS project_events_project
@@ -345,8 +347,8 @@ export class SqliteCollaborationStore implements CollaborationStore {
       const inserted = this.#db
         .prepare(
           `INSERT OR IGNORE INTO project_events
-             (id, project_id, kind, summary, detail, producer_id, producer_kind, disposition, responsible_agents, delivery_key, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, project_id, kind, summary, detail, producer_id, producer_kind, disposition, responsible_agents, delivery_key, origin_scope_ids, origin_message_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           input.event.id,
@@ -359,6 +361,8 @@ export class SqliteCollaborationStore implements CollaborationStore {
           input.event.disposition,
           JSON.stringify(input.event.responsibleAgentIds),
           input.event.deliveryKey,
+          JSON.stringify(input.event.originScopeIds ?? []),
+          input.event.originMessageId ?? null,
           input.event.createdAt,
         );
 
@@ -977,6 +981,8 @@ interface EventRow {
   readonly disposition: string;
   readonly responsible_agents: string;
   readonly delivery_key: string;
+  readonly origin_scope_ids: string;
+  readonly origin_message_id: string | null;
   readonly created_at: number;
 }
 
@@ -1031,6 +1037,8 @@ function toEvent(row: EventRow): ProjectEvent {
     },
     disposition: row.disposition as ProjectEvent['disposition'],
     responsibleAgentIds: JSON.parse(row.responsible_agents) as string[],
+    ...(row.origin_scope_ids !== '[]' ? { originScopeIds: JSON.parse(row.origin_scope_ids) as string[] } : {}),
+    ...(row.origin_message_id !== null ? { originMessageId: row.origin_message_id } : {}),
     deliveryKey: row.delivery_key,
     createdAt: row.created_at,
   };

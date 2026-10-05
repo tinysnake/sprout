@@ -24,9 +24,9 @@ const content = {
 };
 
 interface FeedBody {
-  attention: { id: string; severity: string; category: string; reason: string; lifecycle: string; target: { path: string; taskId?: string } }[];
+  attention: { id: string; severity: string; category: string; reason: string; lifecycle: string; target: { path: string; surface?: string; taskId?: string; scopeId?: string; messageId?: string; eventId?: string } }[];
   inFlight: { id: string; kind: 'task' | 'run'; taskId?: string; lifecycle: string }[];
-  activity: { id: string; summary: string; target?: { surface?: string; projectId?: string; scopeId?: string; messageId?: string; eventId?: string; runId?: string; agentId?: string } }[];
+  activity: { id: string; kind?: string; summary: string; target?: { surface?: string; projectId?: string; scopeId?: string; messageId?: string; eventId?: string; runId?: string; agentId?: string } }[];
   scopes: { id: string; kind: string; attentionCount: number }[];
 }
 
@@ -160,6 +160,72 @@ test('the composed runtime serves GET /api/feed and its Attention follows real d
     assert.equal(dismiss.status, 404);
     feed = await readFeed(cookie);
     assert.deepEqual(feed.attention.map((item) => item.category), ['task-validation'], 'the failed dismiss changed nothing');
+  } finally {
+    await runtime.close();
+  }
+});
+
+test('the production Feed projects Task-group beats and focused notify-only escalation once', async () => {
+  const credential = randomBytes(32).toString('base64url');
+  const { runtime } = await build({ configuration: { operatorCredential: credential }, listen: false });
+  try {
+    const { port } = await runtime.api.listen(assignedPort(5));
+    const base = new URL('http://localhost');
+    base.port = String(port);
+    const signIn = await fetch(new URL('/api/auth/session', base), {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ credential }),
+    });
+    assert.equal(signIn.status, 201);
+    const cookie = (signIn.headers.get('set-cookie') ?? '').split(';', 1)[0]!;
+    const task = await runtime.tasks.create({
+      projectId: PROJECT_ID, title: 'Review message evidence',
+      goal: 'Make task-group routing observable.', status: 'in-progress',
+    });
+    const humanLead = { memberId: 'operator', memberKind: 'human' as const };
+    await runtime.stores.tasks.save({
+      ...task,
+      admission: {
+        proposalId: 'feed-task-group-proposal', proposalRevision: 1, contentVersion: 1,
+        validationCriteria: [], lead: humanLead, contextAgentId: 'scout',
+        approvedBy: humanLead, approvedAt: task.createdAt,
+      },
+    });
+    const group = await runtime.conversationScopes.syncTaskGroup({
+      taskId: task.id, projectId: PROJECT_ID, title: task.title,
+      goal: task.goal, constraints: task.constraints,
+      lead: { memberId: 'operator', kind: 'human' }, contentVersion: 1, status: 'in-progress',
+    });
+    const message = await runtime.collaboration.deliver({
+      scopeId: group.id, author: { id: 'operator', kind: 'human' },
+      body: 'Please review this task-group message.', deliveryKey: 'feed-task-group-message',
+    });
+    const signal = {
+      projectId: PROJECT_ID,
+      kind: 'task-group-unanswered',
+      summary: 'No Agent has answered this task-group message.',
+      disposition: 'human-action-required' as const,
+      deliveryKey: `task-group:${message.message.id}:attention`,
+      originScopeIds: [group.id],
+      awaitReply: false,
+    };
+    const first = await runtime.collaboration.publishEvent(signal);
+    const retry = await runtime.collaboration.publishEvent(signal);
+    assert.equal(first.wakes.length, 0, 'the escalation signal is notify-only');
+    assert.equal(retry.duplicate, true);
+
+    const response = await fetch(new URL('/api/feed', base), { headers: { cookie } });
+    assert.equal(response.status, 200);
+    const feed = await response.json() as FeedBody;
+    assert.deepEqual(feed.attention.map((item) => item.category), ['task-group-human-waiting']);
+    assert.deepEqual(
+      [feed.attention[0]?.target.surface, feed.attention[0]?.target.scopeId, feed.attention[0]?.target.messageId],
+      ['project-chat', group.id, message.message.id],
+    );
+    assert.deepEqual(
+      feed.activity.filter((item) => item.kind?.startsWith('task-group-')).map((item) => item.kind),
+      ['task-group-escalation', 'task-group-created'],
+    );
+    assert.equal(feed.activity.filter((item) => item.id === `event:${first.event.id}`).length, 1);
   } finally {
     await runtime.close();
   }

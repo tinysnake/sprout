@@ -64,7 +64,7 @@ import {
   type ConversationProjectPort,
   type TaskGroupSyncInput,
 } from './conversation/service.ts';
-import { projectChannelScopeId } from './conversation/model.ts';
+import { currentTaskGroupContent, isTaskGroup, projectChannelScopeId } from './conversation/model.ts';
 import type { ConversationScopeStore } from './conversation/store.ts';
 import type { AgentRun } from './run/model.ts';
 import { RunOrchestrator } from './run/orchestrator.ts';
@@ -93,7 +93,7 @@ import { createTaskAdmissionRouter } from './web/task-admission-router.ts';
 import { createTaskControlRouter } from './web/task-control-router.ts';
 import { createFeedRouter } from './web/feed-router.ts';
 import { createCollaborationAttentionRouter } from './web/collaboration-attention-router.ts';
-import { createFeedProjection, type FeedChatActivityOrigin } from './web/feed.ts';
+import { createFeedProjection, type FeedChatActivityOrigin, type FeedTaskGroup } from './web/feed.ts';
 import { isTerminalTaskStatus } from './task/model.ts';
 import type { Task } from './task/model.ts';
 import type { TaskStore } from './task/store.ts';
@@ -1779,11 +1779,31 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     });
     await operations.start();
     await operations.capture();
-    // The read-only Feed projection (#103): one derived snapshot over the
-    // authoritative Task, proposal, Project-event, enrollment, recovery, run,
-    // and routing state. It stores and mutates nothing — Attention clears only
-    // when its source clears, and its router serves GET with no dismiss or
-    // snooze command.
+    // The read-only Feed/Attention projection (#103) includes Task-group facts
+    // as curated activity and consumes durable #211 escalation events by their
+    // Project-event identity and declared Human-attention disposition.
+    const feedTaskGroups = async (): Promise<FeedTaskGroup[]> => {
+      const [projectsNow, taskRows] = await Promise.all([projectService.list(), tasks.list()]);
+      const taskById = new Map(taskRows.map((task) => [task.id, task]));
+      const projectIds = new Set([
+        ...projectsNow.map((project) => project.id),
+        ...projects.list().map((project) => project.id),
+        ...taskRows.map((task) => task.projectId),
+      ]);
+      const scopes = (await Promise.all([...projectIds].map((projectId) =>
+        openedStoresForCatalog.conversationScopes.listForProject(projectId),
+      ))).flat();
+      return scopes.filter(isTaskGroup).map((group) => ({
+        scopeId: group.id,
+        projectId: group.projectId,
+        taskId: group.taskId,
+        taskTitle: currentTaskGroupContent(group).taskTitle,
+        ...(taskById.get(group.taskId)?.admission?.lead.memberKind !== undefined
+          ? { leadKind: taskById.get(group.taskId)!.admission!.lead.memberKind }
+          : {}),
+        createdAt: group.createdAt,
+      }));
+    };
     const feed = createFeedProjection({
       projects: async () => {
         const refs = (await projectService.list()).map((project) => ({ id: project.id, displayName: project.displayName }));
@@ -1806,6 +1826,28 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       routingBatches: () => collaboration.listRoutingBatches(),
       wakeFailures: () => openedStoresForCatalog.collaboration.listWakeFailures(),
       attentionResolutions: () => openedStoresForCatalog.collaboration.listAttentionResolutions(),
+      taskGroups: feedTaskGroups,
+      taskGroupMessages: async () => {
+        const [taskGroups, messages] = await Promise.all([
+          feedTaskGroups(),
+          collaboration.listMessages(),
+        ]);
+        const groups = new Map(taskGroups.map((group) => [group.scopeId, group]));
+        return messages.flatMap((message) => {
+          const group = groups.get(message.scopeId);
+          if (group === undefined || group.projectId !== message.projectId) return [];
+          return [{
+            id: message.id,
+            projectId: message.projectId,
+            scopeId: message.scopeId,
+            kind: message.kind ?? 'status',
+            authorKind: message.author.kind,
+            ...(message.inReplyTo !== undefined ? { inReplyTo: message.inReplyTo } : {}),
+            createdAt: message.createdAt,
+          }];
+        });
+      },
+      taskGroupEscalations: () => collaboration.listTaskGroupEscalations(),
       chatActivityOrigins: async ({ events: eventRows, routingBatches }) => {
         const [messages, wakes] = await Promise.all([
           collaboration.listMessages(),
