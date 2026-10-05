@@ -1185,7 +1185,7 @@ function sendMessage() {
 
         <div class="p-3 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] flex flex-col gap-1.5">
           <strong class="text-[10px] uppercase font-bold text-[var(--text-muted)]">Routing & Delivery Semantics</strong>
-          <p class="text-[var(--text-secondary)]">Mentions strictly wake declared recipients. Unaddressed messages follow project wake policy. All messages are durably recorded in SQLite.</p>
+          <p class="text-[var(--text-secondary)]">Mentions wake declared recipients; Task groups use the lead as a last resort when no addressed Agent can wake. Unaddressed Task-group messages follow Task orchestration; other shared messages follow project wake policy. All messages are durably recorded in SQLite.</p>
         </div>
       </div>
 
