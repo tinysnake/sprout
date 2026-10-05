@@ -81,6 +81,41 @@ function messageRegistry(transport: JsonRpcTransport) {
   return registry;
 }
 
+const taskGroupCapabilities = new WeakMap<JsonRpcTransport, Map<string, NonNullable<StartSessionRequest['postTaskGroupMessage']>>>();
+function taskGroupRegistry(transport: JsonRpcTransport) {
+  let registry = taskGroupCapabilities.get(transport);
+  if (registry) return registry;
+  registry = new Map();
+  taskGroupCapabilities.set(transport, registry);
+  const capabilities = registry;
+  transport.onServerRequest(message => {
+    if (message.method !== WORKER_METHODS.taskGroupMessage) return;
+    const params = message.params as { sessionId?: string; input?: import('../engine/port.ts').AgentTaskGroupMessageInput } | null;
+    void (async () => {
+      try {
+        const post = typeof params?.sessionId === 'string' ? capabilities.get(params.sessionId) : undefined;
+        if (!post || !params?.input) throw new Error('Task-group post capability is unavailable');
+        transport.respond(message.id, await post(params.input));
+      } catch (error) {
+        const capabilityError = error as Error & { readonly status?: unknown; readonly code?: unknown; readonly reason?: unknown };
+        if (error instanceof Error && typeof capabilityError.status === 'number' && Number.isInteger(capabilityError.status) && typeof capabilityError.code === 'string') {
+          const status = capabilityError.status;
+          if (status >= 400 && status <= 599) {
+            transport.respondError(message.id, status, JSON.stringify({
+              error: redactSensitiveText(error.message),
+              code: capabilityError.code,
+              ...(typeof capabilityError.reason === 'string' ? { reason: capabilityError.reason } : {}),
+            }));
+            return;
+          }
+        }
+        transport.respondError(message.id, -32000, redactSensitiveText(error instanceof Error ? error.message : 'Task-group post refused'));
+      }
+    })();
+  });
+  return registry;
+}
+
 /** Raised when the channel to a worker dies while a session is still live. */
 type ChannelClosedHandler = (reason: string) => void;
 
@@ -159,6 +194,7 @@ export class WorkerClient implements EngineAdapter {
           engine: this.id,
           agentId: request.agentId,
           ...(request.sendDirectMessage !== undefined ? { directMessagesEnabled: true } : {}),
+          ...(request.postTaskGroupMessage !== undefined ? { taskGroupMessagesEnabled: true } : {}),
           ...(request.runId !== undefined ? { runId: request.runId } : {}),
           workingDirectory: request.workingDirectory,
           ...(request.model !== undefined ? { model: request.model } : {}),
@@ -188,7 +224,13 @@ export class WorkerClient implements EngineAdapter {
 
     const registry = messageRegistry(this.#transport);
     if (request.sendDirectMessage) registry.set(started.sessionId, request.sendDirectMessage);
-    const removeMessageHandler = () => { registry.delete(started.sessionId); this.#live.delete(removeMessageHandler); };
+    const groupRegistry = taskGroupRegistry(this.#transport);
+    if (request.postTaskGroupMessage) groupRegistry.set(started.sessionId, request.postTaskGroupMessage);
+    const removeMessageHandler = () => {
+      registry.delete(started.sessionId);
+      groupRegistry.delete(started.sessionId);
+      this.#live.delete(removeMessageHandler);
+    };
     this.#live.add(removeMessageHandler);
     const session = new WorkerEngineSession(
       {

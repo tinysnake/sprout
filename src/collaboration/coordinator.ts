@@ -127,12 +127,14 @@ import {
 import {
   type Message,
   type MessageAuthor,
+  type TaskGroupMessageEnvelope,
+  type TaskGroupMessageKind,
   type WakeObservation,
   type WakeRequest,
 } from './model.ts';
 import { TaskGroupOrchestration } from './task-group-orchestration.ts';
 import type { TaskGroupWakeFacts, TaskGroupWakeModelPort } from './task-group-wake.ts';
-import { planEventWake, planWake, type WakeMember, type WakeScopeFacts } from './wake.ts';
+import { planEventWake, planWake, parseMentionTargets, type WakeMember, type WakeScopeFacts } from './wake.ts';
 import {
   type RoutingAttempt,
   type RoutingBatch,
@@ -295,12 +297,18 @@ export interface CollaborationCoordinatorOptions {
 export interface DeliverInput {
   /** Optional runtime authority fence, checked after lookups before durable delivery. */
   readonly assertActive?: () => void;
+  /** Async run/task/lease authority checked under the Task-group lock before persistence. */
+  readonly assertPersistenceAuthority?: () => Promise<void>;
   /** The conversation scope the Message is posted to. */
   readonly scopeId: string;
   readonly author: MessageAuthor;
   readonly body: string;
   readonly kind?: Message['kind'];
   readonly inReplyTo?: string;
+  /** The validated Task-group category requested for this post; defaults to status. */
+  readonly taskGroupKind?: TaskGroupMessageKind;
+  /** Core-resolved run identity for a Task-group Agent post or projected reply. */
+  readonly taskGroupRunId?: string;
   /** Direct Messages may name recipients; channel Messages may not. */
   readonly recipients?: readonly string[];
   /** Idempotency key. Repeating it must not create a second Message. */
@@ -563,6 +571,17 @@ export class CollaborationCoordinator {
       ...(input.kind ? { kind: input.kind } : {}),
       ...(input.inReplyTo ? { inReplyTo: input.inReplyTo } : {}),
       recipients: scope.kind === 'direct' ? (input.recipients ?? []) : [],
+      ...(scope.kind === 'task-group' ? {
+        envelope: {
+          kind: input.taskGroupKind ?? (input.kind === 'question' ? 'question' : 'status'),
+          sender: input.author,
+          taskId: scope.taskId,
+          ...(input.taskGroupRunId !== undefined ? { runId: input.taskGroupRunId } : {}),
+          workItemId: scope.taskId,
+          groupId: scope.id,
+          to: parseMentionTargets(input.body),
+        } satisfies TaskGroupMessageEnvelope,
+      } : {}),
       deliveryKey: input.deliveryKey,
       createdAt: now,
     };
@@ -577,6 +596,11 @@ export class CollaborationCoordinator {
     // same store transaction as the Message itself (#97): a crash between the
     // two can never leave an eligible input outside every window.
     const collect = plan.batchEligible === true ? { intervalMs: routingPolicy.intervalMs } : undefined;
+    // Stop's synchronous fence stays adjacent to persistence. The async
+    // run/task/lease proof completes while the Task-group lifecycle lock is
+    // held, then Stop is checked once more before the store can write.
+    input.assertActive?.();
+    await input.assertPersistenceAuthority?.();
     input.assertActive?.();
     const stored = await this.#store.postMessage({
       message,
@@ -608,6 +632,8 @@ export class CollaborationCoordinator {
     // still pending is admitted now: idempotency must not leave addressed work
     // unwoken just because an earlier process died between persist and admit.
     const pending = (await this.#store.listWakeRequests()).filter((wake) => wake.inputId === message.id);
+    input.assertActive?.();
+    await input.assertPersistenceAuthority?.();
     input.assertActive?.();
     const admittedRunIds = await this.#admitAll(
       pending,
@@ -861,8 +887,22 @@ export class CollaborationCoordinator {
               channel: source.input.channel,
               inReplyTo: source.input.id,
             };
+    const replyScope = placement.channel === 'task-group'
+      ? await this.#scopes.getScope(placement.scopeId)
+      : undefined;
+    const envelope = replyScope?.kind === 'task-group'
+      ? {
+          kind: 'status' as const,
+          sender: base.author,
+          taskId: replyScope.taskId,
+          runId,
+          workItemId: replyScope.taskId,
+          groupId: replyScope.id,
+          to: parseMentionTargets(text),
+        }
+      : undefined;
     const stored = await this.#store.postMessage({
-      message: { ...base, ...placement },
+      message: { ...base, ...placement, ...(envelope !== undefined ? { envelope } : {}) },
       plan: { inputId: sourceCausalId(source), decisions: [], observations: [] },
       now: this.#clock.now(),
     });
@@ -988,6 +1028,12 @@ export class CollaborationCoordinator {
       projectedMessageIds: [...projectedMessageIds],
       failureEventRunIds,
     };
+  }
+
+  /** Whether a durable Message belongs to the supplied conversation scope. */
+  async messageBelongsToScope(messageId: string, scopeId: string): Promise<boolean> {
+    const message = await this.#store.getMessage(messageId);
+    return message?.scopeId === scopeId;
   }
 
   /** Durable state for observability: every Message on record. */

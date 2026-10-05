@@ -37,18 +37,22 @@ history.
 The following inputs wake their Agent recipients immediately and never consult
 the wake policy or model:
 
-- a Project-scoped direct Message naming one or more current Agent members;
+- a Human-authored Project-scoped direct Message naming one or more current Agent members;
 - exact, whole-token Agent mentions in a Project-channel Message;
 - an exact `@all` broadcast, which wakes every current Agent member except the
   author; and
 - a Project event with an explicitly responsible Agent.
 
-Human- and Agent-authored Messages use the same deterministic rules. A
-`(Message, Agent)` target is deduplicated when more than one addressing form
-names it. The author is not woken by its own Message. A target that is unknown
-or no longer belongs to the Project produces a durable per-target routing
-failure while other valid targets continue; it never falls through to model
-judgement. Human notification semantics are outside this decision.
+Human-authored direct Messages and Human- or Agent-authored Project-channel and
+Working-group Messages use the same deterministic rules. Agent-authored direct
+sends are unsupported; explicit Agent collaboration uses Task-group posts
+(ADR-0015). Automatically projected Agent replies remain non-routing, as
+specified below. A `(Message, Agent)` target is deduplicated when more than one
+addressing form names it. The author is not woken by its own Message. A target
+that is unknown or no longer belongs to the Project produces a durable
+per-target routing failure while other valid targets continue; it never falls
+through to model judgement. Human notification semantics are outside this
+decision.
 
 A Working group channel follows these same rules resolved against the group's
 **current participants** (ADR-0008): its `@all` broadcast wakes every current

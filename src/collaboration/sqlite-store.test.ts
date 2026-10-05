@@ -106,6 +106,45 @@ test('a Message and its wake requests survive a restart', async () => {
   }
 });
 
+test('a Task-group envelope survives a SQLite restart', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-task-group-envelope-'));
+  const path = join(directory, 'store.db');
+  const envelope = {
+    kind: 'handoff' as const,
+    sender: { id: 'scout', kind: 'agent' as const },
+    taskId: 'task-1',
+    runId: 'run-1',
+    workItemId: 'task-1',
+    groupId: 'tg-task-1',
+    to: ['forge'],
+  };
+  try {
+    const first = new SqliteCollaborationStore({ filename: path });
+    await first.postMessage({
+      message: message({
+        scopeId: 'tg-task-1',
+        channel: 'task-group',
+        author: { id: 'scout', kind: 'agent' },
+        body: 'Completed the report; @forge can review it.',
+        recipients: [],
+        deliveryKey: 'task-group-envelope-1',
+        envelope,
+      }),
+      plan: { inputId: 'msg-1', decisions: [], observations: [] },
+      now: 1,
+    });
+    first.close();
+
+    const second = new SqliteCollaborationStore({ filename: path });
+    const restored = await second.getMessage('msg-1');
+    assert.deepEqual(restored?.envelope, envelope);
+    assert.equal(restored?.channel, 'task-group');
+    second.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('a repeated delivery key inserts nothing and returns the stored input', async () => {
   await withDatabase(async (store) => {
     const first = await store.postMessage({ message: message(), plan: plan('msg-1', 'scout'), now: 1 });
