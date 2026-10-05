@@ -527,6 +527,7 @@ test('explicit indexes keep their names, tables, and column order', async () => 
         { name: 'run_reconnect_retries_retry_idx', tbl: 'run_reconnect_retries' },
         { name: 'collaboration_messages_scope_order', tbl: 'collaboration_messages' },
         { name: 'project_events_project', tbl: 'project_events' },
+        { name: 'project_events_project_order', tbl: 'project_events' },
         { name: 'collaboration_routing_windows_project', tbl: 'collaboration_routing_windows' },
         { name: 'collaboration_routing_batches_project', tbl: 'collaboration_routing_batches' },
         { name: 'collaboration_routing_attempt_number', tbl: 'collaboration_routing_attempts' },
@@ -554,6 +555,11 @@ test('explicit indexes keep their names, tables, and column order', async () => 
         { name: 'usage_observations_effective_idx', tbl: 'usage_observations' },
       ],
     );
+
+    const eventOrderColumns = store.db.prepare('PRAGMA index_info(project_events_project_order)').all() as unknown as readonly {
+      readonly name: string;
+    }[];
+    assert.deepEqual(eventOrderColumns.map((column) => column.name), ['project_id', 'created_at', 'id']);
 
     const replayColumns = store.db.prepare('PRAGMA index_info(agent_runs_replay_sequence_idx)').all() as unknown as readonly {
       readonly name: string;
