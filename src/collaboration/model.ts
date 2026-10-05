@@ -43,7 +43,6 @@ export type MessageChannel = 'project' | 'direct' | 'working-group' | 'task-grou
 export type AuthorKind = 'human' | 'agent';
 
 /** The bounded message category available on Task-group posts. */
-export type TaskGroupMessageKind = 'handoff' | 'assignment' | 'question' | 'status';
 
 export interface MessageAuthor {
   readonly id: string;
@@ -79,6 +78,8 @@ export interface TaskGroupMessageEnvelope {
  * Deliberately absent: the agent run's events, tool output, and raw reasoning.
  * Those stay in the run record (`AgentRun.events`) and never enter conversation.
  */
+export type TaskGroupMessageKind = 'status' | 'question' | 'escalation' | 'handoff' | 'assignment';
+
 export interface Message {
   readonly id: string;
   readonly projectId: string;
@@ -88,8 +89,8 @@ export interface Message {
   readonly channel: MessageChannel;
   readonly author: MessageAuthor;
   readonly body: string;
-  /** Task-group routing intent; omission means status. */
-  readonly kind?: 'status' | 'question' | 'escalation';
+  /** Task-group routing intent and lifecycle label; omission means status. */
+  readonly kind?: TaskGroupMessageKind;
   /** Explicit addressees for a direct Message; empty for channel Messages. */
   readonly recipients: readonly string[];
   /** Present on Task-group Messages; stamped by the channel write path. */

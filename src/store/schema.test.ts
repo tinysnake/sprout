@@ -1,25 +1,17 @@
 import { test } from 'node:test';
-
-import assert from 'node:assert/strict';import { existsSync, mkdtempSync, rmSync } from 'node:fs';
-
+import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-
 import { join } from 'node:path';
-
-import { DatabaseSync } from 'node:sqlite';import { CURRENT_SCHEMA_VERSION, MIN_SUPPORTED_SCHEMA_VERSION, MAX_SUPPORTED_SCHEMA_VERSION, SUPPORTED_SCHEMA_RANGE, SchemaMigrationError, migrateOrInitializeDatabase, getSchemaVersion, defaultSafetyCopyPath, type MigrationStep } from './schema.ts';
-
-import { SqliteStore } from './db.ts';
+import { DatabaseSync } from 'node:sqlite';
 
 import { BROWSER_SESSION_ABSOLUTE_LIFETIME_MS, BROWSER_SESSION_IDLE_LIFETIME_MS } from '../auth/session-policy.ts';
-
-import { WorkerConnectionRegistry } from '../environment/worker-epoch.ts';
-
 import { ADMISSION_CAPABILITY, projectCatalogEntry } from '../environment/catalog.ts';
-
 import { createPendingEnrollment } from '../environment/enrollment.ts';
-
 import { SUPPORTED_WORKER_PROTOCOL } from '../environment/enrollment-service.ts';
-
+import { WorkerConnectionRegistry } from '../environment/worker-epoch.ts';
+import { CURRENT_SCHEMA_VERSION, MIN_SUPPORTED_SCHEMA_VERSION, MAX_SUPPORTED_SCHEMA_VERSION, SUPPORTED_SCHEMA_RANGE, SchemaMigrationError, migrateOrInitializeDatabase, getSchemaVersion, defaultSafetyCopyPath, type MigrationStep } from './schema.ts';
+import { SqliteStore } from './db.ts';
 
 function withTempDir<T>(fn: (dir: string) => Promise<T> | T): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), 'sprout-schema-test-'));
@@ -32,13 +24,126 @@ function withTempDir<T>(fn: (dir: string) => Promise<T> | T): Promise<T> {
 
 
 test('schema constants declare supported version range', () => {
-  assert.equal(CURRENT_SCHEMA_VERSION, 29);
+  assert.equal(CURRENT_SCHEMA_VERSION, 30);
   assert.equal(MIN_SUPPORTED_SCHEMA_VERSION, 0);
-  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 29);
+  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 30);
   assert.deepEqual(SUPPORTED_SCHEMA_RANGE, {
     min: 0,
-    max: 29,
-    current: 29,
+    max: 30,
+    current: 30,
+  });
+});
+
+test('v28 migration preserves Project events and adds durable conversation origins', async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'sprout.db');
+    const safetyPath = defaultSafetyCopyPath(path);
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      PRAGMA user_version = 28;
+      CREATE TABLE collaboration_messages (
+        id TEXT PRIMARY KEY, project_id TEXT NOT NULL, scope_id TEXT NOT NULL DEFAULT '',
+        channel TEXT NOT NULL, author_id TEXT NOT NULL, author_kind TEXT NOT NULL,
+        body TEXT NOT NULL, recipients TEXT NOT NULL, delivery_key TEXT NOT NULL UNIQUE,
+        in_reply_to TEXT, created_at INTEGER NOT NULL
+      );
+      INSERT INTO collaboration_messages VALUES
+        ('legacy-message', 'project', 'tg-old', 'task-group', 'agent', 'agent', 'body', '[]', 'legacy-message-key', NULL, 1);
+      CREATE TABLE project_events (
+        id TEXT PRIMARY KEY, project_id TEXT NOT NULL, kind TEXT NOT NULL,
+        summary TEXT NOT NULL, detail TEXT, producer_id TEXT NOT NULL,
+        producer_kind TEXT NOT NULL, disposition TEXT NOT NULL,
+        responsible_agents TEXT NOT NULL, delivery_key TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL
+      );
+      INSERT INTO project_events VALUES
+        ('legacy-event', 'project', 'operational', 'Legacy fact', NULL,
+         'sprout', 'system', 'informational', '[]', 'legacy-event-key', 1);
+    `);
+    legacy.close();
+
+    const store = new SqliteStore({ filename: path });
+    assert.equal(store.schemaVersion, 30);
+    const messageColumns = store.db.prepare('PRAGMA table_info(collaboration_messages)').all() as unknown as readonly { name: string }[];
+    assert.ok(messageColumns.some((column) => column.name === 'message_kind'));
+    assert.equal((store.db.prepare("SELECT message_kind FROM collaboration_messages WHERE id = 'legacy-message'").get() as { message_kind: string }).message_kind, 'status');
+    const columns = store.db.prepare('PRAGMA table_info(project_events)').all() as unknown as readonly { name: string }[];
+    assert.ok(columns.some((column) => column.name === 'origin_scope_ids'));
+    assert.ok(columns.some((column) => column.name === 'origin_message_id'));
+    assert.equal((await store.collaboration.getEvent('legacy-event'))?.originMessageId, undefined);
+
+    const event = {
+      id: 'task-group:message-1:attention', projectId: 'project', kind: 'task-group-unanswered',
+      summary: 'Task group needs Human attention.',
+      producer: { id: 'sprout', kind: 'system' as const },
+      disposition: 'human-action-required' as const,
+      responsibleAgentIds: [], deliveryKey: 'task-group:message-1:attention',
+      originScopeIds: ['tg-task-1'], originMessageId: 'message-1', createdAt: 2,
+    };
+    await store.collaboration.publishEvent({
+      event, plan: { inputId: event.id, decisions: [], observations: [] }, now: event.createdAt,
+    });
+    store.close();
+
+    const reopened = new SqliteStore({ filename: path });
+    try {
+      const durable = await reopened.collaboration.getEvent(event.id);
+      assert.deepEqual(durable?.originScopeIds, ['tg-task-1']);
+      assert.equal(durable?.originMessageId, 'message-1');
+    } finally { reopened.close(); }
+
+    const safety = new DatabaseSync(safetyPath);
+    assert.equal(getSchemaVersion(safety), 28);
+    const safetyColumns = safety.prepare('PRAGMA table_info(project_events)').all() as unknown as readonly { name: string }[];
+    assert.equal(safetyColumns.some((column) => column.name === 'origin_scope_ids'), false);
+    safety.close();
+  });
+});
+
+test('a failed v29 conversation-origin migration rolls back its columns and keeps the safety copy', async () => {
+  await withTempDir(async (dir) => {
+    const path = join(dir, 'sprout.db');
+    const safetyPath = defaultSafetyCopyPath(path);
+    const db = new DatabaseSync(path);
+    db.exec(`
+      PRAGMA user_version = 29;
+      CREATE TABLE project_events (
+        id TEXT PRIMARY KEY, project_id TEXT NOT NULL, kind TEXT NOT NULL,
+        summary TEXT NOT NULL, detail TEXT, producer_id TEXT NOT NULL,
+        producer_kind TEXT NOT NULL, disposition TEXT NOT NULL,
+        responsible_agents TEXT NOT NULL, delivery_key TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL
+      );
+      INSERT INTO project_events VALUES
+        ('legacy-event', 'project', 'operational', 'Legacy fact', NULL,
+         'sprout', 'system', 'informational', '[]', 'legacy-event-key', 1);
+    `);
+    const failure: readonly MigrationStep[] = [{
+      fromVersion: 29,
+      toVersion: 30,
+      migrate(database) {
+        database.exec("ALTER TABLE project_events ADD COLUMN origin_scope_ids TEXT NOT NULL DEFAULT '[]';");
+        database.exec('ALTER TABLE project_events ADD COLUMN origin_message_id TEXT;');
+        throw new Error('simulated conversation-origin migration failure');
+      },
+    }];
+
+    assert.throws(() => migrateOrInitializeDatabase(db, {
+      filename: path,
+      targetVersion: 30,
+      supportedRange: { min: 0, max: 30, current: 30 },
+      migrations: failure,
+    }), SchemaMigrationError);
+    assert.equal(getSchemaVersion(db), 29);
+    const columns = db.prepare('PRAGMA table_info(project_events)').all() as unknown as readonly { name: string }[];
+    assert.equal(columns.some((column) => column.name === 'origin_scope_ids'), false);
+    assert.equal(columns.some((column) => column.name === 'origin_message_id'), false);
+    assert.equal((db.prepare('SELECT id FROM project_events').get() as { id: string }).id, 'legacy-event');
+    db.close();
+
+    const safety = new DatabaseSync(safetyPath);
+    assert.equal(getSchemaVersion(safety), 29);
+    safety.close();
   });
 });
 

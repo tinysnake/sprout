@@ -36,6 +36,7 @@
 import { redactSensitiveText } from '../environment/privacy.ts';
 import type { CollaborationAttentionResolution, FailedWakeInput } from '../collaboration/attention.ts';
 import type { ProjectEvent } from '../collaboration/events.ts';
+import type { TaskGroupMessageKind } from '../collaboration/model.ts';
 import type { RoutingBatch } from '../collaboration/routing.ts';
 import type { EnvironmentEnrollment } from '../environment/enrollment.ts';
 import type { EnvironmentRecoveryRecord } from '../environment/recovery.ts';
@@ -52,6 +53,12 @@ export const FEED_ACTIVITY_LIMIT = 50;
 /** The character bound on any summary or reason text the Feed emits. */
 export const FEED_TEXT_LIMIT = 400;
 
+/** Categories projected from the durable task-group-unanswered signal. */
+export const TASK_GROUP_UNANSWERED_EVENT_KIND = 'task-group-unanswered';
+const TASK_GROUP_ATTENTION_EVENT_CATEGORIES = new Map<string, FeedAttentionCategory>([
+  [TASK_GROUP_UNANSWERED_EVENT_KIND, 'task-group-escalation'],
+]);
+
 /** Urgency tiers, most urgent first (story 15). */
 export type FeedSeverity = 'action_required' | 'attention' | 'info';
 export const FEED_SEVERITIES: readonly FeedSeverity[] = ['action_required', 'attention', 'info'];
@@ -65,7 +72,10 @@ export type FeedAttentionCategory =
   | 'lease-recovery'
   | 'enrollment-pending'
   | 'routing-failure'
-  | 'human-action-required';
+  | 'human-action-required'
+  | 'task-group-escalation'
+  | 'task-group-human-waiting'
+  | 'task-group-human-question';
 
 /** The domain surfaces a Feed deep link may own (story 18). */
 export type FeedTargetSurface =
@@ -188,6 +198,36 @@ export interface FeedProjectRef {
   readonly displayName: string;
 }
 
+/** Minimal Task-group identity used for Feed labels and exact Chat targets. */
+export interface FeedTaskGroup {
+  readonly scopeId: string;
+  readonly projectId: string;
+  readonly taskId: string;
+  readonly taskTitle: string;
+  readonly leadKind?: 'human' | 'agent';
+  readonly createdAt: number;
+}
+
+/** Kind-stamped Task-group Messages and their reply links, without body content. */
+export interface FeedTaskGroupMessage {
+  readonly id: string;
+  readonly projectId: string;
+  readonly scopeId: string;
+  readonly kind: TaskGroupMessageKind;
+  readonly authorKind: 'human' | 'agent';
+  readonly inReplyTo?: string;
+  readonly createdAt: number;
+}
+
+/** Durable #211 notification-only escalation identity. */
+export interface FeedTaskGroupEscalation {
+  readonly eventId: string;
+  readonly messageId: string;
+  readonly scopeId: string;
+  readonly projectId: string;
+  readonly at: number;
+}
+
 export interface FeedChatActivityOrigin {
   readonly runId: string;
   readonly projectId: string;
@@ -214,6 +254,12 @@ export interface FeedSources {
   routingBatches(): Promise<readonly RoutingBatch[]>;
   wakeFailures(): Promise<readonly FailedWakeInput[]>;
   attentionResolutions(): Promise<readonly CollaborationAttentionResolution[]>;
+  /** Current and historical Task groups as minimal, read-only identities. */
+  taskGroups?(): Promise<readonly FeedTaskGroup[]>;
+  /** Kind-stamped Task-group Messages without body content. */
+  taskGroupMessages?(): Promise<readonly FeedTaskGroupMessage[]>;
+  /** Durable notification-only escalation signals from task-group orchestration (#211). */
+  taskGroupEscalations?(): Promise<readonly FeedTaskGroupEscalation[]>;
   /** Durable run-to-Message/Event identity links for exact Chat activity destinations. */
   chatActivityOrigins?(context: {
     readonly events: readonly ProjectEvent[];
@@ -234,7 +280,7 @@ export interface FeedAttentionItem {
   /** Scope ids this item belongs to: Project ids and/or `feed:infra`. */
   readonly scopes: readonly string[];
   /** The authoritative source this item projects; never a second copy. */
-  readonly source: { readonly kind: 'proposal' | 'task' | 'recovery' | 'enrollment' | 'routing-batch' | 'wake-input' | 'event'; readonly id: string };
+  readonly source: { readonly kind: 'proposal' | 'task' | 'recovery' | 'enrollment' | 'routing-batch' | 'wake-input' | 'event' | 'message'; readonly id: string };
   readonly at: number;
 }
 
@@ -396,7 +442,7 @@ export function filterFeed(snapshot: FeedSnapshot, filter: FeedFilter = {}): Fee
  * and activity newest first, scopes as `all`, Projects by id, then `infra`.
  */
 export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
-  const [projects, tasks, proposals, events, enrollments, recoveries, runs, batches, wakeFailures, resolutions] = await Promise.all([
+  const [projects, tasks, proposals, rawEvents, enrollments, recoveries, runs, batches, wakeFailures, resolutions, taskGroups, taskGroupMessages, taskGroupEscalations] = await Promise.all([
     sources.projects(),
     sources.tasks(),
     sources.proposals(),
@@ -407,9 +453,25 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
     sources.routingBatches(),
     sources.wakeFailures(),
     sources.attentionResolutions(),
+    sources.taskGroups?.() ?? Promise.resolve([]),
+    sources.taskGroupMessages?.() ?? Promise.resolve([]),
+    sources.taskGroupEscalations?.() ?? Promise.resolve([]),
   ]);
+  const eventsByDelivery = new Map<string, ProjectEvent>();
+  for (const event of rawEvents) {
+    const identity = `${event.projectId}\u0000${event.deliveryKey}`;
+    if (!eventsByDelivery.has(identity)) eventsByDelivery.set(identity, event);
+  }
+  const events = [...eventsByDelivery.values()];
   const chatOrigins = await sources.chatActivityOrigins?.({ events, routingBatches: batches }) ?? [];
 
+  const taskGroupsByScope = new Map(taskGroups.map((group) => [group.scopeId, group]));
+  const taskGroupMessagesById = new Map(taskGroupMessages.map((message) => [message.id, message]));
+  const taskGroupEscalationsByEventId = new Map(taskGroupEscalations.map((signal) => [signal.eventId, signal]));
+  const taskGroupByScope = (projectId: string, scopeId: string): FeedTaskGroup | undefined => {
+    const group = taskGroupsByScope.get(scopeId);
+    return group?.projectId === projectId ? group : undefined;
+  };
   const tasksById = new Map(tasks.map((task) => [task.id, task]));
   const runsById = new Map(runs.map((run) => [run.id, run]));
   const enrollmentsById = new Map(enrollments.map((enrollment) => [enrollment.id, enrollment]));
@@ -424,6 +486,11 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
   for (const task of tasks) {
     if (usable(task.projectId) && !projectRefs.has(task.projectId)) {
       projectRefs.set(task.projectId, { id: task.projectId, displayName: task.projectId });
+    }
+  }
+  for (const group of taskGroups) {
+    if (usable(group.projectId) && !projectRefs.has(group.projectId)) {
+      projectRefs.set(group.projectId, { id: group.projectId, displayName: group.projectId });
     }
   }
   const knownProject = (projectId: string | undefined): projectId is string =>
@@ -445,6 +512,21 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
           ? { messageId: origin.messageId }
           : origin.eventId !== undefined ? { eventId: origin.eventId } : {}),
       runId: origin.runId, agentId: origin.agentId,
+    });
+  };
+
+  const taskGroupTarget = (
+    group: FeedTaskGroup,
+    focus: { readonly messageId?: string; readonly eventId?: string } = {},
+  ): FeedTarget | undefined => {
+    if (!safeChatIdentity(group.scopeId)) return undefined;
+    if (focus.messageId !== undefined && !safeChatIdentity(focus.messageId)) return undefined;
+    if (focus.eventId !== undefined && !safeChatIdentity(focus.eventId)) return undefined;
+    if (focus.messageId !== undefined && focus.eventId !== undefined) return undefined;
+    return feedTarget({
+      surface: 'project-chat', projectId: group.projectId, scopeId: group.scopeId,
+      ...(focus.messageId !== undefined ? { messageId: focus.messageId } : {}),
+      ...(focus.eventId !== undefined ? { eventId: focus.eventId } : {}),
     });
   };
 
@@ -616,18 +698,63 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
     });
   }
 
+  const repliedMessageIds = new Set<string>();
+  for (const reply of taskGroupMessages) {
+    if (reply.inReplyTo === undefined) continue;
+    const parent = taskGroupMessagesById.get(reply.inReplyTo);
+    if (parent?.projectId === reply.projectId && parent.scopeId === reply.scopeId) repliedMessageIds.add(parent.id);
+  }
+  for (const message of taskGroupMessages) {
+    if (message.kind !== 'question' || message.authorKind !== 'agent' || repliedMessageIds.has(message.id) || !knownProject(message.projectId)) continue;
+    const group = taskGroupByScope(message.projectId, message.scopeId);
+    if (group?.leadKind !== 'human' || !safeChatIdentity(message.id)) continue;
+    const target = taskGroupTarget(group, { messageId: message.id });
+    if (target === undefined) continue;
+    attention.push({
+      id: `task-group-human-question:${message.id}`,
+      severity: 'attention',
+      category: 'task-group-human-question',
+      reason: boundText(`Question in “${group.taskTitle}” is routed to its Human lead.`),
+      lifecycle: 'Task group · Human lead asked to answer · No Human wake is sent',
+      target,
+      scopes: [message.projectId],
+      source: { kind: 'message', id: message.id },
+      at: message.createdAt,
+    });
+  }
+
   // 8. Authoritative human-action-required Project events (ADR-0007). Other
   // dispositions never become attention: an addressed event has an Agent, and
   // an informational event is background activity.
   for (const event of events) {
     if (event.disposition !== 'human-action-required' || !knownProject(event.projectId) || resolved('event', event.id, event.projectId)) continue;
+    const escalation = taskGroupEscalationsByEventId.get(event.id);
+    if (escalation !== undefined && (escalation.projectId !== event.projectId || !safeChatIdentity(escalation.messageId))) continue;
+    const groupScopeId = escalation?.scopeId ?? (event.originScopeIds?.length === 1 ? event.originScopeIds[0] : undefined);
+    const taskGroup = groupScopeId !== undefined ? taskGroupByScope(event.projectId, groupScopeId) : undefined;
+    const messageOriginId = escalation?.messageId ?? event.originMessageId;
+    const messageOrigin = messageOriginId !== undefined
+      ? taskGroupMessagesById.get(messageOriginId)
+      : undefined;
+    if (escalation !== undefined && (taskGroup === undefined
+      || messageOrigin?.projectId !== event.projectId
+      || messageOrigin.scopeId !== taskGroup.scopeId)) continue;
+    const focus = messageOrigin?.projectId === event.projectId && messageOrigin.scopeId === taskGroup?.scopeId
+      ? { messageId: messageOrigin.id }
+      : safeChatIdentity(event.id) ? { eventId: event.id } : {};
+    const category = escalation !== undefined && taskGroup?.leadKind === 'human'
+      ? 'task-group-human-waiting'
+      : taskGroup !== undefined ? TASK_GROUP_ATTENTION_EVENT_CATEGORIES.get(event.kind) : undefined;
+    const target = taskGroup !== undefined ? taskGroupTarget(taskGroup, focus) : undefined;
     attention.push({
       id: `event:${event.id}`,
       severity: 'action_required',
-      category: 'human-action-required',
-      reason: boundText(event.summary),
-      lifecycle: boundText(`Project event · Human action required · ${event.kind}`),
-      target: feedTarget({ surface: 'project-overview', projectId: event.projectId }),
+      category: category ?? 'human-action-required',
+      reason: boundText(taskGroup !== undefined ? `Task group “${taskGroup.taskTitle}” needs Human attention.` : event.summary),
+      lifecycle: boundText(taskGroup !== undefined
+        ? `Task group · Human attention required · ${event.kind}`
+        : `Project event · Human action required · ${event.kind}`),
+      target: target ?? feedTarget({ surface: 'project-overview', projectId: event.projectId }),
       scopes: [event.projectId],
       source: { kind: 'event', id: event.id },
       at: event.createdAt,
@@ -697,6 +824,44 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
   // here; the run-derived entry covers the runs no event is published for.
   type ActivityDraft = { id: string; kind: string; summary: string; scopes: readonly string[]; target?: FeedTarget; projectId?: string; at: number };
   const activityDrafts: ActivityDraft[] = [];
+  const seenTaskGroupActivity = new Set<string>();
+  for (const group of taskGroups) {
+    if (!knownProject(group.projectId) || !safeChatIdentity(group.scopeId)) continue;
+    const identity = `created:${group.scopeId}`;
+    if (seenTaskGroupActivity.has(identity)) continue;
+    seenTaskGroupActivity.add(identity);
+    const title = boundText(group.taskTitle, 120);
+    const target = taskGroupTarget(group);
+    activityDrafts.push({
+      id: `task-group-created:${group.scopeId}`,
+      kind: 'task-group-created',
+      summary: boundText(`Task group created for “${title || 'Task'}”.`, 300),
+      scopes: [group.projectId],
+      ...(target !== undefined ? { target } : {}),
+      projectId: group.projectId,
+      at: group.createdAt,
+    });
+  }
+  for (const message of taskGroupMessages) {
+    if (!knownProject(message.projectId) || (message.kind !== 'handoff' && message.kind !== 'assignment')) continue;
+    const group = taskGroupByScope(message.projectId, message.scopeId);
+    if (group === undefined || !safeChatIdentity(message.id)) continue;
+    const identity = `message:${message.id}`;
+    if (seenTaskGroupActivity.has(identity)) continue;
+    seenTaskGroupActivity.add(identity);
+    const title = boundText(group.taskTitle, 120);
+    const kind = message.kind === 'handoff' ? 'task-group-handoff' : 'task-group-assignment';
+    const target = taskGroupTarget(group, { messageId: message.id });
+    activityDrafts.push({
+      id: `task-group-message:${message.id}`,
+      kind,
+      summary: boundText(`${message.kind === 'handoff' ? 'Handoff' : 'Assignment'} posted in “${title || 'Task group'}”.`, 300),
+      scopes: [message.projectId],
+      ...(target !== undefined ? { target } : {}),
+      projectId: message.projectId,
+      at: message.createdAt,
+    });
+  }
   for (const event of events) {
     const summary = boundText(event.summary, 300);
     if (summary === '') continue;
@@ -710,7 +875,15 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
       ? chatTarget(event.projectId, chatOriginsByRun.get(eventRunId!), linkedFailureRun.agentId, event.id)
       : undefined;
     const isChatEvent = /chat|message|routing|wake|run/i.test(event.kind);
-    const eventScopeId = event.originScopeIds?.length === 1 ? event.originScopeIds[0] : undefined;
+    const escalation = taskGroupEscalationsByEventId.get(event.id);
+    const eventScopeId = escalation?.scopeId ?? (event.originScopeIds?.length === 1 ? event.originScopeIds[0] : undefined);
+    const taskGroup = eventScopeId !== undefined ? taskGroupByScope(event.projectId, eventScopeId) : undefined;
+    const originMessageId = escalation?.messageId ?? event.originMessageId;
+    const taskGroupEventTarget = taskGroup !== undefined && event.kind.startsWith('task-group-')
+      ? taskGroupTarget(taskGroup, originMessageId !== undefined
+        ? { messageId: originMessageId }
+        : safeChatIdentity(event.id) ? { eventId: event.id } : {})
+      : undefined;
     const chatEventTarget = projectKnown && isChatEvent && safeChatIdentity(event.id)
       ? feedTarget({
           surface: 'project-chat', projectId: event.projectId,
@@ -721,14 +894,17 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
         })
       : undefined;
     const eventTarget = projectKnown
-      ? linkedFailureEventTarget ?? (isChatEvent
+      ? linkedFailureEventTarget ?? taskGroupEventTarget ?? (isChatEvent
           ? chatEventTarget
           : feedTarget({ surface: 'project-overview', projectId: event.projectId }))
       : undefined;
+    const eventSummary = boundText(taskGroup !== undefined && event.kind.startsWith('task-group-')
+      ? `Task group “${boundText(taskGroup.taskTitle, 120)}”: ${summary}`
+      : summary, 300);
     activityDrafts.push({
       id: `event:${event.id}`,
-      kind: event.kind,
-      summary,
+      kind: escalation !== undefined ? 'task-group-escalation' : event.kind,
+      summary: eventSummary,
       scopes: projectKnown ? [event.projectId] : [],
       ...(eventTarget !== undefined ? { target: eventTarget } : {}),
       ...(projectKnown ? { projectId: event.projectId } : {}),

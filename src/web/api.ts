@@ -53,6 +53,13 @@ export * from './views.ts';
 /** The single machine-authenticated Worker upgrade path (ADR-0012). */
 export const WORKER_CONNECT_PATH = '/api/worker/connect';
 
+const TASK_GROUP_MESSAGE_KINDS: readonly TaskGroupMessageKind[] = [
+  'status', 'question', 'escalation', 'handoff', 'assignment',
+];
+function isTaskGroupMessageKind(value: unknown): value is TaskGroupMessageKind {
+  return typeof value === 'string' && TASK_GROUP_MESSAGE_KINDS.includes(value as TaskGroupMessageKind);
+}
+
 /** Allow a remote close acknowledgement, without holding Core shutdown indefinitely. */
 export const WORKER_CONNECTION_SHUTDOWN_DEADLINE_MS = 5_000;
 
@@ -358,8 +365,11 @@ export function createRunApi(options: RunApiOptions): RunApi {
       }
       const text = rawText;
       const rawTaskGroupKind = body.kind;
-      if (scope.kind === 'task-group' && rawTaskGroupKind !== undefined && !isTaskGroupMessageKind(rawTaskGroupKind)) {
-        sendJson(response, 400, { error: 'kind must be handoff, assignment, question, or status' });
+      if (
+        rawTaskGroupKind !== undefined &&
+        (scope.kind !== 'task-group' || !isTaskGroupMessageKind(rawTaskGroupKind))
+      ) {
+        sendJson(response, 400, { error: 'kind must be a supported Task-group Message kind on a task-group scope' });
         return;
       }
       const recipients = body.recipients;
@@ -399,8 +409,11 @@ export function createRunApi(options: RunApiOptions): RunApi {
           scopeId,
           author,
           body: text,
-          ...(scope.kind === 'task-group' && rawTaskGroupKind !== undefined
-            ? { taskGroupKind: rawTaskGroupKind as TaskGroupMessageKind }
+          ...(rawTaskGroupKind !== undefined
+            ? {
+                kind: rawTaskGroupKind as TaskGroupMessageKind,
+                taskGroupKind: rawTaskGroupKind as TaskGroupMessageKind,
+              }
             : {}),
           ...(Array.isArray(recipients) ? { recipients: recipients as readonly string[] } : {}),
           deliveryKey,
@@ -1253,10 +1266,6 @@ async function readJson(request: IncomingMessage): Promise<Record<string, unknow
   } catch {
     return {};
   }
-}
-
-function isTaskGroupMessageKind(value: unknown): value is TaskGroupMessageKind {
-  return value === 'handoff' || value === 'assignment' || value === 'question' || value === 'status';
 }
 
 /**

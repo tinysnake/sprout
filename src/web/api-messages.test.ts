@@ -468,6 +468,44 @@ test('a duplicate message delivery over the API is idempotent', async () => {
   }
 });
 
+test('the message API stores Task-group lifecycle kinds on the Message', async () => {
+  const context = buildWithCollaboration();
+  const { port } = await context.api.listen(0);
+  const base = `http://127.0.0.1:${port}`;
+  const scope = await context.scopes.scopes.syncTaskGroup({
+    taskId: 'api-task-group', projectId: 'project-sprout', title: 'API Task group',
+    goal: 'Store message intent.', constraints: [], lead: { memberId: 'human-lead', kind: 'human' },
+    contentVersion: 1, status: 'in-progress',
+  });
+  try {
+    for (const [index, kind] of (['handoff', 'assignment'] as const).entries()) {
+      const response = await fetch(`${base}/api/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          scopeId: scope.id, authorId: 'human-lead', authorKind: 'human',
+          body: `Task-group ${kind}.`, deliveryKey: `api-task-group-${index}`, kind, awaitReply: false,
+        }),
+      });
+      assert.equal(response.status, 202);
+      const posted = await response.json() as { message: { id: string; kind: string } };
+      assert.equal(posted.message.kind, kind);
+      assert.equal((await context.collaboration.listMessages()).find((message) => message.id === posted.message.id)?.kind, kind);
+    }
+    const invalid = await fetch(`${base}/api/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        scopeId: scope.id, authorId: 'human-lead', authorKind: 'human',
+        body: 'Unknown kind.', deliveryKey: 'api-task-group-invalid-kind', kind: 'narrative', awaitReply: false,
+      }),
+    });
+    assert.equal(invalid.status, 400);
+  } finally {
+    await context.api.close();
+  }
+});
+
 test('the message API refuses missing, unknown, and mis-shaped scope requests', async () => {
   const context = buildWithCollaboration();
   const { port } = await context.api.listen(0);

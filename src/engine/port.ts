@@ -155,7 +155,7 @@ export interface AgentTaskGroupMessageInput {
 }
 
 export interface AgentTaskGroupMessageEnvelope {
-  readonly kind: 'handoff' | 'assignment' | 'question' | 'status';
+  readonly kind: 'handoff' | 'assignment' | 'question' | 'status' | 'escalation';
   readonly sender: { readonly id: string; readonly kind: 'human' | 'agent' };
   readonly taskId: string;
   readonly runId?: string;

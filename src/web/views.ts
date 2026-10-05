@@ -211,6 +211,7 @@ export interface MessageView {
   readonly authorId: string;
   readonly authorKind: string;
   readonly body: string;
+  readonly kind?: Message['kind'];
   readonly recipients: readonly string[];
   /** Present for Task-group messages; authoritative channel-stamped routing facts. */
   readonly envelope?: TaskGroupMessageEnvelope;
@@ -227,6 +228,7 @@ export function toMessageView(message: Message): MessageView {
     authorId: message.author.id,
     authorKind: message.author.kind,
     body: message.body,
+    ...(message.kind !== undefined ? { kind: message.kind } : {}),
     recipients: message.recipients,
     ...(message.envelope !== undefined ? { envelope: message.envelope } : {}),
     ...(message.inReplyTo !== undefined ? { inReplyTo: message.inReplyTo } : {}),

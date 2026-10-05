@@ -16,6 +16,7 @@ import { join } from 'node:path';
 
 import { projectFeed, type FeedSources, type FeedSnapshot } from './feed.ts';
 import { SqliteStore } from '../store/db.ts';
+import { ConversationScopeService } from '../conversation/service.ts';
 import type { ProjectAuthority } from '../project/authority-model.ts';
 import type { Task } from '../task/model.ts';
 import type { TaskProposal } from '../task/proposal-model.ts';
@@ -38,6 +39,40 @@ function storeSources(store: SqliteStore): FeedSources {
     routingBatches: async () => [],
     wakeFailures: () => store.collaboration.listWakeFailures(),
     attentionResolutions: () => store.collaboration.listAttentionResolutions(),
+  };
+}
+
+function taskGroupStoreSources(store: SqliteStore): FeedSources {
+  const base = storeSources(store);
+  return {
+    ...base,
+    taskGroups: async () => (await store.conversationScopes.listForProject(PROJECT_ID)).flatMap((scope) => {
+      if (scope.kind !== 'task-group') return [];
+      const content = scope.content.versions.find((version) => version.version === scope.content.currentVersion);
+      return [{
+        scopeId: scope.id,
+        projectId: scope.projectId,
+        taskId: scope.taskId,
+        taskTitle: content?.taskTitle ?? '',
+        createdAt: scope.createdAt,
+      }];
+    }),
+    taskGroupMessages: async () => {
+      const groups = new Set((await store.conversationScopes.listForProject(PROJECT_ID))
+        .filter((scope) => scope.kind === 'task-group').map((scope) => scope.id));
+      return (await store.collaboration.listMessages())
+        .filter((message) => groups.has(message.scopeId))
+        .map((message) => ({
+          id: message.id,
+          projectId: message.projectId,
+          scopeId: message.scopeId,
+          kind: message.kind ?? 'status',
+          authorKind: message.author.kind,
+          ...(message.inReplyTo !== undefined ? { inReplyTo: message.inReplyTo } : {}),
+          createdAt: message.createdAt,
+        }));
+    },
+    taskGroupEscalations: async () => [],
   };
 }
 
@@ -224,6 +259,86 @@ function summarize(snapshot: FeedSnapshot): unknown {
     scopes: snapshot.scopes,
   };
 }
+
+test('task-group escalation Chat deep link survives reopening its SQLite sources', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-feed-task-group-restart-'));
+  const filename = join(directory, 'sprout.db');
+  const first = new SqliteStore({ filename });
+  let firstClosed = false;
+  try {
+    await first.projectAuthorities.save(authority);
+    const scopes = new ConversationScopeService({
+      store: first.conversationScopes,
+      projects: { projectFacts: async (projectId) => ({
+        projectId,
+        status: 'active',
+        contentVersion: 1,
+        goal: 'Keep group identity durable',
+        rules: [],
+        wakePolicy: 'explicit-only',
+        routingIntervalMs: 30_000,
+        members: [
+          { memberId: 'human-1', memberKind: 'human' },
+          { memberId: 'agent-scout', memberKind: 'agent' },
+        ],
+      }) },
+      clock: () => 10,
+    });
+    const group = await scopes.syncTaskGroup({
+      taskId: 'task-feed-restart', projectId: PROJECT_ID, title: 'Reopen task group links',
+      goal: 'Keep the Message destination stable.', constraints: [],
+      lead: { memberId: 'agent-scout', kind: 'agent' }, contentVersion: 1, status: 'in-progress',
+    });
+    const message = {
+      id: 'message-feed-restart', projectId: PROJECT_ID, scopeId: group.id, channel: 'task-group' as const,
+      author: { id: 'agent-scout', kind: 'agent' as const }, body: 'A private question body.', kind: 'question' as const,
+      recipients: [], deliveryKey: 'feed-restart-message', createdAt: 20,
+    };
+    await first.collaboration.postMessage({
+      message,
+      plan: { inputId: message.id, decisions: [], observations: [] },
+      now: message.createdAt,
+    });
+    const event = {
+      id: `task-group:${message.id}:attention`,
+      projectId: PROJECT_ID,
+      kind: 'task-group-unanswered',
+      summary: 'Task group message needs Human attention.',
+      producer: { id: 'sprout', kind: 'system' as const },
+      disposition: 'human-action-required' as const,
+      responsibleAgentIds: [],
+      deliveryKey: `task-group:${message.id}:attention`,
+      originScopeIds: [group.id],
+      originMessageId: message.id,
+      createdAt: 30,
+    };
+    await first.collaboration.publishEvent({
+      event,
+      plan: { inputId: event.id, decisions: [], observations: [] },
+      now: event.createdAt,
+    });
+
+    const before = await projectFeed(taskGroupStoreSources(first));
+    const beforeTarget = before.attention.find((item) => item.id === `event:${event.id}`)?.target;
+    assert.deepEqual([beforeTarget?.scopeId, beforeTarget?.messageId], [group.id, message.id]);
+    first.close();
+    firstClosed = true;
+
+    const reopened = new SqliteStore({ filename });
+    try {
+      const after = await projectFeed(taskGroupStoreSources(reopened));
+      const afterTarget = after.attention.find((item) => item.id === `event:${event.id}`)?.target;
+      assert.deepEqual(afterTarget, beforeTarget);
+      assert.equal(afterTarget?.messageId, message.id);
+      assert.equal(afterTarget?.scopeId, group.id);
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    if (!firstClosed) first.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test('a restart reconstructs the identical Feed snapshot from reopened durable stores', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-feed-restart-'));

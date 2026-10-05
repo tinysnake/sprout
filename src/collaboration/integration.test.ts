@@ -202,6 +202,61 @@ test('parallel Task groups keep Message and Wake records inside their own scope'
   assert.deepEqual(firstDelivery.wakes.map((wake) => wake.inputId), [firstDelivery.message.id]);
   assert.deepEqual(secondDelivery.wakes.map((wake) => wake.inputId), [secondDelivery.message.id]);
 });
+test('Human Task-group posts use the shared wake ladder and every author is excluded from its own wake', async (t) => {
+  const harness = build({ turns: Array.from({ length: 5 }, (_, index) => scriptedTurn(`Reply ${index + 1}.`)) });
+  t.after(harness.close);
+  const group = await harness.scopes.scopes.syncTaskGroup({
+    taskId: 'human-participation', projectId: 'project-sprout', title: 'Human participation',
+    goal: 'Observe and interject in the task conversation.', constraints: [],
+    lead: { memberId: 'scout', kind: 'agent' }, contentVersion: 1, status: 'in-progress',
+  });
+  assert.deepEqual(await harness.scopes.scopes.scopeState(group.id, 'human-lead'), {
+    scopeId: group.id, writable: true,
+  }, 'the current Human Project member participates without a group-membership command');
+
+  const humanPost = await harness.coordinator.deliver({
+    scopeId: group.id, author: { id: 'human-lead', kind: 'human' }, body: '@all Please inspect this update.',
+    deliveryKey: 'human-task-group-post',
+  });
+  assert.deepEqual(humanPost.wakes.map((wake) => wake.agentId), ['scout', 'forge', 'scribe']);
+  assert.ok(humanPost.wakes.every((wake) => wake.reason === 'broadcast'));
+
+  const agentPost = await harness.coordinator.deliver({
+    scopeId: group.id, author: { id: 'scout', kind: 'agent' }, body: '@all I completed the next step.',
+    deliveryKey: 'agent-task-group-post',
+  });
+  assert.deepEqual(agentPost.wakes.map((wake) => wake.agentId), ['forge', 'scribe']);
+  assert.ok(!agentPost.wakes.some((wake) => wake.agentId === 'scout'), 'ADR-0007 sender exclusion applies to a group Agent post');
+});
+
+test('human-action-required Task-group events are notify-only and idempotent', async (t) => {
+  const harness = build({ turns: [scriptedTurn('must not run')] });
+  t.after(harness.close);
+  const group = await harness.scopes.scopes.syncTaskGroup({
+    taskId: 'human-lead-wait', projectId: 'project-sprout', title: 'Human lead wait',
+    goal: 'Escalate unanswered work to the Human.', constraints: [],
+    lead: { memberId: 'human-lead', kind: 'human' }, contentVersion: 1, status: 'in-progress',
+  });
+  const input = {
+    projectId: 'project-sprout', kind: 'task-group-unanswered',
+    summary: 'Task group message needs Human attention.',
+    disposition: 'human-action-required' as const,
+    deliveryKey: 'task-group:message-1:attention',
+    originScopeIds: [group.id], originMessageId: 'message-1', awaitReply: false,
+  };
+  const first = await harness.coordinator.publishEvent(input);
+  const retry = await harness.coordinator.publishEvent(input);
+
+  assert.equal(first.wakes.length, 0, 'Human attention is notify-only and does not create a WakeRequest');
+  assert.equal((await harness.sqlite.collaboration.listWakeRequests()).length, 0);
+  assert.equal(first.admittedRunIds.length, 0);
+  assert.equal(retry.duplicate, true);
+  assert.equal(retry.event.id, first.event.id);
+  assert.deepEqual(retry.event.originScopeIds, [group.id]);
+  assert.equal(retry.event.originMessageId, 'message-1');
+  assert.equal((await harness.coordinator.listEvents()).filter((event) => event.deliveryKey === input.deliveryKey).length, 1);
+});
+
 test('Task-group membership follows Project changes and routing admits only current members', async (t) => {
   const newcomer = { id: 'newcomer', name: 'Newcomer', engine: 'scripted', capability: 'agent-run', workingDirectory: '/srv/work' };
   const harness = build({

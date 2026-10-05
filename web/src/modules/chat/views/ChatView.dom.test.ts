@@ -424,6 +424,18 @@ test('task-groups appear with a task marker and title and open from the Human sc
   } finally { p.close(); }
 });
 
+test('message rows identify both Human and Agent senders explicitly', async () => {
+  const p = await page();
+  try {
+    const agentRow = dom.window.document.querySelector<HTMLElement>('[data-message-id="message-1"]');
+    assert.equal(agentRow?.querySelector('[data-author-kind="agent"]')?.textContent, 'Agent');
+    await p.append('human');
+    const humanRow = p.dataRows().find((row) => row.textContent?.includes('Human Operator'));
+    assert.ok(humanRow, 'the Human-authored row is present in the timeline');
+    assert.equal(humanRow.querySelector('[data-author-kind="human"]')?.textContent, 'Human');
+  } finally { p.close(); }
+});
+
 test('opening a conversation aligns its rendered history to the bottom', async () => {
   const p = await page();
   try { assert.equal(p.list.scrollTop, bottom(p.list)); assert.equal(p.button(), null); }
