@@ -50,15 +50,17 @@ Agent silently.
 
 Routine communication has three explicit scopes:
 
-1. A Project-scoped direct message between current members of the same Project.
+1. A Human-to-Agent Project-scoped direct message between the Human and a
+   current Agent member of the same Project.
 2. The Project channel, whose current participants are all Project members.
 3. A Working group channel, whose participants are the members of one Working
    group inside that Project.
 
-Direct-message history is separate per Project. A pair that shares two Projects
-therefore has two distinct direct-message contexts. When a membership ends, the
-old direct messages remain readable but no new message can be sent in that
-Project.
+Direct-message history is separate per Project. A Human and Agent that share
+two Projects therefore have two distinct direct-message contexts. When a
+membership ends, the old direct messages remain readable but no new message can
+be sent in that Project. Agents do not send direct messages to other Agents;
+explicit Agent collaboration uses Task-group posts (ADR-0015).
 
 A Working group is a temporary collaboration scope within exactly one Project.
 It has a stable identity, non-empty display name, optional goal and rules, a

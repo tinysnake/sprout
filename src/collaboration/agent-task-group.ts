@@ -54,6 +54,9 @@ export function createAgentTaskGroupMessageSender(options: {
     if (input.kind !== undefined && !MESSAGE_KINDS.has(input.kind)) {
       throw new AgentTaskGroupPostError(400, 'invalid-kind', 'kind must be handoff, assignment, question, or status');
     }
+    if (input.inReplyTo !== undefined && (typeof input.inReplyTo !== 'string' || input.inReplyTo.trim() === '')) {
+      throw new AgentTaskGroupPostError(400, 'invalid-post', 'inReplyTo must be a Message id');
+    }
     if (input.awaitReply !== undefined && typeof input.awaitReply !== 'boolean') {
       throw new AgentTaskGroupPostError(400, 'invalid-post', 'awaitReply must be a boolean');
     }
@@ -74,6 +77,13 @@ export function createAgentTaskGroupMessageSender(options: {
     const scope = await options.scopes.getScope(taskGroupScopeId(taskId));
     if (scope === undefined || scope.kind !== 'task-group' || scope.taskId !== taskId || scope.projectId !== projectId) {
       throw new AgentTaskGroupPostError(409, 'task-group-unavailable', 'the current Task group is unavailable');
+    }
+    if (input.inReplyTo !== undefined) {
+      const replyTargetIsLocal = await options.collaboration.messageBelongsToScope(input.inReplyTo, scope.id);
+      assertActive();
+      if (!replyTargetIsLocal) {
+        throw new AgentTaskGroupPostError(409, 'invalid-reply-target', 'inReplyTo must name a Message in the current Task group');
+      }
     }
     assertActive();
 
@@ -109,6 +119,7 @@ export function createAgentTaskGroupMessageSender(options: {
         body: input.body,
         taskGroupKind: input.kind ?? 'status',
         taskGroupRunId: runId,
+        ...(input.inReplyTo !== undefined ? { inReplyTo: input.inReplyTo } : {}),
         deliveryKey: `agent-task-group:${JSON.stringify([projectId, taskId, agentId, input.deliveryKey])}`,
         awaitReply: input.awaitReply ?? false,
       });
@@ -126,6 +137,7 @@ export function createAgentTaskGroupMessageSender(options: {
       messageId: delivered.message.id,
       scopeId: delivered.message.scopeId,
       authorId: delivered.message.author.id,
+      ...(delivered.message.inReplyTo !== undefined ? { inReplyTo: delivered.message.inReplyTo } : {}),
       ...(delivered.message.envelope !== undefined ? { envelope: delivered.message.envelope } : {}),
       duplicate: delivered.duplicate,
       admittedRunIds: delivered.admittedRunIds,
@@ -143,4 +155,3 @@ export function createAgentTaskGroupMessageSender(options: {
     };
   };
 }
-

@@ -149,6 +149,8 @@ export interface AgentTaskGroupMessageInput {
   readonly body: string;
   readonly deliveryKey: string;
   readonly kind?: 'handoff' | 'assignment' | 'question' | 'status';
+  /** The earlier Message this explicit send answers, when it belongs to this Task group. */
+  readonly inReplyTo?: string;
   readonly awaitReply?: boolean;
 }
 
@@ -166,6 +168,7 @@ export interface AgentTaskGroupMessageResult {
   readonly messageId: string;
   readonly scopeId: string;
   readonly authorId: string;
+  readonly inReplyTo?: string;
   readonly envelope?: AgentTaskGroupMessageEnvelope;
   readonly duplicate: boolean;
   readonly admittedRunIds: readonly string[];

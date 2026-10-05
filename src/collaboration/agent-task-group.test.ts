@@ -210,6 +210,8 @@ async function buildHarness(options: {
       return { response, body: await response.json() as Record<string, any> };
     },
     messages: () => collaboration.listMessages(),
+    collaborationStore,
+    wakes: () => collaboration.listWakeRequests(),
     admitted,
     close: () => bridge.close(),
   };
@@ -255,6 +257,7 @@ test('task-group channel stamps identity, kind, Task/run binding, and mention re
     groupId: h.taskGroupId,
     to: ['forge'],
   });
+  assert.deepEqual(result.wakes.map((wake: { readonly agentId: string; readonly reason: string }) => [wake.agentId, wake.reason]), [['forge', 'agent-mention']]);
   assert.equal((await h.messages())[0]?.body, body);
 });
 
@@ -269,6 +272,16 @@ test('task-group accepts free-form body unchanged and defaults its stamped kind 
   assert.deepEqual(result.envelope.to, []);
 });
 
+test('task-group accepts an empty free-form body unchanged', async t => {
+  const h = await buildHarness();
+  t.after(h.close);
+  const { response, body: result } = await h.post({ body: '', deliveryKey: 'empty-body' });
+  assert.equal(response.status, 200);
+  assert.equal((await h.messages())[0]?.body, '');
+  assert.equal(result.envelope.kind, 'status');
+});
+
+
 test('task-group deliveryKey retry returns one stored message and one wake', async t => {
   const h = await buildHarness();
   t.after(h.close);
@@ -282,6 +295,54 @@ test('task-group deliveryKey retry returns one stored message and one wake', asy
   assert.equal((await h.messages()).length, 1);
   assert.deepEqual(h.admitted, ['forge']);
 });
+
+test('the session post bridge relays an explicit same-group reply link', async t => {
+  const h = await buildHarness();
+  t.after(h.close);
+  const first = await h.post({ body: 'I found the issue.', deliveryKey: 'reply-parent' });
+  const second = await h.post({
+    body: 'The fix is ready.',
+    deliveryKey: 'reply-child',
+    inReplyTo: first.body.messageId,
+  });
+  assert.equal(second.response.status, 200);
+  assert.equal(second.body.inReplyTo, first.body.messageId);
+  assert.equal((await h.messages()).find(message => message.id === second.body.messageId)?.inReplyTo, first.body.messageId);
+});
+
+test('task-group reply link refuses a Message from another scope', async t => {
+  const h = await buildHarness();
+  t.after(h.close);
+  await h.collaborationStore.postMessage({
+    message: {
+      id: 'foreign-message', projectId, scopeId: 'direct:operator:scout', channel: 'direct',
+      author: { id: 'operator', kind: 'human' }, body: 'Private direct message', recipients: ['scout'],
+      deliveryKey: 'foreign-message-key', createdAt: 1,
+    },
+    plan: { inputId: 'foreign-message', decisions: [], observations: [] },
+    now: 1,
+  });
+  const { response, body } = await h.post({
+    body: 'This must stay in the Task group.', deliveryKey: 'cross-scope-reply', inReplyTo: 'foreign-message',
+  });
+  assert.equal(response.status, 409);
+  assert.equal(body.code, 'invalid-reply-target');
+  assert.deepEqual((await h.messages()).filter(message => message.scopeId === h.taskGroupId), []);
+});
+test('concurrent task-group deliveryKey retries store one message and admit one wake', async t => {
+  const h = await buildHarness();
+  t.after(h.close);
+  const input = { body: '@forge review this once', deliveryKey: 'concurrent-retry' };
+  const [first, second] = await Promise.all([h.post(input), h.post(input)]);
+  assert.equal(first.response.status, 200);
+  assert.equal(second.response.status, 200);
+  assert.equal([first.body.duplicate, second.body.duplicate].filter(Boolean).length, 1);
+  assert.equal(first.body.messageId, second.body.messageId);
+  assert.equal((await h.messages()).length, 1);
+  assert.equal((await h.wakes()).length, 1, 'one durable wake belongs to the one stored Message');
+  assert.deepEqual(h.admitted, ['forge']);
+});
+
 
 test('a Stop requested during the persistence-time authority check leaves no group post', async () => {
   const h = await buildHarness({ stopAtPersistCheck: true });
@@ -339,10 +400,12 @@ test('persistence refuses a Task lease revoked during the authority check', asyn
 test('a frozen Task group returns truthful 409 and keeps its history unchanged', async t => {
   const h = await buildHarness();
   t.after(h.close);
+  await h.sendDirect({ body: 'Existing group history.', deliveryKey: 'before-freeze' });
+  const before = await h.messages();
   await h.freezeTaskGroup();
   const { response, body } = await h.post({ body: 'This should remain refused.', deliveryKey: 'frozen-group' });
   assert.equal(response.status, 409);
   assert.equal(body.code, 'scope-read-only');
   assert.equal(body.reason, 'task-group-frozen');
-  assert.deepEqual(await h.messages(), []);
+  assert.deepEqual(await h.messages(), before);
 });

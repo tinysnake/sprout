@@ -37,18 +37,22 @@ history.
 The following inputs wake their Agent recipients immediately and never consult
 the wake policy or model:
 
-- a Project-scoped direct Message naming one or more current Agent members;
+- a Human-authored Project-scoped direct Message naming one or more current Agent members;
 - exact, whole-token Agent mentions in a Project-channel Message;
 - an exact `@all` broadcast, which wakes every current Agent member except the
   author; and
 - a Project event with an explicitly responsible Agent.
 
-Human- and Agent-authored Messages use the same deterministic rules. A
-`(Message, Agent)` target is deduplicated when more than one addressing form
-names it. The author is not woken by its own Message. A target that is unknown
-or no longer belongs to the Project produces a durable per-target routing
-failure while other valid targets continue; it never falls through to model
-judgement. Human notification semantics are outside this decision.
+Human-authored direct Messages and Human- or Agent-authored Project-channel and
+Working-group Messages use the same deterministic rules. Agent-authored direct
+sends are unsupported; explicit Agent collaboration uses Task-group posts
+(ADR-0015). Automatically projected Agent replies remain non-routing, as
+specified below. A `(Message, Agent)` target is deduplicated when more than one
+addressing form names it. The author is not woken by its own Message. A target
+that is unknown or no longer belongs to the Project produces a durable
+per-target routing failure while other valid targets continue; it never falls
+through to model judgement. Human notification semantics are outside this
+decision.
 
 A Working group channel follows these same rules resolved against the group's
 **current participants** (ADR-0008): its `@all` broadcast wakes every current
@@ -58,6 +62,31 @@ invalid target for that scope: naming it produces a durable per-target routing
 failure beside the valid participant wakes, never a wake, so group-only
 content never reaches an Agent outside the group. The Project channel needs no
 narrower gate because its participants are every current Project member.
+
+## Task-group extension
+
+Task groups (ADR-0014) use the hybrid orchestration decision in ADR-0015 rather
+than inheriting Project-channel suppression. Mentions and broadcasts still
+bypass the model, `question` and `escalation` route to the lead, and assignments
+and declared responsibility keys precede bounded ambiguity inference and lead
+fallback. Invalid explicit targets remain durable failures; if none can wake,
+the Agent lead is the last resort. Human leads never force inferred Agent work.
+
+A Message's sender is excluded from every Task-group wake, including model
+selection, lead fallback, and the single idle lead re-wake. Explicit causal
+Agent chains are limited to two Messages: A→B→A may admit B and then A, but a
+further Agent hop emits Human Attention. Automatically projected replies remain
+non-routing, including those produced by a fallback or re-wake. Orchestration
+lifecycle facts cannot recursively enter conversation routing.
+
+A fixed five-minute idle deadline permits one lead re-wake; another five
+minutes without Agent work or a reply emits one durable Human Attention event.
+Human-led groups and sender-excluded or unavailable leads use Attention without
+forcing a wake. Sender exclusion and bounded chains take precedence over the
+wake-time guarantee; these exceptions produce visible escalation rather than
+silent suppression. Stable stage identities bound calls and retries across
+restart. This is a Task-group exception to the Project batch's fail-closed
+model behavior, preserving persistence-before-admission and Human authority.
 
 ## Eligible inputs and routing dispositions
 

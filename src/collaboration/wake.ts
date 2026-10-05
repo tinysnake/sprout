@@ -171,7 +171,16 @@ export function planWake(message: Message, input: WakePlanInput): WakePlan {
   // input. Broadcast excludes nonparticipants silently, but an explicitly
   // named nonparticipant must still receive a durable failure. Neither form
   // reaches a model.
-  const broadcast = ALL_MENTION.test(message.body);
+  // Task-group routing consumes the channel-stamped mention list. Other scopes
+  // parse the Message body because they do not carry this envelope.
+  const mentionTargets =
+    scope.kind === 'task-group' && message.envelope !== undefined
+      ? message.envelope.to
+      : parseMentionTargets(message.body);
+  const broadcast =
+    scope.kind === 'task-group' && message.envelope !== undefined
+      ? mentionTargets.some((target) => target.toLowerCase() === 'all')
+      : ALL_MENTION.test(message.body);
   if (broadcast) {
     for (const agentId of resolver.currentAgentIds) {
       if (agentId === message.author.id) continue;
@@ -180,8 +189,7 @@ export function planWake(message: Message, input: WakePlanInput): WakePlan {
     }
   }
 
-  const mentioned = parseMentions(message.body, resolver.currentMemberIds);
-  const targets = dedupe([...mentioned.members, ...mentioned.unknown])
+  const targets = dedupe(mentionTargets)
     .filter((target) => !(broadcast && target.toLowerCase() === 'all'));
   if (broadcast || targets.length > 0) {
     for (const target of targets) {

@@ -333,10 +333,10 @@ export function createRunApi(options: RunApiOptions): RunApi {
     ) {
       const body = await readBody();
       const scopeId = typeof body.scopeId === 'string' ? body.scopeId : '';
-      const text = typeof body.body === 'string' ? body.body : '';
+      const rawText = body.body;
       const deliveryKey = typeof body.deliveryKey === 'string' ? body.deliveryKey : '';
       const awaitReply = body.awaitReply !== false;
-      if (scopeId === '' || text === '' || deliveryKey === '') {
+      if (scopeId === '' || typeof rawText !== 'string' || deliveryKey === '') {
         sendJson(response, 400, { error: 'scopeId, body, and deliveryKey are required' });
         return;
       }
@@ -352,6 +352,11 @@ export function createRunApi(options: RunApiOptions): RunApi {
         sendJson(response, 404, { error: `unknown conversation scope: ${scopeId}` });
         return;
       }
+      if (scope.kind !== 'task-group' && rawText === '') {
+        sendJson(response, 400, { error: 'scopeId, body, and deliveryKey are required' });
+        return;
+      }
+      const text = rawText;
       const rawTaskGroupKind = body.kind;
       if (scope.kind === 'task-group' && rawTaskGroupKind !== undefined && !isTaskGroupMessageKind(rawTaskGroupKind)) {
         sendJson(response, 400, { error: 'kind must be handoff, assignment, question, or status' });

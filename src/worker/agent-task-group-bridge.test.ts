@@ -105,4 +105,9 @@ test('Worker Task-group bridge uses session-only credentials and forwards the Co
   assert.deepEqual(received, [input, { ...input, deliveryKey: 'worker-frozen' }]);
   await session.close();
   await assert.rejects(workerPost!(input), /expired|unavailable/);
+  await assert.rejects(fetch(sessionUrl, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${sessionToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify(input),
+  }), 'session close revokes the bridge URL and credential');
 });

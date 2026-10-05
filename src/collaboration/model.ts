@@ -88,6 +88,8 @@ export interface Message {
   readonly channel: MessageChannel;
   readonly author: MessageAuthor;
   readonly body: string;
+  /** Task-group routing intent; omission means status. */
+  readonly kind?: 'status' | 'question' | 'escalation';
   /** Explicit addressees for a direct Message; empty for channel Messages. */
   readonly recipients: readonly string[];
   /** Present on Task-group Messages; stamped by the channel write path. */
@@ -107,6 +109,8 @@ export interface Message {
  * exactly why an input did or did not start a run.
  */
 export type WakeReason =
+  | 'task-lead'
+  | 'task-assignment'
   /** The input named this agent as a direct recipient. */
   | 'direct-recipient'
   /** The input mentioned this agent by exact whole-token `@id`. */

@@ -414,6 +414,7 @@ export interface SproutRuntimeOptions {
   readonly onObservation?: CollaborationCoordinatorOptions['onObservation'];
   /** Trusted host-composed wake model, never supplied through Human HTTP. */
   readonly routingModel?: CollaborationCoordinatorOptions['routingModel'];
+  readonly taskGroupModel?: CollaborationCoordinatorOptions['taskGroupModel'];
 }
 
 /** Explicit private composition injection, used only by adapter tests. */
@@ -1233,6 +1234,22 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       : new UsageAwareRoutingModelPort({ inner: options.routingModel });
     const collaboration = new CollaborationCoordinator({
       scopes: conversationScopes,
+      ...(options.taskGroupModel ? { taskGroupModel: options.taskGroupModel } : {}),
+      taskGroupFacts: async scopeId => {
+        const scope = await conversationScopes.getScope(scopeId);
+        if (scope?.kind !== 'task-group') return undefined;
+        const task = await tasks.get(scope.taskId);
+        const lead = task?.admission?.lead;
+        if (!task || !lead) return undefined;
+        const latest = [...(task.controlHistory ?? [])].reverse().find(event => event.action === 'content-revised');
+        const currentLead = latest?.action === 'content-revised' ? latest.content.lead : lead;
+        const contract = await conversationScopes.projectContract(scope.projectId);
+        return {
+          lead: { id: currentLead.memberId, kind: currentLead.memberKind },
+          assignedAgentIds: task.assignedAgentId ? [task.assignedAgentId] : [],
+          roles: (contract?.members ?? []).map(member => ({ agentId: member.memberId, keys: member.responsibilities ?? [] })),
+        };
+      },
       store: stores.collaboration,
       runs: orchestrator,
       ...(usageRoutingModel !== undefined ? { routingModel: usageRoutingModel } : {}),

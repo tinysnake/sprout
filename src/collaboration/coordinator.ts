@@ -132,6 +132,8 @@ import {
   type WakeObservation,
   type WakeRequest,
 } from './model.ts';
+import { TaskGroupOrchestration } from './task-group-orchestration.ts';
+import type { TaskGroupWakeFacts, TaskGroupWakeModelPort } from './task-group-wake.ts';
 import { planEventWake, planWake, parseMentionTargets, type WakeMember, type WakeScopeFacts } from './wake.ts';
 import {
   type RoutingAttempt,
@@ -261,6 +263,8 @@ export class MessageDeliveryError extends Error {
 }
 
 export interface CollaborationCoordinatorOptions {
+  readonly taskGroupFacts?: (scopeId: string) => Promise<TaskGroupWakeFacts | undefined>;
+  readonly taskGroupModel?: TaskGroupWakeModelPort;
   readonly store: CollaborationStore;
   readonly runs: RunOrchestrator | RunAdmitter;
   readonly scopes: CollaborationScopePort;
@@ -299,6 +303,8 @@ export interface DeliverInput {
   readonly scopeId: string;
   readonly author: MessageAuthor;
   readonly body: string;
+  readonly kind?: Message['kind'];
+  readonly inReplyTo?: string;
   /** The validated Task-group category requested for this post; defaults to status. */
   readonly taskGroupKind?: TaskGroupMessageKind;
   /** Core-resolved run identity for a Task-group Agent post or projected reply. */
@@ -429,6 +435,7 @@ function renderSourcePrompt(source: ResolvedRoutingSource, agentId: string): str
 }
 
 export class CollaborationCoordinator {
+  readonly #taskGroups: TaskGroupOrchestration;
   readonly #store: CollaborationStore;
   readonly #runs: RunAdmitter;
   readonly #scopes: CollaborationScopePort;
@@ -457,6 +464,32 @@ export class CollaborationCoordinator {
     this.#onRoutingAttempt = options.onRoutingAttempt;
     this.#attemptTimeoutMs = options.routingAttemptTimeoutMs ?? 30_000;
     this.#routingBounds = options.routingBounds;
+    this.#taskGroups = new TaskGroupOrchestration({
+      store: this.#store, now: () => this.#clock.now(),
+      serialize: async (message, action) => {
+        const scope = await this.#scopes.getScope(message.scopeId);
+        return scope?.kind === 'task-group' && this.#scopes.withTaskGroupLock
+          ? this.#scopes.withTaskGroupLock(scope.taskId, action) : action();
+      },
+      facts: options.taskGroupFacts ?? (async () => undefined),
+      members: projectId => this.#requireMembers(projectId),
+      writable: async message => {
+        const state = await this.#scopes.scopeState(message.scopeId, message.author.id);
+        // The accepted Message outlives its sender's membership. Scope and
+        // Task lifecycle, rather than that sender's later status, govern wakes.
+        return state.writable || state.reason === 'membership-ended' || state.reason === 'not-a-member';
+      },
+      working: async wakes => {
+        for (const wake of wakes) {
+          if (!wake.runId || !this.#runs.load) continue;
+          const run = await this.#runs.load(wake.runId);
+          if (run?.status === 'running') return true;
+        }
+        return false;
+      },
+      admit: async (wakes, message) => { await this.#admitAll(wakes, { kind: 'input', input: message }, false); },
+      ...(options.taskGroupModel ? { model: options.taskGroupModel } : {}),
+    });
 
     // The live run-lifecycle failure producer (#180). The subscription lives as
     // long as the orchestrator it belongs to (both are process-lifetime), and
@@ -535,10 +568,12 @@ export class CollaborationCoordinator {
       channel: scope.kind,
       author: input.author,
       body: input.body,
+      ...(input.kind ? { kind: input.kind } : {}),
+      ...(input.inReplyTo ? { inReplyTo: input.inReplyTo } : {}),
       recipients: scope.kind === 'direct' ? (input.recipients ?? []) : [],
       ...(scope.kind === 'task-group' ? {
         envelope: {
-          kind: input.taskGroupKind ?? 'status',
+          kind: input.taskGroupKind ?? (input.kind === 'question' ? 'question' : 'status'),
           sender: input.author,
           taskId: scope.taskId,
           ...(input.taskGroupRunId !== undefined ? { runId: input.taskGroupRunId } : {}),
@@ -551,7 +586,7 @@ export class CollaborationCoordinator {
       createdAt: now,
     };
 
-    const plan = planWake(message, {
+    const plan = scope.kind === 'task-group' ? await this.#taskGroups.plan(message, members) : planWake(message, {
       members,
       scope: scopeFacts(scope),
       wakePolicy: routingPolicy.wakePolicy,
@@ -580,6 +615,7 @@ export class CollaborationCoordinator {
   async #finishMessageDelivery(input: DeliverInput, prepared: PreparedMessageDelivery): Promise<DeliverResult> {
     if (prepared.kind === 'duplicate') return this.#finishDuplicateDelivery(input, prepared.message);
     const { message, plan, stored } = prepared;
+    if (message.channel === 'task-group') this.#taskGroups.schedule();
     if (stored.duplicate) return { ...stored, admittedRunIds: [] };
     this.#announce(message.id, plan.observations);
     if (stored.window !== undefined) this.#afterWindowJoin(stored.window);
@@ -899,6 +935,12 @@ export class CollaborationCoordinator {
     });
   }
 
+  /** Deferred routing and durable idle deadlines, including restart recovery. */
+  sweepTaskGroups(): Promise<void> { return this.#taskGroups.sweep(); }
+
+  /** Safe durable signal port for Feed/Attention; resolving its event never retries work. */
+  listTaskGroupEscalations(projectId?: string) { return this.#taskGroups.escalations(projectId); }
+
   /**
    * Recover the collaboration write path after a restart.
    *
@@ -930,6 +972,7 @@ export class CollaborationCoordinator {
    * same window twice or judges one batch twice.
    */
   async reconcile(): Promise<ReconcileResult> {
+    await this.sweepTaskGroups();
     // Repair the crash boundary between durable attempt settlement and its
     // usage observer. Replaying facts never invokes the model or invents tokens.
     if (this.#onRoutingAttempt !== undefined) {
@@ -987,6 +1030,12 @@ export class CollaborationCoordinator {
     };
   }
 
+  /** Whether a durable Message belongs to the supplied conversation scope. */
+  async messageBelongsToScope(messageId: string, scopeId: string): Promise<boolean> {
+    const message = await this.#store.getMessage(messageId);
+    return message?.scopeId === scopeId;
+  }
+
   /** Durable state for observability: every Message on record. */
   listMessages(filter?: { readonly scopeId?: string }): Promise<readonly Message[]> {
     return this.#store.listMessages().then((messages) =>
@@ -1041,6 +1090,11 @@ export class CollaborationCoordinator {
   async #projectEvents(events: readonly ProjectEvent[]): Promise<readonly ProjectEvent[]> {
     const wakes = await this.#store.listWakeRequests();
     return Promise.all(events.map(async (event) => {
+      if (event.kind.startsWith('task-group-') && event.deliveryKey.startsWith('task-group:')) {
+        const messageId = event.deliveryKey.slice('task-group:'.length).replace(/:[^:]+$/, '');
+        const message = await this.#store.getMessage(messageId);
+        if (message?.channel === 'task-group' && message.projectId === event.projectId) return { ...event, originScopeIds: [message.scopeId] };
+      }
       const isFailure = event.kind === 'agent-run-failure' && event.producer.kind === 'system' &&
         event.deliveryKey.startsWith('run-failure:');
       const isInterruption = event.kind === 'agent-run-interruption' && event.producer.kind === 'system' &&
@@ -1649,6 +1703,14 @@ export class CollaborationCoordinator {
         .filter((outcome) => outcome.assignments.some((a) => a.agentId === wake.agentId))
         .map((outcome) => outcome.inputId);
       return { kind: 'batch', batch, assigned: await this.#resolveInputs(assignedIds) };
+    }
+    if (wake.inputId.startsWith('task-group:')) {
+      const event = await this.#store.getEvent(wake.inputId);
+      if (event?.kind === 'task-group-routed' || event?.kind === 'task-group-rewake') {
+        const messageId = wake.inputId.slice('task-group:'.length).replace(/:(routed|rewake)$/, '');
+        const message = await this.#store.getMessage(messageId);
+        if (message?.channel === 'task-group') return { kind: 'input', input: message };
+      }
     }
     const input =
       (await this.#store.getMessage(wake.inputId)) ?? (await this.#store.getEvent(wake.inputId));
