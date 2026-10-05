@@ -177,7 +177,7 @@ async function buildHarness(options: {
   const bridge = await createAgentTaskGroupMessageBridge(send);
   return {
     taskGroupId: group.id,
-    sendDirect: send,
+    sendTaskGroup: send,
     setTask(value: ReturnType<typeof makeTask>) { task = value; },
     async freezeTaskGroup() {
       task = makeTask('done');
@@ -348,7 +348,7 @@ test('a Stop requested during the persistence-time authority check leaves no gro
   const h = await buildHarness({ stopAtPersistCheck: true });
   try {
     await assert.rejects(
-      h.sendDirect({ body: 'This send races with Stop.', deliveryKey: 'stop-mid-send' }),
+      h.sendTaskGroup({ body: 'This send races with Stop.', deliveryKey: 'stop-mid-send' }),
       (error: unknown) => error instanceof Error && error.message.includes('no longer active'),
     );
     assert.deepEqual(await h.messages(), []);
@@ -362,7 +362,7 @@ test('persistence refuses a run that became stale during the authority check', a
   const h = await buildHarness({ staleRunAtPersistCheck: true });
   try {
     await assert.rejects(
-      h.sendDirect({ body: 'This run is no longer current.', deliveryKey: 'stale-run' }),
+      h.sendTaskGroup({ body: 'This run is no longer current.', deliveryKey: 'stale-run' }),
       (error: unknown) => error instanceof Error && error.message.includes('Task run is no longer current'),
     );
     assert.deepEqual(await h.messages(), []);
@@ -375,7 +375,7 @@ test('persistence refuses a Task whose active run changed during the authority c
   const h = await buildHarness({ staleTaskAtPersistCheck: true });
   try {
     await assert.rejects(
-      h.sendDirect({ body: 'This Task is now assigned to another run.', deliveryKey: 'stale-task' }),
+      h.sendTaskGroup({ body: 'This Task is now assigned to another run.', deliveryKey: 'stale-task' }),
       (error: unknown) => error instanceof Error && error.message.includes('Task run is no longer current'),
     );
     assert.deepEqual(await h.messages(), []);
@@ -388,7 +388,7 @@ test('persistence refuses a Task lease revoked during the authority check', asyn
   const h = await buildHarness({ revokeLeaseAtPersistCheck: true });
   try {
     await assert.rejects(
-      h.sendDirect({ body: 'The Task lease is no longer active.', deliveryKey: 'revoked-lease' }),
+      h.sendTaskGroup({ body: 'The Task lease is no longer active.', deliveryKey: 'revoked-lease' }),
       (error: unknown) => error instanceof Error && error.message.includes('Task environment lease is no longer active'),
     );
     assert.deepEqual(await h.messages(), []);
@@ -400,7 +400,7 @@ test('persistence refuses a Task lease revoked during the authority check', asyn
 test('a frozen Task group returns truthful 409 and keeps its history unchanged', async t => {
   const h = await buildHarness();
   t.after(h.close);
-  await h.sendDirect({ body: 'Existing group history.', deliveryKey: 'before-freeze' });
+  await h.sendTaskGroup({ body: 'Existing group history.', deliveryKey: 'before-freeze' });
   const before = await h.messages();
   await h.freezeTaskGroup();
   const { response, body } = await h.post({ body: 'This should remain refused.', deliveryKey: 'frozen-group' });
