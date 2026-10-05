@@ -8,6 +8,7 @@ import { InMemoryTaskProposalStore } from './proposal-store.ts';
 import { TaskProposalService } from './proposal-service.ts';
 import { TaskAdmissionError, TaskAdmissionService } from './admission-service.ts';
 import { TaskService } from './service.ts';
+import type { Task } from './model.ts';
 import { TaskAdvanceConflictError, TaskEnvironmentLeaseRefusal, TaskEnvironmentLifecycle, type TaskContextWorker } from './environment-lifecycle.ts';
 import type { TaskContextMaterialization } from '../worker/protocol.ts';
 import type { TaskStore } from './store.ts';
@@ -49,6 +50,7 @@ function fixture(options: {
     idFactory: () => `lease-${Math.random()}`,
   });
   const materializations: TaskContextMaterialization[] = [];
+  const taskGroupSnapshots: Task[] = [];
   const worker: TaskContextWorker = {
     async prepare(input) {
       materializations.push(structuredClone(input));
@@ -72,6 +74,7 @@ function fixture(options: {
     store: taskStore, pool, agents, projects, runs: runner, worker,
     ids: { task: () => 'unused-task', lease: () => 'unused-lease', run: (() => { let n = 0; return () => `run-${++n};` })(), message: () => 'unused-message', projectEvent: () => 'unused-event' },
     clock: { now: () => 100 },
+    taskGroups: { sync: async (task) => { taskGroupSnapshots.push(structuredClone(task)); } },
   });
   const tasks = new TaskService({ store: taskStore, runs: runner, lifecycle });
   const facts = {
@@ -95,7 +98,7 @@ function fixture(options: {
     ids: { task: () => 'task-1', lease: () => 'unused-lease', run: () => 'unused-run', message: () => 'unused-message', projectEvent: () => 'unused-event' },
     now: () => 100,
   });
-  return { taskStore, proposalStore, pool, worker, materializations, submissions, tasks, proposals, admissions };
+  return { taskStore, proposalStore, pool, worker, materializations, taskGroupSnapshots, submissions, tasks, proposals, admissions };
 }
 
 async function propose(context: ReturnType<typeof fixture>) {
@@ -120,6 +123,12 @@ test('a Human lead begins one frozen proposal snapshot without waking an Agent',
   assert.equal(result.task.admission?.proposalRevision, 1);
   assert.equal(result.task.admission?.contentVersion, 1);
   assert.deepEqual(result.task.admission?.validationCriteria, content.validationCriteria);
+  assert.equal(context.taskGroupSnapshots.length, 1);
+  assert.equal(context.taskGroupSnapshots[0]?.status, 'in-progress');
+  assert.equal(context.taskGroupSnapshots[0]?.id, result.task.id);
+  assert.deepEqual(context.taskGroupSnapshots[0]?.admission?.lead, { memberId: 'operator', memberKind: 'human' });
+  assert.equal(context.taskGroupSnapshots[0]?.goal, content.goal);
+  assert.deepEqual(context.taskGroupSnapshots[0]?.constraints, content.constraints);
   assert.deepEqual(context.submissions, []);
   assert.equal(context.materializations[0]?.taskContentVersion, 1);
   assert.deepEqual(context.materializations[0]?.taskValidationCriteria, content.validationCriteria);

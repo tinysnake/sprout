@@ -758,3 +758,44 @@ test('a failed direct run surfaces as one sanitized informational Project event 
     await context.api.close();
   }
 });
+
+test('posting to a terminal Task group returns a truthful 409 and keeps history readable', async () => {
+  const context = buildWithCollaboration();
+  const { port } = await context.api.listen(0);
+  const base = `http://127.0.0.1:${port}`;
+  const input = {
+    taskId: 'task-terminal-api', projectId: 'project-sprout', title: 'Terminal API scope',
+    goal: 'Preserve the conversation.', constraints: ['Keep history.'],
+    lead: { memberId: 'human-lead', kind: 'human' as const }, contentVersion: 1,
+  };
+  const scope = await context.scopes.scopes.syncTaskGroup({ ...input, status: 'in-progress' });
+  try {
+    await context.collaboration.deliver({
+      scopeId: scope.id, author: { id: 'human-lead', kind: 'human' },
+      body: 'This decision stays available.', deliveryKey: 'task-history-before-freeze', awaitReply: false,
+    });
+    await context.scopes.scopes.syncTaskGroup({ ...input, status: 'done' });
+
+    const rejected = await fetch(`${base}/api/messages`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        scopeId: scope.id, authorId: 'human-lead', authorKind: 'human',
+        body: 'This late post must be rejected.', deliveryKey: 'task-post-after-freeze',
+      }),
+    });
+    assert.equal(rejected.status, 409);
+    const failure = await rejected.json() as { error: string; code: string; reason: string };
+    assert.equal(failure.code, 'scope-read-only');
+    assert.equal(failure.reason, 'task-group-frozen');
+    assert.match(failure.error, /frozen.*posting is rejected.*history remains readable/i);
+
+    const history = await fetch(`${base}/api/messages?scopeId=${encodeURIComponent(scope.id)}`);
+    assert.equal(history.status, 200);
+    const body = await history.json() as { messages: { body: string; channel: string }[] };
+    assert.deepEqual(body.messages.map((message) => [message.channel, message.body]), [
+      ['task-group', 'This decision stays available.'],
+    ]);
+  } finally {
+    await context.api.close();
+  }
+});

@@ -1239,7 +1239,7 @@ export class CollaborationCoordinator {
         // Same fail-closed rule as deterministic routing: a participant-scoped
         // kind without a participant set resolves to the empty set.
         const participants =
-          facts.kind === 'project' ? undefined : (facts.participants ?? []);
+          facts.kind === 'project' || facts.kind === 'task-group' ? undefined : (facts.participants ?? []);
         if (participants !== undefined) {
           candidates = candidates.filter((agentId) => participants.includes(agentId));
         }
@@ -1662,11 +1662,11 @@ export class CollaborationCoordinator {
   async #requireWritableScope(scopeId: string, actorId: string): Promise<ConversationScope> {
     const state = await this.#scopes.scopeState(scopeId, actorId);
     if (!state.writable) {
-      throw new MessageDeliveryError(
-        state.reason ?? 'not-a-member',
-        `conversation scope ${scopeId} is read-only for ${actorId}` +
-          `${state.reason !== undefined ? ` (${state.reason})` : ''}`,
-      );
+      const reason = state.reason ?? 'not-a-member';
+      const message = reason === 'task-group-frozen'
+        ? `Task group ${scopeId} is frozen because its Task is terminal; posting is rejected and history remains readable`
+        : `conversation scope ${scopeId} is read-only for ${actorId}${state.reason !== undefined ? ` (${state.reason})` : ''}`;
+      throw new MessageDeliveryError(reason, message);
     }
     const scope = await this.#scopes.getScope(scopeId);
     if (scope === undefined) {
@@ -1743,7 +1743,9 @@ export function renderWakePrompt(input: RoutingInput, agentId: string): string {
       ? 'a direct message'
       : input.channel === 'working-group'
         ? `the Working group channel ${input.scopeId}`
-        : 'the project channel';
+        : input.channel === 'task-group'
+          ? `the Task group channel ${input.scopeId}`
+          : 'the project channel';
   return [
     `You were woken by ${where} in project ${input.projectId}.`,
     ``,

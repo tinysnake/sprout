@@ -1,0 +1,3 @@
+# Task groups are temporary per-Task conversation scopes
+
+A Task admitted with a lead has one temporary conversation scope permanently bound to that Task. Every current Project member participates through current Project membership, while append-only Task title, goal, and constraint snapshots preserve the context the group saw; terminal Task status makes the scope read-only and leaves its history available. Membership is projected from the Project at read time so Project authority remains the single source of who may participate, including members who join after admission. This extends ADR-0008's Project, direct, and Working group communication scopes: unlike a Working group, a Task group is created and frozen with Task lifecycle and cannot be independently managed.
