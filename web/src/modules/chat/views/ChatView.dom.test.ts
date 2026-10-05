@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { after, test } from 'node:test';
 import { JSDOM } from 'jsdom';
@@ -41,15 +42,25 @@ for (const [key, value] of Object.entries(globals)) {
   Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
 }
 let extraHeight = 0;
+let viewportHeight = 200;
+let automaticScrollEvents = false;
+const pageSize = Number(readFileSync(new URL('./ChatView.vue', import.meta.url), 'utf8').match(/const CHAT_MESSAGE_PAGE_SIZE = (\d+)/)![1]);
 const positions = new WeakMap<Element, number>();
 let scrollWrites = 0;
 Object.defineProperties(dom.window.HTMLElement.prototype, {
-  clientHeight: { configurable: true, get() { return this.classList.contains('chat-messages-body') ? 200 : 0; } },
+  clientHeight: { configurable: true, get() { return this.classList.contains('chat-messages-body') ? viewportHeight : 0; } },
   scrollHeight: { configurable: true, get() { return this.classList.contains('chat-messages-body') ? this.querySelectorAll('.chat-msg').length * 100 + extraHeight : 0; } },
   scrollTop: {
     configurable: true,
     get() { return positions.get(this) ?? 0; },
-    set(value: number) { scrollWrites++; positions.set(this, Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight))); },
+    set(value: number) {
+      scrollWrites++;
+      const previous = positions.get(this) ?? 0;
+      const top = Math.max(0, Math.min(value, this.scrollHeight - this.clientHeight));
+      positions.set(this, top);
+      // Native scroll delivery is asynchronous and only occurs on a changed position.
+      if (automaticScrollEvents && top !== previous) queueMicrotask(() => this.dispatchEvent(new dom.window.Event('scroll')));
+    },
   },
 });
 const { createServer } = await import('vite');
@@ -86,8 +97,11 @@ async function paint() {
 function message(id: string, scopeId = 'channel', authorKind: 'human' | 'agent' = 'agent'): MessageView {
   return { id, scopeId, projectId: 'project', channel: scopeId, recipients: [], authorId: authorKind === 'human' ? 'operator' : 'agent', authorKind, body: id, createdAt: Number(id.replace(/\D/g, '')) || 1 };
 }
-async function page(query = '', options: { channelMessages?: number; shell?: boolean } = {}) {
+async function page(query = '', options: { channelMessages?: number; shell?: boolean; height?: number; automaticEvents?: boolean } = {}) {
   frames.clear(); extraHeight = 0; scrollWrites = 0;
+  viewportHeight = options.height ?? 200;
+  automaticScrollEvents = options.automaticEvents ?? false;
+  let olderRequests = 0;
   dom.window.document.body.innerHTML = '<div id="app"></div>';
   const scopes: ConversationScopeView[] = [
     { id: 'channel', projectId: 'project', kind: 'project', createdAt: 1, updatedAt: 1 },
@@ -106,6 +120,7 @@ async function page(query = '', options: { channelMessages?: number; shell?: boo
       const rows = messages.filter((item) => item.scopeId === id)
         .sort((left, right) => left.createdAt - right.createdAt || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
       if (options?.before !== undefined) {
+        olderRequests++;
         const index = rows.findIndex((item) => item.id === options.before);
         const older = index < 0 ? [] : rows.slice(0, index);
         return (options.limit !== undefined ? older.slice(-options.limit) : older).map((item) => ({ ...item }));
@@ -141,13 +156,14 @@ async function page(query = '', options: { channelMessages?: number; shell?: boo
   let closed = false;
   return {
     list, router,
+    olderRequests: () => olderRequests,
     async setRunStatus(status: 'queued' | 'running' | 'completed') {
       activeRuns = status === 'completed' ? [] : [{ id: 'chat-run', agentId: 'agent', status }];
       runStatusListener?.({ id: 'chat-run', status });
       await flush();
     },
     button: () => dom.window.document.querySelector<HTMLButtonElement>('.chat-jump-latest'),
-    scroll(top: number) { list.scrollTop = top; list.dispatchEvent(new dom.window.Event('scroll')); },
+    scroll(top: number) { list.dispatchEvent(new dom.window.WheelEvent('wheel', { deltaY: -100 })); positions.set(list, top); list.dispatchEvent(new dom.window.Event('scroll')); },
     async refresh() { dom.window.document.dispatchEvent(new dom.window.Event('visibilitychange')); await flush(); },
     async append(kind: 'human' | 'agent' | 'notice') {
       if (kind === 'notice') events.push({ id: 'notice', projectId: 'project', kind: 'agent-run-interruption', summary: 'Agent stopped', producerId: 'agent', producerKind: 'agent', responsibleAgentIds: [], disposition: 'recorded', createdAt: 30 });
@@ -422,14 +438,14 @@ test('late image or code sizing keeps bottom alignment but respects reading hist
   } finally { p.close(); }
 });
 test('older-page prepend is history, not a live arrival; a later append still raises jump to latest', async () => {
-  const p = await page('', { channelMessages: 55 });
+  const p = await page('', { channelMessages: pageSize + 5 });
   try {
-    // 55 messages; the newest window loads 50 so hasOlder is true and entry lands at bottom.
+    // One full newest page plus five historical messages.
     assert.equal(p.list.scrollTop, bottom(p.list), 'entry opens at the bottom');
     p.scroll(0); // reading at the top triggers the older-page fetch
     await flush(); await paint();
     const rows = p.list.querySelectorAll('.chat-msg').length;
-    assert.equal(rows, 55, 'older page was prepended into the loaded window');
+    assert.equal(rows, pageSize + 5, 'older page was prepended into the loaded window');
     assert.equal(p.button(), null, 'prepend must not raise jump-to-latest (history is not an arrival)');
     assert.equal(p.list.scrollTop, 0, 'reading position stays where the operator left it');
     await p.append('agent');
@@ -462,4 +478,74 @@ test('a targeted historical message keeps the existing deep-link centering behav
   const p = await page('&message=message-2');
   try { assert.equal(centered, 'message-2'); assert.equal(p.list.scrollTop, 100); }
   finally { p.close(); delete (dom.window.HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView; }
+});
+
+
+test('automatic positioning: a queued user gesture does not turn a script write into paging', async () => {
+  const p = await page('', { channelMessages: pageSize * 3, height: pageSize * 100 - 20, automaticEvents: true });
+  try {
+    p.list.dispatchEvent(new dom.window.WheelEvent('wheel', { deltaY: -100 }));
+    extraHeight = 10;
+    for (const observer of observers) observer.deliver(); await paint();
+    assert.equal(p.olderRequests(), 0, 'programmatic write wins over pending input');
+    p.scroll(0); await paint();
+    assert.equal(p.olderRequests(), 1, 'the next real user gesture is admitted immediately');
+  } finally { p.close(); }
+});
+test('automatic positioning: a lost event expires without suppressing a later user scroll at the same position', async () => {
+  const p = await page('', { channelMessages: pageSize * 3, height: pageSize * 100 - 20 });
+  try {
+    // Initial write has no delivered event in this mode. Let its defensive
+    // frame expiry run before a user gesture at the identical near-top offset.
+    await paint();
+    p.scroll(20); await paint();
+    assert.equal(p.olderRequests(), 1);
+  } finally { p.close(); }
+});
+
+// Recreate the diagnosed automatic-positioning matrix with native-like delivery.
+for (const gap of [-20, 0, 20, 40, 150, 800]) {
+  test(`automatic positioning: bottom gap ${gap} never pages without user input`, async () => {
+    const p = await page('', { channelMessages: pageSize * 3, height: pageSize * 100 - gap, automaticEvents: true });
+    try {
+      for (let cycle = 0; cycle < 10; cycle++) {
+        extraHeight = cycle % 2 ? 27 : 0; // loading-row-sized growth and removal
+        for (const observer of observers) observer.deliver();
+        dom.window.dispatchEvent(new dom.window.Event('resize'));
+        await p.refresh(); await paint();
+      }
+      assert.equal(p.olderRequests(), 0, 'zero input must issue zero older reads');
+      assert.equal(p.list.querySelectorAll('.chat-msg').length, pageSize);
+    } finally { p.close(); }
+  });
+}
+for (const targetTop of [30, 150]) {
+  test(`automatic positioning: deep-link at ${targetTop}px and scope switches never page`, async () => {
+    dom.window.HTMLElement.prototype.scrollIntoView = function () {
+      this.closest('.chat-messages-body')!.scrollTop = targetTop;
+    };
+    const p = await page('&message=message-' + (pageSize * 3), { channelMessages: pageSize * 3, automaticEvents: true });
+    try {
+      for (let cycle = 0; cycle < 3; cycle++) {
+        await p.refresh(); await paint();
+        await p.router.push('/chat/direct?project=project&message=message-' + (pageSize * 3)); await paint();
+        await p.router.push('/chat/channel?project=project&message=message-' + (pageSize * 3)); await paint();
+      }
+      assert.equal(p.olderRequests(), 0);
+      assert.equal(p.list.querySelectorAll('.chat-msg').length, pageSize);
+    } finally { p.close(); delete (dom.window.HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView; }
+  });
+}
+test('automatic positioning: unchanged bottom writes do not swallow the next user scroll', async () => {
+  const p = await page('', { channelMessages: pageSize * 2 + 5, automaticEvents: true });
+  try {
+    for (const observer of observers) observer.deliver(); await paint();
+    p.scroll(0); await paint();
+    assert.equal(p.olderRequests(), 1);
+    assert.equal(p.list.querySelectorAll('.chat-msg').length, pageSize * 2);
+    p.scroll(0); await paint();
+    assert.equal(p.list.querySelectorAll('.chat-msg').length, pageSize * 2 + 5);
+    p.scroll(0); await paint();
+    assert.equal(p.olderRequests(), 2, 'conversation start stops paging');
+  } finally { p.close(); }
 });
