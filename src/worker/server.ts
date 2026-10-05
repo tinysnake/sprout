@@ -30,7 +30,6 @@ import {
   type WorkerReadinessProbeParams,
   type WorkerReadinessProbeResult,
 } from './protocol.ts';
-import { createAgentMessageBridge } from './agent-message-bridge.ts';
 import { createAgentTaskGroupMessageBridge } from './agent-task-group-bridge.ts';
 import { WorkerWorkspace } from './workspace.ts';
 import type { WorkerRecoveryJournal } from './recovery-journal.ts';
@@ -79,7 +78,6 @@ export interface EnvironmentWorkerOptions {
   readonly recoveryJournal?: WorkerRecoveryJournal;
 }
 interface LiveSession {
-  readonly closeMessageBridge?: () => Promise<void>;
   readonly closeTaskGroupMessageBridge?: () => Promise<void>;
   readonly engine: string;
   readonly session: EngineSession;
@@ -278,26 +276,19 @@ export class EnvironmentWorker {
     // Fence conservatively before an engine can start, not after it returns.
     this.#options.recoveryJournal?.engineStarted();
 
-    let messagesActive = true;
-    const sendDirectMessage = params.directMessagesEnabled ? async (input: import('../engine/port.ts').AgentDirectMessageInput) => {
-      if (!messagesActive || this.#closed || !this.#sessions.has(sessionId)) throw new Error('Agent message capability expired');
-      return this.#transport.request<import('../engine/port.ts').AgentDirectMessageResult>(WORKER_METHODS.directMessage, { sessionId, input });
-    } : undefined;
     let taskGroupMessagesActive = true;
     const postTaskGroupMessage = params.taskGroupMessagesEnabled ? async (input: import('../engine/port.ts').AgentTaskGroupMessageInput) => {
       if (!taskGroupMessagesActive || this.#closed || !this.#sessions.has(sessionId)) throw new Error('Task-group post capability expired');
       return this.#transport.request<import('../engine/port.ts').AgentTaskGroupMessageResult>(WORKER_METHODS.taskGroupMessage, { sessionId, input });
     } : undefined;
     const sessionId = `session-${this.#options.recoveryJournal?.snapshot().epoch ?? 'local'}-${++this.#counter}`;
-    const bridge = sendDirectMessage ? await createAgentMessageBridge(sendDirectMessage) : undefined;
     const taskGroupBridge = postTaskGroupMessage ? await createAgentTaskGroupMessageBridge(postTaskGroupMessage) : undefined;
     let session: EngineSession;
     try {
       session = await adapter.startSession({
-        ...(sendDirectMessage !== undefined ? { sendDirectMessage } : {}),
         ...(postTaskGroupMessage !== undefined ? { postTaskGroupMessage } : {}),
-        ...((bridge !== undefined || taskGroupBridge !== undefined) ? {
-          sessionEnvironment: { ...(bridge?.environment ?? {}), ...(taskGroupBridge?.environment ?? {}) },
+        ...(taskGroupBridge !== undefined ? {
+          sessionEnvironment: taskGroupBridge.environment,
         } : {}),
         agentId: params.agentId,
         workingDirectory: params.projectWorkspaceId === undefined
@@ -309,17 +300,16 @@ export class EnvironmentWorker {
           ),
         ...(params.model !== undefined ? { model: params.model } : {}),
         ...(params.effort !== undefined ? { effort: params.effort } : {}),
-        ...(params.instructions !== undefined || bridge !== undefined || taskGroupBridge !== undefined ? {
-          instructions: (params.instructions ?? '') + (bridge?.instructions ?? '') + (taskGroupBridge?.instructions ?? ''),
+        ...(params.instructions !== undefined || taskGroupBridge !== undefined ? {
+          instructions: (params.instructions ?? '') + (taskGroupBridge?.instructions ?? ''),
         } : {}),
         ...(params.resumeSessionKey !== undefined
           ? { resumeSessionKey: params.resumeSessionKey }
           : {}),
       });
     } catch (error) {
-      messagesActive = false;
       taskGroupMessagesActive = false;
-      await Promise.all([bridge?.close(), taskGroupBridge?.close()]);
+      await taskGroupBridge?.close();
       throw error;
     }
 
@@ -333,7 +323,6 @@ export class EnvironmentWorker {
       this.#options.onLog?.(contractDeliveryDiagnostic(delivery));
     }
     this.#sessions.set(sessionId, {
-      ...(bridge !== undefined ? { closeMessageBridge: async () => { messagesActive = false; await bridge.close(); } } : {}),
       ...(taskGroupBridge !== undefined ? { closeTaskGroupMessageBridge: async () => { taskGroupMessagesActive = false; await taskGroupBridge.close(); } } : {}),
       engine: params.engine,
       runId: params.runId,
@@ -447,7 +436,6 @@ export class EnvironmentWorker {
   async #closeSession(params: CloseParams): Promise<Record<string, never>> {
     const live = this.#sessions.get(params.sessionId);
     if (live) {
-      await live.closeMessageBridge?.();
       await live.closeTaskGroupMessageBridge?.();
       await live.session.close();
       if (live.running !== undefined) await settleOrTimeout([live.running]);
@@ -474,7 +462,6 @@ export class EnvironmentWorker {
     let fenced = true;
     const running: Promise<void>[] = [];
     for (const [sessionId, live] of this.#sessions) {
-      await live.closeMessageBridge?.();
       await live.closeTaskGroupMessageBridge?.();
       this.#sessions.delete(sessionId);
       if (live.running !== undefined) running.push(live.running);

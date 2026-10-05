@@ -1,4 +1,8 @@
-# Agent Task-group messages
+# Human direct messages and Agent Task-group posts
+
+Direct conversation scopes support Human-to-Agent chat only. Agent-authored direct
+messages are forbidden; Agents collaborate through the post command for their
+current Task group.
 
 An Agent sends collaboration messages to its current Task group through the session-local Task-group post command. The command is available only to a Worker-hosted session for a Project-bound Task run. Core binds it to that run's Task, Project, Agent, and Task-held Environment lease; the command accepts no destination or identity fields.
 

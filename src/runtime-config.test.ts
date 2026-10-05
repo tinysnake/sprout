@@ -38,7 +38,7 @@ test('runtime configuration refuses a Project member absent from configured Agen
   })), /not an Agent/);
 });
 
-test('the O7 Minesweeper configuration registers its local workspace and all four hand-off Agents', () => {
+test('the O7 Minesweeper configuration registers its local workspace and all four Task-group collaboration Agents', () => {
   const file = new URL('../config/o7-minesweeper-runtime.json', import.meta.url);
   const configured = parseRuntimeConfiguration(readFileSync(file, 'utf8'));
 
@@ -55,7 +55,8 @@ test('the O7 Minesweeper configuration registers its local workspace and all fou
     ],
   );
   for (const membership of configured.project?.memberships ?? []) {
-    assert.match(membership.collaborationInstructions, /direct-message the planner|direct messages/i);
+    assert.match(membership.collaborationInstructions, /Task-group post command|Task group|Task-group history/i);
+    assert.doesNotMatch(membership.collaborationInstructions, /SPROUT_AGENT_MESSAGE_URL|recipientId.*deliveryKey/i);
   }
 });
 
