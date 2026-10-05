@@ -97,7 +97,7 @@ async function paint() {
 function message(id: string, scopeId = 'channel', authorKind: 'human' | 'agent' = 'agent'): MessageView {
   return { id, scopeId, projectId: 'project', channel: scopeId, recipients: [], authorId: authorKind === 'human' ? 'operator' : 'agent', authorKind, body: id, createdAt: Number(id.replace(/\D/g, '')) || 1 };
 }
-async function page(query = '', options: { channelMessages?: number; shell?: boolean; height?: number; automaticEvents?: boolean } = {}) {
+async function page(query = '', options: { channelMessages?: number; directMessages?: number; shell?: boolean; height?: number; automaticEvents?: boolean } = {}) {
   frames.clear(); extraHeight = 0; scrollWrites = 0;
   viewportHeight = options.height ?? 200;
   automaticScrollEvents = options.automaticEvents ?? false;
@@ -108,7 +108,7 @@ async function page(query = '', options: { channelMessages?: number; shell?: boo
     { id: 'direct', projectId: 'project', kind: 'direct', participants: ['operator', 'agent'], createdAt: 1, updatedAt: 1 },
   ];
   let messages = Array.from({ length: options.channelMessages ?? 8 }, (_, i) => message(`message-${i + 1}`));
-  messages.push(...Array.from({ length: 5 }, (_, i) => message(`direct-${i + 1}`, 'direct')));
+  messages.push(...Array.from({ length: options.directMessages ?? 5 }, (_, i) => message(`direct-${i + 1}`, 'direct')));
   let events: ProjectEventView[] = [];
   let activeRuns: readonly ActiveChatRun[] = [];
   let runStatusListener: Parameters<ChatService['subscribeRunStatuses']>[0] | undefined;
@@ -480,6 +480,25 @@ test('a targeted historical message keeps the existing deep-link centering behav
   finally { p.close(); delete (dom.window.HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView; }
 });
 
+
+test('scope switch does not let an old lost positioning event suppress the first user scroll', async () => {
+  dom.window.HTMLElement.prototype.scrollIntoView = function () {
+    positions.set(this.closest('.chat-messages-body')!, 0);
+  };
+  const p = await page('&message=message-' + (pageSize * 3), {
+    channelMessages: pageSize * 3, directMessages: pageSize * 3,
+  });
+  try {
+    p.scroll(bottom(p.list)); await paint();
+    await p.router.push('/chat/channel?project=project&message=message-' + (pageSize * 3 - 1));
+    await p.router.push('/chat/direct?project=project');
+    p.scroll(0); await flush();
+    assert.equal(p.olderRequests(), 1, 'the first wheel scroll in the new scope pages immediately');
+  } finally {
+    p.close();
+    delete (dom.window.HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView;
+  }
+});
 
 test('automatic positioning: a queued user gesture does not turn a script write into paging', async () => {
   const p = await page('', { channelMessages: pageSize * 3, height: pageSize * 100 - 20, automaticEvents: true });
