@@ -18,7 +18,7 @@ import {
   type RunAdmitter,
 } from './coordinator.ts';
 import { ProjectEventError } from './events.ts';
-import { InMemoryCollaborationStore } from './store.ts';
+import { DEFAULT_PROJECT_EVENT_PAGE_SIZE, InMemoryCollaborationStore } from './store.ts';
 import { buildCollaborationScopes, type CollaborationScopeHarness } from './scope-harness.ts';
 
 const definition: EnvironmentDefinition = {
@@ -72,6 +72,34 @@ function build(options: {
   });
   return { coordinator, store, engine, orchestrator, scopes };
 }
+
+test('origin-filtered event pages scan sparse history and resume at the matching exclusive cursor', async () => {
+  const { coordinator, store } = build({ turns: [] });
+  const count = DEFAULT_PROJECT_EVENT_PAGE_SIZE * 3 + 1;
+  const matching: string[] = [];
+  for (let index = 0; index < count; index++) {
+    const id = `origin-event-${index}`;
+    const matches = index % DEFAULT_PROJECT_EVENT_PAGE_SIZE === 0;
+    if (matches) matching.push(id);
+    await store.publishEvent({
+      event: {
+        id, projectId: project.id, kind: 'pagination-fixture', summary: id,
+        producer: { kind: 'system', id: 'sprout' }, disposition: 'informational',
+        responsibleAgentIds: [], deliveryKey: id, createdAt: index,
+        originScopeIds: [matches ? 'direct' : 'other'],
+      },
+      plan: { inputId: id, decisions: [], observations: [] }, now: index,
+    });
+  }
+  const newest = await coordinator.listEventsPage({ projectId: project.id, originScopeId: 'direct', limit: 2 });
+  assert.deepEqual(newest?.events.map((event) => event.id), matching.slice(-2));
+  assert.equal(newest?.hasOlder, true);
+  const older = await coordinator.listEventsPage({ projectId: project.id, originScopeId: 'direct', limit: 2, before: newest!.events[0]!.id });
+  assert.deepEqual(older?.events.map((event) => event.id), matching.slice(0, 2));
+  assert.equal(older?.hasOlder, false);
+  assert.equal(await coordinator.listEventsPage({ projectId: project.id, originScopeId: 'direct', limit: 2, before: 'unknown' }), undefined);
+  assert.equal((await coordinator.listEvents(project.id)).length, count, 'unpaged Feed/audit reads retain all events');
+});
 
 function completedTurn(text: string): ScriptedTurn {
   return { events: [{ type: 'message', text, final: true }], result: { status: 'completed', text } };

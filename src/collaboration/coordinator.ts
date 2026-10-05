@@ -150,8 +150,12 @@ import {
   type JudgementParseResult,
   type RoutingJudgement,
 } from './routing-judgement.ts';
-import type { CollaborationStore } from './store.ts';
-import { wakeFromBatch, wakeIdempotencyKey } from './store.ts';
+import type {
+  CollaborationStore,
+  ProjectEventPage,
+  ProjectEventPageQuery,
+} from './store.ts';
+import { DEFAULT_PROJECT_EVENT_PAGE_SIZE, wakeFromBatch, wakeIdempotencyKey } from './store.ts';
 import { runFailureEventInput } from './run-failure-events.ts';
 import { runInterruptionEventInput } from './run-interruption-events.ts';
 
@@ -924,7 +928,42 @@ export class CollaborationCoordinator {
 
   /** Durable state for observability: every Project event on record. */
   async listEvents(projectId?: string): Promise<readonly ProjectEvent[]> {
-    const events = await this.#store.listEvents(projectId);
+    return this.#projectEvents(await this.#store.listEvents(projectId));
+  }
+
+  /** Bounded Project event page, optionally filtered to its causal chat origin. */
+  async listEventsPage(query: ProjectEventPageQuery & { readonly originScopeId?: string }): Promise<ProjectEventPage | undefined> {
+    if (query.originScopeId === undefined) {
+      const page = await this.#store.listEventsPage(query);
+      return page === undefined ? undefined : { ...page, events: await this.#projectEvents(page.events) };
+    }
+
+    const matching: ProjectEvent[] = [];
+    let cursor = query.before;
+    let hasOlder = false;
+    const scanLimit = Math.max(query.limit + 1, DEFAULT_PROJECT_EVENT_PAGE_SIZE);
+    while (matching.length <= query.limit) {
+      const page = await this.#store.listEventsPage({
+        projectId: query.projectId,
+        limit: scanLimit,
+        ...(cursor !== undefined ? { before: cursor } : {}),
+      });
+      if (page === undefined) return undefined;
+      const projected = await this.#projectEvents(page.events);
+      for (const event of [...projected].reverse()) {
+        if (event.originScopeIds?.includes(query.originScopeId)) matching.push(event);
+        if (matching.length > query.limit) break;
+      }
+      if (matching.length > query.limit) { hasOlder = true; break; }
+      if (!page.hasOlder) break;
+      const oldest = page.events[0]?.id;
+      if (oldest === undefined || oldest === cursor) break;
+      cursor = oldest;
+    }
+    return { events: matching.slice(0, query.limit).reverse(), hasOlder };
+  }
+
+  async #projectEvents(events: readonly ProjectEvent[]): Promise<readonly ProjectEvent[]> {
     const wakes = await this.#store.listWakeRequests();
     return Promise.all(events.map(async (event) => {
       const isFailure = event.kind === 'agent-run-failure' && event.producer.kind === 'system' &&

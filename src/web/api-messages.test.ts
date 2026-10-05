@@ -30,6 +30,105 @@ async function messageHistory(count: number) {
   return { context, base: `http://127.0.0.1:${port}`, scopeId };
 }
 
+async function eventHistory(count: number) {
+  const context = buildObservableCollaboration();
+  const { port } = await context.api.listen(0);
+  for (let index = 0; index < count; index += 1) {
+    await context.collaboration.publishEvent({
+      projectId: 'project-sprout',
+      kind: 'pagination-fixture',
+      summary: `History event ${index}`,
+      disposition: 'informational',
+      deliveryKey: `event-history-${index}`,
+    });
+  }
+  return { context, base: `http://127.0.0.1:${port}` };
+}
+
+test('GET /api/projects/:id/events returns a bounded newest window and hasOlder by default', async () => {
+  const { context, base } = await eventHistory(55);
+  try {
+    const response = await fetch(`${base}/api/projects/project-sprout/events`);
+    assert.equal(response.status, 200);
+    const body = await response.json() as { events: { id: string }[]; hasOlder: boolean };
+    const durable = [...await context.collaboration.listEvents('project-sprout')]
+      .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+    assert.equal(body.events.length, 50);
+    assert.deepEqual(body.events.map((event) => event.id), durable.slice(-50).map((event) => event.id));
+    assert.equal(body.hasOlder, true);
+  } finally {
+    await context.api.close();
+  }
+});
+
+test('GET /api/projects/:id/events honors limit and an exclusive backward cursor', async () => {
+  const { context, base } = await eventHistory(8);
+  try {
+    const durable = [...await context.collaboration.listEvents('project-sprout')]
+      .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+    const newestResponse = await fetch(`${base}/api/projects/project-sprout/events?limit=3`);
+    const newest = await newestResponse.json() as { events: { id: string }[]; hasOlder: boolean };
+    assert.equal(newest.events.length, 3);
+    assert.equal(newest.hasOlder, true);
+    const olderResponse = await fetch(`${base}/api/projects/project-sprout/events?limit=3&before=${encodeURIComponent(newest.events[0]!.id)}`);
+    const older = await olderResponse.json() as { events: { id: string }[]; hasOlder: boolean };
+    assert.equal(olderResponse.status, 200);
+    assert.deepEqual(older.events.map((event) => event.id), durable.slice(-6, -3).map((event) => event.id));
+    assert.equal(older.hasOlder, true);
+    assert.ok(older.events.every((event) => event.id !== newest.events[0]?.id));
+  } finally {
+    await context.api.close();
+  }
+});
+
+test('GET /api/projects/:id/events returns an empty page before the oldest event', async () => {
+  const { context, base } = await eventHistory(4);
+  try {
+    const oldest = [...await context.collaboration.listEvents('project-sprout')]
+      .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))[0]!;
+    const response = await fetch(`${base}/api/projects/project-sprout/events?limit=3&before=${encodeURIComponent(oldest.id)}`);
+    assert.equal(response.status, 200);
+    const body = await response.json() as { events: unknown[]; hasOlder: boolean };
+    assert.deepEqual(body.events, []);
+    assert.equal(body.hasOlder, false);
+  } finally {
+    await context.api.close();
+  }
+});
+
+test('GET /api/projects/:id/events returns 404 for unknown and cross-project cursors', async () => {
+  const { context, base } = await eventHistory(1);
+  try {
+    const unknown = await fetch(`${base}/api/projects/project-sprout/events?before=missing-event-cursor`);
+    assert.equal(unknown.status, 404);
+    assert.match((await unknown.json() as { error: string }).error, /missing-event-cursor/);
+    const [cursor] = await context.collaboration.listEvents('project-sprout');
+    const other = await fetch(`${base}/api/projects/other-project/events?before=${encodeURIComponent(cursor!.id)}`);
+    assert.equal(other.status, 404, 'a cursor must belong to the requested project');
+  } finally { await context.api.close(); }
+});
+
+test('GET /api/projects/:id/events caps the requested page size', async () => {
+  const { context, base } = await eventHistory(105);
+  try {
+    const capped = await fetch(`${base}/api/projects/project-sprout/events?limit=1000`);
+    assert.equal(capped.status, 200);
+    const body = await capped.json() as { events: unknown[]; hasOlder: boolean };
+    assert.equal(body.events.length, 100);
+    assert.equal(body.hasOlder, true);
+  } finally { await context.api.close(); }
+});
+
+test('GET /api/projects/:id/events validates paging parameters', async () => {
+  const { context, base } = await eventHistory(1);
+  try {
+    for (const query of ['limit=0', 'limit=-1', 'limit=1.5', 'limit=abc', 'limit=9007199254740992', 'originScopeId=', 'before=']) {
+      const response = await fetch(`${base}/api/projects/project-sprout/events?${query}`);
+      assert.equal(response.status, 400, query);
+    }
+  } finally { await context.api.close(); }
+});
+
 test('GET /api/messages returns a bounded newest window with the legacy response shape', async () => {
   const { context, base, scopeId } = await messageHistory(55);
   try {
@@ -585,6 +684,7 @@ test('a failed direct run surfaces as one sanitized informational Project event 
   const { port } = await context.api.listen(0);
   const base = `http://127.0.0.1:${port}`;
   const scopeId = await context.scopes.openDirect('project-sprout', ['human-lead', 'agent-scout']);
+  const unrelatedScopeId = 'direct-unrelated-origin';
   try {
     const delivered = await fetch(`${base}/api/messages`, {
       method: 'POST',
@@ -631,6 +731,17 @@ test('a failed direct run surfaces as one sanitized informational Project event 
     assert.deepEqual(event.responsibleAgentIds, []);
     assert.equal(event.summary, 'Agent run failed (execution) for agent-scout');
     assert.match(event.detail ?? '', new RegExp(`run ${result.admittedRunIds[0]}`), 'the evidence chain links the run');
+
+    const originPageResponse = await fetch(`${base}/api/projects/project-sprout/events?limit=1&originScopeId=${encodeURIComponent(scopeId)}`);
+    const originPage = await originPageResponse.json() as { events: { id: string; originScopeIds?: string[] }[]; hasOlder: boolean };
+    assert.equal(originPageResponse.status, 200);
+    assert.deepEqual(originPage.events.map((item) => item.id), [event.id]);
+    assert.ok(originPage.events[0]?.originScopeIds?.includes(scopeId));
+    assert.equal(originPage.hasOlder, false);
+    const unrelatedPageResponse = await fetch(`${base}/api/projects/project-sprout/events?originScopeId=${encodeURIComponent(unrelatedScopeId)}`);
+    const unrelatedPage = await unrelatedPageResponse.json() as { events: unknown[]; hasOlder: boolean };
+    assert.deepEqual(unrelatedPage.events, [], 'origin filtering happens before paging');
+    assert.equal(unrelatedPage.hasOlder, false);
 
     // Privacy projection: never the run prompt, raw events, or tool output.
     const serialized = JSON.stringify(event);

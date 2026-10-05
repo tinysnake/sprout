@@ -72,15 +72,30 @@ function onResize() { viewportWidth.value = window.innerWidth; void markVisible(
 const knownEvents = new Set<string>();
 let generation = 0;
 let detailGeneration = 0;
+let timelineGeneration = 0;
 let activeRunGeneration = 0;
 let activeRunScopeId = '';
 let inspectedScopeKey = '';
 let unsubRuns: (() => void) | undefined;
 const refreshTimers = new Set<ReturnType<typeof setTimeout>>();
-type ChatMessagePageState = { readonly hasOlder: boolean; readonly loading: boolean; readonly limited: boolean };
+type ChatMessagePageState = { readonly hasOlder: boolean; readonly loading: boolean; readonly limited: boolean; readonly pagedOlder: boolean };
+type ChatTimelinePageState = {
+  projectId: string;
+  scopeId: string;
+  visibleIds: Set<string>;
+  messageCursor?: string;
+  eventCursor?: string;
+  messageHasOlder: boolean;
+  eventHasOlder: boolean;
+  loading: boolean;
+  limited: boolean;
+  pagedOlder: boolean;
+};
+type ChatEventPage = Awaited<ReturnType<ChatService['listProjectEvents']>>;
 const messagePages = ref<Record<string, ChatMessagePageState>>({});
+const timelinePaging = ref<ChatTimelinePageState | null>(null);
 const CHAT_MESSAGE_PAGE_SIZE = 50;
-const CHAT_MESSAGE_MEMORY_LIMIT = 200;
+const CHAT_TIMELINE_MEMORY_LIMIT = 200;
 // The Message port has no arrival signal. Observe the selected Project at a
 // bounded cadence while visible; run-coupled replies keep their fast follow-ups.
 const CHAT_POLL_MS = 15000;
@@ -112,21 +127,33 @@ const archivedDirectAgent = computed(() => {
 });
 const activeMessages = computed(() => messages.value.filter((m) => m.scopeId === activeScope.value?.id));
 function compareStableId(left: string, right: string) { return left < right ? -1 : left > right ? 1 : 0; }
+function timelineEntryId(entry: ChatTimelineItem) { return entry.kind === 'message' ? entry.message.id : entry.event.id; }
+function timelineEntryKey(entry: ChatTimelineItem) { return `${entry.kind}:${timelineEntryId(entry)}`; }
+function compareTimelineItems(left: ChatTimelineItem, right: ChatTimelineItem) {
+  const leftTime = left.kind === 'message' ? left.message.createdAt : left.event.createdAt;
+  const rightTime = right.kind === 'message' ? right.message.createdAt : right.event.createdAt;
+  return leftTime - rightTime || compareStableId(timelineEntryId(left), timelineEntryId(right)) || compareStableId(left.kind, right.kind);
+}
 const timeline = computed<ChatTimelineItem[]>(() => [
   ...activeMessages.value.map((message) => ({ kind: 'message' as const, message })),
   ...events.value.filter((event) => activeScope.value?.kind === 'project' || event.originScopeIds?.includes(activeScopeId.value)).map((event) => ({ kind: 'event' as const, event })),
-].sort((a, b) => {
-  const aTime = a.kind === 'message' ? a.message.createdAt : a.event.createdAt;
-  const bTime = b.kind === 'message' ? b.message.createdAt : b.event.createdAt;
-  return aTime - bTime || compareStableId(a.kind === 'message' ? a.message.id : a.event.id, b.kind === 'message' ? b.message.id : b.event.id);
-}));
+].sort(compareTimelineItems));
+const visibleTimeline = computed(() => {
+  const page = timelinePaging.value;
+  return page?.scopeId === activeScopeId.value && page.projectId === projectId.value
+    ? timeline.value.filter((entry) => page.visibleIds.has(timelineEntryKey(entry)))
+    : [];
+});
 const { viewport: messageViewport, content: messageContent, hasNewEntries, onScroll: onMessageScroll, jumpToLatest, noteHistory: noteTimelineHistory, scrollProgrammatically, consumeProgrammaticScroll } = useTimelineScroll(
   computed(() => `${projectId.value}|${activeScopeId.value}|${requestedScopeId.value}`),
-  computed(() => timeline.value.map((entry) => entry.kind === 'message' ? `message:${entry.message.id}` : `event:${entry.event.id}`)),
+  computed(() => visibleTimeline.value.map(timelineEntryKey)),
   computed(() => !!requestedMessageId.value || !!requestedEventId.value),
 );
 const dateSeparators = computed(() => messageDateSeparators(
-  timeline.value.flatMap((entry) => entry.kind === 'message' ? [entry.message] : []), Date.now(),
+  visibleTimeline.value.map((entry) => ({
+    id: timelineEntryKey(entry),
+    createdAt: entry.kind === 'message' ? entry.message.createdAt : entry.event.createdAt,
+  })), Date.now(),
 ));
 const activeChatRuns = computed(() => activeRuns.value.filter((run) => run.status === 'queued' || run.status === 'running'));
 const canSend = computed(() => !!service && !!activeScope.value && !archivedDirectAgent.value && !detailLoading.value && activeRunsKnown.value && !activeRunsLoading.value && activeChatRuns.value.length === 0 && inspection.value?.scope.id === activeScope.value.id && inspection.value.state.writable && presentation.value.controlAvailable && !sending.value);
@@ -160,7 +187,7 @@ async function markVisible() {
   if (token !== generation || id !== activeScopeId.value || loading.value || error.value || detailLoading.value
     || document.visibilityState === 'hidden' || (!requestedScopeId.value && viewportWidth.value < 768)
     || inspection.value?.scope.id !== id) return;
-  await unreadState?.markRead(id, activeMessages.value.map((m) => m.id));
+  await unreadState?.markRead(id, visibleTimeline.value.flatMap((entry) => entry.kind === 'message' ? [entry.message.id] : []));
 }
 function scopeKind(scope: ConversationScopeView) { return scope.kind === 'project' ? 'channel' : scope.kind === 'direct' ? 'direct-message' : 'working-group'; }
 function isTargetEntry(entry: ChatTimelineItem) {
@@ -241,12 +268,57 @@ function mergeMessageWindows(current: readonly MessageView[], incoming: readonly
   for (const message of [...current, ...incoming]) if (message.projectId === forProjectId) messagesById.set(message.id, message);
   const byScope = new Map<string, MessageView[]>();
   for (const message of messagesById.values()) byScope.set(message.scopeId, [...(byScope.get(message.scopeId) ?? []), message]);
-  return [...byScope.values()].flatMap((rows) => rows
-    .sort((left, right) => left.createdAt - right.createdAt || compareStableId(left.id, right.id))
-    .slice(-CHAT_MESSAGE_MEMORY_LIMIT));
+  return [...byScope.entries()].flatMap(([scopeId, rows]) => {
+    const retainedOlder = messagePages.value[scopeId]?.pagedOlder === true;
+    // Active source rows include unconsumed buffers. The merged visible cap is
+    // enforced below; trimming a source here could skip its next history row.
+    const limit = scopeId !== activeScopeId.value ? 1 : retainedOlder ? Infinity : CHAT_MESSAGE_PAGE_SIZE;
+    return rows.sort((left, right) => left.createdAt - right.createdAt || compareStableId(left.id, right.id)).slice(-limit);
+  });
+}
+function mergeEventWindows(current: readonly ProjectEventView[], incoming: readonly ProjectEventView[], forProjectId: string) {
+  const eventsById = new Map<string, ProjectEventView>();
+  for (const event of [...current, ...incoming]) if (event.projectId === forProjectId) eventsById.set(event.id, event);
+  return [...eventsById.values()]
+    .sort((left, right) => left.createdAt - right.createdAt || compareStableId(left.id, right.id));
+}
+function mergeTimelineRows(messageRows: readonly MessageView[], eventRows: readonly ProjectEventView[]) {
+  return [
+    ...messageRows.map((message) => ({ kind: 'message' as const, message })),
+    ...eventRows.map((event) => ({ kind: 'event' as const, event })),
+  ].sort(compareTimelineItems);
+}
+function timelinePageState(scopeId: string, eventPage: ChatEventPage, markHistory = false): ChatTimelinePageState {
+  const messageRows = activeMessages.value;
+  const eventRows = eventPage.events;
+  const newest = mergeTimelineRows(messageRows, eventRows).slice(-CHAT_MESSAGE_PAGE_SIZE);
+  if (markHistory) noteTimelineHistory(newest.map((entry) => `${entry.kind}:${timelineEntryId(entry)}`));
+  const oldestMessage = [...messageRows].sort((left, right) => left.createdAt - right.createdAt || compareStableId(left.id, right.id))[0];
+  const messagePage = messagePages.value[scopeId];
+  return {
+    projectId: projectId.value,
+    scopeId,
+    visibleIds: new Set(newest.map(timelineEntryKey)),
+    ...(oldestMessage !== undefined ? { messageCursor: oldestMessage.id } : {}),
+    ...(eventRows[0] !== undefined ? { eventCursor: eventRows[0].id } : {}),
+    messageHasOlder: messagePage?.hasOlder === true && messagePage.limited !== true,
+    eventHasOlder: eventPage.hasOlder,
+    loading: false,
+    limited: false,
+    pagedOlder: false,
+  };
+}
+function eventOriginScopeId(scope: ConversationScopeView | undefined) {
+  return scope?.kind === 'project' || scope === undefined ? undefined : scope.id;
 }
 let userScrollUntil = 0;
-watch(activeScopeId, () => { userScrollUntil = 0; });
+let loadingTimelineScopeId = '';
+let pendingTimelinePageScopeId = '';
+let pendingTimelinePageUntil = 0;
+watch(activeScopeId, () => {
+  userScrollUntil = 0;
+  pendingTimelinePageScopeId = '';
+}, { flush: 'sync' });
 function onScrollInput(event: Event) {
   if (event instanceof KeyboardEvent && !['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) return;
   if (event.type.startsWith('pointer') && (event as PointerEvent).buttons === 0) return;
@@ -256,9 +328,28 @@ function onScrollInput(event: Event) {
 }
 function onMessagesScroll(event: Event) {
   const viewport = event.currentTarget as HTMLElement;
-  if (viewport.scrollHeight > viewport.clientHeight && viewport.scrollTop <= 40) void loadOlderMessages(viewport);
+  const scopeId = activeScopeId.value;
+  if (loadingTimelineScopeId === scopeId || timelinePaging.value?.scopeId !== scopeId) {
+    if (viewport.scrollTop <= 40) {
+      // Keep a recent admitted gesture while the filtered event head is loading.
+      // It resumes only at the same near-top position; no layout event can create it.
+      pendingTimelinePageScopeId = scopeId;
+      pendingTimelinePageUntil = performance.now() + 1000;
+    }
+    return;
+  }
+  if (viewport.scrollHeight <= viewport.clientHeight || viewport.scrollTop > 40) return;
+  void loadOlderTimeline(viewport);
 }
-/** Union of #200's bottom-follow tracking and #201's older-page trigger on one scroll container. */
+function resumePendingTimelinePage(scopeId: string) {
+  if (pendingTimelinePageScopeId !== scopeId) return;
+  pendingTimelinePageScopeId = '';
+  const viewport = messageViewport.value;
+  if (performance.now() <= pendingTimelinePageUntil && viewport && viewport.scrollHeight > viewport.clientHeight && viewport.scrollTop <= 40) {
+    void loadOlderTimeline(viewport);
+  }
+}
+/** R4 admission gates this trigger; all positioning and anchor writes stay suppressed by useTimelineScroll. */
 function onViewportScroll(event: Event) {
   const programmatic = consumeProgrammaticScroll();
   if (!programmatic && performance.now() <= userScrollUntil) {
@@ -267,57 +358,180 @@ function onViewportScroll(event: Event) {
   }
   onMessageScroll();
 }
-/** #201 paging stays isolated from #200's independent bottom-stick behaviour. */
-async function loadOlderMessages(viewport: HTMLElement) {
+async function loadOlderTimeline(viewport: HTMLElement) {
+  const state = timelinePaging.value;
   const scopeId = activeScopeId.value;
-  const state = messagePages.value[scopeId];
-  if (!service || !scopeId || !state?.hasOlder || state.loading) return;
-  const loaded = activeMessages.value;
-  if (loaded.length === 0) return;
-  if (loaded.length >= CHAT_MESSAGE_MEMORY_LIMIT) {
-    messagePages.value = { ...messagePages.value, [scopeId]: { hasOlder: false, loading: false, limited: true } };
+  if (!service || !state || state.scopeId !== scopeId || state.projectId !== projectId.value || state.loading || state.limited) return;
+  if (refreshInFlight) {
+    pendingTimelinePageScopeId = scopeId;
+    pendingTimelinePageUntil = performance.now() + 1000;
     return;
   }
-  const cursor = [...loaded].sort((left, right) => left.createdAt - right.createdAt || compareStableId(left.id, right.id))[0]!.id;
-  const token = generation;
+  const hasBufferedRows = activeMessages.value.some((message) => !state.visibleIds.has(`message:${message.id}`))
+    || events.value.some((event) => !state.visibleIds.has(`event:${event.id}`));
+  if (!hasBufferedRows && !state.messageHasOlder && !state.eventHasOlder) return;
+  if (state.visibleIds.size >= CHAT_TIMELINE_MEMORY_LIMIT) {
+    state.limited = true;
+    messagePages.value = { ...messagePages.value, [scopeId]: { ...(messagePages.value[scopeId] ?? { hasOlder: false, loading: false, limited: false, pagedOlder: false }), limited: true } };
+    return;
+  }
+
+  const token = timelineGeneration;
   const anchor = [...viewport.querySelectorAll<HTMLElement>('[data-message-id], [data-event-id]')]
     .find((row) => row.getBoundingClientRect().bottom > viewport.getBoundingClientRect().top);
   const anchorId = anchor?.dataset['messageId'] ?? anchor?.dataset['eventId'];
   const anchorTop = anchor?.getBoundingClientRect().top;
-  messagePages.value = { ...messagePages.value, [scopeId]: { ...state, loading: true } };
+  const previousMessagePage = messagePages.value[scopeId] ?? { hasOlder: false, loading: false, limited: false, pagedOlder: false };
+  state.loading = true;
+  state.pagedOlder = true;
+  messagePages.value = { ...messagePages.value, [scopeId]: { ...previousMessagePage, loading: true, pagedOlder: true } };
+  const selected: ChatTimelineItem[] = [];
+  const selectedIds = new Set<string>();
+  const current = () => timelinePaging.value?.scopeId === scopeId && timelinePaging.value.projectId === state.projectId
+    && token === timelineGeneration && scopeId === activeScopeId.value;
+
   try {
-    const older = await service.listMessages(scopeId, { limit: CHAT_MESSAGE_PAGE_SIZE, before: cursor });
-    if (token !== generation || scopeId !== activeScopeId.value) return;
-    // An older-page prepend is history, not a live arrival: mark it before the
-    // entry watcher runs so #200's controller neither raises jump-to-latest nor
-    // yanks a reading position anchored to the pre-prepend viewport.
-    noteTimelineHistory(older.map((message) => `message:${message.id}`));
-    messages.value = mergeMessageWindows(messages.value, older, projectId.value);
-    const retained = messages.value.filter((message) => message.scopeId === scopeId).length;
-    const limited = retained >= CHAT_MESSAGE_MEMORY_LIMIT && (older.length === CHAT_MESSAGE_PAGE_SIZE || state.hasOlder);
+    const fetchOlderMessages = async () => {
+      const cursor = state.messageCursor;
+      if (!cursor) { state.messageHasOlder = false; return; }
+      // Fill each empty source before choosing the globally newest pending row.
+      // Source buffers are at most one page beyond the retained visible rows.
+      const limit = CHAT_MESSAGE_PAGE_SIZE;
+      const older = await service.listMessages(scopeId, { limit, before: cursor });
+      if (!current()) return;
+      if (older.length === 0) { state.messageHasOlder = false; return; }
+      messages.value = mergeMessageWindows(messages.value, older, projectId.value);
+      state.messageCursor = older[0]?.id;
+      state.messageHasOlder = older.length === limit;
+      messagePages.value = {
+        ...messagePages.value,
+        [scopeId]: { ...previousMessagePage, hasOlder: state.messageHasOlder, loading: true, limited: false, pagedOlder: true },
+      };
+    };
+    const fetchOlderEvents = async () => {
+      const cursor = state.eventCursor;
+      if (!cursor) { state.eventHasOlder = false; return; }
+      const limit = CHAT_MESSAGE_PAGE_SIZE;
+      const scope = activeScope.value;
+      const originScopeId = eventOriginScopeId(scope);
+      const older = await service.listProjectEvents(projectId.value, {
+        limit, before: cursor, ...(originScopeId !== undefined ? { originScopeId } : {}),
+      });
+      if (!current()) return;
+      if (older.events.length === 0) { state.eventHasOlder = older.hasOlder; return; }
+      events.value = mergeEventWindows(events.value, older.events, projectId.value);
+      state.eventCursor = older.events[0]?.id;
+      state.eventHasOlder = older.hasOlder;
+    };
+
+    while (selected.length < Math.min(CHAT_MESSAGE_PAGE_SIZE, CHAT_TIMELINE_MEMORY_LIMIT - state.visibleIds.size)) {
+      let pendingMessages = activeMessages.value.filter((message) =>
+        !state.visibleIds.has(`message:${message.id}`) && !selectedIds.has(`message:${message.id}`),
+      );
+      let pendingEvents = events.value.filter((event) =>
+        !state.visibleIds.has(`event:${event.id}`) && !selectedIds.has(`event:${event.id}`),
+      );
+      if (pendingMessages.length === 0 && state.messageHasOlder) {
+        await fetchOlderMessages();
+        if (!current()) return;
+        pendingMessages = activeMessages.value.filter((message) =>
+          !state.visibleIds.has(`message:${message.id}`) && !selectedIds.has(`message:${message.id}`),
+        );
+      }
+      if (pendingEvents.length === 0 && state.eventHasOlder) {
+        await fetchOlderEvents();
+        if (!current()) return;
+        pendingEvents = events.value.filter((event) =>
+          !state.visibleIds.has(`event:${event.id}`) && !selectedIds.has(`event:${event.id}`),
+        );
+      }
+      const candidates = mergeTimelineRows(pendingMessages, pendingEvents).sort((left, right) => compareTimelineItems(right, left));
+      const next = candidates[0];
+      if (!next) break;
+      selected.push(next);
+      selectedIds.add(timelineEntryKey(next));
+    }
+
+    if (!current()) return;
+    if (selected.length > 0) {
+      // These rows were fetched as history, including rows buffered by the
+      // initial source pages; mark before adding them to the rendered union.
+      noteTimelineHistory(selected.map((entry) => `${entry.kind}:${timelineEntryId(entry)}`));
+      state.visibleIds = new Set([...state.visibleIds, ...selected.map(timelineEntryKey)]);
+    }
+    state.limited = state.visibleIds.size >= CHAT_TIMELINE_MEMORY_LIMIT || state.limited;
     messagePages.value = {
       ...messagePages.value,
-      [scopeId]: { hasOlder: older.length === CHAT_MESSAGE_PAGE_SIZE && !limited, loading: false, limited },
+      [scopeId]: { ...messagePages.value[scopeId]!, hasOlder: state.messageHasOlder, loading: true, limited: state.limited, pagedOlder: state.pagedOlder },
     };
     await nextTick();
-    if (token !== generation || scopeId !== activeScopeId.value || anchorId === undefined || anchorTop === undefined) return;
+    if (!current() || anchorId === undefined || anchorTop === undefined) return;
     const currentAnchor = [...viewport.querySelectorAll<HTMLElement>('[data-message-id], [data-event-id]')]
       .find((row) => row.dataset['messageId'] === anchorId || row.dataset['eventId'] === anchorId);
     if (currentAnchor) scrollProgrammatically((element) => { element.scrollTop += currentAnchor.getBoundingClientRect().top - anchorTop; });
   } catch {
-    if (token === generation && scopeId === activeScopeId.value) actionError.value = 'Older messages could not be loaded. Scroll up to retry.';
+    if (current()) actionError.value = 'Older chat rows could not be loaded. Scroll up to retry.';
   } finally {
-    const latest = messagePages.value[scopeId];
-    if (latest?.loading) messagePages.value = { ...messagePages.value, [scopeId]: { ...latest, loading: false } };
+    if (current()) {
+      state.loading = false;
+      const latest = messagePages.value[scopeId] ?? previousMessagePage;
+      messagePages.value = { ...messagePages.value, [scopeId]: { ...latest, loading: false, limited: state.limited, pagedOlder: state.pagedOlder } };
+    }
   }
 }
 function selectProject(id: string) {
   if (id !== projectId.value) void router.push({ name: 'project-chat', query: { ...route.query, project: id } });
 }
+async function loadTimelineScope() {
+  const scope = activeScope.value;
+  if (!scope) {
+    timelineGeneration++;
+    timelinePaging.value = null;
+    events.value = [];
+    return;
+  }
+  if (!service || loading.value || (timelinePaging.value?.scopeId === scope.id && timelinePaging.value.projectId === projectId.value)) return;
+  const token = ++timelineGeneration;
+  const selectedProjectId = projectId.value;
+  loadingTimelineScopeId = scope.id;
+  timelinePaging.value = null;
+  events.value = [];
+  try {
+    const originScopeId = eventOriginScopeId(scope);
+    const [rows, page] = await Promise.all([
+      service.listMessages(scope.id, { limit: CHAT_MESSAGE_PAGE_SIZE }),
+      service.listProjectEvents(selectedProjectId, {
+        limit: CHAT_MESSAGE_PAGE_SIZE,
+        ...(originScopeId !== undefined ? { originScopeId } : {}),
+      }),
+    ]);
+    if (token !== timelineGeneration || selectedProjectId !== projectId.value || scope.id !== activeScopeId.value) return;
+    messagePages.value = {
+      ...messagePages.value,
+      [scope.id]: { hasOlder: rows.length === CHAT_MESSAGE_PAGE_SIZE, loading: false, limited: false, pagedOlder: false },
+    };
+    messages.value = mergeMessageWindows(messages.value.filter((message) => message.scopeId !== scope.id), rows, selectedProjectId);
+    events.value = page.events;
+    timelinePaging.value = timelinePageState(scope.id, page, true);
+    await nextTick();
+    if (token !== timelineGeneration || scope.id !== activeScopeId.value) return;
+    resumePendingTimelinePage(scope.id);
+  } catch {
+    if (token === timelineGeneration && scope.id === activeScopeId.value) actionError.value = 'Project events could not be loaded. Shown facts may be stale.';
+  } finally {
+    if (loadingTimelineScopeId === scope.id) loadingTimelineScopeId = '';
+  }
+}
 
 async function loadProject() {
   if (!service || !projectService) { loading.value = false; error.value = 'Project Chat is unavailable: production authority is not connected.'; return; }
   const token = ++generation;
+  timelineGeneration++;
+  timelinePaging.value = null;
+  messages.value = [];
+  events.value = [];
+  messagePages.value = {};
+  knownEvents.clear();
   loading.value = true;
   error.value = '';
   try {
@@ -327,17 +541,26 @@ async function loadProject() {
     if (!projectId.value || !listed.some((p) => p.id === projectId.value)) { error.value = 'Project Not Found. Choose a Project from Overview.'; scopes.value = []; return; }
     const selectedId = projectId.value;
     const scopeList = await service.listScopes(selectedId);
-    const [messageWindow, projectEvents, routing] = await Promise.all([
-      projectMessages(scopeList), service.listProjectEvents(selectedId), service.listRoutingBatches(selectedId),
+    const selectedScope = requestedScopeId.value
+      ? scopeList.find((scope) => scope.id === requestedScopeId.value)
+      : scopeList.find((scope) => scope.kind === 'project') ?? scopeList[0];
+    const originScopeId = eventOriginScopeId(selectedScope);
+    const projectEventPagePromise = service.listProjectEvents(selectedId, { limit: CHAT_MESSAGE_PAGE_SIZE });
+    const activeEventPagePromise = originScopeId === undefined
+      ? projectEventPagePromise
+      : service.listProjectEvents(selectedId, { limit: CHAT_MESSAGE_PAGE_SIZE, originScopeId });
+    const [messageWindow, recentProjectEvents, activeEventPage, routing] = await Promise.all([
+      projectMessages(scopeList), projectEventPagePromise, activeEventPagePromise, service.listRoutingBatches(selectedId),
     ]);
     if (token !== generation) return;
     scopes.value = scopeList;
     messages.value = mergeMessageWindows([], messageWindow.messages, selectedId);
     messagePages.value = Object.fromEntries(scopeList.map((scope) => [scope.id, {
-      hasOlder: messageWindow.hasOlder[scope.id] ?? false, loading: false, limited: false,
+      hasOlder: messageWindow.hasOlder[scope.id] ?? false, loading: false, limited: false, pagedOlder: false,
     }]));
-    events.value = projectEvents;
-    for (const event of projectEvents) knownEvents.add(event.id);
+    events.value = activeEventPage.events;
+    for (const event of recentProjectEvents.events) knownEvents.add(event.id);
+    if (selectedScope !== undefined) timelinePaging.value = timelinePageState(selectedScope.id, activeEventPage, true);
     batches.value = routing.batches;
     await refreshActiveRuns();
     await unreadState?.refresh();
@@ -345,48 +568,101 @@ async function loadProject() {
   finally { if (token === generation) loading.value = false; }
 }
 async function refreshMessages() {
-  if (!service || !projectId.value || loading.value || error.value || refreshInFlight) return;
+  if (!service || !projectId.value || loading.value || error.value || refreshInFlight || timelinePaging.value?.loading) return;
   refreshInFlight = true;
   const id = projectId.value;
+  const scopeId = activeScopeId.value;
+  const scope = activeScope.value;
   const token = generation;
+  const pageAtStart = timelinePaging.value?.scopeId === scopeId ? timelinePaging.value : null;
   try {
     const scopeList = await service.listScopes(id);
-    const [window, projectEvents] = await Promise.all([projectMessages(scopeList), service.listProjectEvents(id)]);
-    if (token !== generation || id !== projectId.value || document.visibilityState === 'hidden') return;
-    const all = window.messages;
-    const incoming = all.filter((m) => !messages.value.some((old) => old.id === m.id) && m.authorKind !== 'human');
-    const newEvents = projectEvents.filter((event) => !knownEvents.has(event.id));
+    const originScopeId = eventOriginScopeId(scope);
+    const activeEventPagePromise = service.listProjectEvents(id, {
+      limit: CHAT_MESSAGE_PAGE_SIZE,
+      ...(originScopeId !== undefined ? { originScopeId } : {}),
+    });
+    const recentProjectEventsPromise = originScopeId === undefined
+      ? activeEventPagePromise
+      : service.listProjectEvents(id, { limit: CHAT_MESSAGE_PAGE_SIZE });
+    const [window, activeEventPage, recentProjectEvents] = await Promise.all([
+      projectMessages(scopeList), activeEventPagePromise, recentProjectEventsPromise,
+    ]);
+    if (token !== generation || id !== projectId.value || scopeId !== activeScopeId.value || document.visibilityState === 'hidden') return;
+    const previousMessageIds = new Set(messages.value.map((message) => message.id));
+    const activeMessageIds = new Set(messages.value.filter((message) => message.scopeId === scopeId).map((message) => message.id));
+    const freshActiveMessages = window.messages.filter((message) => message.scopeId === scopeId && !activeMessageIds.has(message.id));
+    const freshActiveEvents = activeEventPage.events.filter((event) => !events.value.some((loaded) => loaded.id === event.id));
+    const incoming = window.messages.filter((message) => !previousMessageIds.has(message.id) && message.authorKind !== 'human');
+    const newEvents = recentProjectEvents.events.filter((event) => !knownEvents.has(event.id));
     scopes.value = scopeList;
-    messages.value = mergeMessageWindows(messages.value, all, id);
-    messagePages.value = Object.fromEntries(scopeList.map((scope) => {
-      const previous = messagePages.value[scope.id];
+    const pageState = pageAtStart && timelinePaging.value === pageAtStart ? pageAtStart : null;
+    messagePages.value = Object.fromEntries(scopeList.map((item) => {
+      const previous = messagePages.value[item.id];
       const limited = previous?.limited ?? false;
-      return [scope.id, {
-        hasOlder: !limited && ((previous?.hasOlder ?? false) || (window.hasOlder[scope.id] ?? false)),
+      const pagedOlder = previous?.pagedOlder ?? false;
+      return [item.id, {
+        hasOlder: limited ? false : pagedOlder ? (previous?.hasOlder ?? false) : (window.hasOlder[item.id] ?? false),
         loading: previous?.loading ?? false,
         limited,
+        pagedOlder,
       } satisfies ChatMessagePageState];
     }));
-    events.value = projectEvents;
-    for (const event of newEvents) knownEvents.add(event.id);
+
+    if (pageState?.pagedOlder) {
+      const currentMessages = messages.value.filter((message) => message.scopeId === scopeId);
+      const latestMessages = window.messages.filter((message) => message.scopeId === scopeId);
+      const candidates = mergeMessageWindows(currentMessages, latestMessages, id);
+      const candidateEvents = mergeEventWindows(events.value, activeEventPage.events, id);
+      // Only rendered rows count against the history cap. Unconsumed source
+      // rows remain buffered; refresh must not move their fetch cursors.
+      const candidateRows = mergeTimelineRows(candidates, candidateEvents);
+      const visibleIds = new Set([
+        ...pageState.visibleIds,
+        ...freshActiveMessages.map((message) => `message:${message.id}`),
+        ...freshActiveEvents.map((event) => `event:${event.id}`),
+      ]);
+      const retained = candidateRows.filter((entry) => visibleIds.has(timelineEntryKey(entry))).slice(-CHAT_TIMELINE_MEMORY_LIMIT);
+      const retainedIds = new Set(retained.map(timelineEntryKey));
+      const bufferedAndVisible = candidateRows.filter((entry) =>
+        !visibleIds.has(timelineEntryKey(entry)) || retainedIds.has(timelineEntryKey(entry)),
+      );
+      const retainedMessages = bufferedAndVisible.flatMap((entry) => entry.kind === 'message' ? [entry.message] : []);
+      const retainedEvents = bufferedAndVisible.flatMap((entry) => entry.kind === 'event' ? [entry.event] : []);
+      const otherMessages = mergeMessageWindows(
+        messages.value.filter((message) => message.scopeId !== scopeId),
+        window.messages.filter((message) => message.scopeId !== scopeId),
+        id,
+      );
+      messages.value = mergeMessageWindows(otherMessages, retainedMessages, id);
+      events.value = retainedEvents;
+      pageState.visibleIds = retainedIds;
+      pageState.limited = pageState.limited || pageState.visibleIds.size >= CHAT_TIMELINE_MEMORY_LIMIT;
+      messagePages.value = {
+        ...messagePages.value,
+        [scopeId]: { ...messagePages.value[scopeId]!, hasOlder: pageState.messageHasOlder, limited: pageState.limited, pagedOlder: true },
+      };
+    } else {
+      messages.value = mergeMessageWindows(messages.value, window.messages, id);
+      events.value = activeEventPage.events;
+      if (pageState) Object.assign(pageState, timelinePageState(scopeId, activeEventPage));
+      else timelinePaging.value = timelinePageState(scopeId, activeEventPage);
+    }
+    knownEvents.clear();
+    for (const event of recentProjectEvents.events) knownEvents.add(event.id);
     await unreadState?.refresh();
     void markVisible();
     let sentence: string | undefined;
     if (incoming.length || newEvents.length) {
-      const inCurrent = incoming.filter((m) => m.scopeId === activeScope.value?.id);
+      const inCurrent = incoming.filter((message) => message.scopeId === activeScope.value?.id);
       sentence = `${incoming.length ? `${incoming.length} new ${incoming.length === 1 ? 'message' : 'messages'}` : ''}${incoming.length && newEvents.length ? ' and ' : ''}${newEvents.length ? `${newEvents.length} new Project ${newEvents.length === 1 ? 'event' : 'events'}` : ''} in ${project.value?.displayName ?? 'Project'}${inCurrent.length ? `; ${inCurrent.length} in ${activeScope.value ? title(activeScope.value) : 'current conversation'}` : ''}.`;
     }
-    // A refresh replaces the scope list, so the active scope's admission is
-    // re-checked here; the selection watcher keys on the scope id and does not
-    // fire for an unchanged selection. Announcing *after* that read settles is
-    // what carries an arrival to the live region: the connection state
-    // announces the start and the settle of every read, and inside the same
-    // flush those would overwrite the arrival sentence before it renders.
+    // Refresh replaces scope facts, so re-check admission before announcing arrivals.
     await loadScope();
     await refreshActiveRuns();
     if (sentence !== undefined && token === generation && document.visibilityState !== 'hidden') announcer.announce(sentence);
   } catch { if (token === generation) actionError.value = 'Could not refresh the conversation. Shown facts may be stale.'; }
-  finally { refreshInFlight = false; }
+  finally { refreshInFlight = false; resumePendingTimelinePage(scopeId); }
 }
 function onVisibilityChange() {
   if (pollTimer !== undefined) { clearInterval(pollTimer); pollTimer = undefined; }
@@ -649,8 +925,10 @@ async function inspectBatch(id: string, attempt?: number) {
   await router.push({ name: 'project-chat-routing', params: { batchId: id }, query: { ...route.query, ...(attempt ? { attempt: String(attempt) } : {}), ...(activeScope.value ? { from: activeScope.value.id } : {}) } });
 }
 watch(projectId, () => { if (projectId.value) void loadProject(); });
-watch([activeScopeId, loading], () => { if (!loading.value) { void loadScope(); void refreshActiveRuns(); } });
-watch(activeMessages, markVisible);
+watch([activeScopeId, loading], () => {
+  if (!loading.value) { void loadScope(); void refreshActiveRuns(); void loadTimelineScope(); }
+});
+watch(visibleTimeline, markVisible);
 onMounted(() => { announcer.announce('Project chat view.'); void loadProject(); void agentService?.listAgents().then((rows) => { agents.value = rows; }).catch(() => {}); document.addEventListener('keydown', onKey); document.addEventListener('click', onDocumentClick);
   window.addEventListener('resize', onResize);
   document.addEventListener('visibilitychange', onVisibilityChange);
@@ -739,15 +1017,15 @@ onUnmounted(() => { window.removeEventListener('resize', onResize); generation++
         <div class="relative flex min-h-0 flex-1 flex-col">
           <!-- Admission covers messages without allocating a row or intercepting input. -->
           <div v-if="showAdmissionNotice" class="chat-detail-loading pointer-events-none absolute right-3 top-2 z-20 max-w-[min(20rem,calc(100%-1.5rem))] rounded border border-[var(--yellow-attention-border)] bg-[var(--bg-surface)] p-3 text-xs text-[var(--text-primary)] shadow-lg" aria-hidden="true">Checking conversation admission…</div>
-          <div ref="messageViewport" class="chat-messages-body min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-4 [overflow-anchor:none]" :aria-busy="detailLoading || messagePages[activeScopeId]?.loading" @scroll="onViewportScroll" @wheel.passive="onScrollInput" @touchmove.passive="onScrollInput" @keydown="onScrollInput" @pointerdown="onScrollInput" @pointermove="onScrollInput">
+          <div ref="messageViewport" class="chat-messages-body min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-4 [overflow-anchor:none]" :aria-busy="detailLoading || timelinePaging?.loading" @scroll="onViewportScroll" @wheel.passive="onScrollInput" @touchmove.passive="onScrollInput" @keydown="onScrollInput" @pointerdown="onScrollInput" @pointermove="onScrollInput">
           <div ref="messageContent" class="chat-messages-content flex min-h-full flex-col gap-3">
-          <div v-if="messagePages[activeScopeId]?.loading" class="chat-older-loading text-center text-[10px] text-[var(--text-muted)]" role="status">Loading older messages…</div>
-          <div v-if="messagePages[activeScopeId]?.limited" class="chat-history-limit text-center text-[10px] text-[var(--text-muted)]" role="note">The latest 200 messages are retained in this view.</div>
-          <div v-if="!timeline.length" class="chat-empty-state m-auto text-center text-xs text-[var(--text-muted)]"><Icon name="chat" :size="22" class="mx-auto mb-2" /><strong class="block">No messages yet in this conversation scope.</strong><p>Send a message or @mention a project agent below to begin collaboration.</p></div>
-          <template v-for="entry in timeline" :key="entry.kind === 'message' ? entry.message.id : entry.event.id">
-          <div v-if="entry.kind === 'message' && dateSeparators.has(entry.message.id)" class="chat-date-separator flex items-center gap-3 py-2 text-xs font-medium text-[var(--text-secondary)]">
+          <div v-if="timelinePaging?.loading" class="chat-older-loading text-center text-[10px] text-[var(--text-muted)]" role="status">Loading older chat rows…</div>
+          <div v-if="timelinePaging?.limited" class="chat-history-limit text-center text-[10px] text-[var(--text-muted)]" role="note">The latest {{ CHAT_TIMELINE_MEMORY_LIMIT }} chat rows are retained in this view.</div>
+          <div v-if="!visibleTimeline.length && !timelinePaging?.loading" class="chat-empty-state m-auto text-center text-xs text-[var(--text-muted)]"><Icon name="chat" :size="22" class="mx-auto mb-2" /><strong class="block">No messages yet in this conversation scope.</strong><p>Send a message or @mention a project agent below to begin collaboration.</p></div>
+          <template v-for="entry in visibleTimeline" :key="entry.kind === 'message' ? entry.message.id : entry.event.id">
+          <div v-if="dateSeparators.has(timelineEntryKey(entry))" class="chat-date-separator flex items-center gap-3 py-2 text-xs font-medium text-[var(--text-secondary)]">
             <span class="h-px flex-1 bg-[var(--border-subtle)]" aria-hidden="true" />
-            <span>{{ dateSeparators.get(entry.message.id) }}</span>
+            <span>{{ dateSeparators.get(timelineEntryKey(entry)) }}</span>
             <span class="h-px flex-1 bg-[var(--border-subtle)]" aria-hidden="true" />
           </div>
           <div :data-message-id="entry.kind === 'message' ? entry.message.id : undefined" :data-event-id="entry.kind === 'event' ? entry.event.id : undefined" :data-targeted="isTargetEntry(entry) ? (entry.kind === 'message' ? 'message' : 'event') : undefined" :tabindex="isTargetEntry(entry) ? -1 : undefined"

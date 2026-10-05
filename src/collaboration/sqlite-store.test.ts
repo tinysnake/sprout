@@ -235,6 +235,30 @@ test('a Project event and its wake requests persist, dedupe, and survive a resta
   }
 });
 
+test('SQLite Project event pages use a stable exclusive backward cursor', async () => {
+  await withDatabase(async (store) => {
+    for (let index = 0; index < 5; index += 1) {
+      const id = `evt-page-${index}`;
+      await store.publishEvent({
+        event: event({ id, deliveryKey: `event-page-${index}`, createdAt: 10 + Math.floor(index / 2) }),
+        plan: { inputId: id, decisions: [], observations: [] },
+        now: index,
+      });
+    }
+    const durable = [...await store.listEvents('project-sprout')]
+      .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+    const newest = await store.listEventsPage({ projectId: 'project-sprout', limit: 2 });
+    assert.deepEqual(newest?.events.map((item) => item.id), durable.slice(-2).map((item) => item.id));
+    assert.equal(newest?.hasOlder, true);
+    const older = await store.listEventsPage({ projectId: 'project-sprout', limit: 2, before: newest!.events[0]!.id });
+    assert.deepEqual(older?.events.map((item) => item.id), durable.slice(-4, -2).map((item) => item.id));
+    assert.equal(older?.hasOlder, true);
+    assert.equal(await store.listEventsPage({ projectId: 'other-project', limit: 2, before: newest!.events[0]!.id }), undefined);
+    assert.equal(await store.listEventsPage({ projectId: 'project-sprout', limit: 2, before: 'missing-event' }), undefined);
+    assert.equal((await store.listEvents()).length, 5, 'the unpaged Feed/audit reader remains intact');
+  });
+});
+
 test('a schema-v18 database forward-migrates to scoped inputs and Project events', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-collab-migrate-'));
   const path = join(directory, 'store.db');

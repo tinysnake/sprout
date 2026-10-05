@@ -29,7 +29,7 @@ export class ProductionChatService implements ChatService {
   restoreWorkingGroup: ChatService['restoreWorkingGroup'] = (id) => this.ports.conversations.restoreWorkingGroup(id);
   listMessages: ChatService['listMessages'] = (id, options) => this.ports.messages.listMessages(id, options);
   postMessage: ChatService['postMessage'] = (input) => this.ports.messages.postMessage(input);
-  listProjectEvents: ChatService['listProjectEvents'] = (id) => this.ports.messages.listProjectEvents(id);
+  listProjectEvents: ChatService['listProjectEvents'] = (id, options) => this.ports.messages.listProjectEvents(id, options);
   messageRouting: ChatService['messageRouting'] = (id) => this.ports.routing.messageRouting(id);
   eventRouting: ChatService['eventRouting'] = (id) => this.ports.routing.eventRouting(id);
   listRoutingBatches: ChatService['listRoutingBatches'] = (id) => this.ports.routing.listRoutingBatches(id);

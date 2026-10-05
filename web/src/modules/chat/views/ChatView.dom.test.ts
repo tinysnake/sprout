@@ -45,6 +45,7 @@ let extraHeight = 0;
 let viewportHeight = 200;
 let automaticScrollEvents = false;
 const pageSize = Number(readFileSync(new URL('./ChatView.vue', import.meta.url), 'utf8').match(/const CHAT_MESSAGE_PAGE_SIZE = (\d+)/)![1]);
+const historyLimit = Number(readFileSync(new URL('./ChatView.vue', import.meta.url), 'utf8').match(/const CHAT_TIMELINE_MEMORY_LIMIT = (\d+)/)![1]);
 const positions = new WeakMap<Element, number>();
 let scrollWrites = 0;
 Object.defineProperties(dom.window.HTMLElement.prototype, {
@@ -97,11 +98,20 @@ async function paint() {
 function message(id: string, scopeId = 'channel', authorKind: 'human' | 'agent' = 'agent'): MessageView {
   return { id, scopeId, projectId: 'project', channel: scopeId, recipients: [], authorId: authorKind === 'human' ? 'operator' : 'agent', authorKind, body: id, createdAt: Number(id.replace(/\D/g, '')) || 1 };
 }
-async function page(query = '', options: { channelMessages?: number; directMessages?: number; shell?: boolean; height?: number; automaticEvents?: boolean } = {}) {
+function event(id: string, createdAt: number, originScopeIds?: readonly string[]): ProjectEventView {
+  return { id, projectId: 'project', kind: 'agent-run-failure', summary: id, producerId: 'agent', producerKind: 'agent', disposition: 'recorded', responsibleAgentIds: [], ...(originScopeIds !== undefined ? { originScopeIds } : {}), createdAt };
+}
+async function page(query = '', options: { channelMessages?: number; directMessages?: number; events?: readonly ProjectEventView[]; shell?: boolean; height?: number; automaticEvents?: boolean } = {}) {
   frames.clear(); extraHeight = 0; scrollWrites = 0;
   viewportHeight = options.height ?? 200;
   automaticScrollEvents = options.automaticEvents ?? false;
   let olderRequests = 0;
+  let olderEventRequests = 0;
+  let olderGate: Promise<void> | undefined;
+  let releaseOlder: (() => void) | undefined;
+  let refreshGate: Promise<void> | undefined;
+  let releaseRefresh: (() => void) | undefined;
+  const eventOriginRequests: string[] = [];
   dom.window.document.body.innerHTML = '<div id="app"></div>';
   const scopes: ConversationScopeView[] = [
     { id: 'channel', projectId: 'project', kind: 'project', createdAt: 1, updatedAt: 1 },
@@ -109,25 +119,39 @@ async function page(query = '', options: { channelMessages?: number; directMessa
   ];
   let messages = Array.from({ length: options.channelMessages ?? 8 }, (_, i) => message(`message-${i + 1}`));
   messages.push(...Array.from({ length: options.directMessages ?? 5 }, (_, i) => message(`direct-${i + 1}`, 'direct')));
-  let events: ProjectEventView[] = [];
+  let events: ProjectEventView[] = [...(options.events ?? [])];
   let activeRuns: readonly ActiveChatRun[] = [];
   let runStatusListener: Parameters<ChatService['subscribeRunStatuses']>[0] | undefined;
   const state = () => ({ status: 'online' as const, connection: 'online' as const, loading: false });
   const service = {
     state, subscribeState: () => () => {},
-    listScopes: async () => scopes.map((scope) => ({ ...scope })),
+    listScopes: async () => { await refreshGate; return scopes.map((scope) => ({ ...scope })); },
     listMessages: async (id?: string, options?: { limit?: number; before?: string }) => {
       const rows = messages.filter((item) => item.scopeId === id)
         .sort((left, right) => left.createdAt - right.createdAt || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
       if (options?.before !== undefined) {
         olderRequests++;
+        await olderGate;
         const index = rows.findIndex((item) => item.id === options.before);
         const older = index < 0 ? [] : rows.slice(0, index);
         return (options.limit !== undefined ? older.slice(-options.limit) : older).map((item) => ({ ...item }));
       }
       return (options?.limit !== undefined ? rows.slice(-options.limit) : rows).map((item) => ({ ...item }));
     },
-    listProjectEvents: async () => events.map((item) => ({ ...item })),
+    listProjectEvents: async (_id: string, options?: { limit?: number; before?: string; originScopeId?: string }) => {
+      const rows = events.filter((item) => options?.originScopeId === undefined || item.originScopeIds?.includes(options.originScopeId))
+        .sort((left, right) => left.createdAt - right.createdAt || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+      const end = options?.before === undefined ? rows.length : rows.findIndex((item) => item.id === options.before);
+      if (options?.before !== undefined) {
+        olderEventRequests++;
+        await olderGate;
+        eventOriginRequests.push(options.originScopeId ?? '');
+      }
+      if (end < 0) return { events: [], hasOlder: false };
+      const limit = options?.limit ?? 50;
+      const start = Math.max(0, end - limit);
+      return { events: rows.slice(start, end).map((item) => ({ ...item })), hasOlder: start > 0 };
+    },
     listRoutingBatches: async () => ({ batches: [], windows: [] }),
     listActiveRuns: async () => activeRuns,
     inspectScope: async (id: string) => ({ scope: scopes.find((scope) => scope.id === id)!, state: { scopeId: id, writable: true }, context: { scopeId: id, projectId: 'project', kind: 'project', project: { contentVersion: 1, goal: '', rules: [] } } }),
@@ -157,6 +181,12 @@ async function page(query = '', options: { channelMessages?: number; directMessa
   return {
     list, router,
     olderRequests: () => olderRequests,
+    olderEventRequests: () => olderEventRequests,
+    eventOriginRequests: () => eventOriginRequests,
+    holdRefresh() { refreshGate = new Promise<void>((resolve) => { releaseRefresh = resolve; }); },
+    releaseRefresh() { releaseRefresh?.(); refreshGate = undefined; },
+    holdOlder() { olderGate = new Promise<void>((resolve) => { releaseOlder = resolve; }); },
+    releaseOlder() { releaseOlder?.(); olderGate = undefined; },
     async setRunStatus(status: 'queued' | 'running' | 'completed') {
       activeRuns = status === 'completed' ? [] : [{ id: 'chat-run', agentId: 'agent', status }];
       runStatusListener?.({ id: 'chat-run', status });
@@ -165,6 +195,9 @@ async function page(query = '', options: { channelMessages?: number; directMessa
     button: () => dom.window.document.querySelector<HTMLButtonElement>('.chat-jump-latest'),
     scroll(top: number) { list.dispatchEvent(new dom.window.WheelEvent('wheel', { deltaY: -100 })); positions.set(list, top); list.dispatchEvent(new dom.window.Event('scroll')); },
     async refresh() { dom.window.document.dispatchEvent(new dom.window.Event('visibilitychange')); await flush(); },
+    async addEvent(item: ProjectEventView) { events.push(item); await this.refresh(); await paint(); },
+    async addMessage(item: MessageView) { messages.push(item); await this.refresh(); await paint(); },
+    dataRows: () => [...list.querySelectorAll<HTMLElement>('[data-message-id], [data-event-id]')],
     async append(kind: 'human' | 'agent' | 'notice') {
       if (kind === 'notice') events.push({ id: 'notice', projectId: 'project', kind: 'agent-run-interruption', summary: 'Agent stopped', producerId: 'agent', producerKind: 'agent', responsibleAgentIds: [], disposition: 'recorded', createdAt: 30 });
       else messages.push(message(`message-${messages.length + 10}`, 'channel', kind));
@@ -377,6 +410,155 @@ test('opening a conversation aligns its rendered history to the bottom', async (
   try { assert.equal(p.list.scrollTop, bottom(p.list)); assert.equal(p.button(), null); }
   finally { p.close(); }
 });
+
+test('the newest mixed timeline page is bounded across messages and project events', async () => {
+  const events = Array.from({ length: pageSize * 2 }, (_, index) => event(`event-${index + 1}`, index + 1));
+  const p = await page('', { channelMessages: pageSize * 2, events });
+  try {
+    const rows = p.dataRows();
+    assert.equal(rows.length, pageSize);
+    assert.equal(rows.filter((row) => row.dataset['messageId'] !== undefined).length, pageSize / 2);
+    assert.equal(rows.filter((row) => row.dataset['eventId'] !== undefined).length, pageSize / 2);
+    assert.equal(rows[0]?.previousElementSibling?.classList.contains('chat-date-separator'), true, 'the first visible event has its date separator attached');
+    assert.equal(p.olderRequests(), 0);
+    assert.equal(p.olderEventRequests(), 0);
+  } finally { p.close(); }
+});
+
+test('older merged pages resume both source boundaries without gaps or duplicates', async () => {
+  const messages = Array.from({ length: pageSize * 2 }, (_, index) => message(`message-${index + 1}`));
+  const events = Array.from({ length: pageSize * 2 }, (_, index) => event(`event-${index + 1}`, index + 1));
+  const expected = [
+    ...messages.map((item) => ({ key: `message:${item.id}`, createdAt: item.createdAt })),
+    ...events.map((item) => ({ key: `event:${item.id}`, createdAt: item.createdAt })),
+  ].sort((left, right) => left.createdAt - right.createdAt || (left.key < right.key ? -1 : left.key > right.key ? 1 : 0)).map((item) => item.key);
+  const p = await page('', { channelMessages: pageSize * 2, events });
+  const renderedKeys = () => p.dataRows().map((row) => row.dataset['messageId'] !== undefined
+    ? `message:${row.dataset['messageId']}` : `event:${row.dataset['eventId']}`);
+  try {
+    assert.deepEqual(renderedKeys(), expected.slice(-pageSize));
+    p.scroll(0); await paint();
+    assert.deepEqual(renderedKeys(), expected.slice(-pageSize * 2));
+    assert.equal(p.olderRequests(), 1, 'the message cursor advances to compare with the final buffered event');
+    assert.equal(p.olderEventRequests(), 0);
+    p.scroll(0); await paint();
+    assert.deepEqual(renderedKeys(), expected.slice(-pageSize * 3));
+    assert.equal(p.olderRequests(), 1);
+    assert.equal(p.olderEventRequests(), 1, 'the event cursor advances when its retained page ends');
+    p.scroll(0); await paint();
+    assert.deepEqual(renderedKeys(), expected);
+    assert.equal(new Set(renderedKeys()).size, expected.length);
+  } finally { p.close(); }
+});
+
+test('only admitted input can queue one older page behind a live refresh', async () => {
+  const p = await page('', { channelMessages: pageSize * 3 });
+  try {
+    p.holdRefresh(); await p.refresh();
+    positions.set(p.list, 0); p.list.dispatchEvent(new dom.window.Event('scroll')); await flush();
+    p.releaseRefresh(); await paint();
+    assert.equal(p.olderRequests(), 0, 'layout scroll during refresh cannot queue history');
+    p.holdRefresh(); await p.refresh();
+    p.scroll(0); await flush();
+    assert.equal(p.olderRequests(), 0, 'source mutation waits for refresh');
+    p.releaseRefresh(); await paint();
+    assert.equal(p.olderRequests(), 1, 'the admitted gesture resumes once refresh settles');
+    assert.equal(p.dataRows().length, pageSize * 2);
+    assert.equal(p.button(), null);
+  } finally { p.releaseRefresh(); p.close(); }
+});
+
+test('one admitted older load shows status, survives refresh, and preserves the visible anchor', async () => {
+  const events = Array.from({ length: pageSize * 3 }, (_, index) => event(`event-${index + 1}`, index + 1));
+  const p = await page('', { channelMessages: pageSize * 3, events });
+  const originalRect = dom.window.HTMLElement.prototype.getBoundingClientRect;
+  dom.window.HTMLElement.prototype.getBoundingClientRect = function () {
+    const rows = p.dataRows();
+    const index = rows.indexOf(this);
+    const top = index < 0 ? 0 : index * 100 - p.list.scrollTop;
+    return { top, bottom: top + (index < 0 ? viewportHeight : 100), left: 0, right: 100, width: 100, height: 100, x: 0, y: top, toJSON: () => ({}) };
+  };
+  try {
+    const anchor = p.dataRows()[0]!;
+    p.holdOlder(); p.scroll(0); await flush();
+    assert.ok(p.list.querySelector('.chat-older-loading'), 'status remains visible while the bounded source request waits');
+    const reads = p.olderRequests() + p.olderEventRequests();
+    p.scroll(0); await p.refresh(); await flush();
+    assert.equal(p.olderRequests() + p.olderEventRequests(), reads, 'the loading guard rejects duplicate input and serializes refresh');
+    assert.equal(p.dataRows().length, pageSize);
+    p.releaseOlder(); await paint();
+    assert.equal(p.dataRows().length, pageSize * 2);
+    assert.equal(anchor.getBoundingClientRect().top, 0, 'the existing row stays at the same viewport position');
+    assert.equal(p.list.querySelector('.chat-older-loading'), null);
+    assert.equal(p.button(), null, 'prepended history is not announced as an arrival');
+  } finally { p.releaseOlder(); dom.window.HTMLElement.prototype.getBoundingClientRect = originalRect; p.close(); }
+});
+
+for (const eventOffset of [-historyLimit * 2, -0.25, 0.25, historyLimit * 2]) {
+  test(`mixed boundary ${eventOffset}: refresh and paging preserve the full retained row sequence`, async () => {
+    const count = historyLimit + pageSize;
+    const events = Array.from({ length: count }, (_, index) => event(`event-${index + 1}`, index + 1 + eventOffset));
+    const expected = [
+      ...Array.from({ length: count }, (_, index) => ({ key: `message:message-${index + 1}`, time: index + 1 })),
+      ...events.map((item) => ({ key: `event:${item.id}`, time: item.createdAt })),
+    ].sort((a, b) => a.time - b.time).map((item) => item.key);
+    const p = await page('', { channelMessages: count, events });
+    const keys = () => p.dataRows().map((row) => row.dataset['messageId'] ? `message:${row.dataset['messageId']}` : `event:${row.dataset['eventId']}`);
+    try {
+      for (let size = pageSize; size <= historyLimit; size += pageSize) {
+        assert.deepEqual(keys(), expected.slice(-size));
+        assert.equal(new Set(keys()).size, size);
+        await p.refresh(); await paint();
+        assert.deepEqual(keys(), expected.slice(-size), 'refresh does not consume or discard buffered history');
+        if (size < historyLimit) { p.scroll(0); await paint(); }
+      }
+      for (let index = 1; index <= pageSize * 2; index++) {
+        const item = index % 2 ? event(`fresh-${index}`, count + Math.max(eventOffset, 0) + index) : { ...message(`message-${count + index}`), createdAt: count + Math.max(eventOffset, 0) + index };
+        if ('scopeId' in item) await p.addMessage(item); else await p.addEvent(item);
+        expected.push('scopeId' in item ? `message:${item.id}` : `event:${item.id}`);
+        assert.deepEqual(keys(), expected.slice(-historyLimit), 'refresh evicts only oldest visible rows at the merged cap');
+      }
+      const reads = p.olderRequests() + p.olderEventRequests();
+      p.scroll(0); await paint();
+      assert.equal(p.olderRequests() + p.olderEventRequests(), reads, 'retained-history cap stops additional paging');
+    } finally { p.close(); }
+  });
+}
+
+test('refresh soak keeps the mixed conversation window bounded', async () => {
+  const events = Array.from({ length: pageSize * 2 }, (_, index) => event(`event-${index + 1}`, index + 1));
+  const p = await page('', { channelMessages: pageSize * 2, events });
+  try {
+    for (let index = 1; index <= pageSize * 2; index++) {
+      await p.addEvent(event(`live-${index}`, pageSize * 2 + index));
+      assert.equal(p.dataRows().length, pageSize);
+      assert.ok(p.dataRows().filter((row) => row.dataset['messageId'] !== undefined).length <= pageSize);
+      assert.ok(p.dataRows().filter((row) => row.dataset['eventId'] !== undefined).length <= pageSize);
+    }
+    assert.equal(p.olderRequests(), 0, 'refreshes alone do not page messages');
+    assert.equal(p.olderEventRequests(), 0, 'refreshes alone do not page project events');
+  } finally { p.close(); }
+});
+
+test('direct timeline paging filters project events by origin scope', async () => {
+  const events = [
+    ...Array.from({ length: pageSize * 2 }, (_, index) => event(`direct-event-${index + 1}`, index + 1, ['direct'])),
+    ...Array.from({ length: pageSize * 3 }, (_, index) => event(`unrelated-event-${index + 1}`, pageSize * 3 + index + 1, ['other-scope'])),
+  ];
+  const p = await page('', { directMessages: pageSize * 2, events });
+  try {
+    await p.router.push('/chat/direct?project=project'); await paint();
+    const eventIds = () => p.dataRows().flatMap((row) => row.dataset['eventId'] ? [row.dataset['eventId']] : []);
+    assert.ok(eventIds().length > 0);
+    assert.ok(eventIds().every((id) => id.startsWith('direct-event-')));
+    p.scroll(0); await paint();
+    p.scroll(0); await paint();
+    assert.ok(p.olderEventRequests() > 0, 'older event rows were paged');
+    assert.ok(p.eventOriginRequests().every((scopeId) => scopeId === 'direct'), 'older event cursors carry the active direct scope');
+    assert.ok(eventIds().every((id) => id.startsWith('direct-event-')), 'unrelated project events stay filtered');
+  } finally { p.close(); }
+});
+
 test('at bottom, own send, agent reply and run notice keep the latest entry visible', async () => {
   const p = await page();
   try {
@@ -525,7 +707,7 @@ test('automatic positioning: a lost event expires without suppressing a later us
 // Recreate the diagnosed automatic-positioning matrix with native-like delivery.
 for (const gap of [-20, 0, 20, 40, 150, 800]) {
   test(`automatic positioning: bottom gap ${gap} never pages without user input`, async () => {
-    const p = await page('', { channelMessages: pageSize * 3, height: pageSize * 100 - gap, automaticEvents: true });
+    const p = await page('', { channelMessages: pageSize * 3, events: Array.from({ length: pageSize * 3 }, (_, i) => event(`event-${i + 1}`, i + 1)), height: pageSize * 100 - gap, automaticEvents: true });
     try {
       for (let cycle = 0; cycle < 10; cycle++) {
         extraHeight = cycle % 2 ? 27 : 0; // loading-row-sized growth and removal
@@ -533,7 +715,8 @@ for (const gap of [-20, 0, 20, 40, 150, 800]) {
         dom.window.dispatchEvent(new dom.window.Event('resize'));
         await p.refresh(); await paint();
       }
-      assert.equal(p.olderRequests(), 0, 'zero input must issue zero older reads');
+      assert.equal(p.olderRequests(), 0, 'zero input must issue zero older message reads');
+      assert.equal(p.olderEventRequests(), 0, 'zero input must issue zero older event reads');
       assert.equal(p.list.querySelectorAll('.chat-msg').length, pageSize);
     } finally { p.close(); }
   });
@@ -551,6 +734,7 @@ for (const targetTop of [30, 150]) {
         await p.router.push('/chat/channel?project=project&message=message-' + (pageSize * 3)); await paint();
       }
       assert.equal(p.olderRequests(), 0);
+      assert.equal(p.olderEventRequests(), 0);
       assert.equal(p.list.querySelectorAll('.chat-msg').length, pageSize);
     } finally { p.close(); delete (dom.window.HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView; }
   });
