@@ -415,14 +415,130 @@ test('the authenticated browser refuses Agent-authored direct messages', async (
     assert.equal(signIn.status, 201);
     const cookie = (signIn.headers.get('set-cookie') ?? '').split(';', 1)[0]!;
     const { csrfToken } = await signIn.json() as { readonly csrfToken: string };
-    const response = await fetch(`${base}/api/messages`, {
-      method: 'POST',
-      headers: { cookie, 'x-sprout-csrf': csrfToken, 'content-type': 'application/json' },
-      body: JSON.stringify({ scopeId, authorId: 'agent-scout', authorKind: 'agent', body: 'forged', deliveryKey: 'browser-agent-forbidden' }),
-    });
-    assert.equal(response.status, 403);
+    const refusals = await Promise.all(['agent', 'worker'].map(async (authorKind) => {
+      const response = await fetch(`${base}/api/messages`, {
+        method: 'POST',
+        headers: { cookie, 'x-sprout-csrf': csrfToken, 'content-type': 'application/json' },
+        body: JSON.stringify({ scopeId, authorId: 'agent-scout', authorKind, body: 'forged', deliveryKey: `browser-${authorKind}-forbidden` }),
+      });
+      return { status: response.status, body: await response.json() };
+    }));
+    assert.deepEqual(refusals, [
+      { status: 403, body: { error: 'browser commands are Human-only', code: 'agent-direct-message-forbidden' } },
+      { status: 403, body: { error: 'browser commands are Human-only', code: 'agent-direct-message-forbidden' } },
+    ]);
     assert.deepEqual(await context.collaboration.listMessages({ scopeId }), []);
   } finally {
+    await context.api.close();
+  }
+});
+
+test('POST /api/messages rejects agent and worker authors on direct scopes before idempotent delivery', async () => {
+  const context = buildWithCollaboration();
+  const { port } = await context.api.listen(0);
+  const base = `http://127.0.0.1:${port}`;
+  const scopeId = await context.scopes.openDirect('project-sprout', ['human-lead', 'agent-scout']);
+  const post = (authorId: string, authorKind: string | undefined, deliveryKey: string) => fetch(`${base}/api/messages`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      scopeId,
+      authorId,
+      ...(authorKind !== undefined ? { authorKind } : {}),
+      body: 'Agent collaboration belongs in the Task group.',
+      deliveryKey,
+      awaitReply: false,
+    }),
+  });
+  try {
+    const human = await post('human-lead', 'human', 'direct-human-seed');
+    assert.equal(human.status, 202);
+
+    const attempts = [
+      ['agent-scout', 'agent', 'direct-human-seed'],
+      ['agent-scout', 'worker', 'direct-worker-attempt'],
+      ['human-lead', 'agent', 'direct-mixed-agent-kind'],
+      ['agent-scout', 'agent', 'direct-agent-repeat'],
+      ['agent-scout', 'agent', 'direct-agent-repeat'],
+    ] as const;
+    const refusals = await Promise.all(attempts.map(async ([authorId, authorKind, deliveryKey]) => {
+      const response = await post(authorId, authorKind, deliveryKey);
+      return { authorKind, status: response.status, body: await response.json() };
+    }));
+    assert.deepEqual(refusals.map(({ status }) => status), [403, 403, 403, 403, 403]);
+    for (const refusal of refusals) {
+      assert.deepEqual(refusal.body, {
+        error: 'Agent-authored direct messages are unsupported; use Task-group posts for Agent collaboration',
+        code: 'agent-direct-message-forbidden',
+      });
+    }
+    const emptyKind = await post('human-lead', '', 'direct-empty-kind');
+    const omittedKind = await post('human-lead', undefined, 'direct-omitted-kind');
+    assert.deepEqual([emptyKind.status, omittedKind.status], [202, 202]);
+    const history = await context.collaboration.listMessages({ scopeId });
+    const acceptedHumanKeys = ['direct-empty-kind', 'direct-human-seed', 'direct-omitted-kind'];
+    const acceptedHumanMessages = history.filter((message) => acceptedHumanKeys.includes(message.deliveryKey));
+    assert.deepEqual(acceptedHumanMessages.map((message) => message.deliveryKey).sort(), acceptedHumanKeys);
+    assert.ok(acceptedHumanMessages.every((message) => message.author.kind === 'human'));
+    assert.ok(!history.some((message) => message.deliveryKey === 'direct-agent-repeat' || message.deliveryKey === 'direct-worker-attempt' || message.deliveryKey === 'direct-mixed-agent-kind'));
+  } finally {
+    await context.api.close();
+  }
+});
+
+test('an in-flight Agent direct post is refused after a Human wins the same delivery key', async () => {
+  const context = buildWithCollaboration();
+  const { port } = await context.api.listen(0);
+  const base = `http://127.0.0.1:${port}`;
+  const scopeId = await context.scopes.openDirect('project-sprout', ['human-lead', 'agent-scout']);
+  const scopes = context.scopes.scopes;
+  const getScope = scopes.getScope.bind(scopes);
+  let scopeReads = 0;
+  let releaseCoordinatorRead!: () => void;
+  let coordinatorReadStarted!: () => void;
+  const coordinatorReadBlocked = new Promise<void>((resolve) => { releaseCoordinatorRead = resolve; });
+  const coordinatorRead = new Promise<void>((resolve) => { coordinatorReadStarted = resolve; });
+  scopes.getScope = async (candidateScopeId) => {
+    const scope = await getScope(candidateScopeId);
+    scopeReads += 1;
+    if (scopeReads === 2) {
+      coordinatorReadStarted();
+      await coordinatorReadBlocked;
+    }
+    return scope;
+  };
+  const post = (authorId: string, authorKind: 'agent' | 'human') => fetch(`${base}/api/messages`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      scopeId,
+      authorId,
+      authorKind,
+      body: 'Same key race.',
+      deliveryKey: 'direct-race-key',
+      awaitReply: false,
+    }),
+  });
+  let inFlightAgentPost: Promise<Response> | undefined;
+  try {
+    inFlightAgentPost = post('agent-scout', 'agent');
+    await coordinatorRead;
+    const human = await post('human-lead', 'human');
+    releaseCoordinatorRead();
+    const agent = await inFlightAgentPost;
+    assert.equal(human.status, 202);
+    assert.equal(agent.status, 403);
+    assert.deepEqual(await agent.json(), {
+      error: 'Agent-authored direct messages are unsupported; use Task-group posts for Agent collaboration',
+      code: 'agent-direct-message-forbidden',
+    });
+    const history = await context.collaboration.listMessages({ scopeId });
+    assert.equal(history.length, 1);
+    assert.equal(history[0]?.author.id, 'human-lead');
+    assert.equal(history[0]?.author.kind, 'human');
+  } finally {
+    releaseCoordinatorRead();
+    await inFlightAgentPost?.catch(() => undefined);
     await context.api.close();
   }
 });

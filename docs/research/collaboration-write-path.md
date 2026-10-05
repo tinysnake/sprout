@@ -9,6 +9,8 @@ path Sprout adopts for M1 and why, and the wake contract that path implies. It i
 the evidence map #24 asked for before any production Message, channel, or Task
 ticket is planned.
 
+Ticket #214 supersedes the Agent-to-Agent direct-send experiment described below. Current Agent collaboration uses Task-group posts (ADR-0014/0015); Human↔Agent direct chat remains available.
+
 Nothing here is a production commitment by itself. The prototype code under
 `src/collaboration/` exists to make the decisions testable; it is deliberately not
 wired into `src/main.ts`, adds nothing to the engine port, and adds nothing to the

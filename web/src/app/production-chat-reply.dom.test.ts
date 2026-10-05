@@ -27,7 +27,6 @@ import {
   REPLY_PROJECTION_AGENT_NAME,
   REPLY_PROJECTION_PROJECT_ID,
 } from '../../../src/web/api-harness.ts';
-import { createAgentDirectMessageSender } from '../../../src/collaboration/agent-direct.ts';
 import type { ScriptedTurn } from '../../../src/engine/scripted.ts';
 
 const repoRoot = process.cwd();
@@ -673,33 +672,6 @@ test('Chat shows the active Agent identity, offers Human Stop, accepts the next 
     activeRunsGate?.release();
     await page.close();
   }
-});
-
-test('Human Chat reads an Agent pair with both names and both authors while send remains refused', async () => {
-  let scopeId = '';
-  const page = await startPage([{ events: [], result: { status: 'completed', text: 'Scout answers Forge.' } }], { beforeMount: async server => {
-    const command = async (path: string, body: unknown) => fetch(`${server.base}${path}`, {
-      method: 'POST', headers: { cookie: server.cookie, 'x-sprout-csrf': server.csrf, 'content-type': 'application/json' }, body: JSON.stringify(body),
-    });
-    assert.equal((await command('/api/agents', { id: 'forge', displayName: 'Forge', workOptions: [{ engine: 'scripted', workModel: 'scripted-model', effort: 'standard' }] })).status, 201);
-    assert.equal((await command(`/api/projects/${PROJECT_ID}/memberships`, { agentId: 'forge' })).status, 200);
-    const send = createAgentDirectMessageSender({ run: { agentId: 'forge', projectId: PROJECT_ID }, runs: server.orchestrator, scopes: server.scopes, collaboration: server.collaboration });
-    const delivered = await send({ recipientId: AGENT_ID, body: 'Forge asks Scout.', deliveryKey: 'pair-attribution', awaitReply: true });
-    scopeId = delivered.scopeId;
-  } });
-  try {
-    await page.push(`/project/chat/${scopeId}?project=${PROJECT_ID}`);
-    const input = await waitFor('Agent-authored direct input', () => messageElement(page, 'Forge asks Scout.'));
-    const reply = await waitFor('recipient Agent reply', () => messageElement(page, 'Scout answers Forge.'));
-    assert.equal(authorOf(input), '@Forge');
-    assert.equal(authorOf(reply), `@${AGENT_NAME}`);
-    assert.equal(input.querySelector('[data-author-kind="agent"]')?.textContent, 'Agent');
-    assert.equal(reply.querySelector('[data-author-kind="agent"]')?.textContent, 'Agent');
-    const scopeButton = page.doc.querySelector(`[data-scope-id="${scopeId}"]`);
-    assert.match(scopeButton?.textContent ?? '', /@Forge/);
-    assert.match(scopeButton?.textContent ?? '', new RegExp(`@${AGENT_NAME}`));
-    assert.equal((page.doc.querySelector('.chat-composer button') as HTMLButtonElement).disabled, true);
-  } finally { await page.close(); }
 });
 
 test('the reply renders with attribution and projected evidence in the Working group and the direct scope', async () => {

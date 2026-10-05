@@ -246,6 +246,16 @@ export interface CollaborationScopePort {
   projectContract?(projectId: string): Promise<ConversationProjectFacts | undefined>;
 }
 
+export class AgentDirectMessageForbiddenError extends Error {
+  readonly code = 'agent-direct-message-forbidden' as const;
+  readonly status = 403 as const;
+
+  constructor() {
+    super('Agent-authored direct messages are unsupported; use Task-group posts for Agent collaboration');
+    this.name = 'AgentDirectMessageForbiddenError';
+  }
+}
+
 /**
  * A Message delivery refused by its scope's admission state.
  *
@@ -537,10 +547,13 @@ export class CollaborationCoordinator {
    * `MessageDeliveryError` when the scope is read-only for this author.
    */
   async deliver(input: DeliverInput): Promise<DeliverResult> {
+    const scope = await this.#scopes.getScope(input.scopeId);
+    if (scope?.kind === 'direct' && input.author.kind !== 'human') {
+      throw new AgentDirectMessageForbiddenError();
+    }
     const existing = await this.#store.getMessageByDeliveryKey(input.deliveryKey);
     if (existing !== undefined) return this.#finishDuplicateDelivery(input, existing);
 
-    const scope = await this.#scopes.getScope(input.scopeId);
     const prepare = () => this.#prepareMessageDelivery(input);
     let prepared: PreparedMessageDelivery;
     if (scope?.kind === 'task-group') {

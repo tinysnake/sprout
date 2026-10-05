@@ -28,6 +28,11 @@ test('Worker Task-group bridge uses session-only credentials and forwards the Co
     assert.ok(sessionToken);
     assert.ok(sessionUrl);
     assert.match(standingInstructions, /Task-group post command/);
+    assert.doesNotMatch(standingInstructions, /direct-message/i);
+    assert.deepEqual(Object.keys(request.sessionEnvironment ?? {}).sort(), [
+      'SPROUT_TASK_GROUP_POST_TOKEN',
+      'SPROUT_TASK_GROUP_POST_URL',
+    ]);
     assert.equal(standingInstructions.includes(sessionToken), false);
 
     const session = await startSession(request);

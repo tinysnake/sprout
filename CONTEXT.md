@@ -49,11 +49,11 @@ The durable identity and governance of one Project-owned communication context: 
 _Avoid_: Chat room, DM thread, channel list
 
 **Project-scoped direct message**:
-A private conversation between one Human and one current Agent member of a Project. It is governed and recorded within that Project, so the same pair communicating in another Project has a separate conversation and context.
+A private conversation between one Human and one current Agent member of a Project. The Human's messages can wake the Agent and the Agent's completed replies appear in the same conversation; Agents do not initiate direct messages. It is governed and recorded within that Project, so the same pair communicating in another Project has a separate conversation and context.
 _Avoid_: Global direct message, cross-Project direct message
 
 **Message**:
-One durable piece of Human- or Agent-authored conversation in a Project-scoped direct message, Project channel, Working group channel, or Task group. A Message may cause routing, but it is not a Task, Agent run, run event, or system-generated Project event.
+One durable piece of Human- or Agent-authored conversation in a Project channel, Working group channel, or Task group, or a Human-authored input or projected Agent reply in a Project-scoped direct message. A Message may cause routing, but it is not a Task, Agent run, run event, or system-generated Project event.
 _Avoid_: Task, prompt, run event
 
 **Project event**:
@@ -65,7 +65,7 @@ The declared treatment of a Project event: addressed, wake-eligible, information
 _Avoid_: Notification severity, inferred intent
 
 **Wake policy**:
-The Project-level choice between explicit-only routing, where unaddressed Project-channel and Working-group-channel Messages and events remain durable without model evaluation, and wake-model-assisted routing, where eligible unaddressed inputs are collected for model judgement. Project-scoped direct messages, explicit Agent mentions, broadcasts, and addressed Project events bypass this policy and wake their recipients.
+The Project-level choice between explicit-only routing, where unaddressed Project-channel and Working-group-channel Messages and events remain durable without model evaluation, and wake-model-assisted routing, where eligible unaddressed inputs are collected for model judgement. Human-authored direct messages, explicit Agent mentions, broadcasts, and addressed Project events bypass this policy and wake their recipients.
 _Avoid_: Notification setting, workflow
 
 **Routing batch**:
