@@ -25,7 +25,7 @@ function run(id: string, status: AgentRun['status']): AgentRun {
     ...(status !== 'queued' && status !== 'running' ? { completedAt: 2 } : {}) };
 }
 
-async function scenario(options: { readonly worker?: TaskContextWorker; readonly forceRelease?: boolean; readonly taskLead?: TaskActor; readonly taskGroupSnapshots?: Task[] } = {}) {
+async function scenario(options: { readonly worker?: TaskContextWorker; readonly forceRelease?: boolean; readonly taskLead?: TaskActor; readonly taskGroupSnapshots?: Task[]; readonly taskGroupEvents?: string[] } = {}) {
   const store = new InMemoryTaskStore();
   const pool = new EnvironmentPool({ definitions: [definition], instances: [instance], idFactory: () => 'lease-1' });
   const agents = new AgentRegistry([{ id: 'pi', name: 'Pi', engine: 'scripted', capability: 'agent-run' }]);
@@ -42,7 +42,17 @@ async function scenario(options: { readonly worker?: TaskContextWorker; readonly
     ...(options.worker !== undefined ? { worker: options.worker } : {}),
     ids: { task: () => 'task', message: () => 'message', projectEvent: () => 'event', lease: () => 'lease-1', run: () => `run-${++nextRun}` },
     runs: { submit: async request => ({ id: request.runId }) },
-    ...(options.taskGroupSnapshots !== undefined ? { taskGroups: { sync: async (value: Task) => { options.taskGroupSnapshots!.push(structuredClone(value)); } } } : {}),
+    ...((options.taskGroupSnapshots !== undefined || options.taskGroupEvents !== undefined) ? { taskGroups: {
+      sync: async (value: Task) => {
+        options.taskGroupSnapshots?.push(structuredClone(value));
+        options.taskGroupEvents?.push('group-sync');
+      },
+      withTaskGroupLock: async <T>(_taskId: string, action: () => Promise<T>) => {
+        options.taskGroupEvents?.push('lock-enter');
+        try { return await action(); }
+        finally { options.taskGroupEvents?.push('lock-exit'); }
+      },
+    } } : {}),
     ...(options.forceRelease === false ? {} : { forceReleaseLease: (leaseId: string) => pool.releaseTaskLease(leaseId) !== undefined }),
   });
   const tasks = new TaskService({ store, lifecycle, runs: { submit: async () => ({ id: 'unused' }) } });
@@ -64,13 +74,21 @@ async function scenario(options: { readonly worker?: TaskContextWorker; readonly
 }
 
 test('admitted Task groups synchronize at start and freeze after terminal persistence', async () => {
+  const taskGroupEvents: string[] = [];
   const taskGroupSnapshots: Task[] = [];
-  const s = await scenario({ taskGroupSnapshots });
+  const s = await scenario({ taskGroupSnapshots, taskGroupEvents });
   assert.equal(taskGroupSnapshots.length, 1);
   assert.equal(taskGroupSnapshots[0]?.status, 'in-progress');
   assert.deepEqual(taskGroupSnapshots[0]?.admission?.lead, lead);
 
+  taskGroupEvents.length = 0;
+  const saveTerminalWithLease = s.store.saveTerminalWithLease.bind(s.store);
+  s.store.saveTerminalWithLease = async (task, leaseId) => {
+    taskGroupEvents.push('terminal-save');
+    await saveTerminalWithLease(task, leaseId);
+  };
   const cancelled = await s.controls.discardForHuman('task-1', { reason: 'Task work is cancelled.' });
+  assert.deepEqual(taskGroupEvents, ['lock-enter', 'terminal-save', 'group-sync', 'lock-exit']);
   assert.equal(cancelled.status, 'cancelled');
   assert.equal(taskGroupSnapshots.length, 2);
   assert.equal(taskGroupSnapshots[1]?.status, 'cancelled');
@@ -417,14 +435,22 @@ test('Force Release without a lease-release capability preserves unfinished reco
 });
 
 test('Force Release records cancellation disposition without claiming normal context cleanup', async () => {
-  const s = await scenario();
+  const taskGroupEvents: string[] = [];
+  const s = await scenario({ taskGroupEvents });
   await s.lifecycle.workerChannelLost('task-1');
+  taskGroupEvents.length = 0;
+  const saveTerminalWithLease = s.store.saveTerminalWithLease.bind(s.store);
+  s.store.saveTerminalWithLease = async (task, leaseId) => {
+    taskGroupEvents.push('terminal-save');
+    await saveTerminalWithLease(task, leaseId);
+  };
   const leaseId = s.begun.environmentLeaseId!;
   const affected = await s.lifecycle.forceRelease('task-1', {
     actor: 'operator', reason: 'unrecoverable Worker proof', unresolvedFacts: ['context recycle not proved'], at: 50,
   });
   const forced = await s.tasks.get('task-1');
   assert.deepEqual(affected, []);
+  assert.deepEqual(taskGroupEvents, ['lock-enter', 'terminal-save', 'group-sync', 'lock-exit']);
   assert.equal(forced?.status, 'cancelled');
   assert.equal(forced?.environmentLifecycleState, 'discarded');
   assert.equal(forced?.endDisposition, 'cancelled');

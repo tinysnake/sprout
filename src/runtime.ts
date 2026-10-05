@@ -1137,7 +1137,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         recycle: async (input) =>
           (await runtimeEnvironment.contexts(input.environmentInstanceId)).recycle(input),
       },
-      taskGroups: { sync: syncTaskGroup },
+      taskGroups: {
+        sync: syncTaskGroup,
+        withTaskGroupLock: (taskId, action) => conversationScopes.withTaskGroupLock(taskId, action),
+      },
       leaseTtlMs,
       // Every Task entry into recovery opens the durable recovery record that
       // protects its lease (#88). The callback only records; the lifecycle keeps

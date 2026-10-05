@@ -13,7 +13,7 @@ import {
 import { projectChannelScopeId, isWorkingGroup, taskGroupStatus, workingGroupStatus } from './conversation/model.ts';
 import type { Task } from './task/model.ts';
 
-function admittedTask(id: string, status: 'in-progress' | 'done'): Task {
+function admittedTask(id: string, status: Task['status']): Task {
   return {
     id,
     projectId: PROJECT_ID,
@@ -100,9 +100,13 @@ test('startup reconciliation creates missing admitted Task groups and freezes te
       }],
     };
     const terminalTask = admittedTask('restart-done', 'done');
+    const cancelledTask = admittedTask('restart-cancelled', 'cancelled');
+    const failedTask = admittedTask('restart-failed', 'failed');
     await stores.tasks.create(activeTask);
     await stores.tasks.create(revisedTask);
     await stores.tasks.create(terminalTask);
+    await stores.tasks.create(cancelledTask);
+    await stores.tasks.create(failedTask);
 
     await runtime.reconcile();
 
@@ -111,6 +115,8 @@ test('startup reconciliation creates missing admitted Task groups and freezes te
     const activeGroup = groups.find((group) => group.taskId === activeTask.id);
     const revisedGroup = groups.find((group) => group.taskId === revisedTask.id);
     const terminalGroup = groups.find((group) => group.taskId === terminalTask.id);
+    const cancelledGroup = groups.find((group) => group.taskId === cancelledTask.id);
+    const failedGroup = groups.find((group) => group.taskId === failedTask.id);
     assert.ok(activeGroup, 'the admitted Task gets a scope even if the original admission write was interrupted');
     assert.equal(activeGroup.content.currentVersion, 1);
     assert.equal(activeGroup.content.versions[0]?.taskTitle, activeTask.title);
@@ -126,6 +132,18 @@ test('startup reconciliation creates missing admitted Task groups and freezes te
     assert.ok(terminalGroup, 'a terminal Task still gets its durable conversation history scope');
     assert.equal(taskGroupStatus(terminalGroup), 'frozen');
     assert.equal(terminalGroup.terminalTaskStatus, 'done');
+    assert.ok(cancelledGroup);
+    assert.equal(cancelledGroup.terminalTaskStatus, 'cancelled');
+    assert.equal(taskGroupStatus(cancelledGroup), 'frozen');
+    assert.ok(failedGroup);
+    assert.equal(failedGroup.terminalTaskStatus, 'failed');
+    assert.equal(taskGroupStatus(failedGroup), 'frozen');
+
+    const firstPass = JSON.stringify(groups);
+    await runtime.reconcile();
+    const secondPass = (await stores.conversationScopes.listForProject(PROJECT_ID))
+      .filter((scope) => scope.kind === 'task-group');
+    assert.equal(JSON.stringify(secondPass), firstPass, 'repeat reconciliation appends no duplicate snapshots or freeze facts');
   } finally {
     await runtime.close();
   }

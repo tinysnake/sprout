@@ -15,7 +15,7 @@
 
 import { ConversationScopeService } from '../conversation/service.ts';
 import { InMemoryConversationScopeStore } from '../conversation/store.ts';
-import type { ConversationProjectPort } from '../conversation/service.ts';
+import type { ConversationProjectPort, ConversationTaskPort } from '../conversation/service.ts';
 import { ProjectRegistry } from '../project/registry.ts';
 import type { Project } from '../project/model.ts';
 import type { WakePolicy } from '../project/authority-model.ts';
@@ -41,6 +41,8 @@ export interface CollaborationScopeHarnessOptions {
   readonly wakePolicy?: WakePolicy;
   /** The fixture Projects' fixed routing interval; defaults to 30 seconds. */
   readonly routingIntervalMs?: number;
+  /** Optional live Task facts for Task-group lifecycle tests. */
+  readonly tasks?: ConversationTaskPort;
 }
 
 export interface CollaborationScopeHarness {
@@ -85,6 +87,7 @@ export function buildCollaborationScopes(
   const scopes = new ConversationScopeService({
     store: new InMemoryConversationScopeStore(),
     projects,
+    ...(options.tasks !== undefined ? { tasks: options.tasks } : {}),
   });
   return {
     scopes,

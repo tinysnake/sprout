@@ -131,8 +131,11 @@ export interface TaskEnvironmentLifecycleOptions {
   readonly projects: ProjectRegistry;
   readonly runs: TaskEnvironmentRunner;
   readonly worker?: TaskContextWorker;
-  /** Keeps each admitted Task's conversation scope aligned with its lifecycle. */
-  readonly taskGroups?: { readonly sync: (task: Task) => Promise<void> };
+  /** Keeps each admitted Task's conversation scope aligned and serialized with its lifecycle. */
+  readonly taskGroups?: {
+    readonly sync: (task: Task) => Promise<void>;
+    readonly withTaskGroupLock: <T>(taskId: string, action: () => Promise<T>) => Promise<T>;
+  };
   readonly ids?: IdFactory;
   readonly clock?: { now(): number };
   readonly leaseTtlMs?: number;
@@ -930,7 +933,8 @@ export class TaskEnvironmentLifecycle {
       }
       return [...new Set(affectedRunIds)];
     }
-    if (!task.environmentLeaseId || this.#forceReleaseLease === undefined) {
+    const releaseTaskLease = this.#forceReleaseLease;
+    if (!task.environmentLeaseId || releaseTaskLease === undefined) {
       throw new Error('Force Release lease-release capability is unavailable');
     }
     const forced: Task = omit(
@@ -953,14 +957,17 @@ export class TaskEnvironmentLifecycle {
       ),
       'pendingCompletionClaimId',
     );
-    // One transaction commits the terminal Task row and the Task-held lease
-    // release together. Without the explicit release capability above, unfinished
-    // work remains in recovery rather than claiming terminal cancellation.
-    await this.#store.saveTerminalWithLease(forced, task.environmentLeaseId);
-    this.#resolvePauseRetryGate(taskId);
-    this.#forceReleaseLease(task.environmentLeaseId);
-    await this.ensureTaskGroup(forced);
-    return [...new Set(affectedRunIds)];
+    const leaseId = task.environmentLeaseId;
+    return this.#withTaskGroupLock(task.id, async () => {
+      // One transaction commits the terminal Task row and the Task-held lease
+      // release together. Without the explicit release capability above, unfinished
+      // work remains in recovery rather than claiming terminal cancellation.
+      await this.#store.saveTerminalWithLease(forced, leaseId);
+      this.#resolvePauseRetryGate(taskId);
+      releaseTaskLease(leaseId);
+      await this.ensureTaskGroup(forced);
+      return [...new Set(affectedRunIds)];
+    });
   }
 
   async #recycleThenRelease(task: Task): Promise<Task> {
@@ -979,21 +986,28 @@ export class TaskEnvironmentLifecycle {
       await this.#toRecovery(task, 'ending');
       throw new Error(`task ${task.id} lease could not be released after cleanup`);
     }
-    try {
-      // One transaction makes release and terminal persistence inseparable. A
-      // crash before it leaves `ending` recoverable; a crash after it is already
-      // terminal with a released lease, so retry/discard never gets stuck.
-      await this.#store.saveTerminalWithLease(ended, task.environmentLeaseId);
-      this.#resolvePauseRetryGate(task.id);
-      this.#faults?.afterTerminalCommit?.();
-      this.#pool.releaseTaskLease(task.environmentLeaseId);
-      await this.ensureTaskGroup(ended);
-      return ended;
-    } catch (error) {
-      if (error instanceof DurableWriteCrash) throw error;
-      await this.#toRecovery(task, 'ending');
-      throw error;
-    }
+    return this.#withTaskGroupLock(task.id, async () => {
+      try {
+        // One transaction makes release and terminal persistence inseparable. A
+        // crash before it leaves `ending` recoverable; a crash after it is already
+        // terminal with a released lease, so retry/discard never gets stuck.
+        await this.#store.saveTerminalWithLease(ended, task.environmentLeaseId!);
+        this.#resolvePauseRetryGate(task.id);
+        this.#faults?.afterTerminalCommit?.();
+        this.#pool.releaseTaskLease(task.environmentLeaseId!);
+        await this.ensureTaskGroup(ended);
+        return ended;
+      } catch (error) {
+        if (error instanceof DurableWriteCrash) throw error;
+        await this.#toRecovery(task, 'ending');
+        throw error;
+      }
+    });
+  }
+
+  async #withTaskGroupLock<T>(taskId: string, action: () => Promise<T>): Promise<T> {
+    if (this.#taskGroups === undefined) return action();
+    return this.#taskGroups.withTaskGroupLock(taskId, action);
   }
 
   async #toRecovery(task: Task, prior: NonNullable<Task['environmentLifecycleState']>, hadActiveRun = false, retry = false, cause?: 'lease-overdue'): Promise<void> {
