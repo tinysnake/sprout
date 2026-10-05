@@ -425,6 +425,24 @@ test('the newest mixed timeline page is bounded across messages and project even
   } finally { p.close(); }
 });
 
+test('same Message and Project event IDs retain distinct timeline identity', async () => {
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(' '));
+    originalWarn(...args);
+  };
+  const p = await page('', { channelMessages: 1, events: [event('message-1', 1)] });
+  try {
+    assert.deepEqual(p.dataRows().map((row) => row.dataset['eventId'] !== undefined
+      ? `event:${row.dataset['eventId']}` : `message:${row.dataset['messageId']}`), ['event:message-1', 'message:message-1']);
+    assert.equal(warnings.some((warning) => warning.includes('Duplicate keys')), false);
+  } finally {
+    p.close();
+    console.warn = originalWarn;
+  }
+});
+
 test('older merged pages resume both source boundaries without gaps or duplicates', async () => {
   const messages = Array.from({ length: pageSize * 2 }, (_, index) => message(`message-${index + 1}`));
   const events = Array.from({ length: pageSize * 2 }, (_, index) => event(`event-${index + 1}`, index + 1));
