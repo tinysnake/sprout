@@ -139,6 +139,7 @@ export class TaskGroupOrchestration {
         // back to lead rather than paying for another model call.
         const claimed = await o.store.getEventByDeliveryKey(key('model-claimed'));
         const claim = await this.#event(message, 'model-claimed', empty);
+        if (claim.skipped) continue;
         // Inference may not occupy an earlier Message's idle deadline. An
         // exhausted budget chooses lead fallback instead of queuing more calls.
         const budget = Math.min(next, message.createdAt + TASK_GROUP_IDLE_MS) - o.now();
