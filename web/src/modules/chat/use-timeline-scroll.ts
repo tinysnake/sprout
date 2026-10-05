@@ -11,6 +11,7 @@ export function useTimelineScroll(
   const hasNewEntries = ref(false);
   let following = true;
   let epoch = 0;
+  let currentSelection = selection.value;
   let frame: number | undefined;
   let observer: ResizeObserver | undefined;
   let seen = new Set<string>();
@@ -82,7 +83,11 @@ export function useTimelineScroll(
   function noteHistory(ids: readonly string[]) {
     for (const id of ids) seen.add(id);
   }
-  watch([selection, viewport, content, hasTarget], () => {
+  watch([selection, viewport, content, hasTarget], ([selected]) => {
+    if (selected !== currentSelection) {
+      currentSelection = selected;
+      clearPendingScroll();
+    }
     epoch++;
     cancelFrame();
     observer?.disconnect();
