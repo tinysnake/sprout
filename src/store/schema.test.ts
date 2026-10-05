@@ -1,25 +1,17 @@
 import { test } from 'node:test';
-
-import assert from 'node:assert/strict';import { existsSync, mkdtempSync, rmSync } from 'node:fs';
-
+import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-
 import { join } from 'node:path';
-
-import { DatabaseSync } from 'node:sqlite';import { CURRENT_SCHEMA_VERSION, MIN_SUPPORTED_SCHEMA_VERSION, MAX_SUPPORTED_SCHEMA_VERSION, SUPPORTED_SCHEMA_RANGE, SchemaMigrationError, migrateOrInitializeDatabase, getSchemaVersion, defaultSafetyCopyPath, type MigrationStep } from './schema.ts';
-
-import { SqliteStore } from './db.ts';
+import { DatabaseSync } from 'node:sqlite';
 
 import { BROWSER_SESSION_ABSOLUTE_LIFETIME_MS, BROWSER_SESSION_IDLE_LIFETIME_MS } from '../auth/session-policy.ts';
-
-import { WorkerConnectionRegistry } from '../environment/worker-epoch.ts';
-
 import { ADMISSION_CAPABILITY, projectCatalogEntry } from '../environment/catalog.ts';
-
 import { createPendingEnrollment } from '../environment/enrollment.ts';
-
 import { SUPPORTED_WORKER_PROTOCOL } from '../environment/enrollment-service.ts';
-
+import { WorkerConnectionRegistry } from '../environment/worker-epoch.ts';
+import { CURRENT_SCHEMA_VERSION, MIN_SUPPORTED_SCHEMA_VERSION, MAX_SUPPORTED_SCHEMA_VERSION, SUPPORTED_SCHEMA_RANGE, SchemaMigrationError, migrateOrInitializeDatabase, getSchemaVersion, defaultSafetyCopyPath, type MigrationStep } from './schema.ts';
+import { SqliteStore } from './db.ts';
 
 function withTempDir<T>(fn: (dir: string) => Promise<T> | T): Promise<T> {
   const dir = mkdtempSync(join(tmpdir(), 'sprout-schema-test-'));
