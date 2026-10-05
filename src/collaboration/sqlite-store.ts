@@ -260,6 +260,10 @@ export class SqliteCollaborationStore implements CollaborationStore {
     if (!wakeColumns.some((column) => column.name === 'batch_id')) {
       this.#db.exec('ALTER TABLE collaboration_wake_requests ADD COLUMN batch_id TEXT;');
     }
+    const messageColumns = this.#db.prepare('PRAGMA table_info(collaboration_messages)').all() as unknown as readonly { name: string }[];
+    if (!messageColumns.some(column => column.name === 'message_kind')) {
+      this.#db.exec("ALTER TABLE collaboration_messages ADD COLUMN message_kind TEXT NOT NULL DEFAULT 'status';");
+    }
   }
 
   async postMessage(input: {
@@ -277,8 +281,8 @@ export class SqliteCollaborationStore implements CollaborationStore {
       const inserted = this.#db
         .prepare(
           `INSERT OR IGNORE INTO collaboration_messages
-             (id, project_id, scope_id, channel, author_id, author_kind, body, recipients, delivery_key, in_reply_to, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, project_id, scope_id, channel, author_id, author_kind, body, recipients, delivery_key, in_reply_to, created_at, message_kind)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           input.message.id,
@@ -292,6 +296,7 @@ export class SqliteCollaborationStore implements CollaborationStore {
           input.message.deliveryKey,
           input.message.inReplyTo ?? null,
           input.message.createdAt,
+          input.message.kind ?? 'status',
         );
 
       if (inserted.changes === 0) {
@@ -957,6 +962,7 @@ interface MessageRow {
   readonly recipients: string;
   readonly delivery_key: string;
   readonly in_reply_to: string | null;
+  readonly message_kind: Message['kind'];
   readonly created_at: number;
 }
 
@@ -1004,6 +1010,7 @@ function toMessage(row: MessageRow): Message {
     channel: row.channel as MessageChannel,
     author,
     body: row.body,
+    kind: row.message_kind ?? 'status',
     recipients: JSON.parse(row.recipients) as string[],
     deliveryKey: row.delivery_key,
     ...(row.in_reply_to !== null ? { inReplyTo: row.in_reply_to } : {}),
