@@ -74,7 +74,10 @@ function fixture(options: {
     store: taskStore, pool, agents, projects, runs: runner, worker,
     ids: { task: () => 'unused-task', lease: () => 'unused-lease', run: (() => { let n = 0; return () => `run-${++n};` })(), message: () => 'unused-message', projectEvent: () => 'unused-event' },
     clock: { now: () => 100 },
-    taskGroups: { sync: async (task) => { taskGroupSnapshots.push(structuredClone(task)); } },
+    taskGroups: {
+    sync: async (task) => { taskGroupSnapshots.push(structuredClone(task)); },
+    withTaskGroupLock: (_taskId, action) => action(),
+  },
   });
   const tasks = new TaskService({ store: taskStore, runs: runner, lifecycle });
   const facts = {

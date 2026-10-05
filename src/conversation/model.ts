@@ -426,6 +426,7 @@ export type ScopeStateReason =
   | 'working-group-disbanded'
   | 'task-group-frozen'
   | 'task-group-task-unavailable'
+  | 'task-group-lifecycle-unavailable'
   | 'membership-ended'
   | 'not-a-member'
   | 'not-a-participant';

@@ -108,6 +108,23 @@ test('every current Project member, including later joiners, is admitted to the 
   });
   assert.deepEqual(await f.scopes.scopeState(scope.id, 'late-joiner'), { scopeId: scope.id, writable: true });
   assert.equal((await f.store.get(scope.id))?.kind, 'task-group');
+
+  f.setFacts({
+    projectId: 'project-alpha', status: 'active', contentVersion: 3,
+    goal: 'Project goal', rules: ['Project rule'],
+    members: [
+      { memberId: 'operator', memberKind: 'human' },
+      { memberId: 'scout', memberKind: 'agent' },
+      { memberId: 'scribe', memberKind: 'agent', endedAt: 103 },
+      { memberId: 'late-joiner', memberKind: 'agent' },
+    ],
+  });
+  assert.deepEqual(await f.scopes.scopeState(scope.id, 'scribe'), {
+    scopeId: scope.id, writable: false, reason: 'membership-ended',
+  });
+  assert.deepEqual(await f.scopes.scopeState(scope.id, 'late-joiner'), {
+    scopeId: scope.id, writable: true,
+  });
 });
 
 test('terminal task freezes the task-group while preserving its readable scope record', async () => {

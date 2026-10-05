@@ -237,6 +237,8 @@ export class ConversationScopeService {
   readonly #preparing = new Set<string>();
   /** Hold a scope's preparation turn until its Project persistence settles. */
   readonly #preparationTurns = new Map<string, Promise<void>>();
+  /** Serialize Task group posts with terminal Task commits for the same Task. */
+  readonly #taskGroupTurns = new Map<string, Promise<void>>();
 
   constructor(options: ConversationScopeServiceOptions) {
     this.#store = options.store;
@@ -244,6 +246,26 @@ export class ConversationScopeService {
     this.#tasks = options.tasks;
     this.#clock = options.clock ?? Date.now;
     this.#createId = options.createId ?? (() => Math.random().toString(36).slice(2, 10));
+  }
+
+  /**
+   * Serialize one Task group's post admission and Task terminal transition.
+   * Both the collaboration write path and Task lifecycle hold this turn from
+   * checking Task status through durable Message or terminal persistence, so a
+   * post cannot slip between terminal status commit and the scope freeze.
+   */
+  async withTaskGroupLock<T>(taskId: string, action: () => Promise<T>): Promise<T> {
+    const previous = this.#taskGroupTurns.get(taskId);
+    let unlock!: () => void;
+    const turn = new Promise<void>((resolve) => { unlock = resolve; });
+    this.#taskGroupTurns.set(taskId, turn);
+    if (previous !== undefined) await previous;
+    try {
+      return await action();
+    } finally {
+      if (this.#taskGroupTurns.get(taskId) === turn) this.#taskGroupTurns.delete(taskId);
+      unlock();
+    }
   }
 
   /**
@@ -958,9 +980,9 @@ export class ConversationScopeService {
    * The admission state of one scope for one acting member.
    *
    * `writable: false` is the read-only contract later consumers enforce before
-   * recording a Message: archived Project, disbanded Working group, ended
-   * membership, or a non-participant each block new messages while history
-   * stays readable.
+   * recording a Message: archived Project, disbanded Working group, terminal
+   * Task group, ended membership, or a non-participant each blocks new messages
+   * while history stays readable.
    */
   async scopeState(scopeId: string, actorId: string): Promise<ScopeState> {
     const scope = await this.#store.get(scopeId);

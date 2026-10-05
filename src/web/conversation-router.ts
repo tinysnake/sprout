@@ -110,8 +110,8 @@ export function createConversationRouter(options: ConversationRouterOptions): Ap
       const projectId = segments[2] ?? '';
 
       // GET /api/projects/:id/scopes — every scope of one Project: the
-      // invariant Project channel (ensured), direct conversations, and Working
-      // groups, with participation ends materialized first.
+      // invariant Project channel, direct conversations, Working groups, and
+      // Task groups, with current Task groups retained after terminal freeze.
       if (method === 'GET' && segments.length === 4 && isProjectRoute && segments[3] === 'scopes') {
         try {
           const listed = await scopes.listScopes(projectId);

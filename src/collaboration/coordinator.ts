@@ -37,21 +37,24 @@
  * ## Scope-governed delivery (#96)
  *
  * A Message is delivered to exactly one conversation scope — the Project
- * channel, one Project-scoped direct conversation, or one Working group
- * channel (#95). Before anything is persisted, the acting author's admission
- * state for that scope is checked: an archived Project, a disbanded Working
- * group, or an ended membership refuses delivery with a typed error while the
- * durable history stays readable. The scope is the single source of the
- * Message's `projectId`, `channel`, and current participants (the pair for a
- * direct conversation, the group's active participations for a Working group),
- * so routing can never disagree with scope governance.
+ * channel, one Project-scoped direct conversation, one Working group channel
+ * (#95), or one Task group (#210). Before anything is persisted, the acting
+ * author's admission state for that scope is checked: an archived Project, a
+ * disbanded Working group, a terminal Task group, or an ended membership
+ * refuses delivery with a typed error while the durable history stays
+ * readable. The scope is the single source of the Message's `projectId`,
+ * `channel`, and current participants: the pair for a direct conversation,
+ * active participations for a Working group, and current Project members for
+ * a Project channel or Task group, so routing can never disagree with scope
+ * governance.
  *
  * ## Deterministic routing first, then batches (#96, #97, ADR-0007)
  *
  * `planWake` and `planEventWake` are pure: direct recipients, exact
  * whole-token mentions, exact `@all` broadcasts, and `addressed` Project
  * events resolve against current Project member facts — and, for direct and
- * Working-group scopes, against that scope's current participants — and never
+ * Working-group scopes, against that scope's current participants. Task groups
+ * use all current Project members by owner ruling. These branches never
  * consult a wake model or the Project's wake policy. An input with no
  * deterministic address either records a durable suppressed observation
  * (`explicit-only`) or joins the Project's fixed routing window
@@ -214,6 +217,8 @@ export interface RunAdmitter {
 export interface CollaborationScopePort {
   getScope(scopeId: string): Promise<ConversationScope | undefined>;
   scopeState(scopeId: string, actorId: string): Promise<ScopeState>;
+  /** Serialize Task-group admission and persistence with terminal Task transitions. */
+  withTaskGroupLock?<T>(taskId: string, action: () => Promise<T>): Promise<T>;
   /**
    * The Project's member facts (current and ended), or `undefined` when the
    * Project does not exist. Routing resolves "current Project Agents" here.
@@ -315,6 +320,11 @@ export interface DeliverResult {
   /** Run ids admitted by this delivery, in wake order. */
   readonly admittedRunIds: readonly string[];
 }
+
+type MessagePostResult = Awaited<ReturnType<CollaborationStore['postMessage']>>;
+type PreparedMessageDelivery =
+  | { readonly kind: 'duplicate'; readonly message: Message }
+  | { readonly kind: 'post'; readonly message: Message; readonly plan: ReturnType<typeof planWake>; readonly stored: MessagePostResult };
 
 /** A request to publish one durable Project event (ADR-0007, #96). */
 export interface PublishEventInput {
@@ -481,25 +491,29 @@ export class CollaborationCoordinator {
    */
   async deliver(input: DeliverInput): Promise<DeliverResult> {
     const existing = await this.#store.getMessageByDeliveryKey(input.deliveryKey);
-    if (existing) {
-      // A retry. No new Message is written, but any wake of this input that is
-      // still pending is admitted now: idempotency must not leave addressed work
-      // unwoken just because an earlier process died between persist and admit.
-      // Admission is a compare-and-set, so this cannot double-admit a wake.
-      const pending = (await this.#store.listWakeRequests()).filter((wake) => wake.inputId === existing.id);
-      input.assertActive?.();
-      const admittedRunIds = await this.#admitAll(
-        pending,
-        { kind: 'input', input: existing },
-        input.awaitReply !== false,
-      );
-      return {
-        message: existing,
-        wakes: (await this.#store.listWakeRequests()).filter((w) => w.inputId === existing.id),
-        duplicate: true,
-        admittedRunIds,
-      };
+    if (existing !== undefined) return this.#finishDuplicateDelivery(input, existing);
+
+    const scope = await this.#scopes.getScope(input.scopeId);
+    const prepare = () => this.#prepareMessageDelivery(input);
+    let prepared: PreparedMessageDelivery;
+    if (scope?.kind === 'task-group') {
+      if (this.#scopes.withTaskGroupLock === undefined) {
+        throw new MessageDeliveryError(
+          'task-group-lifecycle-unavailable',
+          `Task group ${scope.id} cannot accept posts because its lifecycle serialization is unavailable`,
+        );
+      }
+      prepared = await this.#scopes.withTaskGroupLock(scope.taskId, prepare);
+    } else {
+      prepared = await prepare();
     }
+    return this.#finishMessageDelivery(input, prepared);
+  }
+
+  /** Check admission and durably store the Message while any Task lock is held. */
+  async #prepareMessageDelivery(input: DeliverInput): Promise<PreparedMessageDelivery> {
+    const existing = await this.#store.getMessageByDeliveryKey(input.deliveryKey);
+    if (existing !== undefined) return { kind: 'duplicate', message: existing };
 
     const scope = await this.#requireWritableScope(input.scopeId, input.author.id);
     const members = await this.#requireMembers(scope.projectId);
@@ -527,8 +541,7 @@ export class CollaborationCoordinator {
     // A batch-eligible input joins its Project's fixed routing window in the
     // same store transaction as the Message itself (#97): a crash between the
     // two can never leave an eligible input outside every window.
-    const collect =
-      plan.batchEligible === true ? { intervalMs: routingPolicy.intervalMs } : undefined;
+    const collect = plan.batchEligible === true ? { intervalMs: routingPolicy.intervalMs } : undefined;
     input.assertActive?.();
     const stored = await this.#store.postMessage({
       message,
@@ -536,19 +549,41 @@ export class CollaborationCoordinator {
       now,
       ...(collect !== undefined ? { collect } : {}),
     });
-    if (stored.duplicate) {
-      return { ...stored, admittedRunIds: [] };
-    }
+    return { kind: 'post', message, plan, stored };
+  }
+
+  /** Admit pending wakes after releasing the Task lifecycle serialization turn. */
+  async #finishMessageDelivery(input: DeliverInput, prepared: PreparedMessageDelivery): Promise<DeliverResult> {
+    if (prepared.kind === 'duplicate') return this.#finishDuplicateDelivery(input, prepared.message);
+    const { message, plan, stored } = prepared;
+    if (stored.duplicate) return { ...stored, admittedRunIds: [] };
     this.#announce(message.id, plan.observations);
     if (stored.window !== undefined) this.#afterWindowJoin(stored.window);
 
     const admittedRunIds = await this.#admitAll(stored.wakes, { kind: 'input', input: message }, input.awaitReply !== false);
-    // Re-read the wake records after admission so the returned result reports
-    // the durable state (status + run id) rather than the pre-admission snapshot.
     const finalWakes = (await this.#store.listWakeRequests()).filter(
       (candidate) => candidate.inputId === message.id,
     );
     return { ...stored, wakes: finalWakes, admittedRunIds };
+  }
+
+  async #finishDuplicateDelivery(input: DeliverInput, message: Message): Promise<DeliverResult> {
+    // A retry. No new Message is written, but any wake of this input that is
+    // still pending is admitted now: idempotency must not leave addressed work
+    // unwoken just because an earlier process died between persist and admit.
+    const pending = (await this.#store.listWakeRequests()).filter((wake) => wake.inputId === message.id);
+    input.assertActive?.();
+    const admittedRunIds = await this.#admitAll(
+      pending,
+      { kind: 'input', input: message },
+      input.awaitReply !== false,
+    );
+    return {
+      message,
+      wakes: (await this.#store.listWakeRequests()).filter((wake) => wake.inputId === message.id),
+      duplicate: true,
+      admittedRunIds,
+    };
   }
 
   /**

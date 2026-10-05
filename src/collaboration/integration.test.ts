@@ -50,6 +50,7 @@ import { ScriptedEngineAdapter, type ScriptedTurn } from '../engine/scripted.ts'
 import { ProjectRegistry } from '../project/registry.ts';
 
 import type { Project } from '../project/model.ts';
+import type { ConversationTaskPort } from '../conversation/service.ts';
 
 import { RunOrchestrator } from '../run/orchestrator.ts';
 
@@ -105,6 +106,7 @@ interface Harness {
   readonly coordinator: CollaborationCoordinator;
   readonly engine: ScriptedEngineAdapter;
   readonly scopes: CollaborationScopeHarness;
+  readonly projects: ProjectRegistry;
   close(): void;
 }
 
@@ -116,6 +118,7 @@ function build(options: {
   definitions?: readonly EnvironmentDefinition[];
   instances?: readonly EnvironmentInstance[];
   agents?: readonly { id: string; name: string; engine: string; capability: string; workingDirectory?: string }[];
+  tasks?: ConversationTaskPort;
 }): Harness {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-collab-integration-'));
   const sqlite = new SqliteStore({ filename: join(directory, 'sprout.db') });
@@ -138,7 +141,7 @@ function build(options: {
     }),
     store: sqlite.runs,
   });
-  const scopes = buildCollaborationScopes({ projects });
+  const scopes = buildCollaborationScopes({ projects, ...(options.tasks !== undefined ? { tasks: options.tasks } : {}) });
   const coordinator = new CollaborationCoordinator({
     scopes: scopes.scopes,
     store: sqlite.collaboration,
@@ -149,6 +152,7 @@ function build(options: {
     coordinator,
     engine,
     scopes,
+    projects,
     close: () => {
       sqlite.close();
       rmSync(directory, { recursive: true, force: true });
@@ -187,10 +191,136 @@ test('parallel Task groups keep Message and Wake records inside their own scope'
   const secondMessages = messages.filter((message) => message.scopeId === second.id);
   assert.deepEqual(firstMessages.map((message) => message.scopeId), [first.id, first.id]);
   assert.deepEqual(secondMessages.map((message) => message.scopeId), [second.id, second.id]);
-  assert.deepEqual(firstMessages.filter((message) => message.author.kind === 'agent').map((message) => message.inReplyTo), [firstDelivery.message.id]);
-  assert.deepEqual(secondMessages.filter((message) => message.author.kind === 'agent').map((message) => message.inReplyTo), [secondDelivery.message.id]);
   assert.equal(messages.filter((message) => message.inReplyTo === firstDelivery.message.id).every((message) => message.scopeId === first.id), true);
   assert.equal(messages.filter((message) => message.inReplyTo === secondDelivery.message.id).every((message) => message.scopeId === second.id), true);
+  assert.deepEqual((await harness.coordinator.listMessages({ scopeId: first.id })).map((message) => message.body), [
+    '@scout handle Task A', 'Scout task reply.',
+  ]);
+  assert.deepEqual((await harness.coordinator.listMessages({ scopeId: second.id })).map((message) => message.body), [
+    '@forge handle Task B', 'Forge task reply.',
+  ]);
+  assert.deepEqual(firstDelivery.wakes.map((wake) => wake.inputId), [firstDelivery.message.id]);
+  assert.deepEqual(secondDelivery.wakes.map((wake) => wake.inputId), [secondDelivery.message.id]);
+});
+test('Task-group membership follows Project changes and routing admits only current members', async (t) => {
+  const newcomer = { id: 'newcomer', name: 'Newcomer', engine: 'scripted', capability: 'agent-run', workingDirectory: '/srv/work' };
+  const harness = build({
+    turns: [scriptedTurn('Newcomer task reply.')],
+    agents: [
+      { id: 'scout', name: 'Scout', engine: 'scripted', capability: 'agent-run', workingDirectory: '/srv/work' },
+      { id: 'forge', name: 'Forge', engine: 'scripted', capability: 'agent-run', workingDirectory: '/srv/work' },
+      { id: 'scribe', name: 'Scribe', engine: 'scripted', capability: 'agent-run', workingDirectory: '/srv/work' },
+      newcomer,
+    ],
+  });
+  t.after(harness.close);
+  const group = await harness.scopes.scopes.syncTaskGroup({
+    taskId: 'membership-changes', projectId: project.id, title: 'Membership changes', goal: 'Use live authority.',
+    constraints: [], lead: { memberId: 'human-lead', kind: 'human' }, contentVersion: 1, status: 'in-progress',
+  });
+  const before = harness.projects.get(project.id)!;
+  harness.projects.add({
+    ...before,
+    memberships: [
+      ...before.memberships.filter((membership) => membership.agentId !== 'forge'),
+      { agentId: 'newcomer', responsibilities: [], collaborationInstructions: '' },
+    ],
+  });
+
+  assert.deepEqual(await harness.scopes.scopes.scopeState(group.id, 'newcomer'), {
+    scopeId: group.id, writable: true,
+  });
+  assert.deepEqual(await harness.scopes.scopes.scopeState(group.id, 'forge'), {
+    scopeId: group.id, writable: false, reason: 'not-a-member',
+  });
+  const removedMember = await harness.coordinator.deliver({
+    scopeId: group.id, author: { id: 'human-lead', kind: 'human' },
+    body: '@forge take this Task', deliveryKey: 'task-group-removed-member',
+  });
+  assert.deepEqual(removedMember.admittedRunIds, []);
+  assert.deepEqual(removedMember.wakes, []);
+  const removedMemberObservations = await harness.sqlite.collaboration.listObservations(removedMember.message.id);
+  assert.equal(removedMemberObservations.some((entry) => entry.agentId === 'forge' && entry.status === 'failed'), true);
+
+  const newMember = await harness.coordinator.deliver({
+    scopeId: group.id, author: { id: 'human-lead', kind: 'human' },
+    body: '@newcomer take this Task', deliveryKey: 'task-group-new-member',
+  });
+  assert.deepEqual(newMember.wakes.map((wake) => wake.agentId), ['newcomer']);
+  assert.equal(newMember.admittedRunIds.length, 1);
+});
+
+test('Task-group post admission serializes with terminal commit and rejects later posts', async (t) => {
+  let taskStatus = 'in-progress';
+  let releaseStoreWrite!: () => void;
+  let notifyStoreWrite!: () => void;
+  const storeWriteStarted = new Promise<void>((resolve) => { notifyStoreWrite = resolve; });
+  const storeWriteGate = new Promise<void>((resolve) => { releaseStoreWrite = resolve; });
+  const harness = build({
+    turns: [],
+    tasks: { async taskFacts(taskId) {
+      return taskId === 'terminal-race' ? { projectId: project.id, status: taskStatus } : undefined;
+    } },
+  });
+  t.after(harness.close);
+  const groupInput = {
+    taskId: 'terminal-race', projectId: project.id, title: 'Terminal race', goal: 'No late post.',
+    constraints: [], lead: { memberId: 'human-lead', kind: 'human' as const }, contentVersion: 1,
+  };
+  const group = await harness.scopes.scopes.syncTaskGroup({ ...groupInput, status: 'in-progress' });
+
+  const events: string[] = [];
+  const persistMessage = harness.sqlite.collaboration.postMessage.bind(harness.sqlite.collaboration);
+  harness.sqlite.collaboration.postMessage = async (input) => {
+    notifyStoreWrite();
+    await storeWriteGate;
+    const stored = await persistMessage(input);
+    events.push('message-persisted');
+    return stored;
+  };
+  const posting = harness.coordinator.deliver({
+    scopeId: group.id, author: { id: 'human-lead', kind: 'human' },
+    body: 'This post races terminal commit.', deliveryKey: 'terminal-race-before-freeze', awaitReply: false,
+  });
+  await storeWriteStarted;
+  let duringTransitionPostRejected: Promise<void> | undefined;
+  const serializeTaskGroup = harness.scopes.scopes.withTaskGroupLock?.bind(harness.scopes.scopes)
+    ?? (<T>(_taskId: string, action: () => Promise<T>) => action());
+  const terminalTransition = serializeTaskGroup(groupInput.taskId, async () => {
+    taskStatus = 'done';
+    const duringTransitionPost = harness.coordinator.deliver({
+      scopeId: group.id, author: { id: 'human-lead', kind: 'human' },
+      body: 'This post starts during terminal transition.', deliveryKey: 'terminal-race-during-transition', awaitReply: false,
+    });
+    duringTransitionPostRejected = assert.rejects(duringTransitionPost, (error: unknown) => {
+      assert.equal((error as { reason?: string }).reason, 'task-group-frozen');
+      return true;
+    });
+    await harness.scopes.scopes.syncTaskGroup({ ...groupInput, status: 'done' });
+    events.push('terminal-committed');
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const transitionFinishedBeforePost = events.includes('terminal-committed');
+
+  releaseStoreWrite();
+  await posting;
+  await terminalTransition;
+  assert.equal(transitionFinishedBeforePost, false, 'terminal persistence waits for a post whose active-state read began first');
+  assert.deepEqual(events, ['message-persisted', 'terminal-committed']);
+  assert.equal(taskStatus, 'done');
+  assert.ok(duringTransitionPostRejected);
+  await duringTransitionPostRejected;
+  const rejected = harness.coordinator.deliver({
+    scopeId: group.id, author: { id: 'human-lead', kind: 'human' },
+    body: 'This post is after terminal commit.', deliveryKey: 'terminal-race-after-freeze', awaitReply: false,
+  });
+  await assert.rejects(rejected, (error: unknown) => {
+    assert.equal((error as { reason?: string }).reason, 'task-group-frozen');
+    assert.match((error as Error).message, /Task is terminal.*history remains readable/i);
+    return true;
+  });
+  const history = (await harness.sqlite.collaboration.listMessages()).filter((message) => message.scopeId === group.id);
+  assert.deepEqual(history.map((message) => message.body), ['This post races terminal commit.']);
 });
 
 
