@@ -58,7 +58,7 @@ export interface WakeMember {
 /** The conversation-scope facts the plan resolves a Message's targets in. */
 export interface WakeScopeFacts {
   /** The scope kind the Message was posted to. */
-  readonly kind: 'project' | 'direct' | 'working-group';
+  readonly kind: 'project' | 'direct' | 'working-group' | 'task-group';
   /**
    * The scope's current participants: the canonical pair for a direct
    * conversation, the active participations for a Working group. Absent for
@@ -128,7 +128,7 @@ export function planWake(message: Message, input: WakePlanInput): WakePlan {
   // and the Working group's participants gate every target; if a scoped kind
   // arrives without a participant set, the gate is the empty set (fail
   // closed — missing facts never widen a fan-out).
-  const participants = scope.kind === 'project' ? undefined : (scope.participants ?? []);
+  const participants = scope.kind === 'project' || scope.kind === 'task-group' ? undefined : (scope.participants ?? []);
   const resolver = new TargetResolver({
     projectId: message.projectId,
     excludedId: message.author.id,
@@ -136,7 +136,7 @@ export function planWake(message: Message, input: WakePlanInput): WakePlan {
     ...(participants !== undefined
       ? {
           participants,
-          scopeLabel: scope.kind === 'direct' ? 'direct conversation' : 'working group',
+          scopeLabel: scope.kind === 'direct' ? 'direct conversation' : scope.kind === 'task-group' ? 'task group' : 'working group',
         }
       : {}),
   });

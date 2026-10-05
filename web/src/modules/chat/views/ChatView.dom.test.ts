@@ -97,7 +97,7 @@ async function paint() {
 function message(id: string, scopeId = 'channel', authorKind: 'human' | 'agent' = 'agent'): MessageView {
   return { id, scopeId, projectId: 'project', channel: scopeId, recipients: [], authorId: authorKind === 'human' ? 'operator' : 'agent', authorKind, body: id, createdAt: Number(id.replace(/\D/g, '')) || 1 };
 }
-async function page(query = '', options: { channelMessages?: number; directMessages?: number; shell?: boolean; height?: number; automaticEvents?: boolean } = {}) {
+async function page(query = '', options: { channelMessages?: number; directMessages?: number; taskGroup?: boolean; shell?: boolean; height?: number; automaticEvents?: boolean } = {}) {
   frames.clear(); extraHeight = 0; scrollWrites = 0;
   viewportHeight = options.height ?? 200;
   automaticScrollEvents = options.automaticEvents ?? false;
@@ -107,6 +107,11 @@ async function page(query = '', options: { channelMessages?: number; directMessa
     { id: 'channel', projectId: 'project', kind: 'project', createdAt: 1, updatedAt: 1 },
     { id: 'direct', projectId: 'project', kind: 'direct', participants: ['operator', 'agent'], createdAt: 1, updatedAt: 1 },
   ];
+  if (options.taskGroup) scopes.push({
+    id: 'task-group-42', projectId: 'project', kind: 'task-group', taskId: 'task-42',
+    taskTitle: 'Verify migration rollback coverage', status: 'active', createdAt: 1, updatedAt: 1,
+    content: { currentVersion: 1, versions: [{ version: 1, taskContentVersion: 1, at: 1, actorMemberId: 'operator', reason: 'Task admitted.', taskTitle: 'Verify migration rollback coverage', goal: 'Verify migrations.', rules: ['Keep history isolated.'] }] },
+  });
   let messages = Array.from({ length: options.channelMessages ?? 8 }, (_, i) => message(`message-${i + 1}`));
   messages.push(...Array.from({ length: options.directMessages ?? 5 }, (_, i) => message(`direct-${i + 1}`, 'direct')));
   let events: ProjectEventView[] = [];
@@ -370,6 +375,20 @@ test('landscape touch devices above the desktop breakpoint still follow keyboard
     vv.geometry.height = 300; vv.change(); await paint();
     assert.equal(dom.window.document.querySelector<HTMLElement>('.sprout-app-shell')!.style.height, '300px');
   } finally { p.close(); vv.restore(); }
+});
+
+test('task-groups appear with a task marker and title and open from the Human scope list', async () => {
+  const p = await page('', { taskGroup: true });
+  try {
+    const card = dom.window.document.querySelector<HTMLButtonElement>('[data-scope-id="task-group-42"]');
+    assert.ok(card, 'the task-group is visible in the default scope list');
+    assert.equal(card.dataset['scopeKind'], 'task-group');
+    assert.match(card.textContent ?? '', /Verify migration rollback coverage/);
+    assert.match(card.textContent ?? '', /Task group/);
+    card.click();
+    await flush();
+    assert.equal(p.router.currentRoute.value.params['scopeId'], 'task-group-42');
+  } finally { p.close(); }
 });
 
 test('opening a conversation aligns its rendered history to the bottom', async () => {

@@ -62,6 +62,7 @@ import {
 import {
   ConversationScopeService,
   type ConversationProjectPort,
+  type TaskGroupSyncInput,
 } from './conversation/service.ts';
 import { projectChannelScopeId } from './conversation/model.ts';
 import type { ConversationScopeStore } from './conversation/store.ts';
@@ -94,6 +95,7 @@ import { createFeedRouter } from './web/feed-router.ts';
 import { createCollaborationAttentionRouter } from './web/collaboration-attention-router.ts';
 import { createFeedProjection, type FeedChatActivityOrigin } from './web/feed.ts';
 import { isTerminalTaskStatus } from './task/model.ts';
+import type { Task } from './task/model.ts';
 import type { TaskStore } from './task/store.ts';
 import type { WorkerInfo, WorkerReadinessProbeResult } from './worker/protocol.ts';
 import type { ValidateWorkspaceParams, ValidateWorkspaceResult } from './worker/protocol.ts';
@@ -196,7 +198,7 @@ export interface RuntimeStores {
   readonly projectAuthorities: ProjectAuthorityStore;
   /** The durable Project Environment access and workspace bindings (#93). */
   readonly projectAccess: ProjectAccessStore;
-  /** The durable conversation scopes and Working groups (#95). */
+  /** The durable Project channels, direct scopes, Working groups, and Task groups (#95, #210). */
   readonly conversationScopes: ConversationScopeStore;
   /** The durable usage activities and append-only observations (#105). */
   readonly usage?: UsageStore;
@@ -331,7 +333,7 @@ export interface SproutRuntime {
   readonly projectService: ProjectService;
   /** The Project Environment access and workspace capability (#93). */
   readonly projectAccess: ProjectAccessService;
-  /** The conversation scope and Working group capability (#95). */
+  /** The Project conversation scopes, Working groups, and Task groups (#95, #210). */
   readonly conversationScopes: ConversationScopeService;
   /** The truthful Usage and cost observation capability (#105). */
   readonly usage: UsageService;
@@ -421,6 +423,30 @@ export type SproutTestComposition = {
     workerGateway: WorkerGateway;
     readinessWorkflow: EnvironmentReadinessWorkflow;
 };
+
+function taskGroupSyncInput(task: Task): TaskGroupSyncInput | undefined {
+  const admission = task.admission;
+  if (admission === undefined) return undefined;
+  const contentRevision = [...(task.controlHistory ?? [])].reverse().find(
+    (event) => event.action === 'content-revised',
+  );
+  return {
+    taskId: task.id,
+    projectId: task.projectId,
+    title: task.title,
+    goal: task.goal,
+    constraints: task.constraints,
+    lead: { memberId: admission.lead.memberId, kind: admission.lead.memberKind },
+    contentVersion: contentRevision?.action === 'content-revised'
+      ? contentRevision.contentVersion
+      : admission.contentVersion,
+    status: task.status,
+    ...(contentRevision?.action === 'content-revised' ? {
+      versionActor: { memberId: contentRevision.actor.memberId, kind: contentRevision.actor.memberKind },
+      reason: contentRevision.reason,
+    } : {}),
+  };
+}
 
 export function createSproutRuntime(options: SproutRuntimeOptions): Promise<SproutRuntime> {
   return composeSproutRuntime(options);
@@ -758,11 +784,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       },
     };
     /**
-     * The conversation scope and Working group capability (#95): the invariant
-     * Project channel, Project-scoped direct conversations, and temporary
-     * Working groups with durable membership history (ADR-0008). It holds no
-     * Message, wake, run, Task, or lease port, so scope commands can never
-     * wake an Agent or create work by themselves.
+     * Project channels, direct scopes, Working groups, and Task groups (#95,
+     * #210). Task groups observe Task state through a read-only port; Task
+     * lifecycle and authority remain with the Task services. Scope operations
+     * hold no Message, wake, run, or lease port, so they cannot create work.
      */
     const taskProposals = new TaskProposalService({
       store: stores.taskProposals,
@@ -773,10 +798,24 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         getMessage: id => openedStores.collaboration.getMessage(id),
       },
     });
+    const taskStoreForConversation = stores.tasks;
     const conversationScopes = new ConversationScopeService({
       store: stores.conversationScopes,
       projects: conversationProjects,
+      tasks: {
+        async taskFacts(taskId) {
+          const task = await taskStoreForConversation.get(taskId);
+          return task === undefined ? undefined : { projectId: task.projectId, status: task.status };
+        },
+      },
     });
+    const syncTaskGroup = async (task: Task): Promise<void> => {
+      const input = taskGroupSyncInput(task);
+      if (input !== undefined) await conversationScopes.syncTaskGroup(input);
+    };
+    const reconcileTaskGroups = async (): Promise<void> => {
+      for (const task of await taskStoreForConversation.list()) await syncTaskGroup(task);
+    };
     // Hydrate the Project channel invariant for every Project that already
     // exists before this composition serves: durable authority records from
     // earlier runs and the host-configured projection each gain their one
@@ -1098,6 +1137,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         recycle: async (input) =>
           (await runtimeEnvironment.contexts(input.environmentInstanceId)).recycle(input),
       },
+      taskGroups: { sync: syncTaskGroup },
       leaseTtlMs,
       // Every Task entry into recovery opens the durable recovery record that
       // protects its lease (#88). The callback only records; the lifecycle keeps
@@ -1115,6 +1155,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       // override needs this capability the Environment domain explicitly grants.
       forceReleaseLease: (leaseId) => pool.releaseTaskLease(leaseId) !== undefined,
     });
+    for (const task of await stores.tasks.list()) {
+      if (task.admission !== undefined) await syncTaskGroup(task);
+    }
     tasks = new TaskService({ store: stores.tasks, runs: orchestrator, lifecycle: taskLifecycle });
     const taskAdmissions = new TaskAdmissionService({
       proposals: taskProposals,
@@ -1973,6 +2016,11 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         const recoveredRuns = await orchestrator.reconcileOrphanedRuns();
         await tasks.reconcileEnvironmentLifecycle();
         await recovery.reconcileAfterRestart();
+        // A process may stop after Task persistence but before its separate
+        // conversation-scope write. Rebuild every admitted Task group from the
+        // durable Task record before serving; terminal Tasks therefore freeze
+        // their scopes during the same restart pass.
+        await reconcileTaskGroups();
         // Recovery may have moved a lease into (or out of) recovery, so the
         // catalog's work-safety projection is re-derived before serving.
         await refreshEnvironmentCatalog();
@@ -1980,9 +2028,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         // Project save leaves a channel row with no Project behind it — the
         // rollback cannot run on termination. Restart reconciliation removes
         // exactly those abandoned preparations before anything is served;
-        // every channel whose Project exists and every Working group record
-        // (history is never deleted, ADR-0008) survives, and a preparation
-        // still in flight in this process is never reaped (#95).
+        // every channel whose Project exists, every Working group, and every
+        // Task group survives, and a preparation still in flight in this
+        // process is never reaped (#95, #210).
         await conversationScopes.removeOrphanProjectChannels();
         // Working group participation ends cascade from an ended Project
         // membership (#95); materializing them here means a process that died

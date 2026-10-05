@@ -319,11 +319,12 @@ watch(
  * both resolve from it, so a channel, a working group, and a direct message can
  * never be rendered with each other's semantics.
  */
-type ChatScopeKind = 'channel' | 'working-group' | 'direct-message';
+type ChatScopeKind = 'channel' | 'working-group' | 'task-group' | 'direct-message';
 
 const CHAT_SCOPE_ICONS: Record<ChatScopeKind, string> = {
   channel: 'chat',
   'working-group': 'project',
+  'task-group': 'project',
   'direct-message': 'agents',
 };
 
@@ -354,6 +355,15 @@ const chatScopes: ChatScope[] = [
     kindLabel: 'Working group',
     lastSnippet: 'Focus ring contrast measured at 5.1:1.',
     lastTime: '09:48 AM',
+    readOnlyReason: '',
+  },
+  {
+    id: 'task-group-verify-migration',
+    label: 'Verify migration rollback coverage',
+    kind: 'task-group',
+    kindLabel: 'Task group',
+    lastSnippet: 'Task-scoped conversation with all Project members.',
+    lastTime: '09:42 AM',
     readOnlyReason: '',
   },
   {

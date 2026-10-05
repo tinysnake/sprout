@@ -25,7 +25,7 @@ function run(id: string, status: AgentRun['status']): AgentRun {
     ...(status !== 'queued' && status !== 'running' ? { completedAt: 2 } : {}) };
 }
 
-async function scenario(options: { readonly worker?: TaskContextWorker; readonly forceRelease?: boolean; readonly taskLead?: TaskActor } = {}) {
+async function scenario(options: { readonly worker?: TaskContextWorker; readonly forceRelease?: boolean; readonly taskLead?: TaskActor; readonly taskGroupSnapshots?: Task[] } = {}) {
   const store = new InMemoryTaskStore();
   const pool = new EnvironmentPool({ definitions: [definition], instances: [instance], idFactory: () => 'lease-1' });
   const agents = new AgentRegistry([{ id: 'pi', name: 'Pi', engine: 'scripted', capability: 'agent-run' }]);
@@ -42,6 +42,7 @@ async function scenario(options: { readonly worker?: TaskContextWorker; readonly
     ...(options.worker !== undefined ? { worker: options.worker } : {}),
     ids: { task: () => 'task', message: () => 'message', projectEvent: () => 'event', lease: () => 'lease-1', run: () => `run-${++nextRun}` },
     runs: { submit: async request => ({ id: request.runId }) },
+    ...(options.taskGroupSnapshots !== undefined ? { taskGroups: { sync: async (value: Task) => { options.taskGroupSnapshots!.push(structuredClone(value)); } } } : {}),
     ...(options.forceRelease === false ? {} : { forceReleaseLease: (leaseId: string) => pool.releaseTaskLease(leaseId) !== undefined }),
   });
   const tasks = new TaskService({ store, lifecycle, runs: { submit: async () => ({ id: 'unused' }) } });
@@ -61,6 +62,19 @@ async function scenario(options: { readonly worker?: TaskContextWorker; readonly
   const begun = await lifecycle.begin('task-1');
   return { store, pool, lifecycle, tasks, controls, begun };
 }
+
+test('admitted Task groups synchronize at start and freeze after terminal persistence', async () => {
+  const taskGroupSnapshots: Task[] = [];
+  const s = await scenario({ taskGroupSnapshots });
+  assert.equal(taskGroupSnapshots.length, 1);
+  assert.equal(taskGroupSnapshots[0]?.status, 'in-progress');
+  assert.deepEqual(taskGroupSnapshots[0]?.admission?.lead, lead);
+
+  const cancelled = await s.controls.discardForHuman('task-1', { reason: 'Task work is cancelled.' });
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(taskGroupSnapshots.length, 2);
+  assert.equal(taskGroupSnapshots[1]?.status, 'cancelled');
+});
 
 test('terminal Tasks reject blocker mutations with a product-owned terminal-state reason', async () => {
   const blocker = {
@@ -88,7 +102,8 @@ test('terminal Tasks reject blocker mutations with a product-owned terminal-stat
 });
 
 test('terminal completion retains prior pause state, so the browser must gate Resume by terminal status', async () => {
-  const s = await scenario();
+  const taskGroupSnapshots: Task[] = [];
+  const s = await scenario({ taskGroupSnapshots });
   await s.controls.pauseForHuman('task-1', { reason: 'Hold future Task runs during final review' });
   await s.controls.submitCompletionClaim('task-1', lead, {
     outcomeSummary: 'The approved work is complete', validationEvidence: ['Completion criteria passed'],
@@ -100,6 +115,7 @@ test('terminal completion retains prior pause state, so the browser must gate Re
   assert.equal(completed.status, 'done');
   assert.equal(completed.environmentLifecycleState, 'ended');
   assert.equal(completed.pauseState, 'paused');
+  assert.equal(taskGroupSnapshots.at(-1)?.status, 'done');
 });
 
 test('Human may submit a marked substitute claim for an Agent-led Task while other Agents remain rejected', async () => {

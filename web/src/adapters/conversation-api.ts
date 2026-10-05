@@ -76,10 +76,35 @@ export interface WorkingGroupScopeView extends ConversationScopeBaseView {
   readonly lifecycle: readonly WorkingGroupLifecycleView[];
 }
 
+export interface TaskGroupContentVersionView {
+  readonly version: number;
+  readonly taskContentVersion: number;
+  readonly at: number;
+  readonly actorMemberId: string;
+  readonly reason: string;
+  readonly taskTitle: string;
+  readonly goal: string;
+  readonly rules: readonly string[];
+}
+
+export interface TaskGroupScopeView extends ConversationScopeBaseView {
+  readonly kind: 'task-group';
+  readonly taskId: string;
+  readonly taskTitle: string;
+  readonly status: 'active' | 'frozen';
+  readonly frozenAt?: number;
+  readonly terminalTaskStatus?: 'done' | 'failed' | 'cancelled';
+  readonly content: {
+    readonly currentVersion: number;
+    readonly versions: readonly TaskGroupContentVersionView[];
+  };
+}
+
 export type ConversationScopeView =
   | ProjectChannelScopeView
   | DirectConversationScopeView
-  | WorkingGroupScopeView;
+  | WorkingGroupScopeView
+  | TaskGroupScopeView;
 
 /** The read-only admission state of one scope for the acting member. */
 export interface ScopeStateView {
@@ -105,6 +130,14 @@ export interface ScopeContextView {
   readonly workingGroup?: {
     readonly displayName: string;
     readonly contentVersion: number;
+    readonly goal: string;
+    readonly rules: readonly string[];
+  };
+  readonly taskGroup?: {
+    readonly taskId: string;
+    readonly taskTitle: string;
+    readonly contentVersion: number;
+    readonly taskContentVersion: number;
     readonly goal: string;
     readonly rules: readonly string[];
   };

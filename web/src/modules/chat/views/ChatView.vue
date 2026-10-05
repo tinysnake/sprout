@@ -94,6 +94,7 @@ const targetAnnouncement = ref('');
 const projectId = computed(() => typeof route.query['project'] === 'string' ? route.query['project'] as string : projects.value.find((p) => p.status === 'active')?.id ?? projects.value[0]?.id ?? '');
 const project = computed(() => projects.value.find((p) => p.id === projectId.value));
 const channelScopes = computed(() => scopes.value.filter((s) => s.kind === 'project'));
+const taskGroups = computed(() => scopes.value.filter((s) => s.kind === 'task-group'));
 const workingGroups = computed(() => scopes.value.filter((s) => s.kind === 'working-group'));
 const directScopes = computed(() => scopes.value.filter((s) => s.kind === 'direct'));
 const activeAgentMembers = computed(() => project.value && currentVersion(project.value)?.memberships.filter((m) => m.memberKind === 'agent' && m.endedAt === undefined) || []);
@@ -138,17 +139,18 @@ const evidenceMessage = computed(() => messages.value.find((m) => m.id === evide
 function currentVersion(p: ProjectAuthorityView) { return p.content.versions.find((v) => v.version === p.content.currentVersion) ?? p.content.versions.at(-1); }
 function title(scope: ConversationScopeView): string {
   if (scope.kind === 'project') return '#general';
+  if (scope.kind === 'task-group') return scope.taskTitle;
   if (scope.kind === 'working-group') return scope.content.versions.find((v) => v.version === scope.content.currentVersion)?.displayName ?? scope.id;
   const humanIds = new Set(project.value && currentVersion(project.value)?.memberships.filter((m) => m.memberKind === 'human').map((m) => m.memberId));
   const agentParticipants = scope.participants.filter(p => !humanIds.has(p));
   return agentParticipants.map(id => `@${agentName(id)}`).join(' ↔ ') || scope.id;
 }
 function agentName(id: string) { return agents.value.find((agent) => agent.id === id)?.displayName ?? id; }
-function kindLabel(scope: ConversationScopeView) { return scope.kind === 'project' ? 'Project channel' : scope.kind === 'working-group' ? 'Working group' : 'Direct message'; }
-function icon(scope: ConversationScopeView) { return scope.kind === 'project' ? 'chat' : scope.kind === 'working-group' ? 'project' : 'agents'; }
+function kindLabel(scope: ConversationScopeView) { return scope.kind === 'project' ? 'Project channel' : scope.kind === 'task-group' ? 'Task group' : scope.kind === 'working-group' ? 'Working group' : 'Direct message'; }
+function icon(scope: ConversationScopeView) { return scope.kind === 'project' ? 'chat' : scope.kind === 'direct' ? 'agents' : 'project'; }
 function preview(scope: ConversationScopeView) {
   const last = [...messages.value].reverse().find((m) => m.scopeId === scope.id);
-  return last?.body ?? (scope.kind === 'working-group' ? scope.content.versions.at(-1)?.goal : undefined) ?? 'No messages yet in this conversation.';
+  return last?.body ?? (scope.kind === 'working-group' ? scope.content.versions.at(-1)?.goal : scope.kind === 'task-group' ? scope.content.versions.at(-1)?.goal : undefined) ?? 'No messages yet in this conversation.';
 }
 function latestTime(scope: ConversationScopeView) { const last = [...messages.value].reverse().find((m) => m.scopeId === scope.id); return last ? time(last.createdAt) : ''; }
 function time(at: number) { return new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
@@ -162,13 +164,14 @@ async function markVisible() {
     || inspection.value?.scope.id !== id) return;
   await unreadState?.markRead(id, activeMessages.value.map((m) => m.id));
 }
-function scopeKind(scope: ConversationScopeView) { return scope.kind === 'project' ? 'channel' : scope.kind === 'direct' ? 'direct-message' : 'working-group'; }
+function scopeKind(scope: ConversationScopeView) { return scope.kind === 'project' ? 'channel' : scope.kind === 'direct' ? 'direct-message' : scope.kind; }
 function isTargetEntry(entry: ChatTimelineItem) {
   return entry.kind === 'message'
     ? requestedMessageId.value !== '' && entry.message.id === requestedMessageId.value
     : requestedEventId.value !== '' && entry.event.id === requestedEventId.value;
 }
 function scopePill(scope: ConversationScopeView) {
+  if (scope.kind === 'task-group') return scope.status === 'frozen' ? 'Frozen' : '';
   if (scope.kind === 'working-group') return scope.status === 'disbanded' ? 'Disbanded' : '';
   if (scope.kind !== 'direct' || !project.value) return '';
   const member = currentVersion(project.value)?.memberships.find((item) => scope.participants.includes(item.memberId) && item.memberKind === 'agent');
@@ -694,7 +697,7 @@ onUnmounted(() => { window.removeEventListener('resize', onResize); generation++
         <div class="flex items-center justify-between px-2 pb-2 text-[11px] font-bold uppercase tracking-wider text-[var(--text-muted)]">
           <span>Conversations &amp; Groups</span><span>{{ scopes.length }} Scopes</span>
         </div>
-        <template v-for="section in [{ label: 'Project Channels', items: channelScopes }, { label: `Working Groups (${workingGroups.length})`, items: workingGroups }, { label: `Direct Messages (${directScopes.length + unopenedAgents.length})`, items: directScopes }]" :key="section.label">
+        <template v-for="section in [{ label: 'Project Channels', items: channelScopes }, { label: `Task Groups (${taskGroups.length})`, items: taskGroups }, { label: `Working Groups (${workingGroups.length})`, items: workingGroups }, { label: `Direct Messages (${directScopes.length + unopenedAgents.length})`, items: directScopes }]" :key="section.label">
           <div class="chat-section border-t border-[var(--border-subtle)] pt-2">
             <div class="flex items-center justify-between px-2 pb-1"><h2 class="text-[11px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">{{ section.label }}</h2><button v-if="section.label.startsWith('Working Groups')" type="button" class="chat-create-wg min-h-11 px-2 text-[11px] font-semibold text-[var(--accent-primary)] disabled:opacity-60" :disabled="!presentation.controlAvailable || project?.status !== 'active'" @click="createGroupOpen = true"><Icon name="plus" :size="12" /> New WG</button></div>
             <p v-if="!section.items.length && !section.label.startsWith('Direct Messages')" class="px-2 py-2 text-xs text-[var(--text-muted)]">No conversations yet.</p>
@@ -799,14 +802,14 @@ onUnmounted(() => { window.removeEventListener('resize', onResize); generation++
           </div>
         </div>
         <form class="chat-composer flex shrink-0 items-center gap-2 border-t border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3" @submit.prevent="sendMessage">
-          <input v-model="newMessage" type="text" :disabled="!canEnterText" :aria-label="`Message ${activeScope ? title(activeScope) : 'conversation'}`" :placeholder="activeScope?.kind === 'direct' ? `Message ${title(activeScope)} (deterministic direct wake)…` : activeScope?.kind === 'working-group' ? `Message ${title(activeScope)}…` : 'Message #general… (Use @agent or @all for immediate wake)'" class="min-h-11 min-w-0 flex-1 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 text-base md:text-xs text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]" />
+          <input v-model="newMessage" type="text" :disabled="!canEnterText" :aria-label="`Message ${activeScope ? title(activeScope) : 'conversation'}`" :placeholder="activeScope?.kind === 'direct' ? `Message ${title(activeScope)} (deterministic direct wake)…` : activeScope?.kind === 'working-group' || activeScope?.kind === 'task-group' ? `Message ${title(activeScope)}…` : 'Message #general… (Use @agent or @all for immediate wake)'" class="min-h-11 min-w-0 flex-1 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 text-base md:text-xs text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]" />
           <Button variant="primary" size="sm" class="min-h-11" type="submit" :disabled="!canSend || !newMessage.trim()">Send</Button>
         </form>
       </section>
     </div>
     <ChatDialog :open="infoOpen" :title="`Conversation Details — ${activeScope ? title(activeScope) : ''}`" description="Scope identity, admission and routing policy" @update:open="infoOpen = $event">
       <div v-if="activeScope" class="space-y-3 text-xs text-[var(--text-secondary)]">
-        <div class="rounded border border-[var(--border-subtle)] p-3"><strong class="block text-sm">{{ title(activeScope) }} · {{ kindLabel(activeScope) }}</strong><span>Project: {{ project?.displayName }} · {{ projectId }}</span><p v-if="inspection?.context.workingGroup">Goal: {{ inspection.context.workingGroup.goal }} · Rules: {{ inspection.context.workingGroup.rules.join('; ') }}</p></div>
+        <div class="rounded border border-[var(--border-subtle)] p-3"><strong class="block text-sm">{{ title(activeScope) }} · {{ kindLabel(activeScope) }}</strong><span>Project: {{ project?.displayName }} · {{ projectId }}</span><p v-if="inspection?.context.workingGroup">Goal: {{ inspection.context.workingGroup.goal }} · Rules: {{ inspection.context.workingGroup.rules.join('; ') }}</p><p v-if="inspection?.context.taskGroup">Task: {{ inspection.context.taskGroup.taskTitle }} · Goal: {{ inspection.context.taskGroup.goal }} · Rules: {{ inspection.context.taskGroup.rules.join('; ') }}<span v-if="inspection.scope.kind === 'task-group' && inspection.scope.status === 'frozen'"> · Frozen, history remains readable</span></p></div>
         <div class="rounded border border-[var(--border-subtle)] p-3"><strong>Project Wake Policy</strong><p>{{ project && currentVersion(project)?.wakePolicy === 'wake-model-assisted' ? 'Wake-Model Assisted (fixed collection window)' : 'Explicit Mentions Only' }}</p><p>Direct messages, exact mentions, and @all use deterministic addressing.</p></div>
         <div class="rounded border border-[var(--border-subtle)] p-3"><strong>Recent routing batches</strong><p v-if="!batches.length">No routing batches recorded for this Project.</p><button v-for="batch in batches" :key="batch.id" class="block min-h-11 text-left text-[var(--accent-primary)]" @click="inspectBatch(batch.id)">Inspect Causal Routing Chain · {{ batch.id }} · {{ batch.status }}</button></div>
         <Button v-if="activeGroup" variant="secondary" size="sm" class="min-h-11" :disabled="!presentation.controlAvailable || project?.status !== 'active' || activeGroup.status !== 'active'" @click="beginEditGroup">Edit Working Group</Button>

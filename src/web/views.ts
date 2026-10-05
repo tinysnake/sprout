@@ -64,11 +64,12 @@ import {
   READINESS_SOURCES,
 } from '../environment/readiness.ts';
 import type { ProjectAuthority } from '../project/authority-model.ts';
-import { workingGroupStatus } from '../conversation/model.ts';
+import { currentTaskGroupContent, taskGroupStatus, workingGroupStatus } from '../conversation/model.ts';
 import type {
   ConversationScope,
   ScopeContext,
   ScopeState,
+  TaskGroupScope,
   WorkingGroupScope,
 } from '../conversation/model.ts';
 import {
@@ -1539,10 +1540,35 @@ export interface WorkingGroupScopeView extends ConversationScopeBaseView {
   readonly lifecycle: readonly WorkingGroupLifecycleView[];
 }
 
+export interface TaskGroupContentVersionView {
+  readonly version: number;
+  readonly taskContentVersion: number;
+  readonly at: number;
+  readonly actorMemberId: string;
+  readonly reason: string;
+  readonly taskTitle: string;
+  readonly goal: string;
+  readonly rules: readonly string[];
+}
+
+export interface TaskGroupScopeView extends ConversationScopeBaseView {
+  readonly kind: 'task-group';
+  readonly taskId: string;
+  readonly taskTitle: string;
+  readonly status: 'active' | 'frozen';
+  readonly frozenAt?: number;
+  readonly terminalTaskStatus?: 'done' | 'failed' | 'cancelled';
+  readonly content: {
+    readonly currentVersion: number;
+    readonly versions: readonly TaskGroupContentVersionView[];
+  };
+}
+
 export type ConversationScopeView =
   | ProjectChannelScopeView
   | DirectConversationScopeView
-  | WorkingGroupScopeView;
+  | WorkingGroupScopeView
+  | TaskGroupScopeView;
 
 /** The read-only admission state of one scope for the acting member. */
 export interface ScopeStateView {
@@ -1568,6 +1594,14 @@ export interface ScopeContextView {
   readonly workingGroup?: {
     readonly displayName: string;
     readonly contentVersion: number;
+    readonly goal: string;
+    readonly rules: readonly string[];
+  };
+  readonly taskGroup?: {
+    readonly taskId: string;
+    readonly taskTitle: string;
+    readonly contentVersion: number;
+    readonly taskContentVersion: number;
     readonly goal: string;
     readonly rules: readonly string[];
   };
@@ -1651,6 +1685,22 @@ function toWorkingGroupContentView(group: WorkingGroupScope): WorkingGroupScopeV
   };
 }
 
+function toTaskGroupContentView(group: TaskGroupScope): TaskGroupScopeView['content'] {
+  return {
+    currentVersion: group.content.currentVersion,
+    versions: group.content.versions.map((version) => ({
+      version: version.version,
+      taskContentVersion: version.taskContentVersion,
+      at: version.at,
+      actorMemberId: sanitizeIdentifier(version.actorMemberId, { fallback: 'unknown-member', kind: 'generic' }),
+      reason: sanitizeOperatorText(version.reason, { fallback: 'Task content version bound to this group.', maxLength: 320 }),
+      taskTitle: sanitizeOperatorText(version.taskTitle, { fallback: 'Task group', maxLength: 120 }),
+      goal: sanitizeProjectText(version.goal),
+      rules: version.rules.map((rule) => sanitizeProjectText(rule)),
+    })),
+  };
+}
+
 export function toConversationScopeView(scope: ConversationScope): ConversationScopeView {
   const base = {
     id: sanitizeScopeId(scope.id),
@@ -1673,14 +1723,27 @@ export function toConversationScopeView(scope: ConversationScope): ConversationS
       ),
     };
   }
+  if (scope.kind === 'working-group') {
+    return {
+      ...base,
+      kind: 'working-group',
+      creatorId: sanitizeIdentifier(scope.creatorId, { fallback: 'unknown-member', kind: 'generic' }),
+      status: workingGroupStatus(scope) === 'disbanded' ? 'disbanded' : 'active',
+      content: toWorkingGroupContentView(scope),
+      memberships: scope.memberships.map(toWorkingGroupMembershipView),
+      lifecycle: scope.lifecycle.map(toWorkingGroupLifecycleView),
+    };
+  }
+  const content = currentTaskGroupContent(scope);
   return {
     ...base,
-    kind: 'working-group',
-    creatorId: sanitizeIdentifier(scope.creatorId, { fallback: 'unknown-member', kind: 'generic' }),
-    status: workingGroupStatus(scope) === 'disbanded' ? 'disbanded' : 'active',
-    content: toWorkingGroupContentView(scope),
-    memberships: scope.memberships.map(toWorkingGroupMembershipView),
-    lifecycle: scope.lifecycle.map(toWorkingGroupLifecycleView),
+    kind: 'task-group',
+    taskId: sanitizeIdentifier(scope.taskId, { fallback: 'unknown-task', kind: 'generic' }),
+    taskTitle: sanitizeOperatorText(content.taskTitle, { fallback: 'Task group', maxLength: 120 }),
+    status: taskGroupStatus(scope),
+    ...(scope.frozenAt !== undefined ? { frozenAt: scope.frozenAt } : {}),
+    ...(scope.terminalTaskStatus !== undefined ? { terminalTaskStatus: scope.terminalTaskStatus } : {}),
+    content: toTaskGroupContentView(scope),
   };
 }
 
@@ -1715,6 +1778,18 @@ export function toScopeContextView(context: ScopeContext): ScopeContextView {
             contentVersion: context.workingGroup.contentVersion,
             goal: sanitizeProjectText(context.workingGroup.goal),
             rules: context.workingGroup.rules.map((rule) => sanitizeProjectText(rule)),
+          },
+        }
+      : {}),
+    ...(context.taskGroup !== undefined
+      ? {
+          taskGroup: {
+            taskId: sanitizeIdentifier(context.taskGroup.taskId, { fallback: 'unknown-task', kind: 'generic' }),
+            taskTitle: sanitizeOperatorText(context.taskGroup.taskTitle, { fallback: 'Task group', maxLength: 120 }),
+            contentVersion: context.taskGroup.contentVersion,
+            taskContentVersion: context.taskGroup.taskContentVersion,
+            goal: sanitizeProjectText(context.taskGroup.goal),
+            rules: context.taskGroup.rules.map((rule) => sanitizeProjectText(rule)),
           },
         }
       : {}),
