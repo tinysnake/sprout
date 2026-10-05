@@ -4,6 +4,12 @@
 
 This retained prototype artifact documents the design, interaction models, decision evidence, and architectural boundaries for **Chat Scopes and Wake-Routing Inspection** in the Sprout M2 Local Operator product (Ticket #64, Scope #44). It builds directly upon the shared shell baseline (#61), Feed & Attention baseline (#62), and Multi-View Project baseline (#63), preserving the message and wake-routing semantics settled in ADR-0007 and the project/agent management journeys settled in ADR-0008.
 
+**Historical status:** This prototype predates Ticket #214. Its direct-message
+scope represents Human-to-Agent chat. Any Agent-to-Agent direct-message examples
+are superseded: current direct-message and Agent collaboration contracts are in
+[agent-direct-messages.md](agent-direct-messages.md), ADR-0007, ADR-0014, and
+ADR-0015.
+
 The interactive prototype artifact is executable via `npm run prototype`, with full DOM test coverage in `web/src/prototype/chat.dom.test.ts` and `web/src/prototype/project.dom.test.ts`.
 
 ---
@@ -40,7 +46,7 @@ Under ADR-0008 and ADR-0007, routine collaboration is organized into three stric
 |---|---|---|---|
 | **Project Channel (`#general`)** | All current Project members | Governed by Project wake policy (`explicit-only` vs `wake-model-assisted`). Exact mentions & `@all` route deterministically; unaddressed inputs enter fixed 30s collection window under assisted policy. | Archived project makes channel read-only. |
 | **Working Group Channel** | Subset of current Project members | Governed by Project wake policy for WG members. Creator is automatically enrolled upon creation. | Disbanded WG makes channel read-only while preserving all history and configuration for potential restore. |
-| **Project-Scoped Direct Message** | Operator + 1 specific Project Agent | **100% Deterministic addressing**. Always wakes the recipient immediately, completely bypassing wake policy and collection windows. | Ended agent membership makes DM read-only, preserving attribution and historical messages. |
+| **Project-Scoped Direct Message** | Operator + 1 specific Project Agent | Human-authored messages wake the recipient immediately and bypass wake policy and collection windows. Agent-authored direct sends are unsupported; Agent collaboration uses Task-group posts (ADR-0014/0015). | Ended agent membership makes DM read-only, preserving attribution and historical messages. |
 
 ---
 
@@ -82,7 +88,7 @@ ADR-0007 establishes a strict separation between deterministic addressing and pr
 ```
 
 ### Addressing Invariants
-1. **Direct DM**: Direct messages always route as `addressed` and wake the recipient immediately.
+1. **Direct DM**: Human-authored direct messages always route as `addressed` and wake the recipient immediately.
 2. **Exact Mentions**: `@Programmer` wakes only `@Programmer`, evaluated as whole tokens (e.g. `@forge` does not match `@forge-two`).
 3. **`@all` Broadcast**: Wakes every active agent member in the Project except the author.
 4. **Author Exclusion**: The author is never woken by their own message.

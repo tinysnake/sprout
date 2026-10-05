@@ -421,7 +421,52 @@ test('the authenticated browser refuses Agent-authored direct messages', async (
       body: JSON.stringify({ scopeId, authorId: 'agent-scout', authorKind: 'agent', body: 'forged', deliveryKey: 'browser-agent-forbidden' }),
     });
     assert.equal(response.status, 403);
+    assert.deepEqual(await response.json(), { error: 'browser commands are Human-only' });
     assert.deepEqual(await context.collaboration.listMessages({ scopeId }), []);
+  } finally {
+    await context.api.close();
+  }
+});
+
+test('POST /api/messages rejects agent and worker authors on direct scopes before idempotent delivery', async () => {
+  const context = buildWithCollaboration();
+  const { port } = await context.api.listen(0);
+  const base = `http://127.0.0.1:${port}`;
+  const scopeId = await context.scopes.openDirect('project-sprout', ['human-lead', 'agent-scout']);
+  const post = (authorId: string, authorKind: string, deliveryKey: string) => fetch(`${base}/api/messages`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      scopeId,
+      authorId,
+      authorKind,
+      body: 'Agent collaboration belongs in the Task group.',
+      deliveryKey,
+      awaitReply: false,
+    }),
+  });
+  try {
+    const human = await post('human-lead', 'human', 'direct-human-seed');
+    assert.equal(human.status, 202);
+
+    const attempts = [
+      ['agent-scout', 'agent', 'direct-human-seed'],
+      ['agent-scout', 'worker', 'direct-worker-attempt'],
+    ] as const;
+    const refusals = await Promise.all(attempts.map(async ([authorId, authorKind, deliveryKey]) => {
+      const response = await post(authorId, authorKind, deliveryKey);
+      return { authorKind, status: response.status, body: await response.json() };
+    }));
+    assert.deepEqual(refusals.map(({ status }) => status), [403, 403]);
+    for (const refusal of refusals) {
+      assert.deepEqual(refusal.body, {
+        error: 'Agent-authored direct messages are unsupported; use Task-group posts for Agent collaboration',
+        code: 'agent-direct-message-forbidden',
+      });
+    }
+    const history = await context.collaboration.listMessages({ scopeId });
+    assert.equal(history.length, 1, 'refused attempts, including a reused delivery key, persist no Message');
+    assert.equal(history[0]?.author.kind, 'human');
   } finally {
     await context.api.close();
   }

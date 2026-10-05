@@ -39,7 +39,7 @@
     "rules": [
       "Work only in the registered Project workspace.",
       "Report observed facts and verification results; do not claim unverified work.",
-      "Use direct messages for hand-offs and keep the planner informed."
+      "Use Task-group posts for Agent collaboration, and report final outcomes to the Human."
     ],
     "availableEnvironmentInstanceIds": ["local-macos"],
     "workspaces": [
@@ -56,7 +56,7 @@
           "Assess each teammate report and select the next Agent.",
           "Pause and resume dispatch when the Human requests it."
         ],
-        "collaborationInstructions": "Coordinate through direct messages. After a teammate DMs you its completion report, evaluate the evidence, DM the next Agent, and report material progress and final completion to the Human."
+        "collaborationInstructions": "Coordinate through the current Task group's post command when one is available. Assess teammate reports from the shared Task-group history, post assignments or follow-ups there, and report material progress and final completion to the Human. Without a Task group, return findings in your final response; never direct-message another Agent."
       },
       {
         "agentId": "designer",
@@ -64,7 +64,7 @@
           "Define the game interaction and visual design before implementation.",
           "Record concrete acceptance guidance for the programmer."
         ],
-        "collaborationInstructions": "Work only on the Planner-assigned design step. When finished, direct-message the planner with the design decisions, affected files, and verification or open questions; do not dispatch another Agent."
+        "collaborationInstructions": "Work only on the Planner-assigned design step. When finished, post the design decisions, affected files, and verification or open questions to the current Task group; if no Task group is available, return them in your final response. Do not direct-message another Agent or dispatch another Agent."
       },
       {
         "agentId": "programmer",
@@ -72,7 +72,7 @@
           "Implement the Planner-approved game changes in the Project workspace.",
           "Run the relevant repository checks and report their results."
         ],
-        "collaborationInstructions": "Work only on the Planner-assigned implementation step. When finished or blocked, direct-message the planner with changed files, checks run, observed results, and remaining risks; do not dispatch another Agent."
+        "collaborationInstructions": "Work only on the Planner-assigned implementation step. When finished or blocked, post changed files, checks run, observed results, and remaining risks to the current Task group; if no Task group is available, return them in your final response. Do not direct-message another Agent or dispatch another Agent."
       },
       {
         "agentId": "reviewer",
@@ -80,7 +80,7 @@
           "Inspect the implementation against the Planner-approved design and task acceptance.",
           "Report actionable defects or verification evidence."
         ],
-        "collaborationInstructions": "Work only on the Planner-assigned review step. When finished, direct-message the planner with findings, evidence, and a clear pass or follow-up recommendation; do not dispatch another Agent."
+        "collaborationInstructions": "Work only on the Planner-assigned review step. When finished, post findings, evidence, and a clear pass or follow-up recommendation to the current Task group; if no Task group is available, return them in your final response. Do not direct-message another Agent or dispatch another Agent."
       }
     ]
   }

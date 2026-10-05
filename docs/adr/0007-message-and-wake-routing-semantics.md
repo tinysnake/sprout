@@ -7,6 +7,14 @@ before admitting an Agent run, project only a completed run's final assistant
 text as its reply, and reconcile pending wakes and missing projections after a
 restart. It also kept private run events and raw reasoning out of conversation.
 
+Ticket #214's final ruling narrows deterministic direct Messages to Human-authored
+inputs. Agent-authored direct sends are unsupported; the API refuses them with
+HTTP 403 before persistence, while completed Agent replies to Human direct
+Messages remain projected into the same conversation. Explicit Agent
+collaboration belongs to the temporary Task-group scope in ADR-0014 and uses the
+bounded wake orchestration in ADR-0015. Project-channel and Working-group Agent
+posts retain their separate routing contracts.
+
 M1 deliberately used a narrower wake contract: each unaddressed Project-channel
 Message was evaluated immediately, the wake model could only engage every other
 member or nobody, and a missing or failed model woke every other member. Those

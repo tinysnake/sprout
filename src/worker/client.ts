@@ -58,29 +58,6 @@ export interface WorkerClientOptions {
   readonly engines: readonly WorkerEngineDeclaration[];
 }
 
-const messageCapabilities = new WeakMap<JsonRpcTransport, Map<string, NonNullable<StartSessionRequest['sendDirectMessage']>>>();
-function messageRegistry(transport: JsonRpcTransport) {
-  let registry = messageCapabilities.get(transport);
-  if (registry) return registry;
-  registry = new Map();
-  messageCapabilities.set(transport, registry);
-  const capabilities = registry;
-  transport.onServerRequest(message => {
-    if (message.method !== WORKER_METHODS.directMessage) return;
-    const params = message.params as { sessionId?: string; input?: import('../engine/port.ts').AgentDirectMessageInput } | null;
-    void (async () => {
-      try {
-        const send = typeof params?.sessionId === 'string' ? capabilities.get(params.sessionId) : undefined;
-        if (!send || !params?.input) throw new Error('Agent message capability is unavailable');
-        transport.respond(message.id, await send(params.input));
-      } catch (error) {
-        transport.respondError(message.id, -32000, redactSensitiveText(error instanceof Error ? error.message : 'Agent direct-message delivery refused'));
-      }
-    })();
-  });
-  return registry;
-}
-
 const taskGroupCapabilities = new WeakMap<JsonRpcTransport, Map<string, NonNullable<StartSessionRequest['postTaskGroupMessage']>>>();
 function taskGroupRegistry(transport: JsonRpcTransport) {
   let registry = taskGroupCapabilities.get(transport);
@@ -193,7 +170,6 @@ export class WorkerClient implements EngineAdapter {
         {
           engine: this.id,
           agentId: request.agentId,
-          ...(request.sendDirectMessage !== undefined ? { directMessagesEnabled: true } : {}),
           ...(request.postTaskGroupMessage !== undefined ? { taskGroupMessagesEnabled: true } : {}),
           ...(request.runId !== undefined ? { runId: request.runId } : {}),
           workingDirectory: request.workingDirectory,
@@ -222,16 +198,13 @@ export class WorkerClient implements EngineAdapter {
       throw new Error(WORKER_DIAGNOSTICS.sessionStartFailed);
     }
 
-    const registry = messageRegistry(this.#transport);
-    if (request.sendDirectMessage) registry.set(started.sessionId, request.sendDirectMessage);
     const groupRegistry = taskGroupRegistry(this.#transport);
     if (request.postTaskGroupMessage) groupRegistry.set(started.sessionId, request.postTaskGroupMessage);
-    const removeMessageHandler = () => {
-      registry.delete(started.sessionId);
+    const removeGroupCapability = () => {
       groupRegistry.delete(started.sessionId);
-      this.#live.delete(removeMessageHandler);
+      this.#live.delete(removeGroupCapability);
     };
-    this.#live.add(removeMessageHandler);
+    this.#live.add(removeGroupCapability);
     const session = new WorkerEngineSession(
       {
         transport: this.#transport,
@@ -249,7 +222,7 @@ export class WorkerClient implements EngineAdapter {
       },
     );
     const close = session.close.bind(session);
-    session.close = async () => { removeMessageHandler(); await close(); };
+    session.close = async () => { removeGroupCapability(); await close(); };
     return session;
   }
 }

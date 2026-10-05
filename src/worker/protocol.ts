@@ -15,7 +15,6 @@ import type { AgentRunEvent, EngineTurnResult, StandingInstructionsChannel, Stre
  */
 
 export const WORKER_METHODS = {
-  directMessage: 'agent/direct-message',
   taskGroupMessage: 'agent/task-group-message',
   /** Identify the worker and the engines it can host. */
   info: 'worker/info',
@@ -172,7 +171,6 @@ export interface WorkerInfo {
 }
 
 export interface StartSessionParams {
-  readonly directMessagesEnabled?: boolean;
   readonly taskGroupMessagesEnabled?: boolean;
   /** Which engine the worker should host for this session. */
   readonly engine: string;

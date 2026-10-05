@@ -128,23 +128,6 @@ export interface TokenUsage {
   readonly totalTokens: number;
 }
 
-export interface AgentDirectMessageInput {
-  readonly recipientId: string;
-  readonly body: string;
-  readonly deliveryKey: string;
-  readonly awaitReply?: boolean;
-}
-
-export interface AgentDirectMessageResult {
-  readonly messageId: string;
-  readonly scopeId: string;
-  readonly authorId: string;
-  readonly duplicate: boolean;
-  readonly admittedRunIds: readonly string[];
-  readonly runs: readonly { readonly id: string; readonly status: string; readonly failure?: string }[];
-  readonly wakes: readonly { readonly agentId: string; readonly reason: string; readonly status: string; readonly detail?: string }[];
-}
-
 export interface AgentTaskGroupMessageInput {
   readonly body: string;
   readonly deliveryKey: string;
@@ -179,8 +162,6 @@ export interface AgentTaskGroupMessageResult {
 export interface StartSessionRequest {
   /** Worker-local process environment overlay. Never serialize into instructions or files. */
   readonly sessionEnvironment?: Readonly<Record<string, string>>;
-  /** Session-bound capability. Author and Project are never supplied by the engine. */
-  readonly sendDirectMessage?: (input: AgentDirectMessageInput) => Promise<AgentDirectMessageResult>;
   /** Session-bound capability for the current Task group; identity and scope are Core-resolved. */
   readonly postTaskGroupMessage?: (input: AgentTaskGroupMessageInput) => Promise<AgentTaskGroupMessageResult>;
   /** Sprout-owned agent identity. Never derived from the engine installation. */

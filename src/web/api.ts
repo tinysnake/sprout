@@ -9,7 +9,7 @@ import type { RunOrchestrator } from '../run/orchestrator.ts';
 import { runFailureReason } from '../run/failure-reason.ts';
 import type { AgentRegistry } from '../agent/registry.ts';
 import type { CollaborationCoordinator } from '../collaboration/coordinator.ts';
-import { MessageDeliveryError } from '../collaboration/coordinator.ts';
+import { AgentDirectMessageForbiddenError, MessageDeliveryError } from '../collaboration/coordinator.ts';
 import type { MessageAuthor, TaskGroupMessageKind } from '../collaboration/model.ts';
 import { ProjectEventError } from '../collaboration/events.ts';
 import {
@@ -401,7 +401,10 @@ export function createRunApi(options: RunApiOptions): RunApi {
           sendJson(response, 400, { error: 'authorId is required' });
           return;
         }
-        author = { id: authorId, kind: body.authorKind === 'agent' ? 'agent' : 'human' };
+        author = {
+          id: authorId,
+          kind: body.authorKind === 'agent' || body.authorKind === 'worker' ? 'agent' : 'human',
+        };
       }
       let delivered: Awaited<ReturnType<CollaborationCoordinator['deliver']>>;
       try {
@@ -1277,6 +1280,13 @@ async function readJson(request: IncomingMessage): Promise<Record<string, unknow
  * a credential, host, or path onto the wire.
  */
 function sendDomainFailure(response: ServerResponse, error: unknown): void {
+  if (error instanceof AgentDirectMessageForbiddenError) {
+    sendJson(response, error.status, {
+      error: redactSensitiveText(error.message),
+      code: error.code,
+    });
+    return;
+  }
   if (error instanceof MessageDeliveryError) {
     const status =
       error.reason === 'not-a-member' || error.reason === 'not-a-participant' ? 403 : 409;
