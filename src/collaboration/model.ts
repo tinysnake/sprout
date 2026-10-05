@@ -42,9 +42,25 @@ export type MessageChannel = 'project' | 'direct' | 'working-group' | 'task-grou
 /** Who authored a Message. */
 export type AuthorKind = 'human' | 'agent';
 
+/** The bounded message category available on Task-group posts. */
+export type TaskGroupMessageKind = 'handoff' | 'assignment' | 'question' | 'status';
+
 export interface MessageAuthor {
   readonly id: string;
   readonly kind: AuthorKind;
+}
+
+/** Server-stamped routing context attached to every Task-group Message. */
+export interface TaskGroupMessageEnvelope {
+  readonly kind: TaskGroupMessageKind;
+  readonly sender: MessageAuthor;
+  readonly taskId: string;
+  readonly runId?: string;
+  /** The Task is the current work item in this conversation scope. */
+  readonly workItemId: string;
+  readonly groupId: string;
+  /** Ordered exact @mentions parsed from the free-form body. */
+  readonly to: readonly string[];
 }
 
 /**
@@ -74,6 +90,8 @@ export interface Message {
   readonly body: string;
   /** Explicit addressees for a direct Message; empty for channel Messages. */
   readonly recipients: readonly string[];
+  /** Present on Task-group Messages; stamped by the channel write path. */
+  readonly envelope?: TaskGroupMessageEnvelope;
   /** Idempotency key: repeated delivery of the same key yields one Message. */
   readonly deliveryKey: string;
   /** The Message this one answers, when it is a reply. */

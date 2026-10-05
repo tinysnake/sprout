@@ -10,7 +10,7 @@ import { runFailureReason } from '../run/failure-reason.ts';
 import type { AgentRegistry } from '../agent/registry.ts';
 import type { CollaborationCoordinator } from '../collaboration/coordinator.ts';
 import { MessageDeliveryError } from '../collaboration/coordinator.ts';
-import type { MessageAuthor } from '../collaboration/model.ts';
+import type { MessageAuthor, TaskGroupMessageKind } from '../collaboration/model.ts';
 import { ProjectEventError } from '../collaboration/events.ts';
 import {
   DEFAULT_MESSAGE_PAGE_SIZE,
@@ -352,6 +352,11 @@ export function createRunApi(options: RunApiOptions): RunApi {
         sendJson(response, 404, { error: `unknown conversation scope: ${scopeId}` });
         return;
       }
+      const rawTaskGroupKind = body.kind;
+      if (scope.kind === 'task-group' && rawTaskGroupKind !== undefined && !isTaskGroupMessageKind(rawTaskGroupKind)) {
+        sendJson(response, 400, { error: 'kind must be handoff, assignment, question, or status' });
+        return;
+      }
       const recipients = body.recipients;
       if (
         recipients !== undefined &&
@@ -389,6 +394,9 @@ export function createRunApi(options: RunApiOptions): RunApi {
           scopeId,
           author,
           body: text,
+          ...(scope.kind === 'task-group' && rawTaskGroupKind !== undefined
+            ? { taskGroupKind: rawTaskGroupKind as TaskGroupMessageKind }
+            : {}),
           ...(Array.isArray(recipients) ? { recipients: recipients as readonly string[] } : {}),
           deliveryKey,
           awaitReply,
@@ -1240,6 +1248,10 @@ async function readJson(request: IncomingMessage): Promise<Record<string, unknow
   } catch {
     return {};
   }
+}
+
+function isTaskGroupMessageKind(value: unknown): value is TaskGroupMessageKind {
+  return value === 'handoff' || value === 'assignment' || value === 'question' || value === 'status';
 }
 
 /**

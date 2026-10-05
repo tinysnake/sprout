@@ -21,7 +21,7 @@
  * cleanup.
  */
 
-import type { Message, WakeRequest } from '../collaboration/model.ts';
+import type { Message, TaskGroupMessageEnvelope, WakeRequest } from '../collaboration/model.ts';
 import type { ProjectEvent } from '../collaboration/events.ts';
 import type {
   RoutingAttempt,
@@ -212,6 +212,8 @@ export interface MessageView {
   readonly authorKind: string;
   readonly body: string;
   readonly recipients: readonly string[];
+  /** Present for Task-group messages; authoritative channel-stamped routing facts. */
+  readonly envelope?: TaskGroupMessageEnvelope;
   readonly inReplyTo?: string;
   readonly createdAt: number;
 }
@@ -226,6 +228,7 @@ export function toMessageView(message: Message): MessageView {
     authorKind: message.author.kind,
     body: message.body,
     recipients: message.recipients,
+    ...(message.envelope !== undefined ? { envelope: message.envelope } : {}),
     ...(message.inReplyTo !== undefined ? { inReplyTo: message.inReplyTo } : {}),
     createdAt: message.createdAt,
   };

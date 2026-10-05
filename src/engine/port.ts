@@ -145,11 +145,41 @@ export interface AgentDirectMessageResult {
   readonly wakes: readonly { readonly agentId: string; readonly reason: string; readonly status: string; readonly detail?: string }[];
 }
 
+export interface AgentTaskGroupMessageInput {
+  readonly body: string;
+  readonly deliveryKey: string;
+  readonly kind?: 'handoff' | 'assignment' | 'question' | 'status';
+  readonly awaitReply?: boolean;
+}
+
+export interface AgentTaskGroupMessageEnvelope {
+  readonly kind: 'handoff' | 'assignment' | 'question' | 'status';
+  readonly sender: { readonly id: string; readonly kind: 'human' | 'agent' };
+  readonly taskId: string;
+  readonly runId?: string;
+  readonly workItemId: string;
+  readonly groupId: string;
+  readonly to: readonly string[];
+}
+
+export interface AgentTaskGroupMessageResult {
+  readonly messageId: string;
+  readonly scopeId: string;
+  readonly authorId: string;
+  readonly envelope?: AgentTaskGroupMessageEnvelope;
+  readonly duplicate: boolean;
+  readonly admittedRunIds: readonly string[];
+  readonly runs: readonly { readonly id: string; readonly status: string; readonly failure?: string }[];
+  readonly wakes: readonly { readonly agentId: string; readonly reason: string; readonly status: string; readonly detail?: string }[];
+}
+
 export interface StartSessionRequest {
   /** Worker-local process environment overlay. Never serialize into instructions or files. */
   readonly sessionEnvironment?: Readonly<Record<string, string>>;
   /** Session-bound capability. Author and Project are never supplied by the engine. */
   readonly sendDirectMessage?: (input: AgentDirectMessageInput) => Promise<AgentDirectMessageResult>;
+  /** Session-bound capability for the current Task group; identity and scope are Core-resolved. */
+  readonly postTaskGroupMessage?: (input: AgentTaskGroupMessageInput) => Promise<AgentTaskGroupMessageResult>;
   /** Sprout-owned agent identity. Never derived from the engine installation. */
   readonly agentId: string;
   /** Core-owned run identity, for durable Worker delivery correlation only. */
