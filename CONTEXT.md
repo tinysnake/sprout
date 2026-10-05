@@ -36,6 +36,10 @@ _Avoid_: Project, Task, default group
 A temporary conversation scope within one Project, bound to exactly one Task and shared by every current Project member. It carries the Task's title, goal, and constraints, and becomes read-only when the Task is terminal while preserving its conversation history.
 _Avoid_: Working group, Task thread, direct message
 
+**Task-group escalation**:
+A durable Project event that exposes an unanswered Task-group Message for Human Attention after bounded wake orchestration cannot obtain Agent work. Acknowledging it does not retry work or grant Task authority.
+_Avoid_: Agent reply, Task blocker, automatic retry
+
 **Working group channel**:
 The shared conversation whose participants are the current members of one Working group.
 _Avoid_: Project channel, direct message
@@ -161,7 +165,7 @@ The model an agent uses for its primary reasoning and work.
 _Avoid_: Brain, main model
 
 **Wake model**:
-The lower-cost model that decides whether a project-channel message should start an agent run.
+The lower-cost model that selects Agent recipients for ambiguous shared conversation inputs, after deterministic addressing and any applicable Task-group assignment rules.
 _Avoid_: Cerebellum, small model
 
 **Task**:

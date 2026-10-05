@@ -25,13 +25,13 @@ import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 28;
+export const CURRENT_SCHEMA_VERSION = 29;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 28;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 29;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -1286,6 +1286,17 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
         message_id TEXT NOT NULL CHECK (length(message_id) > 0),
         PRIMARY KEY (scope_id, human_id)
       );`);
+    },
+  },
+  {
+    fromVersion: 28,
+    toVersion: 29,
+    name: 'task_group_message_intent',
+    migrate(db) {
+      const columns = db.prepare('PRAGMA table_info(collaboration_messages)').all();
+      if (columns.length && !columns.some(column => column['name'] === 'message_kind')) {
+        db.exec("ALTER TABLE collaboration_messages ADD COLUMN message_kind TEXT NOT NULL DEFAULT 'status';");
+      }
     },
   },
 ];
