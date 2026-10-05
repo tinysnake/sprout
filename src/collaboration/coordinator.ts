@@ -119,6 +119,8 @@ import type { ProjectEvent, RoutingDisposition } from './events.ts';
 import {
   ProjectEventError,
   requireRoutingDisposition,
+  sanitizeEventMessageOrigin,
+  sanitizeEventOrigins,
   sanitizeProjectEventDetail,
   sanitizeProjectEventKind,
   sanitizeProjectEventSummary,
@@ -333,6 +335,10 @@ export interface PublishEventInput {
   readonly kind: string;
   readonly summary: string;
   readonly detail?: string;
+  /** One or more conversation scopes whose timeline owns this fact. */
+  readonly originScopeIds?: readonly string[];
+  /** Exact conversation Message this fact concerns, when one exists. */
+  readonly originMessageId?: string;
   /** Who produced the fact; defaults to the system itself. */
   readonly producer?: ProjectEvent['producer'];
   /**
@@ -607,6 +613,8 @@ export class CollaborationCoordinator {
     const kind = sanitizeProjectEventKind(input.kind);
     const summary = sanitizeProjectEventSummary(input.summary);
     const detail = sanitizeProjectEventDetail(input.detail);
+    const originScopeIds = sanitizeEventOrigins(input.originScopeIds);
+    const originMessageId = sanitizeEventMessageOrigin(input.originMessageId, originScopeIds);
     const responsibleAgentIds =
       disposition === 'addressed' ? sanitizeResponsibleAgents(input.responsibleAgentIds) : [];
 
@@ -634,6 +642,8 @@ export class CollaborationCoordinator {
       kind,
       summary,
       ...(detail !== undefined ? { detail } : {}),
+      ...(originScopeIds.length > 0 ? { originScopeIds } : {}),
+      ...(originMessageId !== undefined ? { originMessageId } : {}),
       producer: input.producer ?? { id: 'sprout', kind: 'system' },
       disposition,
       responsibleAgentIds,
@@ -1009,7 +1019,7 @@ export class CollaborationCoordinator {
       const prefix = isFailure ? 'run-failure:' : 'run-interruption:';
       const runId = event.deliveryKey.slice(prefix.length);
       const run = await this.#loadRun(runId);
-      const origins = new Set<string>();
+      const origins = new Set(event.originScopeIds ?? []);
       for (const wake of wakes) {
         // Missing run links are not causal evidence: two unset IDs must never
         // make an unrelated pending wake an origin of this failure notice.

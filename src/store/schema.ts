@@ -25,13 +25,13 @@ import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 28;
+export const CURRENT_SCHEMA_VERSION = 29;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 28;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 29;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -901,6 +901,8 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
           disposition TEXT NOT NULL,
           responsible_agents TEXT NOT NULL,
           delivery_key TEXT NOT NULL UNIQUE,
+          origin_scope_ids TEXT NOT NULL DEFAULT '[]',
+          origin_message_id TEXT,
           created_at INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS project_events_project
@@ -1286,6 +1288,22 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
         message_id TEXT NOT NULL CHECK (length(message_id) > 0),
         PRIMARY KEY (scope_id, human_id)
       );`);
+    },
+  },
+  {
+    fromVersion: 28,
+    toVersion: 29,
+    name: 'project_event_conversation_origins',
+    migrate(db) {
+      const table = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'project_events'").get();
+      if (table === undefined) return;
+      const columns = db.prepare('PRAGMA table_info(project_events)').all() as unknown as readonly { name: string }[];
+      if (!columns.some((column) => column.name === 'origin_scope_ids')) {
+        db.exec("ALTER TABLE project_events ADD COLUMN origin_scope_ids TEXT NOT NULL DEFAULT '[]';");
+      }
+      if (!columns.some((column) => column.name === 'origin_message_id')) {
+        db.exec('ALTER TABLE project_events ADD COLUMN origin_message_id TEXT;');
+      }
     },
   },
 ];

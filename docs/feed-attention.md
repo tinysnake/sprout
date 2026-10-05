@@ -19,6 +19,33 @@ An informational Project event stays activity; it becomes Attention only when
 its disposition is `human-action-required` (ADR-0007). A Project-scoped failed
 run is represented by its durable `agent-run-failure` event, never twice.
 
+## Task-group observation seam (#213)
+
+Task-group Feed items are read-only projections over the existing durable
+conversation scope, Message, and Project-event records:
+
+- `task-group-created` is derived once from a task-group scope identity and its
+  first bound Task title. Its target opens that scope; it does not invent a
+  second lifecycle record.
+- `handoff` and `assignment` are kind-stamped Task-group Messages. Each unique
+  Message id produces one bounded activity item with an exact Chat message
+  target. Message bodies never enter the Feed summary.
+- `task-group-escalation`, `task-group-human-lead-waiting`, and
+  `task-group-human-question` are Project events. The first and the two
+  Human-directed paths use `human-action-required`, so the event creates
+  Attention without creating a WakeRequest. Stable `deliveryKey` values make
+  publication retries idempotent.
+- These Project events carry `originScopeIds: [taskGroupScopeId]` and, when
+  caused by a Message, `originMessageId`. The Feed and Chat resolve the same
+  durable scope/message identity. Schema v29 adds those two optional origin
+  fields to `project_events`; legacy rows read as having no conversation
+  origin.
+
+The task-group kinds are disjoint from `agent-run-failure` and other #180
+run-lifecycle kinds. Event activity deduplicates by Project plus delivery key;
+Message activity deduplicates by Message id. A repeated escalation signal
+therefore remains one activity entry and one Attention item.
+
 ## Invariants
 
 - **No second authority.** The projection stores and mutates nothing. Every
@@ -88,7 +115,14 @@ Message failures link to Project Chat; event failures link to Project Overview.
 - `src/web/feed-restart.test.ts` — identical snapshot across a SQLite reopen.
 - `src/web/feed-router.test.ts` — HTTP contract, filters, 401/400/404 matrix.
 - `src/web/feed-runtime.test.ts` — full-runtime journey driven by real domain
-  commands.
+  commands, including Task-group creation and notify-only escalation targets.
+- `src/web/feed-task-groups.test.ts` — exact lifecycle activity kinds, stable-key
+  retry deduplication, Chat deep-link identities, Human Attention categories,
+  and separation from #180 run-failure activity.
+- `src/collaboration/integration.test.ts` — Human-authored Task-group wake-ladder
+  behavior, sender exclusion, and notify-only Human-lead signals.
+- `web/src/modules/chat/views/ChatView.dom.test.ts` — Task-group listing plus
+  explicit Human and Agent attribution on message rows.
 - `web/src/adapters/feed-api.test.ts` — typed read adapter, error mapping, and
   route-table deep-link resolution.
 

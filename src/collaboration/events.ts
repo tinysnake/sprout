@@ -89,6 +89,8 @@ export interface ProjectEvent {
   readonly producer: ProjectEventProducer;
   /** Read projection from durable run → wake → Message links; not routing targets. */
   readonly originScopeIds?: readonly string[];
+  /** Exact Task-group Message a system fact came from, when one exists. */
+  readonly originMessageId?: string;
   /** The declared routing disposition; publication requires exactly one. */
   readonly disposition: RoutingDisposition;
   /** The responsible Agent ids; non-empty only when `disposition` is `addressed`. */
@@ -168,7 +170,35 @@ function isUsableTarget(value: unknown): value is string {
   return typeof value === 'string' && value.trim() !== '';
 }
 
-/** The sanitized stable event kind, or an error when nothing usable remains. */
+/** Validate safe conversation origins before they become durable routing evidence. */
+export function sanitizeEventOrigins(values: readonly string[] | undefined): readonly string[] {
+  const unique: string[] = [];
+  for (const value of values ?? []) {
+    if (!isSafeEventOrigin(value)) {
+      throw new ProjectEventError('invalid-event', 'a Project event has an unsafe conversation scope identity');
+    }
+    if (!unique.includes(value)) unique.push(value);
+  }
+  return unique;
+}
+
+/** Validate an exact Message origin and require it to name one owning scope. */
+export function sanitizeEventMessageOrigin(
+  value: string | undefined,
+  scopeIds: readonly string[],
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (!isSafeEventOrigin(value) || scopeIds.length !== 1) {
+    throw new ProjectEventError('invalid-event', 'a Project event Message origin requires one safe conversation scope');
+  }
+  return value;
+}
+
+function isSafeEventOrigin(value: string): boolean {
+  return /^[A-Za-z0-9_-][A-Za-z0-9._:-]{0,159}$/.test(value) && value !== '.' && value !== '..';
+}
+
+/** The sanitized event kind, or an error when nothing usable remains. */
 export function sanitizeProjectEventKind(value: string | undefined): string {
   const kind = sanitizeIdentifier(value ?? '', { fallback: '', kind: 'generic', maxLength: MAX_KIND });
   if (kind === '') {
