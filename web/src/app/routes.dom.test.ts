@@ -17,6 +17,7 @@ import { createServer, type ViteDevServer } from 'vite';
 
 const repoRoot = process.cwd();
 const html = await readFile(`${repoRoot}/web/app/index.html`, 'utf8');
+const chatPageSize = Number((await readFile(`${repoRoot}/web/src/modules/chat/views/ChatView.vue`, 'utf8')).match(/const CHAT_MESSAGE_PAGE_SIZE = (\d+)/)![1]);
 
 const GLOBALS = [
   'HTMLElement', 'HTMLButtonElement', 'HTMLFormElement', 'HTMLInputElement', 'HTMLSelectElement',
@@ -697,24 +698,30 @@ test('Project Chat pages older messages on scroll, anchors the viewport, and app
     app.mount(mount);
     await settle(180);
     const viewport = doc.querySelector('.chat-messages-body') as HTMLElement;
+    Object.defineProperties(viewport, {
+      clientHeight: { configurable: true, get: () => 200 },
+      scrollHeight: { configurable: true, get: () => viewport.querySelectorAll('[data-message-id]').length * 40 },
+    });
     const oldestNewestPage = doc.querySelector('[data-message-id]') as HTMLElement;
     assert.ok(oldestNewestPage);
     assert.equal(oldestNewestPage.getBoundingClientRect().top, 0);
     assert.doesNotMatch(viewport.textContent ?? '', /Older page item 0/, 'open renders only the newest page');
-    assert.ok(requests.some((request) => request.scopeId === 'dm-architect' && request.limit === 50 && request.before === undefined));
+    assert.ok(requests.some((request) => request.scopeId === 'dm-architect' && request.limit === chatPageSize && request.before === undefined));
 
     viewport.scrollTop = 0;
+    viewport.dispatchEvent(new dom.window.WheelEvent('wheel', { deltaY: -100 }));
     viewport.dispatchEvent(new dom.window.Event('scroll'));
     await settle(120);
-    assert.ok(requests.some((request) => request.scopeId === 'dm-architect' && request.limit === 50 && request.before === oldestNewestPage.dataset['messageId']));
-    assert.match(viewport.textContent ?? '', /Older page item 162/, 'scrolling to the top renders the prior page');
+    assert.ok(requests.some((request) => request.scopeId === 'dm-architect' && request.limit === chatPageSize && request.before === oldestNewestPage.dataset['messageId']));
+    assert.equal(viewport.querySelectorAll('[data-message-id]').length, chatPageSize * 2, 'scrolling to the top renders the prior page');
     assert.equal(oldestNewestPage.getBoundingClientRect().top, 0, 'the previously visible first row stays anchored');
 
-    for (const oldestVisibleItem of ['112', '62']) {
+    for (let retained = chatPageSize * 2; retained < 200; retained += chatPageSize) {
       viewport.scrollTop = 0;
+      viewport.dispatchEvent(new dom.window.WheelEvent('wheel', { deltaY: -100 }));
       viewport.dispatchEvent(new dom.window.Event('scroll'));
       await settle(120);
-      assert.match(viewport.textContent ?? '', new RegExp(`Older page item ${oldestVisibleItem}`));
+      assert.equal(viewport.querySelectorAll('[data-message-id]').length, Math.min(200, retained + chatPageSize));
     }
     assert.equal(viewport.querySelectorAll('[data-message-id]').length, 200, 'the view retains no more than 200 Messages for the scope');
     assert.match(viewport.querySelector('.chat-history-limit')?.textContent ?? '', /latest 200 messages/);

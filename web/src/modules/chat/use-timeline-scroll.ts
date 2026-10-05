@@ -14,6 +14,37 @@ export function useTimelineScroll(
   let frame: number | undefined;
   let observer: ResizeObserver | undefined;
   let seen = new Set<string>();
+  let pendingScroll: { element: HTMLElement; top: number } | undefined;
+  let scrollExpiry: number | undefined;
+  function clearPendingScroll() {
+    pendingScroll = undefined;
+    if (scrollExpiry !== undefined) cancelAnimationFrame(scrollExpiry);
+    scrollExpiry = undefined;
+  }
+  /** Native script scroll events are trusted too. Mark before writing, then
+   * retain only a changed, clamped position. Multiple writes may coalesce into
+   * one native event, so track the latest position rather than an event count. */
+  function scrollProgrammatically(write: (element: HTMLElement) => void) {
+    const element = viewport.value;
+    if (!element) return;
+    const previous = pendingScroll;
+    const before = element.scrollTop;
+    pendingScroll = { element, top: before };
+    write(element);
+    if (element.scrollTop === before) { pendingScroll = previous; return; }
+    clearPendingScroll();
+    pendingScroll = { element, top: element.scrollTop };
+    // Scroll delivery precedes animation callbacks in the rendering cycle.
+    // Allow a second frame for delayed delivery, but never leave stale state.
+    scrollExpiry = requestAnimationFrame(() => {
+      scrollExpiry = requestAnimationFrame(clearPendingScroll);
+    });
+  }
+  function consumeProgrammaticScroll() {
+    const pending = pendingScroll;
+    clearPendingScroll();
+    return !!pending && pending.element === viewport.value && pending.top === pending.element.scrollTop;
+  }
   // Small tolerance for fractional pixels, not an entire message's height.
   const atBottom = (element: HTMLElement) => element.scrollHeight - element.clientHeight - element.scrollTop <= 8;
 
@@ -31,7 +62,7 @@ export function useTimelineScroll(
       const bottom = Math.max(0, element.scrollHeight - element.clientHeight);
       // ResizeObserver also delivers after our own layout. An unchanged bottom
       // must not produce another write (or an animation-frame/scroll loop).
-      if (Math.abs(element.scrollTop - bottom) > 1) element.scrollTop = bottom;
+      if (Math.abs(element.scrollTop - bottom) > 1) scrollProgrammatically((element) => { element.scrollTop = bottom; });
     });
   }
   function onScroll() {
@@ -76,6 +107,6 @@ export function useTimelineScroll(
     if (following) alignBottom();
     else hasNewEntries.value = true;
   }, { flush: 'post' });
-  onScopeDispose(() => { epoch++; cancelFrame(); observer?.disconnect(); });
-  return { viewport, content, hasNewEntries, onScroll, jumpToLatest, noteHistory };
+  onScopeDispose(() => { epoch++; cancelFrame(); clearPendingScroll(); observer?.disconnect(); });
+  return { viewport, content, hasNewEntries, onScroll, jumpToLatest, noteHistory, scrollProgrammatically, consumeProgrammaticScroll };
 }

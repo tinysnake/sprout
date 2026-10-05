@@ -120,7 +120,7 @@ const timeline = computed<ChatTimelineItem[]>(() => [
   const bTime = b.kind === 'message' ? b.message.createdAt : b.event.createdAt;
   return aTime - bTime || compareStableId(a.kind === 'message' ? a.message.id : a.event.id, b.kind === 'message' ? b.message.id : b.event.id);
 }));
-const { viewport: messageViewport, content: messageContent, hasNewEntries, onScroll: onMessageScroll, jumpToLatest, noteHistory: noteTimelineHistory } = useTimelineScroll(
+const { viewport: messageViewport, content: messageContent, hasNewEntries, onScroll: onMessageScroll, jumpToLatest, noteHistory: noteTimelineHistory, scrollProgrammatically, consumeProgrammaticScroll } = useTimelineScroll(
   computed(() => `${projectId.value}|${activeScopeId.value}|${requestedScopeId.value}`),
   computed(() => timeline.value.map((entry) => entry.kind === 'message' ? `message:${entry.message.id}` : `event:${entry.event.id}`)),
   computed(() => !!requestedMessageId.value || !!requestedEventId.value),
@@ -245,13 +245,26 @@ function mergeMessageWindows(current: readonly MessageView[], incoming: readonly
     .sort((left, right) => left.createdAt - right.createdAt || compareStableId(left.id, right.id))
     .slice(-CHAT_MESSAGE_MEMORY_LIMIT));
 }
+let userScrollUntil = 0;
+watch(activeScopeId, () => { userScrollUntil = 0; });
+function onScrollInput(event: Event) {
+  if (event instanceof KeyboardEvent && !['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) return;
+  if (event.type.startsWith('pointer') && (event as PointerEvent).buttons === 0) return;
+  // Input may precede native scroll delivery. This is an intent expiry, not a
+  // paging cooldown: every new gesture admits scrolling immediately.
+  userScrollUntil = performance.now() + 1000;
+}
 function onMessagesScroll(event: Event) {
   const viewport = event.currentTarget as HTMLElement;
-  if (viewport.scrollTop <= 40) void loadOlderMessages(viewport);
+  if (viewport.scrollHeight > viewport.clientHeight && viewport.scrollTop <= 40) void loadOlderMessages(viewport);
 }
 /** Union of #200's bottom-follow tracking and #201's older-page trigger on one scroll container. */
 function onViewportScroll(event: Event) {
-  onMessagesScroll(event);
+  const programmatic = consumeProgrammaticScroll();
+  if (!programmatic && performance.now() <= userScrollUntil) {
+    userScrollUntil = 0;
+    onMessagesScroll(event);
+  }
   onMessageScroll();
 }
 /** #201 paging stays isolated from #200's independent bottom-stick behaviour. */
@@ -290,7 +303,7 @@ async function loadOlderMessages(viewport: HTMLElement) {
     if (token !== generation || scopeId !== activeScopeId.value || anchorId === undefined || anchorTop === undefined) return;
     const currentAnchor = [...viewport.querySelectorAll<HTMLElement>('[data-message-id], [data-event-id]')]
       .find((row) => row.dataset['messageId'] === anchorId || row.dataset['eventId'] === anchorId);
-    if (currentAnchor) viewport.scrollTop += currentAnchor.getBoundingClientRect().top - anchorTop;
+    if (currentAnchor) scrollProgrammatically((element) => { element.scrollTop += currentAnchor.getBoundingClientRect().top - anchorTop; });
   } catch {
     if (token === generation && scopeId === activeScopeId.value) actionError.value = 'Older messages could not be loaded. Scroll up to retry.';
   } finally {
@@ -417,7 +430,7 @@ watch([timeline, loading, detailLoading, missingScope, activeScopeId, requestedM
       (messageId ? row.dataset['messageId'] : row.dataset['eventId']) === targetId,
     );
     if (target) {
-      target.scrollIntoView?.({ block: 'center' });
+      scrollProgrammatically(() => target.scrollIntoView?.({ block: 'center' }));
       target.focus({ preventScroll: true });
       result = messageId ? 'Target message highlighted.' : 'Target Project event highlighted.';
     } else {
@@ -726,7 +739,7 @@ onUnmounted(() => { window.removeEventListener('resize', onResize); generation++
         <div class="relative flex min-h-0 flex-1 flex-col">
           <!-- Admission covers messages without allocating a row or intercepting input. -->
           <div v-if="showAdmissionNotice" class="chat-detail-loading pointer-events-none absolute right-3 top-2 z-20 max-w-[min(20rem,calc(100%-1.5rem))] rounded border border-[var(--yellow-attention-border)] bg-[var(--bg-surface)] p-3 text-xs text-[var(--text-primary)] shadow-lg" aria-hidden="true">Checking conversation admission…</div>
-          <div ref="messageViewport" class="chat-messages-body min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-4 [overflow-anchor:none]" :aria-busy="detailLoading || messagePages[activeScopeId]?.loading" @scroll="onViewportScroll">
+          <div ref="messageViewport" class="chat-messages-body min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-4 [overflow-anchor:none]" :aria-busy="detailLoading || messagePages[activeScopeId]?.loading" @scroll="onViewportScroll" @wheel.passive="onScrollInput" @touchmove.passive="onScrollInput" @keydown="onScrollInput" @pointerdown="onScrollInput" @pointermove="onScrollInput">
           <div ref="messageContent" class="chat-messages-content flex min-h-full flex-col gap-3">
           <div v-if="messagePages[activeScopeId]?.loading" class="chat-older-loading text-center text-[10px] text-[var(--text-muted)]" role="status">Loading older messages…</div>
           <div v-if="messagePages[activeScopeId]?.limited" class="chat-history-limit text-center text-[10px] text-[var(--text-muted)]" role="note">The latest 200 messages are retained in this view.</div>
