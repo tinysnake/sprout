@@ -83,28 +83,30 @@ export class TaskGroupOrchestration {
     return this.#flight;
   }
 
-  async #event(message: Message, stage: string, plan: WakePlan, attention = false): Promise<{ readonly wakes: readonly WakeRequest[]; readonly duplicate: boolean }> {
+  async #event(message: Message, stage: string, plan: WakePlan, attention = false, replan?: (members: readonly WakeMember[]) => Promise<WakePlan | undefined>): Promise<{ readonly wakes: readonly WakeRequest[]; readonly duplicate: boolean; readonly skipped: boolean }> {
     const key = `task-group:${message.id}:${stage}`;
-    const event: ProjectEvent = {
-      id: key, projectId: message.projectId, kind: attention ? TASK_GROUP_ATTENTION_KIND : `task-group-${stage}`,
-      summary: attention ? 'Task group message needs Human attention.' : 'Task group wake orchestration advanced.',
-      producer: { kind: 'system', id: 'sprout' },
-      disposition: attention ? 'human-action-required' : plan.decisions.length ? 'addressed' : 'non-routing',
-      responsibleAgentIds: plan.decisions.map(decision => decision.agentId), originScopeIds: [message.scopeId], deliveryKey: key, createdAt: this.#options.now(),
-    };
     const persist = async () => {
-      if (plan.decisions.length && !(await this.#options.writable(message))) return undefined;
+      if (!(await this.#options.writable(message))) return undefined;
       const members = await this.#options.members(message.projectId);
-      const decisions = plan.decisions.filter(decision => decision.agentId !== message.author.id && members.some(member => member.memberId === decision.agentId && member.memberKind === 'agent' && member.endedAt === undefined));
-      return this.#options.store.publishEvent({ event: { ...event, responsibleAgentIds: decisions.map(decision => decision.agentId) }, plan: { ...plan, decisions, inputId: key }, now: event.createdAt });
+      const currentPlan = replan ? await replan(members) : plan;
+      if (!currentPlan) return undefined;
+      const decisions = currentPlan.decisions.filter(decision => decision.agentId !== message.author.id && members.some(member => member.memberId === decision.agentId && member.memberKind === 'agent' && member.endedAt === undefined));
+      const event: ProjectEvent = {
+        id: key, projectId: message.projectId, kind: attention ? TASK_GROUP_ATTENTION_KIND : `task-group-${stage}`,
+        summary: attention ? 'Task group message needs Human attention.' : 'Task group wake orchestration advanced.',
+        producer: { kind: 'system', id: 'sprout' },
+        disposition: attention ? 'human-action-required' : decisions.length ? 'addressed' : 'non-routing',
+        responsibleAgentIds: decisions.map(decision => decision.agentId), originScopeIds: [message.scopeId], deliveryKey: key, createdAt: this.#options.now(),
+      };
+      return this.#options.store.publishEvent({ event, plan: { ...currentPlan, decisions, inputId: key }, now: event.createdAt });
     };
     const stored = await (this.#options.serialize?.(message, persist) ?? persist());
-    if (!stored) return { wakes: [], duplicate: false };
+    if (!stored) return { wakes: [], duplicate: false, skipped: true };
     // The event and wakes are durable together. Admission uses the original
     // Message, preserving group context instead of delivering a lifecycle fact.
     try { await this.#options.admit(stored.wakes, message); }
     catch { /* Pending wakes remain durable; admission failure must not block escalation. */ }
-    return stored;
+    return { ...stored, skipped: false };
   }
 
   async #sweep(): Promise<void> {
@@ -116,7 +118,7 @@ export class TaskGroupOrchestration {
       const key = (stage: string) => `task-group:${message.id}:${stage}`;
       if (await o.store.getEventByDeliveryKey(key('attention')) || await o.store.getEventByDeliveryKey(key('answered'))) continue;
       if (!(await o.writable(message))) continue;
-      const facts = await o.facts(message.scopeId);
+      let facts = await o.facts(message.scopeId);
       const members = await o.members(message.projectId);
       if (!facts || await this.#bounded(message)) {
         await this.#event(message, 'attention', { inputId: message.id, decisions: [], observations: [] }, true);
@@ -137,17 +139,37 @@ export class TaskGroupOrchestration {
         // back to lead rather than paying for another model call.
         const claimed = await o.store.getEventByDeliveryKey(key('model-claimed'));
         const claim = await this.#event(message, 'model-claimed', empty);
+        if (claim.skipped) continue;
         // Inference may not occupy an earlier Message's idle deadline. An
         // exhausted budget chooses lead fallback instead of queuing more calls.
         const budget = Math.min(next, message.createdAt + TASK_GROUP_IDLE_MS) - o.now();
         const plan = claimed || claim.duplicate || budget <= 0 ? taskGroupFallback(message, members, facts) : await resolveTaskGroupAmbiguity(message, members, facts, o.model, budget);
-        if (!(await o.writable(message))) continue;
-        const currentMembers = await o.members(message.projectId);
-        const currentFacts = await o.facts(message.scopeId);
-        if (!currentFacts) continue;
-        const decisions = plan.decisions.filter(decision => currentMembers.some(member => member.memberId === decision.agentId && member.memberKind === 'agent' && member.endedAt === undefined));
-        const valid = decisions.length ? { ...plan, decisions } : taskGroupFallback(message, currentMembers, currentFacts);
-        wakes = [...wakes, ...(await this.#event(message, 'routed', valid)).wakes];
+        let latestFacts: TaskGroupWakeFacts | undefined = facts;
+        const routedStage = await this.#event(message, 'routed', empty, false, async currentMembers => {
+          const currentMessages = await o.store.listMessages();
+          const currentWakes = (await o.store.listWakeRequests()).filter(w => w.inputId === message.id || w.inputId === key('routed') || w.inputId === key('rewake'));
+          if (currentMessages.some(m => m.scopeId === message.scopeId && m.inReplyTo === message.id && m.author.kind === 'agent') || await o.working(currentWakes)) return undefined;
+          latestFacts = await o.facts(message.scopeId);
+          facts = latestFacts;
+          if (!latestFacts) return empty;
+          const currentPlan = planTaskGroupWake(message, currentMembers, latestFacts);
+          if (!currentPlan.ambiguous) return currentPlan;
+          const currentCandidates = new Set(currentMembers.filter(member => member.memberKind === 'agent' && member.endedAt === undefined && member.memberId !== message.author.id).map(member => member.memberId));
+          const currentDecisions = plan.decisions.filter(decision => currentCandidates.has(decision.agentId));
+          return currentDecisions.length ? { ...plan, decisions: currentDecisions } : taskGroupFallback(message, currentMembers, latestFacts);
+        });
+        if (routedStage.skipped) {
+          if (!latestFacts) {
+            await this.#event(message, 'attention', empty, true);
+            continue;
+          }
+          continue;
+        }
+        wakes = [...wakes, ...routedStage.wakes];
+      }
+      if (!facts) {
+        await this.#event(message, 'attention', empty, true);
+        continue;
       }
       const reWake = await o.store.getEventByDeliveryKey(key('rewake'));
       const deadline = (reWake?.createdAt ?? message.createdAt) + TASK_GROUP_IDLE_MS;

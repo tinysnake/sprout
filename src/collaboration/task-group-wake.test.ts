@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { SqliteCollaborationStore } from './sqlite-store.ts';
 import type { CollaborationStore } from './store.ts';
 import type { Message } from './model.ts';
-import { resolveTaskGroupAmbiguity, TASK_GROUP_MODEL_TIMEOUT_MS } from './task-group-wake.ts';
+import { resolveTaskGroupAmbiguity, TASK_GROUP_MODEL_TIMEOUT_MS, TASK_GROUP_MODEL_MAX_BODY_CHARS, TASK_GROUP_MODEL_MAX_CANDIDATES } from './task-group-wake.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CollaborationCoordinator, type CollaborationCoordinatorOptions } from './coordinator.ts';
@@ -15,7 +15,7 @@ import type { TaskGroupScope } from '../conversation/model.ts';
 import { TASK_GROUP_IDLE_MS, TASK_GROUP_MAX_AGENT_CHAIN, TASK_GROUP_MAX_MODEL_CALLS, TASK_GROUP_MAX_LEAD_REWAKES, TASK_GROUP_ATTENTION_KIND, type TaskGroupWakeFacts } from './task-group-wake.ts';
 
 function fixture(facts: TaskGroupWakeFacts = { lead: { id: 'lead', kind: 'agent' } }, selection: readonly string[] = [], store: CollaborationStore = new InMemoryCollaborationStore()) {
-  let now = 0, calls = 0, writable = true, failAdmissions = false;
+  let now = 0, calls = 0, writable = true, failAdmissions = false, currentFacts = facts, writableChecks = 0, freezeBeforeClaim = false;
   const submissions: string[] = [];
   const states = new Map<string, AgentRun>();
   const scope = { id: 'group', projectId: 'project', kind: 'task-group', taskId: 'task' } as TaskGroupScope;
@@ -23,11 +23,11 @@ function fixture(facts: TaskGroupWakeFacts = { lead: { id: 'lead', kind: 'agent'
     store, clock: { now: () => now },
     scopes: {
       getScope: async () => scope,
-      scopeState: async () => ({ scopeId: 'group', writable }),
+      scopeState: async () => ({ scopeId: 'group', writable: writable && (!freezeBeforeClaim || ++writableChecks === 1) }),
       withTaskGroupLock: async <T>(_id: string, action: () => Promise<T>) => action(),
       projectMembers: async () => ['lead', 'a', 'b'].map(memberId => ({ memberId, memberKind: 'agent' as const })),
     },
-    taskGroupFacts: async () => facts,
+    taskGroupFacts: async () => currentFacts,
     taskGroupModel: { select: async () => { calls++; return selection; } },
     runs: {
       submit: async ({ agentId }: { agentId: string }) => {
@@ -41,7 +41,7 @@ function fixture(facts: TaskGroupWakeFacts = { lead: { id: 'lead', kind: 'agent'
   };
   const coordinator = new CollaborationCoordinator(options as CollaborationCoordinatorOptions);
   const send = (body: string, extra: Record<string, unknown> = {}) => coordinator.deliver({ scopeId: 'group', author: { id: 'human', kind: 'human' }, body, deliveryKey: `d-${body}`, awaitReply: false, ...extra });
-  return { coordinator, store, submissions, states, send, failAdmissions: () => { failAdmissions = true; }, withModel: (taskGroupModel: CollaborationCoordinatorOptions['taskGroupModel']) => new CollaborationCoordinator({ ...options, taskGroupModel } as CollaborationCoordinatorOptions), freeze: () => { writable = false; }, restart: () => new CollaborationCoordinator(options as CollaborationCoordinatorOptions), calls: () => calls, at: (value: number) => { now = value; } };
+  return { coordinator, store, submissions, states, send, failAdmissions: () => { failAdmissions = true; }, setFacts: (value: TaskGroupWakeFacts) => { currentFacts = value; }, freezeBeforeClaim: () => { freezeBeforeClaim = true; writableChecks = 0; }, withModel: (taskGroupModel: CollaborationCoordinatorOptions['taskGroupModel']) => new CollaborationCoordinator({ ...options, taskGroupModel } as CollaborationCoordinatorOptions), freeze: () => { writable = false; }, restart: () => new CollaborationCoordinator(options as CollaborationCoordinatorOptions), calls: () => calls, at: (value: number) => { now = value; } };
 }
 
 test('mentions override kind and assignment without model cost', async () => {
@@ -112,6 +112,9 @@ test('human lead is not forcibly delegated and unanswered input signals Attentio
   f.at(TASK_GROUP_IDLE_MS); await f.coordinator.sweepTaskGroups(); await f.coordinator.sweepTaskGroups();
   assert.deepEqual(f.submissions, []); assert.equal(f.calls(), 0);
   assert.equal((await f.store.listEvents()).filter(e => e.kind === TASK_GROUP_ATTENTION_KIND).length, 1);
+  const mentioned = fixture({ lead: { id: 'human', kind: 'human' }, assignedAgentIds: ['a'] });
+  await mentioned.send('@b status');
+  assert.deepEqual(mentioned.submissions, ['b']); assert.equal(mentioned.calls(), 0);
 });
 
 test('sender exclusion and bounded A to B to A chains end in Attention', async () => {
@@ -157,6 +160,37 @@ test('model timeout aborts once and failure or absence falls back without fan-ou
   }
 });
 
+test('model input is redacted and bounded for both content and candidate count', async () => {
+  const message: Message = { id: 'm', projectId: 'p', scopeId: 's', channel: 'task-group', author: { id: 'human', kind: 'human' }, body: `/home/example/private ${'x'.repeat(5_000)}`, recipients: [], deliveryKey: 'm', createdAt: 0 };
+  const members = ['lead', ...Array.from({ length: 70 }, (_, index) => `agent-${index}`)].map(memberId => ({ memberId, memberKind: 'agent' as const }));
+  const facts: TaskGroupWakeFacts = { lead: { id: 'lead', kind: 'agent' } };
+  let input: Parameters<NonNullable<CollaborationCoordinatorOptions['taskGroupModel']>['select']>[0] | undefined;
+  const plan = await resolveTaskGroupAmbiguity(message, members, facts, { select: async value => { input = value; return ['agent-0']; } });
+  assert.equal(input?.message.body.length, TASK_GROUP_MODEL_MAX_BODY_CHARS);
+  assert.equal(input?.message.body.includes('/home/example/private'), false);
+  assert.equal(input?.message.kind, 'status');
+  assert.equal(input?.candidates.length, TASK_GROUP_MODEL_MAX_CANDIDATES);
+  assert.equal(plan.decisions[0]?.agentId, 'agent-0');
+});
+
+test('model timeout is shortened to the earliest pending idle deadline', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture(); await f.send('@a');
+  f.at(TASK_GROUP_IDLE_MS - 10_000); const { message } = await f.send('ambiguous');
+  let signal: AbortSignal | undefined;
+  let started!: () => void;
+  const modelStarted = new Promise<void>(resolve => { started = resolve; });
+  const routing = f.withModel({ select: async input => { signal = input.signal; started(); return new Promise<readonly string[]>(() => {}); } });
+  const pending = routing.sweepTaskGroups();
+  await modelStarted;
+  t.mock.timers.tick(10_000);
+  await pending;
+  assert.equal(signal?.aborted, true);
+  const routedWakes = (await f.store.listWakeRequests()).filter(wake => wake.inputId === `task-group:${message.id}:routed`);
+  assert.deepEqual(routedWakes.map(wake => wake.agentId), ['lead']);
+  assert.ok(TASK_GROUP_MODEL_TIMEOUT_MS > 10_000);
+});
+
 test('deadline timers and repeated sweeps produce exactly one re-wake and one signal', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const f = fixture(); await f.send('@a');
@@ -167,6 +201,15 @@ test('deadline timers and repeated sweeps produce exactly one re-wake and one si
   await f.coordinator.sweepTaskGroups();
   assert.equal((await f.coordinator.listTaskGroupEscalations()).length, 1);
   assert.equal(f.submissions.length, 1 + TASK_GROUP_MAX_LEAD_REWAKES);
+});
+
+test('inference does not start when the durable claim is skipped by a terminal Task', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture(undefined, ['b']); await f.send('ambiguous'); f.freezeBeforeClaim();
+  await f.coordinator.sweepTaskGroups();
+  assert.equal(f.calls(), 0);
+  assert.deepEqual(f.submissions, []);
+  assert.equal((await f.store.listEvents()).some(event => event.kind === 'task-group-model-claimed'), false);
 });
 
 test('crashed model claim recovers by lead fallback with zero additional inference', async () => {
@@ -237,6 +280,23 @@ test('a Task frozen during inference cannot admit late model recipients', async 
   const routing = f.withModel({ select: () => { start(); return new Promise(resolve => { finish = resolve; }); } });
   const pending = routing.sweepTaskGroups();
   await started; f.freeze(); finish(['b']); await pending;
+  assert.deepEqual(f.submissions, []);
+});
+
+test('a model result is discarded when the Task becomes Human-led during inference', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture(); await f.send('ambiguous');
+  let start!: () => void;
+  let finish!: (ids: readonly string[]) => void;
+  const started = new Promise<void>(resolve => { start = resolve; });
+  const routing = f.withModel({ select: () => { start(); return new Promise(resolve => { finish = resolve; }); } });
+  const pending = routing.sweepTaskGroups();
+  await started;
+  f.setFacts({ lead: { id: 'human', kind: 'human' }, assignedAgentIds: ['a'] });
+  f.at(TASK_GROUP_IDLE_MS);
+  finish(['b']); await pending;
+  assert.deepEqual(f.submissions, []);
+  assert.equal((await routing.listTaskGroupEscalations()).length, 1);
   assert.deepEqual(f.submissions, []);
 });
 
