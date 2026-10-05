@@ -42,6 +42,8 @@ import type {
 
 export const DEFAULT_MESSAGE_PAGE_SIZE = 50;
 export const MAX_MESSAGE_PAGE_SIZE = 100;
+export const DEFAULT_PROJECT_EVENT_PAGE_SIZE = DEFAULT_MESSAGE_PAGE_SIZE;
+export const MAX_PROJECT_EVENT_PAGE_SIZE = MAX_MESSAGE_PAGE_SIZE;
 
 export interface MessagePageQuery {
   readonly scopeId?: string;
@@ -51,6 +53,17 @@ export interface MessagePageQuery {
 
 export interface MessagePage {
   readonly messages: readonly Message[];
+  readonly hasOlder: boolean;
+}
+
+export interface ProjectEventPageQuery {
+  readonly projectId: string;
+  readonly limit: number;
+  readonly before?: string;
+}
+
+export interface ProjectEventPage {
+  readonly events: readonly ProjectEvent[];
   readonly hasOlder: boolean;
 }
 
@@ -105,6 +118,8 @@ export interface CollaborationStore {
   getEventByDeliveryKey(deliveryKey: string): Promise<ProjectEvent | undefined>;
   /** Project events on record, optionally scoped to one Project, oldest first. */
   listEvents(projectId?: string): Promise<readonly ProjectEvent[]>;
+  /** Stable, bounded Project event history page; cursor is exclusive. */
+  listEventsPage(query: ProjectEventPageQuery): Promise<ProjectEventPage | undefined>;
 
   getWakeRequest(idempotencyKey: string): Promise<WakeRequest | undefined>;
   listWakeRequests(): Promise<readonly WakeRequest[]>;
@@ -493,6 +508,16 @@ export class InMemoryCollaborationStore implements CollaborationStore {
     return [...this.#events.values()]
       .filter((event) => projectId === undefined || event.projectId === projectId)
       .sort((a, b) => a.createdAt - b.createdAt);
+  }
+
+  async listEventsPage(query: ProjectEventPageQuery): Promise<ProjectEventPage | undefined> {
+    const events = [...this.#events.values()]
+      .filter((event) => event.projectId === query.projectId)
+      .sort((left, right) => left.createdAt - right.createdAt || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+    const end = query.before === undefined ? events.length : events.findIndex((event) => event.id === query.before);
+    if (query.before !== undefined && end < 0) return undefined;
+    const start = Math.max(0, end - query.limit);
+    return { events: events.slice(start, end), hasOlder: start > 0 };
   }
 
   async getWakeRequest(idempotencyKey: string): Promise<WakeRequest | undefined> {

@@ -30,6 +30,8 @@ import {
   type CollaborationStore,
   type MessagePage,
   type MessagePageQuery,
+  type ProjectEventPage,
+  type ProjectEventPageQuery,
   type PostMessageResult,
   type PublishEventResult,
   type RoutingWindowCollect,
@@ -171,6 +173,8 @@ export class SqliteCollaborationStore implements CollaborationStore {
       );
       CREATE INDEX IF NOT EXISTS project_events_project
         ON project_events(project_id);
+      CREATE INDEX IF NOT EXISTS project_events_project_order
+        ON project_events(project_id, created_at, id);
       CREATE TABLE IF NOT EXISTS collaboration_routing_windows (
         id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL,
@@ -583,6 +587,26 @@ export class SqliteCollaborationStore implements CollaborationStore {
             .prepare('SELECT * FROM project_events WHERE project_id = ? ORDER BY created_at ASC')
             .all(projectId) as unknown as EventRow[]);
     return rows.map(toEvent);
+  }
+
+  async listEventsPage(query: ProjectEventPageQuery): Promise<ProjectEventPage | undefined> {
+    const cursor = query.before === undefined
+      ? undefined
+      : this.#db.prepare('SELECT id, project_id AS projectId, created_at AS createdAt FROM project_events WHERE id = ?')
+          .get(query.before) as { readonly id: string; readonly projectId: string; readonly createdAt: number } | undefined;
+    if (query.before !== undefined && (!cursor || cursor.projectId !== query.projectId)) return undefined;
+
+    const parameters: (string | number)[] = [query.projectId];
+    let cursorCondition = '';
+    if (cursor !== undefined) {
+      cursorCondition = ' AND (created_at < ? OR (created_at = ? AND id < ?))';
+      parameters.push(cursor.createdAt, cursor.createdAt, cursor.id);
+    }
+    const rows = this.#db.prepare(
+      `SELECT * FROM project_events WHERE project_id = ?${cursorCondition} ORDER BY created_at DESC, id DESC LIMIT ?`,
+    ).all(...parameters, query.limit + 1) as unknown as EventRow[];
+    const hasOlder = rows.length > query.limit;
+    return { events: rows.slice(0, query.limit).map(toEvent).reverse(), hasOlder };
   }
 
   async getWakeRequest(idempotencyKey: string): Promise<WakeRequest | undefined> {

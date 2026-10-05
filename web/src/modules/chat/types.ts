@@ -3,7 +3,7 @@ import type { MessageView, ProjectEventView, RunView } from '../../../../src/web
 import type { BrowserTransportState } from '../../transport/browser-transport.ts';
 import type { ConversationScopeView, CreateWorkingGroupInput, ScopeInspectionView, WorkingGroupScopeView } from '../../adapters/conversation-api.ts';
 import type { RoutingBatchDetailView, RoutingBatchSummaryView, RoutingEvidenceView, RoutingWindowView } from '../../adapters/routing-api.ts';
-import type { MessageBrowserAdapter, MessagePageOptions } from '../../adapters/message-api.ts';
+import type { MessageBrowserAdapter, MessagePageOptions, ProjectEventPage, ProjectEventPageOptions } from '../../adapters/message-api.ts';
 
 export interface ActiveChatRun {
   readonly id: string;
@@ -31,7 +31,7 @@ export interface ChatService {
     options?: MessagePageOptions,
   ): ReturnType<MessageBrowserAdapter['listMessages']>;
   postMessage(input: { readonly scopeId: string; readonly body: string; readonly deliveryKey: string }): ReturnType<MessageBrowserAdapter['postMessage']>;
-  listProjectEvents(projectId: string): Promise<readonly ProjectEventView[]>;
+  listProjectEvents(projectId: string, options?: ProjectEventPageOptions): Promise<ProjectEventPage>;
   messageRouting(id: string): Promise<RoutingEvidenceView>;
   eventRouting(id: string): Promise<RoutingEvidenceView>;
   listRoutingBatches(projectId: string): Promise<{ readonly windows: readonly RoutingWindowView[]; readonly batches: readonly RoutingBatchSummaryView[] }>;
