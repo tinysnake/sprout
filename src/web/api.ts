@@ -351,7 +351,10 @@ export function createRunApi(options: RunApiOptions): RunApi {
       // protected runtime an Agent/Worker cannot select an authority kind or a
       // different Human id through request JSON.
       if (auth && (body.authorKind === 'agent' || body.authorKind === 'worker')) {
-        sendJson(response, 403, { error: 'browser commands are Human-only' });
+        sendJson(response, 403, {
+          error: 'browser commands are Human-only',
+          code: 'agent-direct-message-forbidden',
+        });
         return;
       }
       const scope = await conversationScopes.getScope(scopeId);

@@ -424,8 +424,8 @@ test('the authenticated browser refuses Agent-authored direct messages', async (
       return { status: response.status, body: await response.json() };
     }));
     assert.deepEqual(refusals, [
-      { status: 403, body: { error: 'browser commands are Human-only' } },
-      { status: 403, body: { error: 'browser commands are Human-only' } },
+      { status: 403, body: { error: 'browser commands are Human-only', code: 'agent-direct-message-forbidden' } },
+      { status: 403, body: { error: 'browser commands are Human-only', code: 'agent-direct-message-forbidden' } },
     ]);
     assert.deepEqual(await context.collaboration.listMessages({ scopeId }), []);
   } finally {
