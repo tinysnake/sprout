@@ -32,13 +32,13 @@ function withTempDir<T>(fn: (dir: string) => Promise<T> | T): Promise<T> {
 
 
 test('schema constants declare supported version range', () => {
-  assert.equal(CURRENT_SCHEMA_VERSION, 29);
+  assert.equal(CURRENT_SCHEMA_VERSION, 30);
   assert.equal(MIN_SUPPORTED_SCHEMA_VERSION, 0);
-  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 29);
+  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 30);
   assert.deepEqual(SUPPORTED_SCHEMA_RANGE, {
     min: 0,
-    max: 29,
-    current: 29,
+    max: 30,
+    current: 30,
   });
 });
 
@@ -49,6 +49,14 @@ test('v28 migration preserves Project events and adds durable conversation origi
     const legacy = new DatabaseSync(path);
     legacy.exec(`
       PRAGMA user_version = 28;
+      CREATE TABLE collaboration_messages (
+        id TEXT PRIMARY KEY, project_id TEXT NOT NULL, scope_id TEXT NOT NULL DEFAULT '',
+        channel TEXT NOT NULL, author_id TEXT NOT NULL, author_kind TEXT NOT NULL,
+        body TEXT NOT NULL, recipients TEXT NOT NULL, delivery_key TEXT NOT NULL UNIQUE,
+        in_reply_to TEXT, created_at INTEGER NOT NULL
+      );
+      INSERT INTO collaboration_messages VALUES
+        ('legacy-message', 'project', 'tg-old', 'task-group', 'agent', 'agent', 'body', '[]', 'legacy-message-key', NULL, 1);
       CREATE TABLE project_events (
         id TEXT PRIMARY KEY, project_id TEXT NOT NULL, kind TEXT NOT NULL,
         summary TEXT NOT NULL, detail TEXT, producer_id TEXT NOT NULL,
@@ -63,7 +71,10 @@ test('v28 migration preserves Project events and adds durable conversation origi
     legacy.close();
 
     const store = new SqliteStore({ filename: path });
-    assert.equal(store.schemaVersion, 29);
+    assert.equal(store.schemaVersion, 30);
+    const messageColumns = store.db.prepare('PRAGMA table_info(collaboration_messages)').all() as unknown as readonly { name: string }[];
+    assert.ok(messageColumns.some((column) => column.name === 'message_kind'));
+    assert.equal((store.db.prepare("SELECT message_kind FROM collaboration_messages WHERE id = 'legacy-message'").get() as { message_kind: string }).message_kind, 'status');
     const columns = store.db.prepare('PRAGMA table_info(project_events)').all() as unknown as readonly { name: string }[];
     assert.ok(columns.some((column) => column.name === 'origin_scope_ids'));
     assert.ok(columns.some((column) => column.name === 'origin_message_id'));
@@ -97,13 +108,13 @@ test('v28 migration preserves Project events and adds durable conversation origi
   });
 });
 
-test('a failed v28 conversation-origin migration rolls back its columns and keeps the safety copy', async () => {
+test('a failed v29 conversation-origin migration rolls back its columns and keeps the safety copy', async () => {
   await withTempDir(async (dir) => {
     const path = join(dir, 'sprout.db');
     const safetyPath = defaultSafetyCopyPath(path);
     const db = new DatabaseSync(path);
     db.exec(`
-      PRAGMA user_version = 28;
+      PRAGMA user_version = 29;
       CREATE TABLE project_events (
         id TEXT PRIMARY KEY, project_id TEXT NOT NULL, kind TEXT NOT NULL,
         summary TEXT NOT NULL, detail TEXT, producer_id TEXT NOT NULL,
@@ -116,8 +127,8 @@ test('a failed v28 conversation-origin migration rolls back its columns and keep
          'sprout', 'system', 'informational', '[]', 'legacy-event-key', 1);
     `);
     const failure: readonly MigrationStep[] = [{
-      fromVersion: 28,
-      toVersion: 29,
+      fromVersion: 29,
+      toVersion: 30,
       migrate(database) {
         database.exec("ALTER TABLE project_events ADD COLUMN origin_scope_ids TEXT NOT NULL DEFAULT '[]';");
         database.exec('ALTER TABLE project_events ADD COLUMN origin_message_id TEXT;');
@@ -127,11 +138,11 @@ test('a failed v28 conversation-origin migration rolls back its columns and keep
 
     assert.throws(() => migrateOrInitializeDatabase(db, {
       filename: path,
-      targetVersion: 29,
-      supportedRange: { min: 0, max: 29, current: 29 },
+      targetVersion: 30,
+      supportedRange: { min: 0, max: 30, current: 30 },
       migrations: failure,
     }), SchemaMigrationError);
-    assert.equal(getSchemaVersion(db), 28);
+    assert.equal(getSchemaVersion(db), 29);
     const columns = db.prepare('PRAGMA table_info(project_events)').all() as unknown as readonly { name: string }[];
     assert.equal(columns.some((column) => column.name === 'origin_scope_ids'), false);
     assert.equal(columns.some((column) => column.name === 'origin_message_id'), false);
@@ -139,7 +150,7 @@ test('a failed v28 conversation-origin migration rolls back its columns and keep
     db.close();
 
     const safety = new DatabaseSync(safetyPath);
-    assert.equal(getSchemaVersion(safety), 28);
+    assert.equal(getSchemaVersion(safety), 29);
     safety.close();
   });
 });

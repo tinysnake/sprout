@@ -29,22 +29,22 @@ conversation scope, Message, and Project-event records:
   second lifecycle record.
 - `handoff` and `assignment` are kind-stamped Task-group Messages. Each unique
   Message id produces one bounded activity item with an exact Chat message
-  target. Message bodies never enter the Feed summary.
-- `task-group-escalation`, `task-group-human-lead-waiting`, and
-  `task-group-human-question` are Project events. The first and the two
-  Human-directed paths use `human-action-required`, so the event creates
-  Attention without creating a WakeRequest. Stable `deliveryKey` values make
-  publication retries idempotent.
-- These Project events carry `originScopeIds: [taskGroupScopeId]` and, when
-  caused by a Message, `originMessageId`. The Feed and Chat resolve the same
-  durable scope/message identity. Schema v29 adds those two optional origin
-  fields to `project_events`; legacy rows read as having no conversation
-  origin.
-
-The task-group kinds are disjoint from `agent-run-failure` and other #180
-run-lifecycle kinds. Event activity deduplicates by Project plus delivery key;
-Message activity deduplicates by Message id. A repeated escalation signal
-therefore remains one activity entry and one Attention item.
+  target. Message bodies never enter the Feed summary. Message kind is persisted
+  with the Message and defaults to `status` for older records.
+- The migrations serialize the two related changes: #211 adds `message_kind` in
+  v28→v29, then this ticket adds conversation origin fields to Project events
+  in v29→v30. Legacy Message and event rows keep their previous content.
+- #211 publishes one durable `task-group-unanswered` Project event after the
+  shared idle deadline. Its stable delivery key is resolved through
+  `listTaskGroupEscalations`, which returns the exact triggering Message and
+  scope. The Feed shows one Attention item, categorized as `task-group-escalation`
+  for an Agent lead or `task-group-human-waiting` for a Human lead. The event's
+  `human-action-required` disposition is notify-only and creates no WakeRequest.
+- A `question` Message in a Human-led Task group creates
+  `task-group-human-question` Attention directly from the Message source. It
+  clears when a reply references that Message; no Human wake is sent.
+- Task-group event activity and Attention use the Project plus delivery key for
+  deduplication. Message activity and question Attention use the Message id.
 
 ## Invariants
 

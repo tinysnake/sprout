@@ -25,13 +25,13 @@ import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 29;
+export const CURRENT_SCHEMA_VERSION = 30;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 29;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 30;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -1293,6 +1293,19 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
   {
     fromVersion: 28,
     toVersion: 29,
+    name: 'task_group_message_intent',
+    migrate(db) {
+      const exists = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'collaboration_messages'").get();
+      if (exists === undefined) return;
+      const columns = db.prepare('PRAGMA table_info(collaboration_messages)').all() as unknown as readonly { name: string }[];
+      if (!columns.some((column) => column.name === 'message_kind')) {
+        db.exec("ALTER TABLE collaboration_messages ADD COLUMN message_kind TEXT NOT NULL DEFAULT 'status';");
+      }
+    },
+  },
+  {
+    fromVersion: 29,
+    toVersion: 30,
     name: 'project_event_conversation_origins',
     migrate(db) {
       const table = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'project_events'").get();

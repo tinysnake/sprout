@@ -181,6 +181,15 @@ test('the production Feed projects Task-group beats and focused notify-only esca
       projectId: PROJECT_ID, title: 'Review message evidence',
       goal: 'Make task-group routing observable.', status: 'in-progress',
     });
+    const humanLead = { memberId: 'operator', memberKind: 'human' as const };
+    await runtime.stores.tasks.save({
+      ...task,
+      admission: {
+        proposalId: 'feed-task-group-proposal', proposalRevision: 1, contentVersion: 1,
+        validationCriteria: [], lead: humanLead, contextAgentId: 'scout',
+        approvedBy: humanLead, approvedAt: task.createdAt,
+      },
+    });
     const group = await runtime.conversationScopes.syncTaskGroup({
       taskId: task.id, projectId: PROJECT_ID, title: task.title,
       goal: task.goal, constraints: task.constraints,
@@ -192,12 +201,11 @@ test('the production Feed projects Task-group beats and focused notify-only esca
     });
     const signal = {
       projectId: PROJECT_ID,
-      kind: 'task-group-escalation',
-      summary: 'No Agent is working on this task group.',
+      kind: 'task-group-unanswered',
+      summary: 'No Agent has answered this task-group message.',
       disposition: 'human-action-required' as const,
-      deliveryKey: 'task-group-escalation:feed-task-group-message',
+      deliveryKey: `task-group:${message.message.id}:attention`,
       originScopeIds: [group.id],
-      originMessageId: message.message.id,
       awaitReply: false,
     };
     const first = await runtime.collaboration.publishEvent(signal);
@@ -208,7 +216,7 @@ test('the production Feed projects Task-group beats and focused notify-only esca
     const response = await fetch(new URL('/api/feed', base), { headers: { cookie } });
     assert.equal(response.status, 200);
     const feed = await response.json() as FeedBody;
-    assert.deepEqual(feed.attention.map((item) => item.category), ['task-group-escalation']);
+    assert.deepEqual(feed.attention.map((item) => item.category), ['task-group-human-waiting']);
     assert.deepEqual(
       [feed.attention[0]?.target.surface, feed.attention[0]?.target.scopeId, feed.attention[0]?.target.messageId],
       ['project-chat', group.id, message.message.id],

@@ -63,6 +63,8 @@ export interface MessageAuthor {
  * Deliberately absent: the agent run's events, tool output, and raw reasoning.
  * Those stay in the run record (`AgentRun.events`) and never enter conversation.
  */
+export type TaskGroupMessageKind = 'status' | 'question' | 'escalation' | 'handoff' | 'assignment';
+
 export interface Message {
   readonly id: string;
   readonly projectId: string;
@@ -72,6 +74,8 @@ export interface Message {
   readonly channel: MessageChannel;
   readonly author: MessageAuthor;
   readonly body: string;
+  /** Task-group routing intent and lifecycle label; omission means status. */
+  readonly kind?: TaskGroupMessageKind;
   /** Explicit addressees for a direct Message; empty for channel Messages. */
   readonly recipients: readonly string[];
   /** Idempotency key: repeated delivery of the same key yields one Message. */
@@ -89,6 +93,8 @@ export interface Message {
  * exactly why an input did or did not start a run.
  */
 export type WakeReason =
+  | 'task-lead'
+  | 'task-assignment'
   /** The input named this agent as a direct recipient. */
   | 'direct-recipient'
   /** The input mentioned this agent by exact whole-token `@id`. */

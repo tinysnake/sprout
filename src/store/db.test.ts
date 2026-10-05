@@ -161,6 +161,7 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'delivery_key', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'in_reply_to', type: 'TEXT', notnull: 0, pk: 0 },
     { name: 'created_at', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'message_kind', type: 'TEXT', notnull: 1, pk: 0 },
   ],
   collaboration_wake_requests: [
     { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
@@ -208,6 +209,8 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'disposition', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'responsible_agents', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'delivery_key', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'origin_scope_ids', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'origin_message_id', type: 'TEXT', notnull: 0, pk: 0 },
     { name: 'created_at', type: 'INTEGER', notnull: 1, pk: 0 },
   ],
   collaboration_routing_windows: [

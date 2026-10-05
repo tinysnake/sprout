@@ -10,7 +10,7 @@ import { runFailureReason } from '../run/failure-reason.ts';
 import type { AgentRegistry } from '../agent/registry.ts';
 import type { CollaborationCoordinator } from '../collaboration/coordinator.ts';
 import { MessageDeliveryError } from '../collaboration/coordinator.ts';
-import type { MessageAuthor } from '../collaboration/model.ts';
+import type { MessageAuthor, TaskGroupMessageKind } from '../collaboration/model.ts';
 import { ProjectEventError } from '../collaboration/events.ts';
 import {
   DEFAULT_MESSAGE_PAGE_SIZE,
@@ -52,6 +52,13 @@ export * from './views.ts';
 
 /** The single machine-authenticated Worker upgrade path (ADR-0012). */
 export const WORKER_CONNECT_PATH = '/api/worker/connect';
+
+const TASK_GROUP_MESSAGE_KINDS: readonly TaskGroupMessageKind[] = [
+  'status', 'question', 'escalation', 'handoff', 'assignment',
+];
+function isTaskGroupMessageKind(value: unknown): value is TaskGroupMessageKind {
+  return typeof value === 'string' && TASK_GROUP_MESSAGE_KINDS.includes(value as TaskGroupMessageKind);
+}
 
 /** Allow a remote close acknowledgement, without holding Core shutdown indefinitely. */
 export const WORKER_CONNECTION_SHUTDOWN_DEADLINE_MS = 5_000;
@@ -352,6 +359,11 @@ export function createRunApi(options: RunApiOptions): RunApi {
         sendJson(response, 404, { error: `unknown conversation scope: ${scopeId}` });
         return;
       }
+      const messageKind = body.kind;
+      if (messageKind !== undefined && (scope.kind !== 'task-group' || !isTaskGroupMessageKind(messageKind))) {
+        sendJson(response, 400, { error: 'kind must be a supported Task-group Message kind' });
+        return;
+      }
       const recipients = body.recipients;
       if (
         recipients !== undefined &&
@@ -389,6 +401,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
           scopeId,
           author,
           body: text,
+          ...(messageKind !== undefined ? { kind: messageKind } : {}),
           ...(Array.isArray(recipients) ? { recipients: recipients as readonly string[] } : {}),
           deliveryKey,
           awaitReply,

@@ -414,6 +414,7 @@ export interface SproutRuntimeOptions {
   readonly onObservation?: CollaborationCoordinatorOptions['onObservation'];
   /** Trusted host-composed wake model, never supplied through Human HTTP. */
   readonly routingModel?: CollaborationCoordinatorOptions['routingModel'];
+  readonly taskGroupModel?: CollaborationCoordinatorOptions['taskGroupModel'];
 }
 
 /** Explicit private composition injection, used only by adapter tests. */
@@ -1225,6 +1226,22 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       : new UsageAwareRoutingModelPort({ inner: options.routingModel });
     const collaboration = new CollaborationCoordinator({
       scopes: conversationScopes,
+      ...(options.taskGroupModel ? { taskGroupModel: options.taskGroupModel } : {}),
+      taskGroupFacts: async scopeId => {
+        const scope = await conversationScopes.getScope(scopeId);
+        if (scope?.kind !== 'task-group') return undefined;
+        const task = await tasks.get(scope.taskId);
+        const lead = task?.admission?.lead;
+        if (!task || !lead) return undefined;
+        const latest = [...(task.controlHistory ?? [])].reverse().find(event => event.action === 'content-revised');
+        const currentLead = latest?.action === 'content-revised' ? latest.content.lead : lead;
+        const contract = await conversationScopes.projectContract(scope.projectId);
+        return {
+          lead: { id: currentLead.memberId, kind: currentLead.memberKind },
+          assignedAgentIds: task.assignedAgentId ? [task.assignedAgentId] : [],
+          roles: (contract?.members ?? []).map(member => ({ agentId: member.memberId, keys: member.responsibilities ?? [] })),
+        };
+      },
       store: stores.collaboration,
       runs: orchestrator,
       ...(usageRoutingModel !== undefined ? { routingModel: usageRoutingModel } : {}),
@@ -1767,6 +1784,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     // Project-event identity and declared Human-attention disposition.
     const feedTaskGroups = async (): Promise<FeedTaskGroup[]> => {
       const [projectsNow, taskRows] = await Promise.all([projectService.list(), tasks.list()]);
+      const taskById = new Map(taskRows.map((task) => [task.id, task]));
       const projectIds = new Set([
         ...projectsNow.map((project) => project.id),
         ...projects.list().map((project) => project.id),
@@ -1780,6 +1798,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         projectId: group.projectId,
         taskId: group.taskId,
         taskTitle: currentTaskGroupContent(group).taskTitle,
+        ...(taskById.get(group.taskId)?.admission?.lead.memberKind !== undefined
+          ? { leadKind: taskById.get(group.taskId)!.admission!.lead.memberKind }
+          : {}),
         createdAt: group.createdAt,
       }));
     };
@@ -1815,21 +1836,18 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         return messages.flatMap((message) => {
           const group = groups.get(message.scopeId);
           if (group === undefined || group.projectId !== message.projectId) return [];
-          const stamped = message as typeof message & {
-            readonly kind?: unknown;
-            readonly envelope?: { readonly kind?: unknown };
-          };
-          const kind = stamped.kind ?? stamped.envelope?.kind;
           return [{
             id: message.id,
             projectId: message.projectId,
             scopeId: message.scopeId,
-            kind: kind === 'handoff' || kind === 'assignment' || kind === 'question' || kind === 'status'
-              ? kind : 'status',
+            kind: message.kind ?? 'status',
+            authorKind: message.author.kind,
+            ...(message.inReplyTo !== undefined ? { inReplyTo: message.inReplyTo } : {}),
             createdAt: message.createdAt,
           }];
         });
       },
+      taskGroupEscalations: () => collaboration.listTaskGroupEscalations(),
       chatActivityOrigins: async ({ events: eventRows, routingBatches }) => {
         const [messages, wakes] = await Promise.all([
           collaboration.listMessages(),

@@ -10,6 +10,7 @@ interface TaskGroupSource {
   readonly projectId: string;
   readonly taskId: string;
   readonly taskTitle: string;
+  readonly leadKind?: 'human' | 'agent';
   readonly createdAt: number;
 }
 
@@ -17,7 +18,9 @@ interface TaskGroupMessageSource {
   readonly id: string;
   readonly projectId: string;
   readonly scopeId: string;
-  readonly kind: 'handoff' | 'assignment' | 'question' | 'status';
+  readonly kind: 'handoff' | 'assignment' | 'question' | 'escalation' | 'status';
+  readonly authorKind: 'human' | 'agent';
+  readonly inReplyTo?: string;
   readonly createdAt: number;
 }
 
@@ -40,6 +43,7 @@ function sources(input: {
   readonly groups?: readonly TaskGroupSource[];
   readonly messages?: readonly TaskGroupMessageSource[];
   readonly events?: readonly ProjectEvent[];
+  readonly escalations?: readonly { eventId: string; messageId: string; scopeId: string; projectId: string; at: number }[];
   readonly runs?: readonly AgentRun[];
 }): FeedSources {
   return {
@@ -55,6 +59,7 @@ function sources(input: {
     attentionResolutions: async () => [],
     taskGroups: async () => input.groups ?? [],
     taskGroupMessages: async () => input.messages ?? [],
+    taskGroupEscalations: async () => input.escalations ?? [],
   } as unknown as FeedSources;
 }
 
@@ -65,15 +70,15 @@ const group: TaskGroupSource = {
 
 function taskMessage(id: string, kind: TaskGroupMessageSource['kind'], createdAt: number): TaskGroupMessageSource {
   return {
-    id, kind, createdAt, projectId: group.projectId, scopeId: group.scopeId,
+    id, kind, authorKind: 'agent', createdAt, projectId: group.projectId, scopeId: group.scopeId,
   };
 }
 
 test('task-group creation, handoff, assignment, and escalation each produce one focused Feed event', async () => {
   const escalation = groupEvent({
-    id: 'event-escalation', projectId: group.projectId, kind: 'task-group-escalation',
-    disposition: 'human-action-required', deliveryKey: 'task-group-escalation:incident-1',
-    originScopeIds: [group.scopeId], originMessageId: 'message-escalated', createdAt: 40,
+    id: 'event-escalation', projectId: group.projectId, kind: 'task-group-unanswered',
+    disposition: 'human-action-required', deliveryKey: 'task-group:message-escalated:attention',
+    originScopeIds: [group.scopeId], createdAt: 40,
   });
   const retry = groupEvent({
     ...escalation, id: 'event-escalation-retry', createdAt: 41,
@@ -87,6 +92,7 @@ test('task-group creation, handoff, assignment, and escalation each produce one 
       taskMessage('message-handoff', 'handoff', 20),
     ],
     events: [escalation, retry],
+    escalations: [{ eventId: escalation.id, messageId: 'message-escalated', scopeId: group.scopeId, projectId: group.projectId, at: 40 }],
   }));
 
   const groupActivity = snapshot.activity.filter((item) => item.kind.startsWith('task-group-'));
@@ -111,45 +117,45 @@ test('task-group creation, handoff, assignment, and escalation each produce one 
 });
 
 test('escalation, Human-lead waiting, and Human-directed questions each produce one notify-only Attention item', async () => {
-  const signals = [
-    groupEvent({
-      id: 'event-escalation', projectId: group.projectId, kind: 'task-group-escalation',
-      disposition: 'human-action-required', deliveryKey: 'incident:escalation',
-      originScopeIds: [group.scopeId], originMessageId: 'message-escalation', createdAt: 50,
-    }),
-    groupEvent({
-      id: 'event-waiting', projectId: group.projectId, kind: 'task-group-human-lead-waiting',
-      disposition: 'human-action-required', deliveryKey: 'incident:waiting',
-      originScopeIds: [group.scopeId], originMessageId: 'message-waiting', createdAt: 40,
-    }),
-    groupEvent({
-      id: 'event-question', projectId: group.projectId, kind: 'task-group-human-question',
-      disposition: 'human-action-required', deliveryKey: 'incident:question',
-      originScopeIds: [group.scopeId], originMessageId: 'message-question', createdAt: 30,
-    }),
-  ];
-  const retries = signals.map((signal, index) => groupEvent({
+  const humanGroup = { ...group, scopeId: 'tg-task-human', taskId: 'task-human', leadKind: 'human' as const };
+  const escalation = groupEvent({
+    id: 'event-escalation', projectId: group.projectId, kind: 'task-group-unanswered',
+    disposition: 'human-action-required', deliveryKey: 'task-group:message-escalation:attention',
+    originScopeIds: [group.scopeId], createdAt: 50,
+  });
+  const waiting = groupEvent({
+    id: 'event-waiting', projectId: humanGroup.projectId, kind: 'task-group-unanswered',
+    disposition: 'human-action-required', deliveryKey: 'task-group:message-waiting:attention',
+    originScopeIds: [humanGroup.scopeId], createdAt: 40,
+  });
+  const retries = [escalation, waiting].map((signal, index) => groupEvent({
     ...signal, id: `retry-${index}`, createdAt: signal.createdAt + 1,
   }));
   const snapshot = await projectFeed(sources({
-    groups: [group],
+    groups: [group, humanGroup],
     messages: [
       taskMessage('message-escalation', 'status', 49),
-      taskMessage('message-waiting', 'status', 39),
-      taskMessage('message-question', 'question', 29),
+      { ...taskMessage('message-waiting', 'status', 39), projectId: humanGroup.projectId, scopeId: humanGroup.scopeId },
+      { ...taskMessage('message-question', 'question', 29), projectId: humanGroup.projectId, scopeId: humanGroup.scopeId },
+      { ...taskMessage('cross-scope-reply', 'status', 30), inReplyTo: 'message-question' },
+      { ...taskMessage('answered-question', 'question', 27), projectId: humanGroup.projectId, scopeId: humanGroup.scopeId },
+      { ...taskMessage('human-answer', 'status', 31), projectId: humanGroup.projectId, scopeId: humanGroup.scopeId, authorKind: 'human', inReplyTo: 'answered-question' },
     ],
-    events: [...signals, ...retries],
+    events: [escalation, waiting, ...retries],
+    escalations: [
+      { eventId: escalation.id, messageId: 'message-escalation', scopeId: group.scopeId, projectId: group.projectId, at: 50 },
+      { eventId: waiting.id, messageId: 'message-waiting', scopeId: humanGroup.scopeId, projectId: humanGroup.projectId, at: 40 },
+    ],
   }));
 
   assert.deepEqual(snapshot.attention.map((item) => item.category), [
     'task-group-escalation', 'task-group-human-waiting', 'task-group-human-question',
   ]);
-  assert.equal(snapshot.attention.length, 3, 'one item remains for each stable incident delivery key');
+  assert.equal(snapshot.attention.length, 3, 'one item remains for each stable incident or unanswered question');
   assert.deepEqual(snapshot.attention.map((item) => item.target.messageId), [
     'message-escalation', 'message-waiting', 'message-question',
   ]);
-  assert.ok(snapshot.attention.every((item) => item.target.surface === 'project-chat' && item.target.scopeId === group.scopeId));
-  assert.ok(snapshot.attention.every((item) => isFeedDeepLink(item.target)));
+  assert.ok(snapshot.attention.every((item) => item.target.surface === 'project-chat' && isFeedDeepLink(item.target)));
 });
 
 test('a run-lifecycle failure remains one existing #180 Feed event', async () => {
