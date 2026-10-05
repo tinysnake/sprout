@@ -166,7 +166,16 @@ export class FixtureChatService implements ChatService {
     this.#messages.push(message);
     return { message, duplicate: false, wakes: [], admittedRunIds: [] };
   }
-  async listProjectEvents(id: string) { return id === projectId ? [...this.#events] : []; }
+  async listProjectEvents(id: string, options?: Parameters<ChatService['listProjectEvents']>[1]) {
+    const rows = this.#events.filter((event) => id === projectId &&
+      (options?.originScopeId === undefined || event.originScopeIds?.includes(options.originScopeId)))
+      .sort((left, right) => left.createdAt - right.createdAt || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+    const end = options?.before === undefined ? rows.length : rows.findIndex((event) => event.id === options.before);
+    if (end < 0) return { events: [], hasOlder: false };
+    const limit = options?.limit ?? 50;
+    const start = Math.max(0, end - limit);
+    return { events: rows.slice(start, end), hasOlder: start > 0 };
+  }
   async messageRouting(id: string) { const message = this.#messages.find((item) => item.id === id); if (!message) throw new Error('Message not found'); return evidence({ kind: 'message', message: { ...message } }, id); }
   async eventRouting(id: string): Promise<RoutingEvidenceView> { const target = this.#events.find((item) => item.id === id); if (!target) throw new Error('Event not found'); return evidence({ kind: 'event', event: { ...target } }, id); }
   async listRoutingBatches(id: string) { return { windows: batches.map((detail) => detail.window!), batches: id === projectId ? batches.map((detail) => detail.batch) : [] }; }

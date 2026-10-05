@@ -12,7 +12,12 @@ import type { CollaborationCoordinator } from '../collaboration/coordinator.ts';
 import { MessageDeliveryError } from '../collaboration/coordinator.ts';
 import type { MessageAuthor } from '../collaboration/model.ts';
 import { ProjectEventError } from '../collaboration/events.ts';
-import { DEFAULT_MESSAGE_PAGE_SIZE, MAX_MESSAGE_PAGE_SIZE } from '../collaboration/store.ts';
+import {
+  DEFAULT_MESSAGE_PAGE_SIZE,
+  DEFAULT_PROJECT_EVENT_PAGE_SIZE,
+  MAX_MESSAGE_PAGE_SIZE,
+  MAX_PROJECT_EVENT_PAGE_SIZE,
+} from '../collaboration/store.ts';
 import { ConversationScopeError } from '../conversation/model.ts';
 import type { ConversationScopeService } from '../conversation/service.ts';
 import { redactSensitiveText } from '../environment/privacy.ts';
@@ -471,8 +476,37 @@ export function createRunApi(options: RunApiOptions): RunApi {
       segments[3] === 'events' &&
       collaboration
     ) {
-      const events = await collaboration.listEvents(segments[2] ?? '');
-      sendJson(response, 200, { events: events.map(toProjectEventView) });
+      const projectId = segments[2] ?? '';
+      const rawLimit = url.searchParams.get('limit');
+      let limit = DEFAULT_PROJECT_EVENT_PAGE_SIZE;
+      if (rawLimit !== null) {
+        if (!/^[1-9]\d*$/.test(rawLimit) || !Number.isSafeInteger(Number(rawLimit))) {
+          sendJson(response, 400, { error: 'limit must be a positive integer' });
+          return;
+        }
+        limit = Math.min(Number(rawLimit), MAX_PROJECT_EVENT_PAGE_SIZE);
+      }
+      const rawBefore = url.searchParams.get('before');
+      if (rawBefore === '') {
+        sendJson(response, 400, { error: 'before must name a project event cursor' });
+        return;
+      }
+      const rawOriginScopeId = url.searchParams.get('originScopeId');
+      if (rawOriginScopeId === '') {
+        sendJson(response, 400, { error: 'originScopeId must not be empty' });
+        return;
+      }
+      const page = await collaboration.listEventsPage({
+        projectId,
+        limit,
+        ...(rawBefore !== null ? { before: rawBefore } : {}),
+        ...(rawOriginScopeId !== null ? { originScopeId: rawOriginScopeId } : {}),
+      });
+      if (page === undefined) {
+        sendJson(response, 404, { error: `unknown project event cursor: ${rawBefore}` });
+        return;
+      }
+      sendJson(response, 200, { events: page.events.map(toProjectEventView), hasOlder: page.hasOlder });
       return;
     }
 

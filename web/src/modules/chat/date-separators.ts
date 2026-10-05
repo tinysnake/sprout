@@ -1,4 +1,4 @@
-/** Date rows for a complete, chronologically ordered message list, independent of fetch chunks. */
+/** Date rows for a chronologically ordered Chat timeline, independent of fetch chunks. */
 export function messageDateSeparators(
   messages: readonly { readonly id: string; readonly createdAt: number }[],
   now: number,

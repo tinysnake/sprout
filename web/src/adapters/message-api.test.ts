@@ -12,7 +12,7 @@ test('Message and Project-event adapter uses exact accepted routes and immediate
     events: () => () => {},
     async request<T>(path: string, init?: RequestInit): Promise<T> {
       calls.push({ path, ...(init ? { init } : {}) });
-      if (path.startsWith('/api/projects/')) return { events: [] } as T;
+      if (path.startsWith('/api/projects/')) return { events: [], hasOlder: false } as T;
       if (path.includes('/observations')) return { observations: [], wakes: [] } as T;
       if (init) return { message: { id: 'msg-1' }, duplicate: false, wakes: [], admittedRunIds: [] } as T;
       return { messages: [] } as T;
@@ -49,6 +49,21 @@ test('Message adapter encodes a bounded backward cursor request', async () => {
   });
   await adapter.listMessages('wg/name & more', { limit: 25, before: 'message / 1' });
   assert.deepEqual(calls, ['/api/messages?scopeId=wg%2Fname+%26+more&limit=25&before=message+%2F+1']);
+});
+
+test('Project-event adapter encodes bounded, origin-filtered backward cursor requests', async () => {
+  const calls: string[] = [];
+  const adapter = createMessageBrowserAdapter({
+    state: () => ({ status: 'online', connection: 'online', loading: false }),
+    subscribeState: () => () => {}, setCsrfToken: () => {}, events: () => () => {},
+    async request<T>(path: string): Promise<T> {
+      calls.push(path);
+      return { events: [{ id: 'evt-1' }], hasOlder: true } as T;
+    },
+  });
+  const page = await adapter.listProjectEvents('project/name', { limit: 25, before: 'event / 1', originScopeId: 'scope / 2' });
+  assert.deepEqual(page, { events: [{ id: 'evt-1' }], hasOlder: true });
+  assert.deepEqual(calls, ['/api/projects/project%2Fname/events?limit=25&before=event+%2F+1&originScopeId=scope+%2F+2']);
 });
 
 test('Message adapter propagates transport refusals without queueing or fabricating a message', async () => {
