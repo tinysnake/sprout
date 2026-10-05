@@ -84,6 +84,20 @@ export interface WakePlanInput {
   readonly wakePolicy?: WakePolicy;
 }
 
+/** Exact @id tokens in first-occurrence order, without deciding whether a target is a member. */
+export function parseMentionTargets(body: string): readonly string[] {
+  const targets: string[] = [];
+  const seen = new Set<string>();
+  const tokens = /(?<![\w@])@([a-zA-Z0-9_-]+)(?![\w-])/g;
+  for (const match of body.matchAll(tokens)) {
+    const target = match[1]!;
+    if (seen.has(target)) continue;
+    seen.add(target);
+    targets.push(target);
+  }
+  return targets;
+}
+
 /**
  * Exact agent mentions in a Message body.
  *
@@ -97,16 +111,14 @@ export function parseMentions(
   memberIds: readonly string[],
 ): { readonly members: readonly string[]; readonly unknown: readonly string[] } {
   const members = new Set(memberIds);
-  const mentionedMembers = new Set<string>();
-  const unknownMentions = new Set<string>();
-  const tokens = /(?<![\w@])@([a-zA-Z0-9_-]+)(?![\w-])/g;
+  const mentionedMembers: string[] = [];
+  const unknownMentions: string[] = [];
 
-  for (const match of body.matchAll(tokens)) {
-    const agentId = match[1]!;
-    if (members.has(agentId)) mentionedMembers.add(agentId);
-    else unknownMentions.add(agentId);
+  for (const target of parseMentionTargets(body)) {
+    if (members.has(target)) mentionedMembers.push(target);
+    else unknownMentions.push(target);
   }
-  return { members: [...mentionedMembers], unknown: [...unknownMentions] };
+  return { members: mentionedMembers, unknown: unknownMentions };
 }
 
 /** @deprecated Use `parseMentions` when unknown addressed targets matter. */
@@ -159,7 +171,16 @@ export function planWake(message: Message, input: WakePlanInput): WakePlan {
   // input. Broadcast excludes nonparticipants silently, but an explicitly
   // named nonparticipant must still receive a durable failure. Neither form
   // reaches a model.
-  const broadcast = ALL_MENTION.test(message.body);
+  // Task-group routing consumes the channel-stamped mention list. Other scopes
+  // parse the Message body because they do not carry this envelope.
+  const mentionTargets =
+    scope.kind === 'task-group' && message.envelope !== undefined
+      ? message.envelope.to
+      : parseMentionTargets(message.body);
+  const broadcast =
+    scope.kind === 'task-group' && message.envelope !== undefined
+      ? mentionTargets.some((target) => target.toLowerCase() === 'all')
+      : ALL_MENTION.test(message.body);
   if (broadcast) {
     for (const agentId of resolver.currentAgentIds) {
       if (agentId === message.author.id) continue;
@@ -168,8 +189,7 @@ export function planWake(message: Message, input: WakePlanInput): WakePlan {
     }
   }
 
-  const mentioned = parseMentions(message.body, resolver.currentMemberIds);
-  const targets = dedupe([...mentioned.members, ...mentioned.unknown])
+  const targets = dedupe(mentionTargets)
     .filter((target) => !(broadcast && target.toLowerCase() === 'all'));
   if (broadcast || targets.length > 0) {
     for (const target of targets) {

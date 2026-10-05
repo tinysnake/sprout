@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { SqliteCollaborationStore } from './sqlite-store.ts';
 import type { CollaborationStore } from './store.ts';
 import type { Message } from './model.ts';
-import { resolveTaskGroupAmbiguity, TASK_GROUP_MODEL_TIMEOUT_MS, TASK_GROUP_MODEL_MAX_BODY_CHARS, TASK_GROUP_MODEL_MAX_CANDIDATES } from './task-group-wake.ts';
+import { planTaskGroupWake, resolveTaskGroupAmbiguity, TASK_GROUP_MODEL_TIMEOUT_MS, TASK_GROUP_MODEL_MAX_BODY_CHARS, TASK_GROUP_MODEL_MAX_CANDIDATES } from './task-group-wake.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CollaborationCoordinator, type CollaborationCoordinatorOptions } from './coordinator.ts';
@@ -59,6 +59,30 @@ test('question and escalation deterministically wake the lead', async () => {
   }
 });
 
+test('Task-group routing resolves mention targets from the stamped envelope', () => {
+  const message: Message = {
+    id: 'm', projectId: 'p', scopeId: 's', channel: 'task-group',
+    author: { id: 'author', kind: 'agent' }, body: 'Plain status prose.', recipients: [],
+    envelope: {
+      kind: 'status', sender: { id: 'author', kind: 'agent' }, taskId: 'task',
+      workItemId: 'task', groupId: 's', to: ['recipient'],
+    },
+    deliveryKey: 'm', createdAt: 0,
+  };
+  const members = [
+    { memberId: 'author', memberKind: 'agent' as const },
+    { memberId: 'recipient', memberKind: 'agent' as const },
+  ];
+  const result = planTaskGroupWake(message, members, { lead: { id: 'author', kind: 'agent' } });
+  assert.deepEqual(result.decisions, [{ agentId: 'recipient', reason: 'agent-mention' }]);
+});
+test('a stamped question kind from the Task-group post routes to the lead immediately', async () => {
+  const f = fixture();
+  const sent = await f.send('I need a decision.', { taskGroupKind: 'question' });
+  assert.deepEqual(f.submissions, ['lead']);
+  assert.equal(f.calls(), 0);
+  assert.equal(sent.message.envelope?.kind, 'question');
+});
 test('assignment and exact role rules bypass the model', async () => {
   for (const facts of [
     { lead: { id: 'lead', kind: 'agent' as const }, assignedAgentIds: ['a'] },
@@ -160,6 +184,24 @@ test('model timeout aborts once and failure or absence falls back without fan-ou
   }
 });
 
+test('ambiguous routing passes the stamped envelope kind to the model', async () => {
+  const message: Message = {
+    id: 'm', projectId: 'p', scopeId: 's', channel: 'task-group',
+    author: { id: 'human', kind: 'human' }, body: 'Please take this next.', recipients: [],
+    envelope: {
+      kind: 'assignment', sender: { id: 'human', kind: 'human' }, taskId: 'task',
+      workItemId: 'task', groupId: 's', to: [],
+    },
+    deliveryKey: 'm', createdAt: 0,
+  };
+  const members = ['lead', 'b'].map(memberId => ({ memberId, memberKind: 'agent' as const }));
+  const facts: TaskGroupWakeFacts = { lead: { id: 'lead', kind: 'agent' } };
+  let seenKind: string | undefined;
+  await resolveTaskGroupAmbiguity(message, members, facts, {
+    select: async input => { seenKind = input.message.kind; return ['b']; },
+  });
+  assert.equal(seenKind, 'assignment');
+});
 test('model input is redacted and bounded for both content and candidate count', async () => {
   const message: Message = { id: 'm', projectId: 'p', scopeId: 's', channel: 'task-group', author: { id: 'human', kind: 'human' }, body: `/home/example/private ${'x'.repeat(5_000)}`, recipients: [], deliveryKey: 'm', createdAt: 0 };
   const members = ['lead', ...Array.from({ length: 70 }, (_, index) => `agent-${index}`)].map(memberId => ({ memberId, memberKind: 'agent' as const }));

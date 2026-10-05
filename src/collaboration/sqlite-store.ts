@@ -133,6 +133,7 @@ export class SqliteCollaborationStore implements CollaborationStore {
         recipients TEXT NOT NULL,
         delivery_key TEXT NOT NULL UNIQUE,
         in_reply_to TEXT,
+        envelope_json TEXT,
         created_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS collaboration_messages_scope_order
@@ -250,6 +251,12 @@ export class SqliteCollaborationStore implements CollaborationStore {
       CREATE INDEX IF NOT EXISTS collaboration_routing_outcomes_input
         ON collaboration_routing_outcomes(input_id);
     `);
+    const messageColumns = this.#db
+      .prepare('PRAGMA table_info(collaboration_messages)')
+      .all() as unknown as readonly { name: string }[];
+    if (!messageColumns.some((column) => column.name === 'envelope_json')) {
+      this.#db.exec('ALTER TABLE collaboration_messages ADD COLUMN envelope_json TEXT;');
+    }
     // Batch wake identity (#97): a model-assisted wake names its frozen batch
     // beside the unchanged input/agent identity. A database created before the
     // column exists (schema 19) gains it here as well as through the schema
@@ -260,8 +267,7 @@ export class SqliteCollaborationStore implements CollaborationStore {
     if (!wakeColumns.some((column) => column.name === 'batch_id')) {
       this.#db.exec('ALTER TABLE collaboration_wake_requests ADD COLUMN batch_id TEXT;');
     }
-    const messageColumns = this.#db.prepare('PRAGMA table_info(collaboration_messages)').all() as unknown as readonly { name: string }[];
-    if (!messageColumns.some(column => column.name === 'message_kind')) {
+    if (!messageColumns.some((column) => column.name === 'message_kind')) {
       this.#db.exec("ALTER TABLE collaboration_messages ADD COLUMN message_kind TEXT NOT NULL DEFAULT 'status';");
     }
   }
@@ -281,8 +287,8 @@ export class SqliteCollaborationStore implements CollaborationStore {
       const inserted = this.#db
         .prepare(
           `INSERT OR IGNORE INTO collaboration_messages
-             (id, project_id, scope_id, channel, author_id, author_kind, body, recipients, delivery_key, in_reply_to, created_at, message_kind)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             (id, project_id, scope_id, channel, author_id, author_kind, body, recipients, delivery_key, in_reply_to, envelope_json, created_at, message_kind)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           input.message.id,
@@ -295,6 +301,7 @@ export class SqliteCollaborationStore implements CollaborationStore {
           JSON.stringify(input.message.recipients),
           input.message.deliveryKey,
           input.message.inReplyTo ?? null,
+          input.message.envelope !== undefined ? JSON.stringify(input.message.envelope) : null,
           input.message.createdAt,
           input.message.kind ?? 'status',
         );
@@ -962,8 +969,9 @@ interface MessageRow {
   readonly recipients: string;
   readonly delivery_key: string;
   readonly in_reply_to: string | null;
-  readonly message_kind: Message['kind'];
+  readonly envelope_json: string | null;
   readonly created_at: number;
+  readonly message_kind: Message['kind'];
 }
 
 interface EventRow {
@@ -1014,6 +1022,7 @@ function toMessage(row: MessageRow): Message {
     recipients: JSON.parse(row.recipients) as string[],
     deliveryKey: row.delivery_key,
     ...(row.in_reply_to !== null ? { inReplyTo: row.in_reply_to } : {}),
+    ...(row.envelope_json !== null ? { envelope: JSON.parse(row.envelope_json) as NonNullable<Message['envelope']> } : {}),
     createdAt: row.created_at,
   };
 }

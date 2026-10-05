@@ -1,59 +1,37 @@
-# Agent direct messages
+# Agent Task-group messages
 
-An active Project-bound Agent run can explicitly send a direct message to another
-current member of that Project. Core resolves the author and Project from the
-admitted Run. The command accepts only `recipientId`, `body`, `deliveryKey`, and
-optional `awaitReply`; author, authority kind, Project, and scope cannot be chosen
-by the engine. The authenticated browser remains Human-only.
+An Agent sends collaboration messages to its current Task group through the session-local Task-group post command. The command is available only to a Worker-hosted session for a Project-bound Task run. Core binds it to that run's Task, Project, Agent, and Task-held Environment lease; the command accepts no destination or identity fields.
 
-Production execution carries this capability over the authenticated Environment
-Worker channel. The Worker adds a session-local shell command to the engine's
-standing instructions. Its local bridge requires a random session credential,
-accepts bounded JSON requests, and closes on session close, startup failure, or
-Worker shutdown. The command references `SPROUT_AGENT_MESSAGE_TOKEN` and
-`SPROUT_AGENT_MESSAGE_URL`; the Worker supplies their values only through the
-engine process environment. Adapters must never write that environment overlay
-to instruction files or standing context. Core refuses sends once the Run
-settles or stop is requested, rechecking after scope lookups immediately before
-durable Message persistence (and before duplicate-delivery admission).
-Credentials and host-local bridge locations are not persisted in Core's Run
-instructions, workspace instruction files, Messages, or browser views. The bridge grants no Task
-approval, membership, environment permission, or other Human authority.
+The Worker supplies `SPROUT_TASK_GROUP_POST_URL` and `SPROUT_TASK_GROUP_POST_TOKEN` only in the engine process environment. They are session credentials: adapters must not write them into instruction files, standing context, Task files, or durable records. Closing or stopping the session revokes the bridge. Core rechecks the run, active Task link, lease, and Stop state under the Task-group lifecycle lock immediately before persistence. A frozen Task group rejects a post with HTTP 409 and keeps its history unchanged.
 
-Use one stable delivery key for one intended send and reuse it on retry. Keys are
-namespaced by the server-resolved Agent and Project. A canonical direct pair is
-opened idempotently, then the existing collaboration coordinator persists the
-Message and wake before submitting recipient work. The deterministic
-`direct-recipient` contract, membership/scope checks, normal environment
-admission, and reply projection are shared with Human messages.
+The command accepts a free-form `body`, a stable `deliveryKey`, optional `kind` (`handoff`, `assignment`, `question`, or `status`; default `status`), optional `inReplyTo` naming an earlier Message in the same Task group, and optional `awaitReply` (default `false`). Body text has no schema or required template. Sprout stores it unchanged. One stable delivery key identifies one intended post; retrying that key returns the original Message and wake facts without creating another Message or wake.
 
-`awaitReply` defaults to false so the sender need not remain blocked while the
-recipient runs. Set it to true only when waiting is appropriate. The result
-contains the durable Message and scope identities, actual author, duplicate
-flag, wakes, newly submitted Run IDs, and current Run status/failure facts.
-A stored Message or an `admitted` wake is not proof that execution succeeded:
-the existing coordinator can link a wake to a Run that records an environment
-admission failure. Inspect `runs` and `wakes`; unavailable or busy capacity never
-starts an engine, and later outcomes remain observable through Chat evidence.
-Repeated delivery returns the original Message and wake facts rather than
-creating another wake.
+The channel stamps the envelope from trusted state. It records the selected kind, server-resolved sender, Task and run ids, work-item id, and Task-group id. The group id is the durable conversation scope bound to that Task. `to` is the ordered set of exact `@member` tokens found in the body. Client-supplied sender, Task, run, work-item, group, recipient, or envelope fields are ignored; they cannot move a post to another Task group or change its author. `@all` is retained as a mention target for routing consumers.
 
-ADR-0007 supplies the loop rule: automatically projected final replies are
-non-routing, including replies containing mentions or broadcasts. Reconciliation
-cannot turn them into new wakes. Only a separate explicit send can initiate
-another activation. This bounds automatic reply cycles; it does not impose a
-budget on independently requested messages.
+Use a shell tool to send a JSON request like this to `$SPROUT_TASK_GROUP_POST_URL`:
 
-The Human can inspect the existing Project Chat scope list. Agent-pair titles
-name both participants, and messages carry an Agent badge beside the actual
-author. Inspection does not make the Human a participant: sending into an
-Agent-only pair remains refused, and participant-only unread receipts remain
-unchanged. Messages and replies stay in their canonical pair; they are not
-copied into either Human–Agent conversation. Direct content is excluded from
-routing-model context, which retains its existing bounded windows and excerpts.
-No additional transcript store or in-memory message mirror is introduced.
+```json
+{
+  "body": "The report draft is ready. @reviewer, please check the final section.",
+  "kind": "handoff",
+  "deliveryKey": "report-review-01",
+  "awaitReply": false
+}
+```
 
-The bridge is for tools available to a Worker-hosted CLI engine. An engine that
-cannot execute the supplied shell command cannot initiate sends through this
-surface. A recipient can fail admission while the sender occupies scarce
-capacity; sending does not release or transfer the sender's lease.
+Send it with the session token in the Authorization header. Do not print or copy the token. Reuse `deliveryKey` only when retrying that same intended post. Set `inReplyTo` to an earlier Message id when the post is an explicit reply in this Task group; omit it for an independent send. Inspect the returned envelope, wakes, and runs: a stored Message or admitted wake does not prove that a recipient run completed successfully.
+
+## Soft handoff template
+
+This is a writing aid in Agent instructions only. Sprout does not require these headings or reject a body that uses different wording.
+
+```text
+完成：what is complete
+交付：artifacts and context the next Agent can resume from
+请下游：@next-agent or @lead, when known; otherwise omit
+未决：open questions, risks, or remaining work
+```
+
+Keep the report factual and concise. A recipient may be named with an exact `@member` token when known. The body remains ordinary prose, so an Agent can describe a result in whatever structure fits the work.
+
+Human-to-Agent direct conversations remain available through Human Chat. A Human's direct message wakes the addressed Agent, and the Agent's final reply is projected into that same conversation. For explicit collaboration messages between Agents, use the Task-group post command so each message stays attached to the Task it advances.

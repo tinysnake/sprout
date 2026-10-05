@@ -74,7 +74,7 @@ Rather than forcing all Project concerns into a single monolithic tab or scrollv
 - **Categorized Scope Architecture:** Separates communication into three distinct sections with clean dividers:
   1. **Project Channels:** Broadcast channel (`#general`) for whole-project coordination.
   2. **Working Groups:** Focused team scopes with member counts (`Core Mechanics WG`, `WebAudio Effects WG`).
-  3. **Direct Messages:** 1-on-1 collaboration scopes with active project agents (`@Programmer`, `@Reviewer`, `@Designer`, `@Planner`).
+  3. **Direct Messages:** Human-to-Agent conversations with active Project agents (`@Programmer`, `@Reviewer`, `@Designer`, `@Planner`).
 - **Minimalist Scope Cards:**
   - Left icon or agent avatar.
   - Middle: Scope title + 2-line clamped subtitle previewing the latest message content (with overflow ellipsis).

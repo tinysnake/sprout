@@ -334,6 +334,8 @@ test('a direct message wakes its recipient with a contextual prompt and projects
     author: { id: 'human-lead', kind: 'human' },
     body: 'Please check the wake rule.',
     recipients: ['scout'],
+    taskGroupKind: 'question',
+    taskGroupRunId: 'forged-task-run',
     deliveryKey: 'direct-1',
   });
 
@@ -342,6 +344,7 @@ test('a direct message wakes its recipient with a contextual prompt and projects
   assert.equal(delivered.admittedRunIds.length, 1);
   assert.equal(delivered.message.channel, 'direct');
   assert.equal(delivered.message.scopeId, scopeId);
+  assert.equal(delivered.message.envelope, undefined, 'a direct conversation never carries the Task-group envelope');
 
   // The prompt names author, location, and the target agent.
   const prompt = harness.engine.sessions[0]?.prompts[0] ?? '';

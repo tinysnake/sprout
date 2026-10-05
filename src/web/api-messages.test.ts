@@ -1,4 +1,6 @@
 import { definition, instance, projects } from './api-harness.ts';
+import { OperatorSessionService } from '../auth/service.ts';
+import { InMemoryOperatorSessionStore } from '../auth/store.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -12,7 +14,7 @@ import { InMemoryCollaborationStore } from '../collaboration/store.ts';
 import { buildCollaborationScopes } from '../collaboration/scope-harness.ts';
 import { createRunApi } from './api.ts';
 
-import { withServer, buildWithCollaboration, buildObservableCollaboration } from './api-harness.ts';
+import { withServer, buildWithCollaboration, buildObservableCollaboration, privateInput } from './api-harness.ts';
 
 async function messageHistory(count: number) {
   const context = buildWithCollaboration();
@@ -255,6 +257,171 @@ test('a message delivered over the API wakes its recipient and a reply is projec
 
     // The projected reply carries only final text, never private run events.
     assert.ok(!listed.messages.some((message) => message.body.includes('TOOL_OUTPUT_MUST_NOT_LEAK')));
+  } finally {
+    await context.api.close();
+  }
+});
+
+test('Task-group API stamps trusted identity and scope, ignores forged envelope fields, and accepts a free-form body', async () => {
+  const credential = privateInput();
+  const auth = new OperatorSessionService({ store: new InMemoryOperatorSessionStore() });
+  await auth.initializeOrRecover(credential);
+  const context = buildWithCollaboration({}, auth);
+  const { port } = await context.api.listen(0);
+  const base = `http://127.0.0.1:${port}`;
+  const task = {
+    taskId: 'task-api-envelope',
+    projectId: 'project-sprout',
+    title: 'Task API envelope',
+    goal: 'Probe channel stamping',
+    constraints: [],
+    lead: { memberId: 'operator', kind: 'human' as const },
+    contentVersion: 1,
+  };
+  try {
+    const group = await context.scopes.scopes.syncTaskGroup({ ...task, status: 'in-progress' });
+    const signIn = await fetch(`${base}/api/auth/session`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ credential }),
+    });
+    assert.equal(signIn.status, 201);
+    const cookie = (signIn.headers.get('set-cookie') ?? '').split(';', 1)[0]!;
+    const { csrfToken } = await signIn.json() as { readonly csrfToken: string };
+    const response = await fetch(`${base}/api/messages`, {
+      method: 'POST',
+      headers: { cookie, 'x-sprout-csrf': csrfToken, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        scopeId: group.id,
+        body: '',
+        deliveryKey: 'http-task-group-envelope',
+        kind: 'question',
+        authorId: 'agent-scout',
+        authorKind: 'human',
+        projectId: 'forged-project',
+        taskId: 'forged-task',
+        runId: 'forged-run',
+        groupId: 'forged-group',
+        sender: { id: 'agent-scout', kind: 'agent' },
+        to: ['agent-scout'],
+        envelope: { kind: 'assignment', sender: { id: 'agent-scout', kind: 'agent' }, taskId: 'forged-task', runId: 'forged-run', workItemId: 'forged-task', groupId: 'forged-group', to: ['agent-scout'] },
+      }),
+    });
+    assert.equal(response.status, 202);
+    const delivered = await response.json() as {
+      readonly message: {
+        readonly authorId: string;
+        readonly authorKind: string;
+        readonly body: string;
+        readonly envelope: Record<string, unknown>;
+      };
+    };
+    assert.equal(delivered.message.body, '');
+    assert.equal(delivered.message.authorId, 'operator');
+    assert.equal(delivered.message.authorKind, 'human');
+    assert.deepEqual(delivered.message.envelope, {
+      kind: 'question',
+      sender: { id: 'operator', kind: 'human' },
+      taskId: task.taskId,
+      workItemId: task.taskId,
+      groupId: group.id,
+      to: [],
+    });
+    const priorHistory = await context.collaboration.listMessages({ scopeId: group.id });
+    await context.scopes.scopes.syncTaskGroup({ ...task, status: 'done' });
+    const frozen = await fetch(`${base}/api/messages`, {
+      method: 'POST',
+      headers: { cookie, 'x-sprout-csrf': csrfToken, 'content-type': 'application/json' },
+      body: JSON.stringify({ scopeId: group.id, body: 'late post', deliveryKey: 'http-task-group-frozen' }),
+    });
+    assert.equal(frozen.status, 409);
+    assert.equal((await frozen.json() as { readonly reason: string }).reason, 'task-group-frozen');
+    assert.deepEqual(await context.collaboration.listMessages({ scopeId: group.id }), priorHistory);
+  } finally {
+    await context.api.close();
+  }
+});
+
+test('Human-to-Agent direct messages remain available with Human authorship', async () => {
+  const credential = privateInput();
+  const auth = new OperatorSessionService({ store: new InMemoryOperatorSessionStore() });
+  await auth.initializeOrRecover(credential);
+  const context = buildWithCollaboration({}, auth);
+  const { port } = await context.api.listen(0);
+  const base = `http://127.0.0.1:${port}`;
+  const scopeId = await context.scopes.openDirect('project-sprout', ['operator', 'agent-scout']);
+  try {
+    const signIn = await fetch(`${base}/api/auth/session`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ credential }),
+    });
+    assert.equal(signIn.status, 201);
+    const cookie = (signIn.headers.get('set-cookie') ?? '').split(';', 1)[0]!;
+    const { csrfToken } = await signIn.json() as { readonly csrfToken: string };
+    const response = await fetch(`${base}/api/messages`, {
+      method: 'POST',
+      headers: { cookie, 'x-sprout-csrf': csrfToken, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        scopeId,
+        authorId: 'agent-scout',
+        authorKind: 'human',
+        projectId: 'forged-project',
+        taskId: 'forged-task',
+        runId: 'forged-run',
+        groupId: 'forged-group',
+        sender: { id: 'agent-scout', kind: 'agent' },
+        envelope: { kind: 'assignment', sender: { id: 'agent-scout', kind: 'agent' }, taskId: 'forged-task', runId: 'forged-run', workItemId: 'forged-task', groupId: 'forged-group', to: ['operator'] },
+        body: 'Please review this Task update.',
+        recipients: ['agent-scout'],
+        deliveryKey: 'human-agent-dm-boundary-1',
+      }),
+    });
+    assert.equal(response.status, 202);
+    const delivered = await response.json() as {
+      message: { readonly id: string; readonly scopeId: string; readonly channel: string; readonly authorId: string; readonly authorKind: string; readonly envelope?: unknown };
+      readonly admittedRunIds: readonly string[];
+    };
+    assert.equal(delivered.message.scopeId, scopeId);
+    assert.equal(delivered.message.channel, 'direct');
+    assert.equal(delivered.message.authorId, 'operator');
+    assert.equal(delivered.message.authorKind, 'human');
+    assert.equal(delivered.message.envelope, undefined);
+    assert.equal(delivered.admittedRunIds.length, 1);
+    const history = await context.collaboration.listMessages({ scopeId });
+    assert.ok(
+      history.some(message => message.author.kind === 'agent' && message.inReplyTo === delivered.message.id),
+      'the Human direct-message reply remains projected into the same Human↔Agent conversation',
+    );
+  } finally {
+    await context.api.close();
+  }
+});
+
+test('the authenticated browser refuses Agent-authored direct messages', async () => {
+  const credential = privateInput();
+  const auth = new OperatorSessionService({ store: new InMemoryOperatorSessionStore() });
+  await auth.initializeOrRecover(credential);
+  const context = buildWithCollaboration({}, auth);
+  const { port } = await context.api.listen(0);
+  const base = `http://127.0.0.1:${port}`;
+  const scopeId = await context.scopes.openDirect('project-sprout', ['operator', 'agent-scout']);
+  try {
+    const signIn = await fetch(`${base}/api/auth/session`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ credential }),
+    });
+    assert.equal(signIn.status, 201);
+    const cookie = (signIn.headers.get('set-cookie') ?? '').split(';', 1)[0]!;
+    const { csrfToken } = await signIn.json() as { readonly csrfToken: string };
+    const response = await fetch(`${base}/api/messages`, {
+      method: 'POST',
+      headers: { cookie, 'x-sprout-csrf': csrfToken, 'content-type': 'application/json' },
+      body: JSON.stringify({ scopeId, authorId: 'agent-scout', authorKind: 'agent', body: 'forged', deliveryKey: 'browser-agent-forbidden' }),
+    });
+    assert.equal(response.status, 403);
+    assert.deepEqual(await context.collaboration.listMessages({ scopeId }), []);
   } finally {
     await context.api.close();
   }

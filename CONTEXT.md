@@ -49,7 +49,7 @@ The durable identity and governance of one Project-owned communication context: 
 _Avoid_: Chat room, DM thread, channel list
 
 **Project-scoped direct message**:
-A private conversation between two current members of one Project, governed and recorded within that Project. The same pair communicating in another Project has a separate conversation and context.
+A private conversation between one Human and one current Agent member of a Project. It is governed and recorded within that Project, so the same pair communicating in another Project has a separate conversation and context.
 _Avoid_: Global direct message, cross-Project direct message
 
 **Message**:

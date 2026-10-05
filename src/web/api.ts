@@ -10,7 +10,7 @@ import { runFailureReason } from '../run/failure-reason.ts';
 import type { AgentRegistry } from '../agent/registry.ts';
 import type { CollaborationCoordinator } from '../collaboration/coordinator.ts';
 import { MessageDeliveryError } from '../collaboration/coordinator.ts';
-import type { MessageAuthor } from '../collaboration/model.ts';
+import type { MessageAuthor, TaskGroupMessageKind } from '../collaboration/model.ts';
 import { ProjectEventError } from '../collaboration/events.ts';
 import {
   DEFAULT_MESSAGE_PAGE_SIZE,
@@ -333,10 +333,10 @@ export function createRunApi(options: RunApiOptions): RunApi {
     ) {
       const body = await readBody();
       const scopeId = typeof body.scopeId === 'string' ? body.scopeId : '';
-      const text = typeof body.body === 'string' ? body.body : '';
+      const rawText = body.body;
       const deliveryKey = typeof body.deliveryKey === 'string' ? body.deliveryKey : '';
       const awaitReply = body.awaitReply !== false;
-      if (scopeId === '' || text === '' || deliveryKey === '') {
+      if (scopeId === '' || typeof rawText !== 'string' || deliveryKey === '') {
         sendJson(response, 400, { error: 'scopeId, body, and deliveryKey are required' });
         return;
       }
@@ -350,6 +350,16 @@ export function createRunApi(options: RunApiOptions): RunApi {
       const scope = await conversationScopes.getScope(scopeId);
       if (scope === undefined) {
         sendJson(response, 404, { error: `unknown conversation scope: ${scopeId}` });
+        return;
+      }
+      if (scope.kind !== 'task-group' && rawText === '') {
+        sendJson(response, 400, { error: 'scopeId, body, and deliveryKey are required' });
+        return;
+      }
+      const text = rawText;
+      const rawTaskGroupKind = body.kind;
+      if (scope.kind === 'task-group' && rawTaskGroupKind !== undefined && !isTaskGroupMessageKind(rawTaskGroupKind)) {
+        sendJson(response, 400, { error: 'kind must be handoff, assignment, question, or status' });
         return;
       }
       const recipients = body.recipients;
@@ -389,6 +399,9 @@ export function createRunApi(options: RunApiOptions): RunApi {
           scopeId,
           author,
           body: text,
+          ...(scope.kind === 'task-group' && rawTaskGroupKind !== undefined
+            ? { taskGroupKind: rawTaskGroupKind as TaskGroupMessageKind }
+            : {}),
           ...(Array.isArray(recipients) ? { recipients: recipients as readonly string[] } : {}),
           deliveryKey,
           awaitReply,
@@ -1240,6 +1253,10 @@ async function readJson(request: IncomingMessage): Promise<Record<string, unknow
   } catch {
     return {};
   }
+}
+
+function isTaskGroupMessageKind(value: unknown): value is TaskGroupMessageKind {
+  return value === 'handoff' || value === 'assignment' || value === 'question' || value === 'status';
 }
 
 /**

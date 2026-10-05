@@ -1,6 +1,6 @@
 import { redactSensitiveText } from '../environment/privacy.ts';
-import type { Message, WakePlan } from './model.ts';
-import { parseMentions, planWake, type WakeMember } from './wake.ts';
+import type { Message, TaskGroupMessageKind, WakePlan } from './model.ts';
+import { parseMentionTargets, planWake, type WakeMember } from './wake.ts';
 
 export const TASK_GROUP_IDLE_MS = 5 * 60_000;
 export const TASK_GROUP_MODEL_TIMEOUT_MS = 30_000;
@@ -19,7 +19,7 @@ export interface TaskGroupWakeFacts {
 }
 export interface TaskGroupWakeModelPort {
   /** One bounded call for an ambiguous durable Message; no private run context. */
-  select(input: { readonly message: Pick<Message, 'id' | 'body' | 'kind'>; readonly candidates: readonly string[]; readonly signal: AbortSignal }): Promise<readonly string[]>;
+  select(input: { readonly message: Pick<Message, 'id' | 'body'> & { readonly kind: TaskGroupMessageKind | NonNullable<Message['kind']> }; readonly candidates: readonly string[]; readonly signal: AbortSignal }): Promise<readonly string[]>;
 }
 export interface TaskGroupPlan extends WakePlan { readonly ambiguous?: boolean }
 
@@ -31,11 +31,12 @@ export function taskGroupFallback(message: Message, members: readonly WakeMember
 /** Deterministic precedence. Empty explicit addressing never falls through to a model. */
 export function planTaskGroupWake(message: Message, members: readonly WakeMember[], facts: TaskGroupWakeFacts): TaskGroupPlan {
   const explicit = planWake(message, { members, scope: { kind: 'task-group' } });
-  const mentions = parseMentions(message.body, members.map(m => m.memberId));
-  if (explicit.decisions.length || mentions.members.length || mentions.unknown.length) {
+  const mentionTargets = message.envelope?.to ?? parseMentionTargets(message.body);
+  if (explicit.decisions.length || mentionTargets.length > 0) {
     return { ...explicit, decisions: explicit.decisions.length ? explicit.decisions : taskGroupFallback(message, members, facts).decisions };
   }
-  if (message.kind === 'question' || message.kind === 'escalation' || facts.lead.kind === 'human') return taskGroupFallback(message, members, facts);
+  const kind = message.kind === 'escalation' ? 'escalation' : message.envelope?.kind ?? message.kind;
+  if (kind === 'question' || kind === 'escalation' || facts.lead.kind === 'human') return taskGroupFallback(message, members, facts);
   const candidates = members.filter(m => m.memberKind === 'agent' && m.endedAt === undefined && m.memberId !== message.author.id).map(m => m.memberId);
   const assigned = (facts.assignedAgentIds ?? []).filter(id => candidates.includes(id));
   const roleHits = (facts.roles ?? []).filter(role => role.keys.some(key => message.body.split(/\s+/).includes(key))).map(role => role.agentId).filter(id => candidates.includes(id));
@@ -55,7 +56,7 @@ export async function resolveTaskGroupAmbiguity(message: Message, members: reado
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const selected = await Promise.race([
-        model.select({ message: { id: message.id, body: redactSensitiveText(message.body).slice(0, TASK_GROUP_MODEL_MAX_BODY_CHARS), kind: message.kind ?? 'status' }, candidates: candidates.slice(0, TASK_GROUP_MODEL_MAX_CANDIDATES), signal: abort.signal }),
+        model.select({ message: { id: message.id, body: redactSensitiveText(message.body).slice(0, TASK_GROUP_MODEL_MAX_BODY_CHARS), kind: message.kind === 'escalation' ? 'escalation' : message.envelope?.kind ?? message.kind ?? 'status' }, candidates: candidates.slice(0, TASK_GROUP_MODEL_MAX_CANDIDATES), signal: abort.signal }),
         new Promise<readonly string[]>((_, reject) => { timer = setTimeout(() => { abort.abort(); reject(new Error('timeout')); }, Math.max(1, Math.min(TASK_GROUP_MODEL_TIMEOUT_MS, timeoutMs))); }),
       ]);
       if (Array.isArray(selected) && selected.every(id => candidates.slice(0, TASK_GROUP_MODEL_MAX_CANDIDATES).includes(id))) {

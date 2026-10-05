@@ -104,6 +104,7 @@ export interface RunOrchestratorOptions {
    */
   readonly onTaskRunSettled?: TaskRunObserver;
   readonly directMessages?: (run: AgentRun, assertActive: () => void) => NonNullable<import('../engine/port.ts').StartSessionRequest['sendDirectMessage']>;
+  readonly taskGroupPosts?: (run: AgentRun, assertActive: () => void) => NonNullable<import('../engine/port.ts').StartSessionRequest['postTaskGroupMessage']>;
   readonly leaseTtlMs?: number;
   /** Wait before a bounded engine retry; injectable for deterministic tests. */
   readonly retryBackoff?: (failedAttempt: number) => Promise<void>;
@@ -219,6 +220,7 @@ type SessionAttempt =
 
 export class RunOrchestrator {
   readonly #directMessages: RunOrchestratorOptions['directMessages'];
+  readonly #taskGroupPosts: RunOrchestratorOptions['taskGroupPosts'];
   readonly #engines: RunOrchestratorOptions['engines'];
   readonly #agents: AgentRegistry;
   readonly #resolveAgent: (agentId: string) => Promise<AgentDefinition | undefined>;
@@ -259,6 +261,7 @@ export class RunOrchestrator {
 
   constructor(options: RunOrchestratorOptions) {
     this.#directMessages = options.directMessages;
+    this.#taskGroupPosts = options.taskGroupPosts;
     this.#engines = options.engines;
     this.#agents = options.agents;
     this.#resolveAgent = options.resolveAgent ?? (async (id) => this.#agents.get(id));
@@ -1070,6 +1073,15 @@ export class RunOrchestrator {
             };
             assertActive();
             return this.#directMessages!(running, assertActive)(input);
+          },
+        } : {}),
+        ...(this.#taskGroupPosts !== undefined && running.projectId !== undefined && running.taskId !== undefined ? {
+          postTaskGroupMessage: async (input: import('../engine/port.ts').AgentTaskGroupMessageInput) => {
+            const assertActive = () => {
+              if (this.#runs.get(running.id)?.status !== 'running' || this.#stopRequests.has(running.id)) throw new Error('Agent message capability is no longer active');
+            };
+            assertActive();
+            return this.#taskGroupPosts!(running, assertActive)(input);
           },
         } : {}),
         workingDirectory,
