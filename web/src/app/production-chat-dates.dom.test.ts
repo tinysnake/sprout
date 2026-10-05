@@ -60,9 +60,9 @@ async function waitFor(probe: () => boolean, label: string) {
 function labels() {
   return [...doc.querySelectorAll('.chat-date-separator')].map(row => row.textContent?.trim());
 }
-function assertBefore(id: string, label: string) {
-  const row = doc.querySelector(`[data-message-id="${id}"]`);
-  assert.ok(row, `message ${id} is rendered`);
+function assertBefore(id: string, label: string, kind: 'message' | 'event' = 'message') {
+  const row = doc.querySelector(`[data-${kind}-id="${id}"]`);
+  assert.ok(row, `${kind} ${id} is rendered`);
   assert.ok(row.previousElementSibling?.classList.contains('chat-date-separator'), `date row immediately precedes ${id}`);
   assert.equal(row.previousElementSibling.textContent?.trim(), label);
 }
@@ -154,14 +154,17 @@ test('a live append crossing local midnight adds a date row and updates the prev
   } finally { page.close(); }
 });
 
-test('interleaved Project events do not replace message adjacency or create extra day separators', async t => {
+test('interleaved Project events own the day separator when they are the first data row of that day', async t => {
   t.mock.timers.enable({ apis: ['Date'], now });
   const page = await harness([
     message('yesterday', at(2026, 3, 8, 23, 59)), message('today', now + 10),
   ], true);
   try {
-    assert.ok(doc.querySelector('[data-event-id="event-chat-a"]'));
     assert.deepEqual(labels(), ['Yesterday', 'Today']);
-    assertBefore('today', 'Today');
+    assertBefore('yesterday', 'Yesterday');
+    assertBefore('event-chat-a', 'Today', 'event');
+    const today = doc.querySelector('[data-message-id="today"]')!;
+    assert.equal(today.previousElementSibling?.getAttribute('data-event-id'), 'event-run-failure-a',
+      'same-day messages follow the events without a duplicate date separator');
   } finally { page.close(); }
 });

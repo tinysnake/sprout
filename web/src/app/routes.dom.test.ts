@@ -724,7 +724,7 @@ test('Project Chat pages older messages on scroll, anchors the viewport, and app
       assert.equal(viewport.querySelectorAll('[data-message-id]').length, Math.min(200, retained + chatPageSize));
     }
     assert.equal(viewport.querySelectorAll('[data-message-id]').length, 200, 'the view retains no more than 200 Messages for the scope');
-    assert.match(viewport.querySelector('.chat-history-limit')?.textContent ?? '', /latest 200 messages/);
+    assert.match(viewport.querySelector('.chat-history-limit')?.textContent ?? '', /latest 200 chat rows/);
 
     await fixture.pushIncoming('dm-architect', 'Live arrival while paging');
     await settle(180);
