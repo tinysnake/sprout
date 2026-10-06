@@ -29,6 +29,7 @@ export function readOnlyReason(reason?: string): string {
   switch (reason) {
     case 'project-archived': return 'Project is archived. All communication is read-only.';
     case 'working-group-disbanded': return 'This Working Group has been disbanded. Conversation history is preserved as read-only.';
+    case 'task-group-frozen': return 'This Task has ended. Conversation history is preserved as read-only.';
     case 'membership-ended': return 'Agent membership has ended in this Project. History is preserved; new messages cannot be sent.';
     case 'not-a-participant': return 'You are not a participant in this conversation. New messages cannot be sent.';
     case 'not-a-member': return 'You are not a current Project member. New messages cannot be sent.';

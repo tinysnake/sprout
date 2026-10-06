@@ -2,7 +2,8 @@
 import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import type { MessageView, ProjectEventView } from '../../../../../src/web/views.ts';
-import type { ConversationScopeView, ScopeInspectionView } from '../../../adapters/conversation-api.ts';
+import type { ConversationScopeView, ScopeInspectionView, TaskGroupScopeView } from '../../../adapters/conversation-api.ts';
+import { isTerminalTaskStatus } from '../../../../../src/task/model.ts';
 import type { RoutingBatchSummaryView, RoutingEvidenceView } from '../../../adapters/routing-api.ts';
 import type { ProjectAuthorityView } from '../../../adapters/project-api.ts';
 import { AGENT_SERVICE, type AgentInstance } from '../../agents/types.ts';
@@ -110,8 +111,25 @@ const projectId = computed(() => typeof route.query['project'] === 'string' ? ro
 const project = computed(() => projects.value.find((p) => p.id === projectId.value));
 const channelScopes = computed(() => scopes.value.filter((s) => s.kind === 'project'));
 const taskGroups = computed(() => scopes.value.filter((s) => s.kind === 'task-group'));
+const activeTaskGroups = computed(() => taskGroups.value.filter((scope) => !isClosedTaskGroup(scope)));
+const closedTaskGroups = computed(() => taskGroups.value.filter(isClosedTaskGroup));
+const closedTaskGroupsExpanded = ref(false);
 const workingGroups = computed(() => scopes.value.filter((s) => s.kind === 'working-group'));
 const directScopes = computed(() => scopes.value.filter((s) => s.kind === 'direct'));
+type ChatScopeSection =
+  | { readonly kind: 'scopes'; readonly label: string; readonly items: readonly ConversationScopeView[] }
+  | { readonly kind: 'closed-tasks'; readonly label: string; readonly items: readonly TaskGroupScopeView[] };
+const scopeSections = computed<readonly ChatScopeSection[]>(() => [
+  { kind: 'scopes', label: 'Project Channels', items: channelScopes.value },
+  { kind: 'scopes', label: `Task Groups (${activeTaskGroups.value.length})`, items: activeTaskGroups.value },
+  ...(closedTaskGroups.value.length ? [{
+    kind: 'closed-tasks' as const,
+    label: `Closed tasks (${closedTaskGroups.value.length})`,
+    items: closedTaskGroups.value,
+  }] : []),
+  { kind: 'scopes', label: `Working Groups (${workingGroups.value.length})`, items: workingGroups.value },
+  { kind: 'scopes', label: `Direct Messages (${directScopes.value.length + unopenedAgents.value.length})`, items: directScopes.value },
+]);
 const activeAgentMembers = computed(() => project.value && currentVersion(project.value)?.memberships.filter((m) => m.memberKind === 'agent' && m.endedAt === undefined) || []);
 const unopenedAgents = computed(() => {
   return activeAgentMembers.value.filter((member) => !directScopes.value.some((scope) => scope.kind === 'direct' && scope.participants.includes(member.memberId)));
@@ -192,6 +210,11 @@ async function markVisible() {
   await unreadState?.markRead(id, visibleTimeline.value.flatMap((entry) => entry.kind === 'message' ? [entry.message.id] : []));
 }
 function scopeKind(scope: ConversationScopeView) { return scope.kind === 'project' ? 'channel' : scope.kind === 'direct' ? 'direct-message' : scope.kind; }
+function isClosedTaskGroup(scope: ConversationScopeView): scope is TaskGroupScopeView {
+  return scope.kind === 'task-group'
+    && scope.terminalTaskStatus !== undefined
+    && isTerminalTaskStatus(scope.terminalTaskStatus);
+}
 function isTargetEntry(entry: ChatTimelineItem) {
   return entry.kind === 'message'
     ? requestedMessageId.value !== '' && entry.message.id === requestedMessageId.value
@@ -975,22 +998,30 @@ onUnmounted(() => { window.removeEventListener('resize', onResize); generation++
         <div class="flex items-center justify-between px-2 pb-2 text-[11px] font-bold uppercase tracking-wider text-[var(--text-muted)]">
           <span>Conversations &amp; Groups</span><span>{{ scopes.length }} Scopes</span>
         </div>
-        <template v-for="section in [{ label: 'Project Channels', items: channelScopes }, { label: `Task Groups (${taskGroups.length})`, items: taskGroups }, { label: `Working Groups (${workingGroups.length})`, items: workingGroups }, { label: `Direct Messages (${directScopes.length + unopenedAgents.length})`, items: directScopes }]" :key="section.label">
+        <template v-for="section in scopeSections" :key="section.kind === 'closed-tasks' ? 'closed-tasks' : section.label">
           <div class="chat-section border-t border-[var(--border-subtle)] pt-2">
-            <div class="flex items-center justify-between px-2 pb-1"><h2 class="text-[11px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">{{ section.label }}</h2><button v-if="section.label.startsWith('Working Groups')" type="button" class="chat-create-wg min-h-11 px-2 text-[11px] font-semibold text-[var(--accent-primary)] disabled:opacity-60" :disabled="!presentation.controlAvailable || project?.status !== 'active'" @click="createGroupOpen = true"><Icon name="plus" :size="12" /> New WG</button></div>
-            <p v-if="!section.items.length && !section.label.startsWith('Direct Messages')" class="px-2 py-2 text-xs text-[var(--text-muted)]">No conversations yet.</p>
-            <button v-for="scope in section.items" :key="scope.id" type="button" :data-scope-id="scope.id" :data-scope-kind="scopeKind(scope)" :aria-current="activeScope?.id === scope.id ? 'page' : undefined"
-              class="chat-scope-card mb-1 flex min-h-[64px] w-full items-start gap-2 rounded border p-2.5 text-left focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]"
-              :class="activeScope?.id === scope.id ? 'border-[var(--accent-primary)] bg-[var(--bg-surface)] ring-1 ring-[var(--accent-primary)]' : 'border-transparent hover:border-[var(--border-strong)]'" @click="selectScope(scope)">
-              <span class="rounded bg-[var(--bg-surface)] p-1.5 text-[var(--accent-primary)]"><Icon :name="icon(scope)" :size="17" /></span>
-              <span class="chat-card-content min-w-0 flex-1">
-                <span class="flex items-center gap-1.5"><strong class="truncate text-xs text-[var(--text-primary)]">{{ title(scope) }}</strong><span v-if="scopePill(scope)" class="text-[10px] text-[var(--text-muted)]">{{ scopePill(scope) }}</span><span class="ml-auto shrink-0 text-[10px] text-[var(--text-muted)]">{{ latestTime(scope) }}</span></span>
-                <span class="block text-[10px] text-[var(--text-muted)]">{{ kindLabel(scope) }}</span>
-                <span class="block truncate text-[11px] text-[var(--text-secondary)]">{{ preview(scope) }}</span>
-              </span>
-              <UnreadBadge :count="unread(scope)" class="chat-card-unread self-center shrink-0" />
-            </button>
-            <template v-if="section.label.startsWith('Direct Messages')">
+            <div class="flex items-center justify-between px-2 pb-1">
+              <h2 v-if="section.kind === 'scopes'" class="text-[11px] font-bold uppercase tracking-wide text-[var(--text-secondary)]">{{ section.label }}</h2>
+              <button v-else type="button" class="chat-closed-tasks-toggle min-h-11 text-[11px] font-bold uppercase tracking-wide text-[var(--text-secondary)]" :aria-expanded="closedTaskGroupsExpanded" aria-controls="chat-closed-task-groups" @click="closedTaskGroupsExpanded = !closedTaskGroupsExpanded">{{ section.label }} <Icon name="chevron-down" :class="closedTaskGroupsExpanded ? 'rotate-180' : ''" :size="12" /></button>
+              <button v-if="section.kind === 'scopes' && section.label.startsWith('Working Groups')" type="button" class="chat-create-wg min-h-11 px-2 text-[11px] font-semibold text-[var(--accent-primary)] disabled:opacity-60" :disabled="!presentation.controlAvailable || project?.status !== 'active'" @click="createGroupOpen = true"><Icon name="plus" :size="12" /> New WG</button>
+            </div>
+            <p v-if="section.kind === 'scopes' && !section.items.length && !section.label.startsWith('Direct Messages')" class="px-2 py-2 text-xs text-[var(--text-muted)]">No conversations yet.</p>
+            <div :id="section.kind === 'closed-tasks' ? 'chat-closed-task-groups' : undefined">
+              <template v-if="section.kind !== 'closed-tasks' || closedTaskGroupsExpanded">
+                <button v-for="scope in section.items" :key="scope.id" type="button" :data-scope-id="scope.id" :data-scope-kind="scopeKind(scope)" :aria-current="activeScope?.id === scope.id ? 'page' : undefined"
+                  class="chat-scope-card mb-1 flex min-h-[64px] w-full items-start gap-2 rounded border p-2.5 text-left focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]"
+                  :class="activeScope?.id === scope.id ? 'border-[var(--accent-primary)] bg-[var(--bg-surface)] ring-1 ring-[var(--accent-primary)]' : 'border-transparent hover:border-[var(--border-strong)]'" @click="selectScope(scope)">
+                  <span class="rounded bg-[var(--bg-surface)] p-1.5 text-[var(--accent-primary)]"><Icon :name="icon(scope)" :size="17" /></span>
+                  <span class="chat-card-content min-w-0 flex-1">
+                    <span class="flex items-center gap-1.5"><strong class="truncate text-xs text-[var(--text-primary)]">{{ title(scope) }}</strong><span v-if="scopePill(scope)" class="text-[10px] text-[var(--text-muted)]">{{ scopePill(scope) }}</span><span class="ml-auto shrink-0 text-[10px] text-[var(--text-muted)]">{{ latestTime(scope) }}</span></span>
+                    <span class="block text-[10px] text-[var(--text-muted)]">{{ kindLabel(scope) }}</span>
+                    <span class="block truncate text-[11px] text-[var(--text-secondary)]">{{ preview(scope) }}</span>
+                  </span>
+                  <UnreadBadge :count="unread(scope)" class="chat-card-unread self-center shrink-0" />
+                </button>
+              </template>
+            </div>
+            <template v-if="section.kind === 'scopes' && section.label.startsWith('Direct Messages')">
               <button v-for="member in unopenedAgents" :key="member.memberId" type="button" :disabled="!presentation.controlAvailable || project?.status !== 'active' || agents.some((agent) => agent.id === member.memberId && agent.status === 'archived')" class="chat-direct-unopened mb-1 flex min-h-[64px] w-full items-center gap-2 rounded border border-transparent p-2.5 text-left text-xs hover:border-[var(--border-strong)] disabled:opacity-60" @click="openAgentDirect(member.memberId)">
                 <Icon name="agents" :size="17" class="text-[var(--accent-primary)]" /><span><strong class="block">@{{ agentName(member.memberId) }} <span v-if="agents.some((agent) => agent.id === member.memberId && agent.status === 'archived')">· Archived</span></strong><span class="block text-[10px] text-[var(--text-muted)]">Direct message · {{ agents.some((agent) => agent.id === member.memberId && agent.status === 'archived') ? 'Read-only' : 'Open conversation' }}</span><span class="block truncate text-[var(--text-secondary)]">{{ member.responsibilities.join('; ') || 'No messages yet with agent.' }}</span></span>
               </button>
