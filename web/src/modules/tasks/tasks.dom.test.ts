@@ -136,6 +136,7 @@ function appServices(conflictCodes: readonly string[] = [], snapshot = overview)
     task('recovery-ending', 'recovery', { recoveryState: 'ending', endDisposition: 'completed' }),
     task('recovery-cancelled-ending', 'recovery', { recoveryState: 'ending', endDisposition: 'cancelled' }),
     task('completed', 'ended', { status: 'done', endDisposition: 'completed' }),
+    task('stopped', 'discarded', { status: 'stopped', forcedRelease: { actor: 'operator', reason: 'Emergency environment recovery', unresolvedFacts: ['Engine stop was not proved.'], at: time } }),
     task('cancelled', 'discarded', { status: 'cancelled', endDisposition: 'cancelled', pauseState: 'paused', blocker: { reason: 'The approval was pending when the Task ended.', requiredAction: 'Record approval.', responsible: { kind: 'external-condition', condition: 'Approval arrives.' }, nextAdvancer: { memberId: 'agent-a', memberKind: 'agent' }, createdBy: { memberId: 'operator', memberKind: 'human' }, createdAt: time } }),
   ];
   const details = new Map(allTasks.map((entry) => [entry.id, taskDetail(entry,
@@ -898,12 +899,14 @@ test('Project Tasks filters with a dropdown and keeps task switching inside Chat
     assert.ok(filter);
     assert.equal(doc.querySelector('label[for="task-status-filter"]')?.textContent, 'Filter Project Tasks');
     assert.equal(doc.querySelector('[role="group"][aria-label="Filter Project Tasks"]'), null);
-    assert.deepEqual([...filter.options].map(option => option.value), ['all', 'proposed', 'active', 'validation', 'blocked', 'recovery', 'completed']);
-    for (const [value, expected] of [['proposed', 'proposal-a'], ['active', 'run-idle'], ['validation', 'awaiting-validation'], ['blocked', 'blocked'], ['recovery', 'recovery'], ['completed', 'completed']]) {
+    assert.deepEqual([...filter.options].map(option => option.value), ['all', 'proposed', 'active', 'validation', 'blocked', 'recovery', 'ended', 'stopped', 'cancelled']);
+    for (const [value, expected] of [['proposed', 'proposal-a'], ['active', 'run-idle'], ['validation', 'awaiting-validation'], ['blocked', 'blocked'], ['recovery', 'recovery'], ['ended', 'completed'], ['stopped', 'stopped'], ['cancelled', 'cancelled']]) {
       selectOption(doc, dom, 'task-status-filter', value!);
       await settle(30);
       assert.ok(doc.querySelector(`[data-record-id="${expected}"]`));
       if (value !== 'proposed') assert.equal(doc.querySelector('[data-record-kind="proposal"]'), null);
+      if (value === 'stopped') assert.equal(doc.querySelector('[data-record-id="cancelled"]'), null);
+      if (value === 'cancelled') assert.equal(doc.querySelector('[data-record-id="stopped"]'), null);
     }
     const root = doc.querySelector('.project-tasks-view')!;
     const split = doc.querySelector('[data-task-layout="split"]')!;
@@ -924,6 +927,34 @@ test('Project Tasks filters with a dropdown and keeps task switching inside Chat
       assert.equal(split.className, splitClasses, 'different detail lengths never change the bounded pane contract');
       assert.equal(doc.querySelector('[data-task-layout="split"]'), split);
     }
+    app.unmount();
+  } finally { await cleanup(); }
+});
+
+test('Project Tasks distinguishes stopped from cancelled in badges, detail copy and status filters', async () => {
+  const { dom, doc, vite, cleanup } = await setupHarness();
+  try {
+    const { app, router } = await mountTasks(vite, doc);
+    selectOption(doc, dom, 'task-status-filter', 'stopped');
+    await settle(30);
+    const stoppedRow = doc.querySelector<HTMLElement>('[data-record-id="stopped"]');
+    assert.ok(stoppedRow);
+    assert.match(stoppedRow.textContent ?? '', /Stopped/);
+    assert.match(stoppedRow.textContent ?? '', /Task stopped · No active Agent run · Lease released/);
+    assert.equal(doc.querySelector('[data-record-id="cancelled"]'), null, 'the stopped filter excludes deliberate cancellation');
+
+    await openTaskRecord(router, 'stopped');
+    const details = doc.querySelector<HTMLElement>('[aria-label="Selected Task details"]');
+    assert.ok(details);
+    assert.match(details.textContent ?? '', /Stopped/);
+    assert.match(details.textContent ?? '', /Task stopped · No active Agent run · Lease released/);
+    assert.ok(doc.querySelector('aside[aria-label="Project Task list"]')?.className.includes('lg:flex'), 'the same status badge renders in the desktop list pane');
+    assert.ok(details.querySelector('button.lg\\:hidden'), 'the same status copy renders in the mobile detail pane');
+
+    selectOption(doc, dom, 'task-status-filter', 'cancelled');
+    await settle(30);
+    assert.ok(doc.querySelector('[data-record-id="cancelled"]'));
+    assert.equal(doc.querySelector('[data-record-id="stopped"]'), null, 'the cancelled filter excludes emergency stops');
     app.unmount();
   } finally { await cleanup(); }
 });

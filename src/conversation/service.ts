@@ -544,7 +544,7 @@ export class ConversationScopeService {
     const facts = await this.#facts(input.projectId);
     if (typeof input.taskId !== 'string' || input.taskId.trim() === ''
       || !Number.isSafeInteger(input.contentVersion) || input.contentVersion < 1
-      || !['todo', 'in-progress', 'blocked', 'done', 'failed', 'cancelled'].includes(input.status)) {
+      || !['todo', 'in-progress', 'blocked', 'done', 'failed', 'stopped', 'cancelled'].includes(input.status)) {
       throw new ConversationScopeError('task-group-content-conflict', 'Task group requires a valid Task binding and content version');
     }
     const id = taskGroupScopeId(input.taskId);
@@ -1266,8 +1266,8 @@ export class ConversationScopeService {
   }
 }
 
-function isTerminalTaskStatus(status: string): status is 'done' | 'failed' | 'cancelled' {
-  return status === 'done' || status === 'failed' || status === 'cancelled';
+function isTerminalTaskStatus(status: string): status is 'done' | 'failed' | 'stopped' | 'cancelled' {
+  return status === 'done' || status === 'failed' || status === 'stopped' || status === 'cancelled';
 }
 
 export { ConversationScopeError } from './model.ts';

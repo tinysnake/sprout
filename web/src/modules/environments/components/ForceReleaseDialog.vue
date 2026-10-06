@@ -74,7 +74,7 @@ function handleConfirm() {
       <!-- Emergency Warning -->
       <div class="p-3 rounded-[var(--radius-sm)] border border-[var(--red-action)] bg-[var(--red-action-bg)] text-xs text-[var(--text-primary)] leading-relaxed">
         <strong>EMERGENCY OVERRIDE WARNING:</strong><br />
-        Force Release bypasses normal worker proof and scratch context cleanup. It permanently marks Task #{{ env.activeLeaseHolder?.holderId ?? '104' }} as cancelled with a permanent forced release disposition, preserves the Project workspace, and makes Environment <strong>{{ env.displayName }}</strong> immediately reassignable.
+        Force Release bypasses normal worker proof and scratch context cleanup. It stops Task #{{ env.activeLeaseHolder?.holderId ?? '104' }} while preserving its intent, records permanent forced-release facts, preserves the Project workspace, and makes Environment <strong>{{ env.displayName }}</strong> immediately reassignable.
       </div>
 
       <!-- Unresolved Operational Facts -->

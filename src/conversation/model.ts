@@ -194,7 +194,7 @@ export interface TaskGroupScope extends ConversationScopeBase {
     readonly versions: readonly TaskGroupContentVersion[];
   };
   readonly frozenAt?: number;
-  readonly terminalTaskStatus?: 'done' | 'failed' | 'cancelled';
+  readonly terminalTaskStatus?: 'done' | 'failed' | 'stopped' | 'cancelled';
 }
 
 /** One durable conversation scope. */

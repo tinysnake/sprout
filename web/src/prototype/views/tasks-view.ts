@@ -42,7 +42,7 @@ function renderTaskListPage(
   const proposedCount = projectTasks.filter((t) => t.lifecycle === 'proposed').length;
   const recoveryCount = projectTasks.filter((t) => t.lifecycle === 'recovery').length;
   const completedCount = projectTasks.filter(
-    (t) => t.lifecycle === 'completed' || t.lifecycle === 'cancelled'
+    (t) => t.lifecycle === 'completed' || t.lifecycle === 'stopped' || t.lifecycle === 'cancelled'
   ).length;
 
   const filteredTasks = projectTasks.filter((t) => {
@@ -51,7 +51,9 @@ function renderTaskListPage(
     if (currentFilter === 'blocked') return t.lifecycle === 'blocked';
     if (currentFilter === 'proposed') return t.lifecycle === 'proposed';
     if (currentFilter === 'recovery') return t.lifecycle === 'recovery';
-    if (currentFilter === 'completed') return t.lifecycle === 'completed' || t.lifecycle === 'cancelled';
+    if (currentFilter === 'ended') return t.lifecycle === 'completed' || t.lifecycle === 'stopped' || t.lifecycle === 'cancelled';
+    if (currentFilter === 'stopped') return t.lifecycle === 'stopped';
+    if (currentFilter === 'cancelled') return t.lifecycle === 'cancelled';
     return true;
   });
 
@@ -80,7 +82,9 @@ function renderTaskListPage(
           <option value="blocked" ${currentFilter === 'blocked' ? 'selected' : ''}>Blocked (${blockedCount})</option>
           <option value="proposed" ${currentFilter === 'proposed' ? 'selected' : ''}>Proposals (${proposedCount})</option>
           <option value="recovery" ${currentFilter === 'recovery' ? 'selected' : ''}>Recovery (${recoveryCount})</option>
-          <option value="completed" ${currentFilter === 'completed' ? 'selected' : ''}>Completed (${completedCount})</option>
+          <option value="ended" ${currentFilter === 'ended' ? 'selected' : ''}>Ended (${completedCount})</option>
+          <option value="stopped" ${currentFilter === 'stopped' ? 'selected' : ''}>Stopped</option>
+          <option value="cancelled" ${currentFilter === 'cancelled' ? 'selected' : ''}>Cancelled</option>
         </select>
 
         <button class="btn btn-primary btn-sm new-proposal-btn" ${project?.status === 'archived' ? 'disabled' : ''}>
@@ -113,6 +117,7 @@ function renderTaskListPage(
                     borderClass = 'border-red';
                   } else if (
                     t.lifecycle === 'completed' ||
+                    t.lifecycle === 'stopped' ||
                     t.lifecycle === 'cancelled' ||
                     t.lifecycle === 'rejected'
                   ) {
@@ -220,6 +225,7 @@ function renderTaskDetailPage(
     taskStateColor = 'red';
   } else if (
     selectedTask.lifecycle === 'completed' ||
+    selectedTask.lifecycle === 'stopped' ||
     selectedTask.lifecycle === 'cancelled' ||
     selectedTask.lifecycle === 'rejected'
   ) {
@@ -551,7 +557,7 @@ function renderTaskDetailPage(
           Current Version: <strong>v${selectedTask.currentVersion.version}</strong> · Edited by: ${selectedTask.currentVersion.createdBy}
         </div>
       </div>
-      <button class="btn btn-secondary btn-sm edit-task-content-btn" ${selectedTask.lifecycle === 'completed' || selectedTask.lifecycle === 'cancelled' ? 'disabled' : ''}>
+      <button class="btn btn-secondary btn-sm edit-task-content-btn" ${selectedTask.lifecycle === 'completed' || selectedTask.lifecycle === 'stopped' || selectedTask.lifecycle === 'cancelled' ? 'disabled' : ''}>
         ${renderIcon('edit', 14)} Edit Specification (Create v${selectedTask.currentVersion.version + 1})
       </button>
     </div>

@@ -93,7 +93,7 @@ export interface TaskGroupScopeView extends ConversationScopeBaseView {
   readonly taskTitle: string;
   readonly status: 'active' | 'frozen';
   readonly frozenAt?: number;
-  readonly terminalTaskStatus?: 'done' | 'failed' | 'cancelled';
+  readonly terminalTaskStatus?: 'done' | 'failed' | 'stopped' | 'cancelled';
   readonly content: {
     readonly currentVersion: number;
     readonly versions: readonly TaskGroupContentVersionView[];

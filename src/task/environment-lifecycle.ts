@@ -899,7 +899,7 @@ export class TaskEnvironmentLifecycle {
   /**
    * Emergency Task end for a Human Force Release (#88, ADR-0009).
    *
-   * Records `cancelled` with a permanent forced-release disposition, keeps the
+   * Records `stopped` with permanent forced-release facts, keeps the
    * interrupted run as history, and releases the Task-held lease. It never
    * deletes the Project workspace and records unrecycled Task context as leftover
    * data rather than pretending cleanup finished. This is the only path that ends
@@ -942,13 +942,12 @@ export class TaskEnvironmentLifecycle {
         omit(
           {
             ...task,
-            status: 'cancelled' as const,
+            status: 'stopped' as const,
             completedAt: input.at,
             environmentLifecycleState: 'discarded' as const,
-            endDisposition: 'cancelled' as const,
             forcedRelease: { actor: input.actor, reason: sanitizeOperatorText(input.reason, { maxLength: 2000, fallback: 'Human Force Release' }),
               unresolvedFacts: input.unresolvedFacts.map(fact => sanitizeOperatorText(fact, { maxLength: 2000, fallback: 'unresolved cleanup proof' })), at: input.at },
-            blockerReason: 'Force Released by the Human operator; unresolved facts recorded.',
+            blockerReason: 'Task stopped by the Human operator using Force Release; unresolved facts recorded.',
             updatedAt: input.at,
           },
           'recoveryState',
@@ -961,7 +960,7 @@ export class TaskEnvironmentLifecycle {
     return this.#withTaskGroupLock(task.id, async () => {
       // One transaction commits the terminal Task row and the Task-held lease
       // release together. Without the explicit release capability above, unfinished
-      // work remains in recovery rather than claiming terminal cancellation.
+      // work remains in recovery rather than claiming a terminal outcome.
       await this.#store.saveTerminalWithLease(forced, leaseId);
       this.#resolvePauseRetryGate(taskId);
       releaseTaskLease(leaseId);

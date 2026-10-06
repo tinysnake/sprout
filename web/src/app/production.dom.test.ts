@@ -345,8 +345,12 @@ test('Production Web: emergency Force Release Alert Dialog enforces 3-gate safet
     forceBtn.click();
     await new Promise((resolve) => setTimeout(resolve, 60));
 
-    // Verify Alert Dialog opened
+    // Verify Alert Dialog opened and explains that Force Release stops Task execution without cancelling intent.
     assert.match(doc.body.textContent ?? '', /EMERGENCY OVERRIDE WARNING/);
+    const forceWarning = [...doc.querySelectorAll<HTMLElement>('[role="alertdialog"] .p-3')].find((element) => element.textContent?.includes('EMERGENCY OVERRIDE WARNING'));
+    assert.ok(forceWarning);
+    assert.match(forceWarning.textContent ?? '', /stops Task #104 while preserving its intent/);
+    assert.doesNotMatch(forceWarning.textContent ?? '', /marks Task .*cancelled/);
 
     const typedInput = doc.querySelector('.force-confirm-typed') as HTMLInputElement;
     assert.ok(typedInput, 'Typed confirmation input rendered');

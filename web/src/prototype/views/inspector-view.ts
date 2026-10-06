@@ -177,7 +177,7 @@ export function renderInspectorSheet(state: PrototypeState): HTMLElement | null 
       <div class="inspector-body">
         <div style="background: var(--red-action-bg); border: 1px solid var(--red-action); padding: 12px; border-radius: var(--radius-sm); font-size: 12px; color: var(--text-primary); line-height: 1.4;">
           <strong>EMERGENCY OVERRIDE WARNING:</strong><br/>
-          Force Release bypasses normal worker proof and scratch context cleanup. It permanently marks Task #${task?.id ?? '104'} as cancelled with a permanent forced release disposition, preserves the Project workspace, and makes Environment <strong>${env.displayName}</strong> immediately reassignable.
+          Force Release bypasses normal worker proof and scratch context cleanup. It stops Task #${task?.id ?? '104'} while preserving its intent, records the unresolved facts, preserves the Project workspace, and makes Environment <strong>${env.displayName}</strong> immediately reassignable.
         </div>
 
         <div style="display: flex; flex-direction: column; gap: 6px;">

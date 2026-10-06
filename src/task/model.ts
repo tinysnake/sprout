@@ -23,8 +23,8 @@ import type { EnvironmentPreference } from '../environment/model.ts';
  * The durable lifecycle of one Task.
  *
  * `todo` and `blocked` are both *advanceable*: starting work from either moves
- * the Task to `in-progress`. The terminal states are `done`, `failed`, and
- * `cancelled`; a terminal Task is never silently reopened by advancement.
+ * the Task to `in-progress`. The terminal states are `done`, `failed`,
+ * `stopped`, and `cancelled`; a terminal Task is never silently reopened by advancement.
  */
 export type TaskStatus =
   | 'todo'
@@ -32,6 +32,7 @@ export type TaskStatus =
   | 'blocked'
   | 'done'
   | 'failed'
+  | 'stopped'
   | 'cancelled';
 
 /** Every status, for validation and for the store's SQL CHECK arguments. */
@@ -41,6 +42,7 @@ export const TASK_STATUSES: readonly TaskStatus[] = [
   'blocked',
   'done',
   'failed',
+  'stopped',
   'cancelled',
 ];
 
@@ -251,7 +253,7 @@ export interface TaskWithRuns {
 
 /** The terminal statuses a Task can reach. */
 export function isTerminalTaskStatus(status: TaskStatus): boolean {
-  return status === 'done' || status === 'failed' || status === 'cancelled';
+  return status === 'done' || status === 'failed' || status === 'stopped' || status === 'cancelled';
 }
 
 /** Whether advancing a Task from `status` is permitted. */

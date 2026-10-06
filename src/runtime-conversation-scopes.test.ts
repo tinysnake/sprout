@@ -100,11 +100,13 @@ test('startup reconciliation creates missing admitted Task groups and freezes te
       }],
     };
     const terminalTask = admittedTask('restart-done', 'done');
+    const stoppedTask = admittedTask('restart-stopped', 'stopped');
     const cancelledTask = admittedTask('restart-cancelled', 'cancelled');
     const failedTask = admittedTask('restart-failed', 'failed');
     await stores.tasks.create(activeTask);
     await stores.tasks.create(revisedTask);
     await stores.tasks.create(terminalTask);
+    await stores.tasks.create(stoppedTask);
     await stores.tasks.create(cancelledTask);
     await stores.tasks.create(failedTask);
 
@@ -115,6 +117,7 @@ test('startup reconciliation creates missing admitted Task groups and freezes te
     const activeGroup = groups.find((group) => group.taskId === activeTask.id);
     const revisedGroup = groups.find((group) => group.taskId === revisedTask.id);
     const terminalGroup = groups.find((group) => group.taskId === terminalTask.id);
+    const stoppedGroup = groups.find((group) => group.taskId === stoppedTask.id);
     const cancelledGroup = groups.find((group) => group.taskId === cancelledTask.id);
     const failedGroup = groups.find((group) => group.taskId === failedTask.id);
     assert.ok(activeGroup, 'the admitted Task gets a scope even if the original admission write was interrupted');
@@ -132,6 +135,9 @@ test('startup reconciliation creates missing admitted Task groups and freezes te
     assert.ok(terminalGroup, 'a terminal Task still gets its durable conversation history scope');
     assert.equal(taskGroupStatus(terminalGroup), 'frozen');
     assert.equal(terminalGroup.terminalTaskStatus, 'done');
+    assert.ok(stoppedGroup);
+    assert.equal(stoppedGroup.terminalTaskStatus, 'stopped');
+    assert.equal(taskGroupStatus(stoppedGroup), 'frozen');
     assert.ok(cancelledGroup);
     assert.equal(cancelledGroup.terminalTaskStatus, 'cancelled');
     assert.equal(taskGroupStatus(cancelledGroup), 'frozen');
