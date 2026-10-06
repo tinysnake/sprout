@@ -223,7 +223,25 @@ test('authenticated Task controls preserve authority, validation recovery, priva
     assert.equal(cleaned, true);
     assert.equal(runtime.pool.getLease(leaseId)?.state, 'released');
 
-    const reopenResponse = await post(`${path}/reopen`, { reason: 'Continue the accepted Task on its original Environment.' });
+    const terminalBeforeReopen = (await runtime.tasks.get(task.id))!;
+    const reopenReason = 'Continue the accepted Task on its original Environment.';
+    const forgedAgentAttempt = await post(`${path}/reopen`, {
+      reason: 'Agent attempts to claim Human reopen authority.',
+      actor: { memberId: 'scout', memberKind: 'agent' },
+    });
+    assert.equal(forgedAgentAttempt.status, 400, 'the route rejects a client-supplied Agent actor');
+    assert.match((await forgedAgentAttempt.json() as { error: string }).error, /actor fields are not accepted/);
+    assert.equal((await post(`${path}/reopen`, { reason: reopenReason }, false)).status, 401,
+      'an unauthenticated caller cannot reopen an ended Task');
+    assert.equal((await post(`${path}/reopen`, { reason: reopenReason }, true, false)).status, 403,
+      'an authenticated request without CSRF proof cannot reopen an ended Task');
+    const unchangedAfterRefusals = (await runtime.tasks.get(task.id))!;
+    assert.equal(unchangedAfterRefusals.status, 'done');
+    assert.equal(unchangedAfterRefusals.environmentLifecycleState, 'ended');
+    assert.deepEqual(unchangedAfterRefusals.controlHistory, terminalBeforeReopen.controlHistory);
+    assert.equal(runtime.pool.getLease(leaseId)?.state, 'released');
+
+    const reopenResponse = await post(`${path}/reopen`, { reason: reopenReason });
     assert.equal(reopenResponse.status, 200);
     const reopenedTask = (await reopenResponse.json() as { task: TaskView }).task;
     assert.equal(reopenedTask.status, 'in-progress');
@@ -235,6 +253,6 @@ test('authenticated Task controls preserve authority, validation recovery, priva
     const reopenEvent = reopenedTask.controlHistory?.at(-1);
     assert.ok(reopenEvent?.action === 'reopened');
     assert.deepEqual(reopenEvent.actor, { memberId: 'operator', memberKind: 'human' });
-    assert.equal(reopenEvent.reason, 'Continue the accepted Task on its original Environment.');
+    assert.equal(reopenEvent.reason, reopenReason);
   } finally { await runtime.close(); }
 });

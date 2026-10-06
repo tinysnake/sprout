@@ -609,7 +609,49 @@ test('the stopped incident fixture reopens while retaining recovery, run, and Fo
   assert.deepEqual((await s.tasks.getWithRuns(taskId))?.runs.map((link) => link.runId), ['incident-run', advance.runId]);
 });
 
-  test('reopening refuses an original Environment held by another Task without changing terminal history', async () => {
+test('a fresh-context failure after reopen enters and recovers through the beginning recovery lifecycle', async () => {
+  let preparations = 0;
+  const worker: TaskContextWorker = {
+    prepare: async () => {
+      preparations += 1;
+      if (preparations === 2) throw new Error('fresh Task context could not be prepared');
+      return { bootstrapInstructions: '' };
+    },
+    recycle: async () => undefined,
+  };
+  const s = await scenario({ worker });
+  const ended = await s.controls.discardForHuman(s.taskId, { reason: 'End before probing context preparation failure.' });
+  const oldLeaseId = ended.environmentLeaseId!;
+
+  await assert.rejects(
+    s.controls.reopenForHuman(s.taskId, { reason: 'Reopen and prepare fresh Task context.' }),
+    /fresh Task context could not be prepared/,
+  );
+
+  const protectedTask = (await s.tasks.get(s.taskId))!;
+  const recoveringLeaseId = protectedTask.environmentLeaseId!;
+  assert.equal(preparations, 2);
+  assert.equal(protectedTask.status, 'in-progress', 'the durable reopen transition remains visible');
+  assert.equal(protectedTask.environmentLifecycleState, 'recovery');
+  assert.equal(protectedTask.recoveryState, 'beginning');
+  assert.equal(protectedTask.controlHistory?.at(-1)?.action, 'reopened');
+  assert.notEqual(recoveringLeaseId, oldLeaseId);
+  assert.equal(s.pool.getLease(oldLeaseId)?.state, 'released');
+  assert.equal(s.pool.getLease(recoveringLeaseId)?.state, 'recovering');
+  assert.equal(s.submittedRuns.length, 0, 'preparation failure does not start a run');
+
+  const resumed = await s.controls.recoverForHuman(s.taskId, { action: 'resume', reason: 'Retry beginning preparation.' });
+  assert.equal(preparations, 3);
+  assert.equal(resumed.status, 'in-progress');
+  assert.equal(resumed.environmentLifecycleState, 'idle');
+  assert.equal(resumed.recoveryState, undefined);
+  assert.equal(s.pool.getLease(recoveringLeaseId)?.state, 'active');
+  assert.equal(resumed.controlHistory?.filter((event) => event.action === 'reopened').length, 1);
+  assert.equal(resumed.controlHistory?.at(-1)?.action, 'recovery-requested');
+  assert.equal(s.submittedRuns.length, 0);
+});
+
+test('reopening refuses an original Environment held by another Task without changing terminal history', async () => {
   const s = await scenario();
   const ended = await s.controls.discardForHuman(s.taskId, { reason: 'End before testing Environment contention.' });
   const oldLeaseId = ended.environmentLeaseId!;
@@ -629,6 +671,56 @@ test('the stopped incident fixture reopens while retaining recovery, run, and Fo
   assert.equal(unchanged.controlHistory?.some((event) => event.action === 'reopened'), false);
   assert.equal(s.pool.getLease(oldLeaseId)?.state, 'released');
   assert.equal(s.pool.getLease(competing.lease.id)?.state, 'active');
+});
+
+test('reopen refuses nonterminal, recovering, unbound, and ineligible Tasks without adding history', async () => {
+  const refusals: readonly {
+    readonly name: string;
+    readonly update: (task: Task) => Task;
+    readonly reason: RegExp;
+  }[] = [
+    {
+      name: 'nonterminal Task',
+      update: task => ({ ...task, status: 'in-progress', environmentLifecycleState: 'idle' }),
+      reason: /is not terminal/,
+    },
+    {
+      name: 'unresolved recovery',
+      update: task => ({ ...task, environmentLifecycleState: 'recovery', recoveryState: 'idle' }),
+      reason: /active or unresolved Environment work/,
+    },
+    {
+      name: 'missing original Environment binding',
+      update: task => {
+        const { environmentInstanceId: _environmentInstanceId, ...unbound } = task;
+        return unbound;
+      },
+      reason: /no safely reusable Environment binding/,
+    },
+    {
+      name: 'ineligible context Agent',
+      update: task => ({ ...task, admission: { ...task.admission!, contextAgentId: 'missing-agent' } }),
+      reason: /cannot prepare its original Environment/,
+    },
+  ];
+
+  for (const refusal of refusals) {
+    const s = await scenario();
+    const ended = await s.controls.discardForHuman(s.taskId, { reason: `End before testing ${refusal.name}.` });
+    const invalid = refusal.update(ended);
+    await s.store.save(invalid);
+
+    await assert.rejects(
+      s.controls.reopenForHuman(s.taskId, { reason: `Try to reopen with ${refusal.name}.` }),
+      refusal.reason,
+    );
+
+    const unchanged = (await s.tasks.get(s.taskId))!;
+    assert.equal(unchanged.status, invalid.status, refusal.name);
+    assert.equal(unchanged.environmentLifecycleState, invalid.environmentLifecycleState, refusal.name);
+    assert.deepEqual(unchanged.controlHistory, invalid.controlHistory, refusal.name);
+    assert.equal(unchanged.controlHistory?.some(event => event.action === 'reopened'), false, refusal.name);
+  }
 });
 
 test('reopen cycles append separate control-history events', async () => {
