@@ -1169,6 +1169,7 @@ const TASK_STATUS_VALUES: readonly TaskStatus[] = [
   'blocked',
   'done',
   'failed',
+  'stopped',
   'cancelled',
 ];
 

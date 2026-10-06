@@ -410,9 +410,17 @@ test('infrastructure recovery that blocks a Project transcolates into that scope
 
 test('terminal Tasks retain blocker history without permanent blocker Attention', async () => {
   const original = mixedWorld().tasks.find(task => task.id === 'task-blk')!;
+  const stopEvidenceTask = {
+    ...original,
+    status: 'stopped' as const,
+    environmentLifecycleState: 'discarded' as const,
+    environmentLeaseId: 'lease-stopped',
+  };
+  assert.equal(taskLifecycleSentence(stopEvidenceTask), 'Task stopped · No active Agent run · Lease released');
   for (const terminal of [
     { status: 'cancelled' as const, environmentLifecycleState: 'ended' as const },
     { status: 'cancelled' as const, environmentLifecycleState: 'discarded' as const },
+    { status: 'stopped' as const, environmentLifecycleState: 'discarded' as const },
     { status: 'done' as const, environmentLifecycleState: 'ended' as const },
   ]) {
     const task = { ...original, ...terminal };

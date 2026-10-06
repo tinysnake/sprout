@@ -114,7 +114,9 @@ const filteredEntries = computed(() => {
     if (filter.value === 'validation') return stage === 'Awaiting validation';
     if (filter.value === 'blocked') return stage === 'Blocked';
     if (filter.value === 'recovery') return stage === 'Recovery';
-    return stage === 'Completed' || stage === 'Cancelled' || stage === 'Rejected' || stage === 'Withdrawn';
+    if (filter.value === 'stopped') return entry.kind === 'task' && entry.task.status === 'stopped';
+    if (filter.value === 'cancelled') return entry.kind === 'task' && entry.task.status === 'cancelled';
+    return stage === 'Completed' || stage === 'Stopped' || stage === 'Cancelled' || stage === 'Rejected' || stage === 'Withdrawn';
   });
 });
 const environmentOptions = computed(() => {
@@ -168,7 +170,7 @@ const beginLeadOptions = computed(() => {
 });
 const beginSelectionReady = computed(() => environmentOptions.value.some((entry) => entry.id === beginEnvironmentId.value && entry.enabled)
   && beginLeadOptions.value.some((entry) => entry.key === beginLeadKey.value));
-const filters = ['all', 'proposed', 'active', 'validation', 'blocked', 'recovery', 'completed'] as const;
+const filters = ['all', 'proposed', 'active', 'validation', 'blocked', 'recovery', 'ended', 'stopped', 'cancelled'] as const;
 const taskLeadOptions = computed(() => [
   ...(currentHuman.value ? [{ key: actorKey({ memberId: currentHuman.value.memberId, memberKind: 'human' }), label: 'You · Human Task lead' }] : []),
   ...activeProjectAgents.value.map((member) => ({ key: actorKey({ memberId: member.memberId, memberKind: 'agent' }), label: agentName(member.memberId) })),
@@ -291,9 +293,14 @@ function taskStage(task: TaskView): string {
   if (task.environmentLifecycleState === 'ending') return 'Ending';
   if (task.environmentLifecycleState === 'beginning') return 'Beginning';
   if (task.environmentLifecycleState === 'ended' || task.environmentLifecycleState === 'discarded') {
-    return task.endDisposition === 'completed' || task.status === 'done' ? 'Completed' : 'Cancelled';
+    if (task.status === 'done' || task.endDisposition === 'completed') return 'Completed';
+    if (task.status === 'stopped') return 'Stopped';
+    if (task.status === 'cancelled') return 'Cancelled';
+    if (task.status === 'failed') return 'Failed';
+    return 'Cancelled';
   }
   if (task.status === 'done') return 'Completed';
+  if (task.status === 'stopped') return 'Stopped';
   if (task.status === 'cancelled') return 'Cancelled';
   if (task.pauseState === 'requested') return 'Task pause requested';
   if (task.pauseState === 'paused') return 'Paused';
@@ -301,7 +308,7 @@ function taskStage(task: TaskView): string {
   if (task.blocker !== undefined || task.status === 'blocked' || task.environmentLifecycleState === 'blocked') return 'Blocked';
   if (task.activeRunId !== undefined) return 'Active · run running';
   if (task.environmentLifecycleState === 'idle' || task.environmentLifecycleState === 'running') return 'Active · run idle';
-  if (task.forcedRelease) return 'Cancelled';
+  if (task.forcedRelease) return 'Stopped';
   return task.status;
 }
 function taskRunState(task: TaskView): string {
@@ -324,14 +331,14 @@ function lifecycleSentence(task: TaskView): string {
   return `Task ${stage.toLowerCase()} · ${run} · Lease ${lease}`;
 }
 function isTerminal(task: TaskView): boolean {
-  return ['done', 'cancelled', 'failed'].includes(task.status)
+  return ['done', 'failed', 'stopped', 'cancelled'].includes(task.status)
     || task.environmentLifecycleState === 'ended' || task.environmentLifecycleState === 'discarded';
 }
 function badgeVariant(stage: string): 'success' | 'warning' | 'danger' | 'secondary' | 'purple' {
   if (stage === 'Recovery' || stage === 'Blocked') return 'danger';
   if (stage === 'Proposed' || stage === 'Awaiting validation' || stage === 'Task pause requested' || stage === 'Paused') return 'warning';
   if (stage.startsWith('Active')) return 'success';
-  if (stage === 'Completed' || stage === 'Cancelled' || stage === 'Rejected' || stage === 'Withdrawn') return 'secondary';
+  if (stage === 'Completed' || stage === 'Stopped' || stage === 'Cancelled' || stage === 'Failed' || stage === 'Rejected' || stage === 'Withdrawn') return 'secondary';
   return 'purple';
 }
 function formatTime(at: number | undefined): string {
@@ -853,7 +860,7 @@ onMounted(() => { void loadIndex(); });
             </div>
             <label for="task-status-filter" class="sr-only">Filter Project Tasks</label>
             <select id="task-status-filter" v-model="filter" class="min-h-[44px] w-full rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 text-sm capitalize text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-[var(--border-focus)]">
-              <option v-for="choice in filters" :key="choice" :value="choice">{{ choice === 'validation' ? 'Awaiting validation' : choice }}</option>
+              <option v-for="choice in filters" :key="choice" :value="choice">{{ choice === 'validation' ? 'Awaiting validation' : choice === 'stopped' ? 'Stopped' : choice === 'cancelled' ? 'Cancelled' : choice }}</option>
             </select>
           </div>
           <div v-if="filteredEntries.length" class="flex flex-1 min-h-0 flex-col gap-2 overflow-y-auto">

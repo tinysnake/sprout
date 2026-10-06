@@ -425,7 +425,7 @@ test('cancelled Task end recovery retries through the Human recovery Discard com
   assert.equal(recycles, 2);
 });
 
-test('Force Release without a lease-release capability preserves unfinished recovery instead of recording cancellation', async () => {
+test('Force Release without a lease-release capability preserves unfinished recovery instead of recording a terminal outcome', async () => {
   const s = await scenario({ forceRelease: false });
   await s.lifecycle.workerChannelLost('task-1');
   await assert.rejects(s.lifecycle.forceRelease('task-1', { actor: 'operator', reason: 'attempt unavailable release', unresolvedFacts: ['cleanup unproved'], at: 50 }), /release.*unavailable|capability/i);
@@ -434,9 +434,10 @@ test('Force Release without a lease-release capability preserves unfinished reco
   assert.equal(s.pool.getLease(s.begun.environmentLeaseId!)?.state, 'recovering');
 });
 
-test('Force Release records cancellation disposition without claiming normal context cleanup', async () => {
+test('Force Release stops the Task and freezes its group without claiming normal context cleanup', async () => {
   const taskGroupEvents: string[] = [];
-  const s = await scenario({ taskGroupEvents });
+  const taskGroupSnapshots: Task[] = [];
+  const s = await scenario({ taskGroupEvents, taskGroupSnapshots });
   await s.lifecycle.workerChannelLost('task-1');
   taskGroupEvents.length = 0;
   const saveTerminalWithLease = s.store.saveTerminalWithLease.bind(s.store);
@@ -451,9 +452,11 @@ test('Force Release records cancellation disposition without claiming normal con
   const forced = await s.tasks.get('task-1');
   assert.deepEqual(affected, []);
   assert.deepEqual(taskGroupEvents, ['lock-enter', 'terminal-save', 'group-sync', 'lock-exit']);
-  assert.equal(forced?.status, 'cancelled');
+  assert.equal(forced?.status, 'stopped');
   assert.equal(forced?.environmentLifecycleState, 'discarded');
-  assert.equal(forced?.endDisposition, 'cancelled');
+  assert.equal(forced?.endDisposition, undefined);
+  assert.equal(forced?.blockerReason, 'Task stopped by the Human operator using Force Release; unresolved facts recorded.');
+  assert.equal(taskGroupSnapshots.at(-1)?.status, 'stopped');
   assert.equal(toTaskView(forced!).taskContextState, 'cleanup-unproved-force-release');
   assert.deepEqual(forced?.forcedRelease?.unresolvedFacts, ['context recycle not proved']);
   assert.equal(s.pool.getLease(leaseId)?.state, 'released');

@@ -180,22 +180,27 @@ release before applying the override. If they cannot finish:
 
 - a one-round run remains `interrupted`, carries an explicit warning that its
   events or result may be incomplete, and releases its run-held lease; and
-- a Task Force Release is also the Human's decision to abandon that Task. It
-  performs an emergency Task end, releases the Task lease, and records the Task
-  as `cancelled` with a permanent `forced release` disposition, unresolved
-  facts, and any unverified context cleanup. The Task can neither resume nor
-  move to another Environment.
+- a Task Force Release is the Human's emergency decision to terminate execution
+  while the intent to do the work remains alive. It performs an emergency Task
+  end, releases the Task lease, and records the Task as `stopped` with permanent
+  forced-release facts, unresolved facts, and any unverified context cleanup.
+  It does not record cancellation intent. The Task cannot advance or move to
+  another Environment through ordinary lifecycle controls. ADR-0006 defines
+  Task-level `stopped` separately from the existing stopped outcome of one
+  Agent run.
 
-The Project workspace is never deleted. An unrecycled Task context is recorded
-as leftover data. After Force Release the Environment may be assigned again
-without Worker proof or fresh enrollment because the Human has explicitly
-accepted that risk. The Environment, Task, lease, and run histories continue to
-show the override even after the Environment becomes Green.
+The Task status does not imply the Environment Worker proved the engine stopped.
+After Force Release the Environment may be assigned again without Worker proof
+or fresh enrollment because the Human has explicitly accepted that risk. The
+Environment, Task, lease, and run histories continue to show the override even
+after the Environment becomes Green.
 
 This is a narrow exception to ADR-0005 and ADR-0006's normal Task-end safety
-rule. It changes neither the default recovery path nor the rule that unfinished
-work must never become *silently* reassignable: the exceptional release exists
-only because the Human knowingly and durably authorizes it.
+rule. ADR-0006 records the owner's ruling that emergency Force Release yields
+Task `stopped` while deliberate discard remains `cancelled`. It changes neither
+the default recovery path nor the rule that unfinished work must never become
+*silently* reassignable: the exceptional release exists only because the Human
+knowingly and durably authorizes it.
 
 ## Restart durability, schema migration, and backup boundary
 

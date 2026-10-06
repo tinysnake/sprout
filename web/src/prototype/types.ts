@@ -325,6 +325,7 @@ export type TaskLifecycleState =
   | 'ending'
   | 'recovery'
   | 'completed'
+  | 'stopped'
   | 'cancelled'
   | 'rejected'
   | 'withdrawn';

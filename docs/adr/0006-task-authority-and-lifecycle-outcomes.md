@@ -190,13 +190,17 @@ proof or cleanup cannot complete:
   instead preserves its `completed` intent.
 
 Cleanup or release failure normally remains recovery and cannot be displayed as
-completed or cancelled. ADR-0009 adds one explicit exception for an otherwise
-stuck Local Operator MVP: a Human may use Force Release, acknowledge the
-unresolved proof or cleanup, abandon the Task through an emergency Task end,
-and leave a permanent forced-release disposition. Long idle, paused, blocked,
-or validation periods may produce Human attention and reminders, but never
-start a run, end the Task, or make its Environment instance reassignable
-automatically.
+completed, stopped, or cancelled. ADR-0009 adds one explicit exception for an
+otherwise stuck Local Operator MVP: a Human may use Force Release, acknowledge
+the unresolved proof or cleanup, and end the Task in the terminal state
+`stopped`. This records emergency termination while preserving the fact that
+Human intent to do the work remained alive. The permanent forced-release facts
+record the actor, time, reason, and unresolved facts. Force Release does not
+record `cancelled` or cancellation intent. Long idle, paused, blocked, or
+validation periods may produce Human attention and reminders, but never start a
+run, end the Task, or make its Environment instance reassignable automatically.
+
+The owner states the distinction directly: “Emergency Force Release不应该直接cancel task，而是stop task。需要修改。” (`Emergency Force Release should not directly cancel the Task; it should stop the Task. This needs to change.`) `stopped` here is a **Task-level** terminal status. The existing `stopped` outcome for an Agent run remains separate; a stopped run does not itself end the Task. Deliberate Human discard still produces `cancelled` after normal Task context cleanup and lease release.
 
 ## Operator-visible state
 
@@ -205,14 +209,16 @@ sentences such as `Task paused · No active Agent run · Lease held`:
 
 | Lifecycle | Outcome vocabulary |
 | --- | --- |
-| Task | proposed, active, Task pause requested, paused, blocked, awaiting validation, ending, recovery, completed, cancelled, rejected, withdrawn |
+| Task | proposed, active, Task pause requested, paused, blocked, awaiting validation, ending, recovery, completed, stopped, cancelled, rejected, withdrawn |
 | Agent run | queued, running, completed, failed, stopped, interrupted |
 | Task lease | none, acquiring, held, recovering, releasing, released |
 
 There is no automatic terminal Task `failed` outcome in this product model. A
 failure leaves unfinished work blocked or recovering until a Human decides how
-to proceed. Internal implementations may need finer states, but must not collapse
-Task state, Agent-run state, and Environment-lease state into one label.
+to proceed. `stopped` is a Task outcome for an emergency Force Release while
+intent remains alive; the Agent-run `stopped` outcome describes only that run.
+Internal implementations may need finer states, but must not collapse Task
+state, Agent-run state, and Environment-lease state into one label.
 
 Every proposal, revision, authority decision, run request and settlement,
 pause, stop, resume, blocker, completion claim, validation, correction, end, and
