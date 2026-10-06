@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, nextTick, onMounted, ref, watch } from 'vue';
 import { RouterLink, useRoute, useRouter } from 'vue-router';
-import type { TaskActor, TaskBlockerResponsibility, TaskContent, TaskControlEvent } from '../../../../../src/task/model.ts';
+import { isTerminalTaskStatus, type TaskActor, type TaskBlockerResponsibility, type TaskContent, type TaskControlEvent } from '../../../../../src/task/model.ts';
 import type { TaskProposal, TaskProposalContent, TaskContentVersion } from '../../../../../src/task/proposal-model.ts';
 import type { TaskView, TaskWithRunsView, TaskRunLinkView } from '../../../../../src/web/views.ts';
 import { useAnnouncer } from '../../../primitives/announcer.ts';
@@ -53,6 +53,7 @@ const proposalEditOpen = ref(false);
 const beginOpen = ref(false);
 const taskEditOpen = ref(false);
 const blockerOpen = ref(false);
+const reopenConfirm = ref(false);
 const proposalTitle = ref('');
 const proposalGoal = ref('');
 const proposalConstraints = ref('');
@@ -240,6 +241,7 @@ const taskCanAdvance = computed(() => {
     && task.pauseState === undefined && task.blocker === undefined && !task.pendingCompletionClaimId);
 });
 const terminalTask = computed(() => selectedTask.value ? isTerminal(selectedTask.value.task) : false);
+const canReopenTask = computed(() => selectedTask.value !== undefined && isTerminalTaskStatus(selectedTask.value.task.status));
 const selectedProposalIsHumanProposed = computed(() => {
   const proposal = selectedProposal.value;
   return Boolean(proposal && currentHuman.value && proposal.proposer.memberKind === 'human' && proposal.proposer.memberId === currentHuman.value.memberId);
@@ -331,7 +333,7 @@ function lifecycleSentence(task: TaskView): string {
   return `Task ${stage.toLowerCase()} · ${run} · Lease ${lease}`;
 }
 function isTerminal(task: TaskView): boolean {
-  return ['done', 'failed', 'stopped', 'cancelled'].includes(task.status)
+  return isTerminalTaskStatus(task.status)
     || task.environmentLifecycleState === 'ended' || task.environmentLifecycleState === 'discarded';
 }
 function badgeVariant(stage: string): 'success' | 'warning' | 'danger' | 'secondary' | 'purple' {
@@ -352,7 +354,7 @@ function actionLabel(event: TaskControlEvent): string {
     'interrupt-requested': 'Interrupt requested', resumed: 'Task resumed', 'subordinate-run-stop-requested': 'Run stop requested',
     'blocker-raised': 'Blocker recorded', 'blocker-cleared': 'Blocker cleared', 'completion-claimed': 'Completion claim submitted',
     'validation-accepted': 'Completion claim accepted', 'validation-corrected': 'Correction requested',
-    'end-requested': 'Safe end requested', 'recovery-requested': 'Recovery action requested',
+    'end-requested': 'Safe end requested', 'recovery-requested': 'Recovery action requested', reopened: 'Task reopened',
   };
   return labels[event.action] ?? 'Task updated';
 }
@@ -667,6 +669,18 @@ async function taskControl(action: 'pause' | 'interrupt' | 'resume' | 'clear-blo
     else await currentApi.discard(task.id, controlReason.value.trim());
   });
 }
+async function reopenTask(): Promise<void> {
+  const currentApi = api.value;
+  const task = selectedTask.value?.task;
+  if (!currentApi || !task || !isTerminalTaskStatus(task.status) || actionReasonRequired.value) return;
+  const saved = await perform('Task reopened on its original Environment. Prior history and the Project workspace remain intact.', async () => {
+    await currentApi.reopen(task.id, controlReason.value.trim());
+  });
+  if (saved) {
+    reopenConfirm.value = false;
+    controlReason.value = '';
+  }
+}
 async function stopActiveRun(): Promise<void> {
   const currentApi = api.value;
   const task = selectedTask.value?.task;
@@ -797,6 +811,7 @@ watch(() => [openTaskId.value, openProposalId.value, selectedProjectId.value] as
 watch(() => [openTaskId.value, openProposalId.value] as const, async ([taskId, proposalId]) => {
   stopRunId.value = '';
   stopActiveRunId.value = '';
+  reopenConfirm.value = false;
   if (!taskId && !proposalId) return;
   focusSelectedRecord = true;
   await nextTick();
@@ -1004,7 +1019,11 @@ onMounted(() => { void loadIndex(); });
                 <Button v-if="!selectedTask.task.blocker && !terminalTask && !selectedTask.task.activeRunId && selectedTask.task.environmentLifecycleState === 'idle'" variant="secondary" size="sm" class="min-h-[44px]" :disabled="!canControl" @click="blockerOpen = !blockerOpen">Record blocker</Button>
                 <Button v-if="!terminalTask && selectedTask.task.environmentLifecycleState !== 'ending' && selectedTask.task.environmentLifecycleState !== 'recovery' && !selectedTask.task.activeRunId" variant="ghost" size="sm" class="min-h-[44px] text-[var(--red-action)]" :disabled="!canControl || actionReasonRequired" @click="taskControl('discard')">Discard Task</Button>
                 <Button v-if="selectedTask.task.environmentLifecycleState === 'ending'" variant="primary" size="sm" class="min-h-[44px]" :disabled="!canControl || actionReasonRequired" @click="taskControl('end')">Retry safe Task end</Button>
-                <Button v-if="terminalTask" variant="secondary" size="sm" class="min-h-[44px]" disabled>Task ended</Button>
+                <Button v-if="canReopenTask" data-action="reopen-task" variant="secondary" size="sm" class="min-h-[44px]" :disabled="!canControl" @click="reopenConfirm = true">Reopen Task</Button>
+              </div>
+              <div v-if="reopenConfirm && canReopenTask" class="border-t border-[var(--border-subtle)] pt-3 flex flex-col gap-3" role="group" aria-label="Confirm Task reopen">
+                <p class="text-sm">Reopening clears the current terminal status, completion timestamp, and end disposition. Sprout acquires a fresh lease on the same Environment and prepares a fresh Task context. This does not start a run; advance the Task when you decide to continue. Run history, control history, completion claims, Force Release facts, and the Project workspace are preserved.</p>
+                <div class="flex flex-wrap gap-2"><Button variant="primary" size="sm" class="min-h-[44px]" :disabled="!canControl || actionReasonRequired" @click="reopenTask">Confirm Reopen Task</Button><Button variant="ghost" size="sm" class="min-h-[44px]" @click="reopenConfirm = false">Cancel reopen</Button></div>
               </div>
               <div v-if="blockerOpen && selectedTask.task.environmentLifecycleState !== 'recovery'" class="border-t border-[var(--border-subtle)] pt-3 flex flex-col gap-3"><h4 class="font-bold">Record a routable blocker</h4><label class="flex flex-col gap-1 text-xs">Blocker reason<input v-model="blockerReason" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3 text-sm" required /></label><label class="flex flex-col gap-1 text-xs">Required next action<input v-model="blockerAction" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3 text-sm" required /></label><label class="flex flex-col gap-1 text-xs">Responsible kind<select id="blocker-responsible-kind" v-model="blockerResponsibleKind" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3"><option value="human">Human</option><option value="agent">Agent</option><option value="recovery">Recovery mechanism</option><option value="external-condition">External condition</option></select></label><label v-if="blockerResponsibleKind === 'human' || blockerResponsibleKind === 'agent'" class="flex flex-col gap-1 text-xs">Responsible Human or Agent<select id="blocker-responsible-member" v-model="blockerResponsibleMemberKey" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3"><option value="" disabled>Select a current Project member</option><option v-for="member in blockerResponsibleMembers" :key="`${member.memberKind}:${member.memberId}`" :value="actorKey({ memberId: member.memberId, memberKind: member.memberKind })">{{ member.memberKind === 'human' ? 'You' : agentName(member.memberId) }}</option></select></label><label v-else class="flex flex-col gap-1 text-xs">{{ blockerResponsibleKind === 'recovery' ? 'Recovery mechanism' : 'External condition' }}<input v-model="blockerResponsibleValue" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3 text-sm" required /></label><div class="flex flex-wrap gap-2"><Button variant="primary" size="sm" class="min-h-[44px]" :disabled="!canControl || !blockerReason.trim() || !blockerAction.trim() || !blockerResponsibilityReady" @click="addBlocker">Save blocker</Button><Button variant="ghost" size="sm" class="min-h-[44px]" @click="blockerOpen = false">Cancel</Button></div></div>
             </section>

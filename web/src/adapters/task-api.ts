@@ -41,6 +41,7 @@ export type TaskControlAction =
   | 'validation'
   | 'end'
   | 'discard'
+  | 'reopen'
   | 'recovery';
 
 /** Browser authority over proposals, approved Tasks, their runs, and controls. */
@@ -70,6 +71,7 @@ export interface TaskBrowserAdapter {
   validate(id: string, input: { readonly claimId: string; readonly decision: 'accept' | 'correct'; readonly reason: string }): Promise<TaskView>;
   end(id: string, reason: string): Promise<TaskView>;
   discard(id: string, reason: string): Promise<TaskView>;
+  reopen(id: string, reason: string): Promise<TaskView>;
   recover(id: string, input: { readonly action: 'resume' | 'discard'; readonly reason: string }): Promise<TaskView>;
 }
 
@@ -111,6 +113,7 @@ export function createTaskBrowserAdapter(transport: BrowserTransport): TaskBrows
     validate: (id, input) => control(id, 'validation', input),
     end: (id, reason) => control(id, 'end', { reason }),
     discard: (id, reason) => control(id, 'discard', { reason }),
+    reopen: (id, reason) => control(id, 'reopen', { reason }),
     recover: (id, input) => control(id, 'recovery', input),
   };
 }

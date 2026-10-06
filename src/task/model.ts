@@ -126,7 +126,8 @@ export type TaskControlEvent =
   | { readonly action: 'completion-claimed'; readonly actor: TaskActor; readonly at: number; readonly claimId: string; readonly substitutedFor?: TaskActor }
   | { readonly action: 'validation-accepted' | 'validation-corrected'; readonly actor: TaskActor; readonly at: number; readonly claimId: string; readonly reason: string }
   | { readonly action: 'end-requested'; readonly actor: TaskActor; readonly at: number; readonly disposition: 'completed' | 'cancelled'; readonly reason: string }
-  | { readonly action: 'recovery-requested'; readonly actor: TaskActor; readonly at: number; readonly recoveryAction: 'resume' | 'discard'; readonly reason: string };
+  | { readonly action: 'recovery-requested'; readonly actor: TaskActor; readonly at: number; readonly recoveryAction: 'resume' | 'discard'; readonly reason: string }
+  | { readonly action: 'reopened'; readonly actor: TaskActor; readonly at: number; readonly reason: string; readonly fromStatus: TaskStatus; readonly previousCompletedAt?: number; readonly previousEndDisposition?: 'completed' | 'cancelled' };
 
 /** Approval and the exact proposal snapshot bound by one approve-and-begin command. */
 export interface TaskAdmission {

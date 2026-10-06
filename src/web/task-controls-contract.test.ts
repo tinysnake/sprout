@@ -160,7 +160,7 @@ test('authenticated Task controls preserve authority, validation recovery, priva
       },
     } }),
   });
-  const { port } = await runtime.api.listen(Number(process.env.PORT ?? 0));
+  const { port } = await runtime.api.listen(Number(process.env.TASK_REOPEN_PORT ?? 0));
   const base = new URL('http://localhost');
   base.port = String(port);
   try {
@@ -184,7 +184,7 @@ test('authenticated Task controls preserve authority, validation recovery, priva
     const { task } = await begunResponse.json() as { task: TaskView };
     const path = `/api/tasks/${task.id}`;
     const leaseId = (await runtime.tasks.get(task.id))!.environmentLeaseId!;
-    for (const action of ['pause', 'interrupt', 'resume', 'cancel-pause', 'subordinate-stop', 'blockers', 'clear-blocker', 'completion-claims', 'validation', 'end', 'discard', 'recovery', 'content']) {
+    for (const action of ['pause', 'interrupt', 'resume', 'cancel-pause', 'subordinate-stop', 'blockers', 'clear-blocker', 'completion-claims', 'validation', 'end', 'discard', 'recovery', 'content', 'reopen']) {
       assert.equal((await post(`${path}/${action}`, {}, false)).status, 401, action);
       assert.equal((await post(`${path}/${action}`, {}, true, false)).status, 403, action);
       assert.equal((await post(`${path}/${action}`, { actor: { memberId: 'scout', memberKind: 'agent' } })).status, 400, action);
@@ -222,5 +222,19 @@ test('authenticated Task controls preserve authority, validation recovery, priva
     assert.equal(completed.endDisposition, 'completed');
     assert.equal(cleaned, true);
     assert.equal(runtime.pool.getLease(leaseId)?.state, 'released');
+
+    const reopenResponse = await post(`${path}/reopen`, { reason: 'Continue the accepted Task on its original Environment.' });
+    assert.equal(reopenResponse.status, 200);
+    const reopenedTask = (await reopenResponse.json() as { task: TaskView }).task;
+    assert.equal(reopenedTask.status, 'in-progress');
+    assert.equal(reopenedTask.environmentLifecycleState, 'idle');
+    assert.equal(reopenedTask.environmentInstanceId, task.environmentInstanceId);
+    assert.notEqual(reopenedTask.environmentLeaseId, leaseId);
+    assert.equal(runtime.pool.getLease(leaseId)?.state, 'released');
+    assert.equal(runtime.pool.getLease(reopenedTask.environmentLeaseId!)?.state, 'active');
+    const reopenEvent = reopenedTask.controlHistory?.at(-1);
+    assert.ok(reopenEvent?.action === 'reopened');
+    assert.deepEqual(reopenEvent.actor, { memberId: 'operator', memberKind: 'human' });
+    assert.equal(reopenEvent.reason, 'Continue the accepted Task on its original Environment.');
   } finally { await runtime.close(); }
 });

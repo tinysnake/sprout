@@ -226,6 +226,7 @@ function appServices(conflictCodes: readonly string[] = [], snapshot = overview)
     async validate(id: string, input: { decision: string }) { calls.push(`validate:${id}:${input.decision}`); return allTasks[1]!; },
     async end(id: string) { calls.push(`end:${id}`); return allTasks[1]!; },
     async discard(id: string) { calls.push(`discard:${id}`); return allTasks[1]!; },
+    async reopen(id: string, reason: string) { calls.push(`reopen:${id}:${reason}`); return allTasks[0]!; },
     async recover(id: string, input: { action: string }) { calls.push(`recover:${id}:${input.action}`); return allTasks[1]!; },
   } as unknown as TaskBrowserAdapter;
   const projects = {
@@ -1315,8 +1316,10 @@ test('Project Tasks exposes authorized proposal, intervention, validation, disca
     await settle(180);
     assert.ok(calls.includes('end:ending'));
     await openTaskRecord(router, 'completed');
-    const ended = [...doc.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent?.includes('Task ended'));
-    assert.ok(ended?.disabled, 'terminal Tasks expose no new lifecycle command');
+    const reopen = [...doc.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent?.trim() === 'Reopen Task');
+    assert.ok(reopen && !reopen.disabled, 'terminal Tasks expose the deliberate Reopen command');
+    assert.equal([...doc.querySelectorAll<HTMLButtonElement>('button')].some((button) => ['Pause Task', 'Resume Task', 'Discard Task'].includes(button.textContent?.trim() ?? '')), false,
+      'terminal Tasks do not expose ordinary active lifecycle commands');
     await openTaskRecord(router, 'cancelled');
     assert.equal([...doc.querySelectorAll<HTMLButtonElement>('button')].some((button) => button.textContent?.includes('Clear blocker') && !button.disabled), false,
       'terminal Tasks with historical blockers expose no actionable Clear blocker control');
@@ -1324,6 +1327,31 @@ test('Project Tasks exposes authorized proposal, intervention, validation, disca
       'terminal Tasks do not expose Resume even when a stale pause state is present');
     const masterList = doc.querySelector<HTMLElement>('aside[aria-label="Project Task list"]');
     assert.ok(masterList?.className.includes('hidden') && masterList.className.includes('lg:flex'), 'the master list becomes a desktop pane while detail fills the phone');
+    app.unmount();
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Project Tasks exposes a confirmed Reopen action with explicit reset and preservation copy', async () => {
+  const { dom, doc, vite, cleanup } = await setupHarness();
+  try {
+    const { app, router, calls } = await mountTasks(vite, doc);
+    await openTaskRecord(router, 'stopped');
+    clickButton(doc, 'Reopen Task');
+    await settle();
+    const confirmation = doc.querySelector<HTMLElement>('[aria-label="Confirm Task reopen"]');
+    assert.ok(confirmation, 'an ended Task requires explicit confirmation');
+    assert.match(confirmation.textContent ?? '', /same Environment/i);
+    assert.match(confirmation.textContent ?? '', /fresh Task context/i);
+    assert.match(confirmation.textContent ?? '', /does not start a run/i);
+    assert.match(confirmation.textContent ?? '', /run history.*control history.*Force Release facts.*Project workspace/i);
+    assert.equal(calls.some((call) => call.startsWith('reopen:')), false, 'opening confirmation does not send the command');
+
+    await enterField(doc, dom, 'Reason for this action', 'Continue the unfinished work after review.');
+    clickButton(doc, 'Confirm Reopen Task');
+    await settle(180);
+    assert.ok(calls.includes('reopen:stopped:Continue the unfinished work after review.'));
     app.unmount();
   } finally {
     await cleanup();

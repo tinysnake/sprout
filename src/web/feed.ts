@@ -41,7 +41,7 @@ import type { RoutingBatch } from '../collaboration/routing.ts';
 import type { EnvironmentEnrollment } from '../environment/enrollment.ts';
 import type { EnvironmentRecoveryRecord } from '../environment/recovery.ts';
 import type { AgentRun } from '../run/model.ts';
-import type { Task } from '../task/model.ts';
+import { isTerminalTaskStatus, type Task } from '../task/model.ts';
 import type { TaskProposal } from '../task/proposal-model.ts';
 
 /** Synthetic scopes contain a colon, which sanitizeProjectId cannot preserve. */
@@ -595,7 +595,7 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
 
     // 3. Routable blockers with owner, action, and next advancer (ADR-0006).
     if (task.blocker !== undefined && !['ended', 'discarded'].includes(task.environmentLifecycleState ?? '')
-      && !['done', 'cancelled', 'failed'].includes(task.status)) {
+      && !isTerminalTaskStatus(task.status)) {
       attention.push({
         id: `blocker:${task.id}`,
         severity: 'action_required',
@@ -834,6 +834,23 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
   type ActivityDraft = { id: string; kind: string; summary: string; scopes: readonly string[]; target?: FeedTarget; projectId?: string; at: number };
   const activityDrafts: ActivityDraft[] = [];
   const seenTaskGroupActivity = new Set<string>();
+  for (const task of tasks) {
+    if (!knownProject(task.projectId)) continue;
+    const target = feedTarget({ surface: 'project-task-detail', projectId: task.projectId, taskId: task.id });
+    for (const [index, event] of (task.controlHistory ?? []).entries()) {
+      if (event.action !== 'reopened') continue;
+      const actor = `${event.actor.memberKind === 'human' ? 'Human' : 'Agent'} ${event.actor.memberId}`;
+      activityDrafts.push({
+        id: `task-reopened:${task.id}:${event.at}:${index}`,
+        kind: 'task-reopened',
+        summary: boundText(`Task reopened by ${actor}: ${event.reason}`, 300),
+        scopes: [task.projectId],
+        target,
+        projectId: task.projectId,
+        at: event.at,
+      });
+    }
+  }
   for (const group of taskGroups) {
     if (!knownProject(group.projectId) || !safeChatIdentity(group.scopeId)) continue;
     const identity = `created:${group.scopeId}`;

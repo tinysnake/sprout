@@ -41,6 +41,7 @@ test('Task browser adapter uses encoded production proposal, Task, run, and cont
   await adapter.validate('task/one two', { claimId: 'claim-a', decision: 'accept', reason: 'Evidence is sufficient.' });
   await adapter.end('task/one two', 'Retry safe completion cleanup.');
   await adapter.discard('task/one two', 'Abandon the proposed work.');
+  await adapter.reopen('task/one two', 'Continue the ended Task.');
   await adapter.recover('task/one two', { action: 'resume', reason: 'Recovery evidence is ready.' });
   await adapter.stopSubordinate('task/one two', { runId: 'run/one', reason: 'Stop this run.' });
   await adapter.getContentVersion('proposal/one two', 4);
@@ -58,6 +59,7 @@ test('Task browser adapter uses encoded production proposal, Task, run, and cont
     '/api/tasks/task%2Fone%20two/validation',
     '/api/tasks/task%2Fone%20two/end',
     '/api/tasks/task%2Fone%20two/discard',
+    '/api/tasks/task%2Fone%20two/reopen',
     '/api/tasks/task%2Fone%20two/recovery',
     '/api/tasks/task%2Fone%20two/subordinate-stop',
   ]);
@@ -66,6 +68,7 @@ test('Task browser adapter uses encoded production proposal, Task, run, and cont
   assert.deepEqual(JSON.parse(String(calls[3]?.init?.body)), { targetAgentId: 'agent-a', reason: 'Continue verified work.' });
   assert.deepEqual(JSON.parse(String(calls[5]?.init?.body)), { reason: 'Hold further runs.' });
   assert.deepEqual(JSON.parse(String(calls[8]?.init?.body)), { reason: 'Waiting for approval.', requiredAction: 'Record approval.', responsible: { kind: 'external-condition', condition: 'Approval arrives.' }, nextAdvancer: { memberId: 'agent-a', memberKind: 'agent' } });
+  assert.deepEqual(JSON.parse(String(calls.find((call) => call.path.endsWith('/reopen'))?.init?.body)), { reason: 'Continue the ended Task.' });
 });
 
 test('Task browser adapter preserves typed 409 conflict codes for page presentation', async () => {

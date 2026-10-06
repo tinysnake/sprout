@@ -115,6 +115,7 @@ The authority boundary is explicit rather than inferred from status names:
 | Make a Task completion claim | Task lead; Human may submit a substitute claim on an Agent-led Task |
 | Pause or resume a Task | Human only |
 | Validate, correct, end, recover, discard, or Force Release a Task | Human only |
+| Reopen a terminal Task | Human only |
 
 Sprout may carry out the consequences of an authorized command—acquiring a
 lease, admitting a run, reconciling interruption, or cleaning Task context—but
@@ -201,6 +202,12 @@ validation periods may produce Human attention and reminders, but never start a
 run, end the Task, or make its Environment instance reassignable automatically.
 
 The owner states the distinction directly: “Emergency Force Release不应该直接cancel task，而是stop task。需要修改。” (`Emergency Force Release should not directly cancel the Task; it should stop the Task. This needs to change.`) `stopped` here is a **Task-level** terminal status. The existing `stopped` outcome for an Agent run remains separate; a stopped run does not itself end the Task. Deliberate Human discard still produces `cancelled` after normal Task context cleanup and lease release.
+
+**Amendment (2026-10-06; #216, owner ruling: “我认为任何ended task与github issue一样，需要有重新open的功能。”)** A Human may reopen every Task status for which `isTerminalTaskStatus` is true. This uses the same Human authority as discard and approval; Task leads, Agents, and clients without an authenticated operator session cannot reopen. Reopen is an explicit control action, never an automatic consequence of advancement.
+
+Reopen appends a distinct `reopened` control-history event with actor, time, reason, prior status, and the previous completion timestamp and end disposition when present. It clears the current terminal status, completion timestamp, and current end disposition while retaining every prior control-history event, completion claim, run link, and permanent `forcedRelease` fact. The Task keeps its existing Environment binding: reopening acquires a fresh lease on that same instance and prepares a fresh Task context. It does not alter the Project workspace or start a run; the next run still requires a deliberate advance. Existing blockers and pauses continue to gate advancement.
+
+The Task group keeps its original scope identity and readable messages. Reopen lifts that scope's persisted terminal freeze and synchronizes its current Task content under the same serialization boundary as the Task transition. If the Task has an active run or unresolved recovery, lacks a valid Environment binding, or the same Environment cannot be safely leased and prepared, reopen is refused without changing its terminal state; a preparation failure after the reopen commit enters the existing recovery lifecycle. No status in the current terminal Task set is unsupported solely because of its status. `rejected` and `withdrawn` are TaskProposal outcomes, not Task statuses; they have no Task lease or Task group and remain governed by the proposal lifecycle.
 
 ## Operator-visible state
 
