@@ -11,7 +11,7 @@ import { TaskEnvironmentLifecycle, type TaskContextWorker } from './environment-
 import { InMemoryTaskStore } from './store.ts';
 import { TaskService } from './service.ts';
 import { TaskControlService } from './control-service.ts';
-import type { Task, TaskActor } from './model.ts';
+import { isTerminalTaskStatus, TASK_STATUSES, type Task, type TaskActor } from './model.ts';
 import { toTaskView } from '../web/views.ts';
 
 const definition: EnvironmentDefinition = { id: 'local', platform: 'macos', capabilities: [{ name: 'agent-run', requiresLease: true }] };
@@ -25,15 +25,18 @@ function run(id: string, status: AgentRun['status']): AgentRun {
     ...(status !== 'queued' && status !== 'running' ? { completedAt: 2 } : {}) };
 }
 
-async function scenario(options: { readonly worker?: TaskContextWorker; readonly forceRelease?: boolean; readonly taskLead?: TaskActor; readonly taskGroupSnapshots?: Task[]; readonly taskGroupEvents?: string[] } = {}) {
+async function scenario(options: { readonly worker?: TaskContextWorker; readonly forceRelease?: boolean; readonly taskLead?: TaskActor; readonly taskGroupSnapshots?: Task[]; readonly taskGroupEvents?: string[]; readonly taskId?: string } = {}) {
+  const taskId = options.taskId ?? 'task-1';
   const store = new InMemoryTaskStore();
-  const pool = new EnvironmentPool({ definitions: [definition], instances: [instance], idFactory: () => 'lease-1' });
+  let nextLease = 0;
+  const pool = new EnvironmentPool({ definitions: [definition], instances: [instance], idFactory: () => `lease-${++nextLease}` });
   const agents = new AgentRegistry([{ id: 'pi', name: 'Pi', engine: 'scripted', capability: 'agent-run' }]);
   const projects = new ProjectRegistry([{ id: 'project', goal: 'Goal', rules: [], availableEnvironmentInstanceIds: ['local-1'], memberships: [{ agentId: 'pi', responsibilities: [], collaborationInstructions: '' }] }]);
   let lifecycle!: TaskEnvironmentLifecycle;
   let nextRun = 0;
+  const submittedRuns: string[] = [];
   const task = (): Task => ({
-    id: 'task-1', projectId: 'project', title: 'Task', goal: 'Goal', constraints: [], status: 'todo', assignedAgentId: 'pi',
+    id: taskId, projectId: 'project', title: 'Task', goal: 'Goal', constraints: [], status: 'todo', assignedAgentId: 'pi',
     admission: { proposalId: 'proposal', proposalRevision: 1, contentVersion: 1, validationCriteria: ['tests pass'], lead: options.taskLead ?? lead, contextAgentId: 'pi', approvedBy: human, approvedAt: 1, approvalReason: 'approved' },
     createdAt: 1, updatedAt: 1,
   });
@@ -41,7 +44,7 @@ async function scenario(options: { readonly worker?: TaskContextWorker; readonly
     store, pool, agents, projects,
     ...(options.worker !== undefined ? { worker: options.worker } : {}),
     ids: { task: () => 'task', message: () => 'message', projectEvent: () => 'event', lease: () => 'lease-1', run: () => `run-${++nextRun}` },
-    runs: { submit: async request => ({ id: request.runId }) },
+    runs: { submit: async request => { submittedRuns.push(request.runId); return { id: request.runId }; } },
     ...((options.taskGroupSnapshots !== undefined || options.taskGroupEvents !== undefined) ? { taskGroups: {
       sync: async (value: Task) => {
         options.taskGroupSnapshots?.push(structuredClone(value));
@@ -65,12 +68,12 @@ async function scenario(options: { readonly worker?: TaskContextWorker; readonly
   } as unknown as TaskProposalService;
   const controls = new TaskControlService({
     tasks, lifecycle, proposals,
-    runs: { stop: async runId => { const stopped = run(runId, 'stopped'); await tasks.onRunSettled({ taskId: 'task-1', run: stopped }); return stopped; } },
+    runs: { stop: async runId => { const stopped = run(runId, 'stopped'); await tasks.onRunSettled({ taskId, run: { ...stopped, taskId } }); return stopped; } },
     now: () => 50, id: () => 'claim-1',
   });
   await store.create(task());
-  const begun = await lifecycle.begin('task-1');
-  return { store, pool, lifecycle, tasks, controls, begun };
+  const begun = await lifecycle.begin(taskId);
+  return { store, pool, lifecycle, tasks, controls, begun, taskId, submittedRuns };
 }
 
 test('admitted Task groups synchronize at start and freeze after terminal persistence', async () => {
@@ -484,4 +487,157 @@ test('completion claims accept only the fact-form schema and reject empty or hos
   assert.deepEqual(claim.completionClaims?.[0]?.validationEvidence, ['Focused lifecycle contract passed']);
   await assert.rejects(s.lifecycle.advanceRun('task-1', 'pi', 'cannot bypass validation', { actor: lead, reason: 'skip', contentVersion: 1 }), /awaiting-validation|validation/i);
   assert.equal(s.pool.getLease(s.begun.environmentLeaseId!)?.state, 'active');
+});
+
+for (const status of TASK_STATUSES.filter(isTerminalTaskStatus)) {
+  test(`Human reopen follows the same lifecycle for terminal Task status ${status}`, async () => {
+    const taskGroupSnapshots: Task[] = [];
+    const s = await scenario({ taskGroupSnapshots });
+    const ended = await s.controls.discardForHuman(s.taskId, { reason: 'End before the reopen contract test.' });
+    const { endDisposition: _oldDisposition, ...withoutDisposition } = ended;
+    const priorClaims = [{
+      id: 'claim-before-reopen', contentVersion: 1, actor: human, at: 30,
+      outcomeSummary: 'Previously reviewed Task work.', validationEvidence: ['Review was recorded.'],
+      durableChanges: ['Existing Project files.'], limitations: [], recommendedDisposition: 'continue' as const,
+    }];
+    const terminal: Task = {
+      ...withoutDisposition,
+      status,
+      environmentLifecycleState: 'discarded',
+      completedAt: 41,
+      completionClaims: priorClaims,
+      ...(status === 'done' ? { endDisposition: 'completed' as const } : {}),
+      ...(status === 'cancelled' ? { endDisposition: 'cancelled' as const } : {}),
+      ...(status === 'stopped' ? { forcedRelease: { actor: 'operator', reason: 'Emergency release', unresolvedFacts: ['engineSessionStopped=false'], at: 41 } } : {}),
+    };
+    await s.store.save(terminal);
+    const oldLeaseId = terminal.environmentLeaseId!;
+    const historyBefore = terminal.controlHistory;
+
+    const reopened = await s.controls.reopenForHuman(s.taskId, { reason: `Continue the Task after ${status}.` });
+
+    assert.equal(reopened.status, 'in-progress');
+    assert.equal(reopened.environmentLifecycleState, 'idle');
+    assert.equal(reopened.environmentInstanceId, terminal.environmentInstanceId);
+    assert.notEqual(reopened.environmentLeaseId, oldLeaseId, 'reopen acquires a new lease identity');
+    assert.equal(s.pool.getLease(oldLeaseId)?.state, 'released');
+    assert.equal(s.pool.getLease(reopened.environmentLeaseId!)?.state, 'active');
+    assert.equal(reopened.activeRunId, undefined);
+    assert.equal(reopened.completedAt, undefined);
+    assert.equal(reopened.endDisposition, undefined);
+    assert.deepEqual(reopened.controlHistory?.slice(0, historyBefore?.length), historyBefore);
+    assert.deepEqual(reopened.completionClaims, priorClaims, 'completion claims remain inspectable after reopen');
+    const reopenEvent = reopened.controlHistory?.at(-1);
+    assert.ok(reopenEvent?.action === 'reopened');
+    assert.deepEqual(reopenEvent.actor, human);
+    assert.equal(reopenEvent.reason, `Continue the Task after ${status}.`);
+    assert.equal(reopenEvent.fromStatus, status);
+    assert.equal(reopenEvent.previousCompletedAt, 41);
+    assert.equal(reopenEvent.previousEndDisposition, terminal.endDisposition);
+    assert.equal(Number.isSafeInteger(reopenEvent.at), true);
+    assert.equal(taskGroupSnapshots.at(-1)?.status, 'in-progress');
+    assert.equal(s.submittedRuns.length, 0, 'reopen does not start a run automatically');
+
+    const advance = await s.tasks.advanceWithAttribution(s.taskId, {
+      agentId: 'pi', actor: human, reason: 'Deliberately continue reopened work', contentVersion: 1,
+    });
+    assert.equal(advance.task.activeRunId, advance.runId);
+    assert.equal(s.submittedRuns.length, 1, 'the reopened Task admits a new run');
+  });
+}
+
+test('the stopped incident fixture reopens while retaining recovery, run, and Force Release history', async () => {
+  const taskId = 'task-muwtqk0e-aff3220b';
+  const taskGroupSnapshots: Task[] = [];
+  const taskGroupEvents: string[] = [];
+  const preparedTaskIds: string[] = [];
+  const preparedEnvironmentIds: string[] = [];
+  let recycled = 0;
+  const worker: TaskContextWorker = {
+    prepare: async input => { preparedTaskIds.push(input.taskId); preparedEnvironmentIds.push(input.environmentInstanceId); return { bootstrapInstructions: '' }; },
+    recycle: async () => { recycled += 1; },
+  };
+  const s = await scenario({ taskId, worker, taskGroupSnapshots, taskGroupEvents });
+  await s.store.linkRun({ taskId, runId: 'incident-run', agentId: 'pi', now: 10 });
+  await s.store.recordRunSummary({ taskId, runId: 'incident-run', agentId: 'pi', status: 'stopped', summary: 'Prior run settlement', recordedAt: 20 });
+  await s.lifecycle.workerChannelLost(taskId);
+  await s.controls.recoverForHuman(taskId, { action: 'resume', reason: 'Inspect the retained recovery facts.' });
+  await s.lifecycle.workerChannelLost(taskId);
+  const stoppedIds = await s.lifecycle.forceRelease(taskId, {
+    actor: 'operator', reason: 'Unresolved engine stop during recovery',
+    unresolvedFacts: ['engineSessionStopped=false', 'recovery proof was unresolved'], at: 60,
+  });
+  const stopped = (await s.tasks.get(taskId))!;
+  const historyBefore = stopped.controlHistory;
+  const releaseFacts = stopped.forcedRelease;
+  const oldLeaseId = stopped.environmentLeaseId!;
+  assert.deepEqual(stoppedIds, ['incident-run']);
+  assert.ok(historyBefore?.some((event) => event.action === 'recovery-requested'));
+  assert.deepEqual(releaseFacts?.unresolvedFacts, ['engineSessionStopped=false', 'recovery proof was unresolved']);
+  assert.equal(stopped.status, 'stopped');
+  assert.equal(stopped.environmentLifecycleState, 'discarded');
+  assert.equal(recycled, 0, 'Force Release does not claim Task context recycling');
+
+  taskGroupEvents.length = 0;
+  const saveBeginningWithLease = s.store.saveBeginningWithLease.bind(s.store);
+  s.store.saveBeginningWithLease = async (task, lease) => {
+    taskGroupEvents.push('beginning-save');
+    await saveBeginningWithLease(task, lease);
+  };
+  const reopened = await s.controls.reopenForHuman(taskId, { reason: 'Recovery evidence is understood; resume the unfinished intent.' });
+
+  assert.deepEqual(taskGroupEvents, ['lock-enter', 'beginning-save', 'group-sync', 'lock-exit']);
+  assert.equal(reopened.status, 'in-progress');
+  assert.equal(reopened.environmentLifecycleState, 'idle');
+  assert.equal(reopened.environmentInstanceId, stopped.environmentInstanceId);
+  assert.notEqual(reopened.environmentLeaseId, oldLeaseId);
+  assert.equal(s.pool.getLease(oldLeaseId)?.state, 'released');
+  assert.equal(s.pool.getLease(reopened.environmentLeaseId!)?.state, 'active');
+  assert.deepEqual(reopened.controlHistory?.slice(0, historyBefore?.length), historyBefore);
+  assert.deepEqual(reopened.forcedRelease, releaseFacts);
+  assert.equal(reopened.controlHistory?.at(-1)?.action, 'reopened');
+  assert.deepEqual((await s.tasks.getWithRuns(taskId))?.runs.map((link) => link.runId), ['incident-run']);
+  assert.deepEqual(preparedTaskIds, [taskId, taskId], 'reopen creates a fresh Task context for the same Task');
+  assert.deepEqual(preparedEnvironmentIds, ['local-1', 'local-1'], 'both contexts use the same original Environment instance');
+  assert.equal(recycled, 0, 'reopen leaves the Project workspace and prior Task history intact');
+  assert.equal(s.submittedRuns.length, 0, 'reopen waits for a later deliberate advance');
+
+  const advance = await s.tasks.advanceWithAttribution(taskId, {
+    agentId: 'pi', actor: human, reason: 'Continue the incident Task after review.', contentVersion: 1,
+  });
+  assert.equal(advance.task.activeRunId, advance.runId);
+  assert.deepEqual((await s.tasks.getWithRuns(taskId))?.runs.map((link) => link.runId), ['incident-run', advance.runId]);
+});
+
+  test('reopening refuses an original Environment held by another Task without changing terminal history', async () => {
+  const s = await scenario();
+  const ended = await s.controls.discardForHuman(s.taskId, { reason: 'End before testing Environment contention.' });
+  const oldLeaseId = ended.environmentLeaseId!;
+  const competing = s.pool.reserveTaskLease({
+    instanceId: ended.environmentInstanceId!, capability: 'agent-run', holderId: 'other-task', taskId: 'other-task', ttlMs: 60_000,
+  });
+  assert.ok(competing.ok);
+  s.pool.adoptLease(competing.lease);
+
+  await assert.rejects(s.controls.reopenForHuman(s.taskId, { reason: 'Try to reopen while the Environment is held.' }),
+    /environment local-1 is unavailable/);
+
+  const unchanged = (await s.tasks.get(s.taskId))!;
+  assert.equal(unchanged.status, 'cancelled');
+  assert.equal(unchanged.environmentLifecycleState, 'discarded');
+  assert.equal(unchanged.environmentLeaseId, oldLeaseId);
+  assert.equal(unchanged.controlHistory?.some((event) => event.action === 'reopened'), false);
+  assert.equal(s.pool.getLease(oldLeaseId)?.state, 'released');
+  assert.equal(s.pool.getLease(competing.lease.id)?.state, 'active');
+});
+
+test('reopen cycles append separate control-history events', async () => {
+  const s = await scenario();
+  await s.controls.discardForHuman(s.taskId, { reason: 'First end.' });
+  await s.controls.reopenForHuman(s.taskId, { reason: 'First reopen.' });
+  await s.controls.discardForHuman(s.taskId, { reason: 'Second end.' });
+  const second = await s.controls.reopenForHuman(s.taskId, { reason: 'Second reopen.' });
+  const reopenEvents = second.controlHistory?.filter((event) => event.action === 'reopened') ?? [];
+  assert.deepEqual(reopenEvents.map((event) => event.reason), ['First reopen.', 'Second reopen.']);
+  assert.equal(reopenEvents.length, 2, 'each reopen cycle appends a separate event');
 });

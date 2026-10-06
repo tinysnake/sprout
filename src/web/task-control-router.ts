@@ -27,7 +27,7 @@ export function createTaskControlRouter(options: {
       if (context.method !== 'POST' || context.segments.length !== 4
         || context.segments[0] !== 'api' || context.segments[1] !== 'tasks') return false;
       const action = context.segments[3] ?? '';
-      const supported = new Set(['content', 'pause', 'interrupt', 'resume', 'cancel-pause', 'subordinate-stop', 'blockers', 'clear-blocker', 'completion-claims', 'validation', 'end', 'discard', 'recovery']);
+      const supported = new Set(['content', 'pause', 'interrupt', 'resume', 'cancel-pause', 'subordinate-stop', 'blockers', 'clear-blocker', 'completion-claims', 'validation', 'end', 'discard', 'reopen', 'recovery']);
       if (!supported.has(action)) return false;
       if (!context.operatorSessionId) return json(context, 401, { error: 'authentication required' });
       try {
@@ -56,6 +56,7 @@ export function createTaskControlRouter(options: {
           case 'clear-blocker':
           case 'end':
           case 'discard':
+          case 'reopen':
             if (!onlyKeys(body, ['reason']) || typeof body.reason !== 'string') {
               return json(context, 400, { code: 'invalid-command', error: 'reason is required and actor fields are not accepted' });
             }
@@ -65,6 +66,7 @@ export function createTaskControlRouter(options: {
             else if (action === 'cancel-pause') task = await controls.cancelPauseForHuman(taskId, { reason: body.reason });
             else if (action === 'clear-blocker') task = await controls.clearBlockerForHuman(taskId, { reason: body.reason });
             else if (action === 'end') task = await (options.end ?? controls.endForHuman.bind(controls))(taskId, { reason: body.reason });
+            else if (action === 'reopen') task = await controls.reopenForHuman(taskId, { reason: body.reason });
             else task = await controls.discardForHuman(taskId, { reason: body.reason });
             break;
           case 'blockers':

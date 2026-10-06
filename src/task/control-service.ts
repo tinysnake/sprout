@@ -173,6 +173,11 @@ export class TaskControlService {
     return this.#lifecycle.discardForHuman(taskId, actor, commandReason(input?.reason));
   }
 
+  async reopenForHuman(taskId: string, input: { readonly reason: string }): Promise<Task> {
+    const actor = await this.#humanForTask(taskId);
+    return this.#lifecycle.reopen(taskId, actor, commandReason(input?.reason));
+  }
+
   async recoverForHuman(taskId: string, input: { readonly action: TaskRecoveryAction; readonly reason: string }): Promise<Task> {
     const actor = await this.#humanForTask(taskId);
     const current = await this.#task(taskId);

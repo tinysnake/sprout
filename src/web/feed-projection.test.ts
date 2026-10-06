@@ -30,7 +30,7 @@ import { sanitizeProjectId } from '../project/authority-model.ts';
 import type { EnvironmentEnrollment } from '../environment/enrollment.ts';
 import type { EnvironmentRecoveryRecord } from '../environment/recovery.ts';
 import type { AgentRun } from '../run/model.ts';
-import type { Task } from '../task/model.ts';
+import type { Task, TaskControlEvent } from '../task/model.ts';
 import type { TaskProposal } from '../task/proposal-model.ts';
 
 const NOW = 1_000;
@@ -680,6 +680,25 @@ test('items whose source has no owning Project are omitted rather than deep-link
   const dangling = snapshot.attention.find((item) => item.id === 'lease-recovery:rec-dangling');
   assert.deepEqual(dangling?.scopes, ['feed:infra'], 'a recovery record whose Task is gone stays infrastructure-only');
   assert.equal(dangling?.target?.surface, 'environments');
+});
+
+test('Task reopen control-history events produce separate task-centric Feed beats with actor and reason', async () => {
+  const history: TaskControlEvent[] = [
+    { action: 'reopened', actor: { memberId: 'operator', memberKind: 'human' }, at: 900, reason: 'Recovery evidence was reviewed.', fromStatus: 'stopped', previousCompletedAt: 800 },
+    { action: 'reopened', actor: { memberId: 'operator', memberKind: 'human' }, at: 950, reason: 'The remaining work is still needed.', fromStatus: 'cancelled' },
+  ];
+  const snapshot = await projectFeed(sources({
+    projects: [{ id: 'proj-reopen', displayName: 'Reopen Project' }],
+    tasks: [makeTask({ id: 'task-reopen', projectId: 'proj-reopen', status: 'in-progress', controlHistory: history })],
+  }));
+  const beats = snapshot.activity.filter((item) => item.kind === 'task-reopened').sort((left, right) => left.at - right.at);
+  assert.equal(beats.length, 2, 'each reopen cycle remains a distinct activity item');
+  assert.notEqual(beats[0]?.id, beats[1]?.id);
+  assert.equal(beats[0]?.summary, 'Task reopened by Human operator: Recovery evidence was reviewed.');
+  assert.equal(beats[1]?.summary, 'Task reopened by Human operator: The remaining work is still needed.');
+  assert.deepEqual(beats[0]?.scopes, ['proj-reopen']);
+  assert.equal(beats[0]?.target?.surface, 'project-task-detail');
+  assert.equal(beats[0]?.target?.taskId, 'task-reopen');
 });
 
 test('isFeedDeepLink accepts canonical targets and rejects malformed identities', () => {

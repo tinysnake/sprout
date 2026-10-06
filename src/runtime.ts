@@ -442,6 +442,7 @@ function taskGroupSyncInput(task: Task): TaskGroupSyncInput | undefined {
       ? contentRevision.contentVersion
       : admission.contentVersion,
     status: task.status,
+    allowThaw: task.controlHistory?.at(-1)?.action === 'reopened',
     ...(contentRevision?.action === 'content-revised' ? {
       versionActor: { memberId: contentRevision.actor.memberId, kind: contentRevision.actor.memberKind },
       reason: contentRevision.reason,

@@ -12,6 +12,7 @@ interface TaskGroupSyncInput {
   readonly lead: { readonly memberId: string; readonly kind: 'human' | 'agent' };
   readonly contentVersion: number;
   readonly status: 'in-progress' | 'done' | 'failed' | 'stopped' | 'cancelled';
+  readonly allowThaw?: boolean;
 }
 
 function fixture() {
@@ -154,6 +155,30 @@ test('Force Release stops a terminal Task group while preserving its readable sc
   await assert.rejects(sync(f.scopes, task('task-stop-group', {
     title: 'Must not revise frozen scope', contentVersion: 2,
   })), /frozen/i);
+});
+
+test('reopening a Task group lifts the freeze on the same scope and appends changed content', async () => {
+  const f = fixture();
+  const original = await sync(f.scopes, task('task-reopen'));
+  await sync(f.scopes, task('task-reopen', { status: 'stopped' }));
+  assert.deepEqual(await f.scopes.scopeState(original.id, 'operator'), {
+    scopeId: original.id, writable: false, reason: 'task-group-frozen',
+  });
+
+  const reopened = await sync(f.scopes, task('task-reopen', {
+    title: 'Reopened title', goal: 'Current reopened goal', constraints: ['Current reopened rule'],
+    contentVersion: 2, status: 'in-progress', allowThaw: true,
+  }));
+  assert.equal(reopened.id, original.id, 'reopen reuses the Task-bound scope identity');
+  assert.equal(reopened.taskId, original.taskId);
+  assert.equal(reopened.frozenAt, undefined);
+  assert.equal(reopened.terminalTaskStatus, undefined);
+  assert.equal(reopened.content.currentVersion, 2);
+  assert.equal(reopened.content.versions.length, 2, 'content synchronization remains append-only');
+  assert.equal(reopened.content.versions[1]?.goal, 'Current reopened goal');
+  assert.deepEqual(await f.scopes.scopeState(original.id, 'operator'), {
+    scopeId: original.id, writable: true,
+  });
 });
 
 test('two task-groups have distinct immutable scope identities', async () => {

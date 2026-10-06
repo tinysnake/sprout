@@ -217,8 +217,12 @@ The Human-authorized act that normally has the environment worker recycle the Ta
 _Avoid_: Stop, cancel
 
 **Task stop**:
-The Task-level terminal outcome recorded by emergency Force Release: execution is terminated because the Environment must be released while intent to do the work remains alive. The permanent forced-release facts preserve the actor, reason, time, and unresolved cleanup facts. This is distinct from an Agent run's `stopped` status and from deliberate Task cancellation.
+The Task-level terminal outcome recorded by emergency Force Release: execution is terminated because the Environment must be released while intent to do the work remains alive. The permanent forced-release facts preserve the actor, reason, time, and unresolved cleanup facts. A Human may later reopen the Task if its original Environment can be safely leased again; reopening does not remove those permanent facts. This is distinct from an Agent run's `stopped` status and from deliberate Task cancellation.
 _Avoid_: Agent run stop, cancellation, normal Task discard
+
+**Task reopen**:
+The Human-authorized return of a terminal Task to deliberate work on its previously bound Environment, preserving its history and Project workspace. It reacquires a Task lease and prepares a fresh Task context but does not start an Agent run until a later explicit advance.
+_Avoid_: Retry an old run, revise a rejected Task proposal
 
 **Task discard**:
 The Human decision to abandon a begun Task, including during recovery, and authorize normal Task end toward cancellation. The Task becomes cancelled only after Task end recycles its Task context and releases its lease; the Project workspace and its work remain preserved. Force Release is a separate emergency decision and ends the Task as stopped while intent remains alive.

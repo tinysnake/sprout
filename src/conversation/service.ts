@@ -192,6 +192,8 @@ export interface TaskGroupSyncInput {
   readonly lead: ConversationActor;
   readonly contentVersion: number;
   readonly status: string;
+  /** A durable Human reopen event is required to thaw a terminal Task group. */
+  readonly allowThaw?: boolean;
   readonly versionActor?: ConversationActor;
   readonly reason?: string;
 }
@@ -595,28 +597,32 @@ export class ConversationScopeService {
       }
       const group = current as TaskGroupScope;
       const latest = currentTaskGroupContent(group);
+      let next = group;
       if (group.frozenAt !== undefined) {
-        if (terminalStatus === undefined) {
+        if (terminalStatus !== undefined) {
+          if (group.terminalTaskStatus !== terminalStatus || latest.taskContentVersion !== input.contentVersion
+            || latest.taskTitle !== taskTitle || latest.goal !== goal || JSON.stringify(latest.rules) !== JSON.stringify(rules)) {
+            throw new ConversationScopeError('task-group-binding-conflict', `frozen Task group ${group.id} cannot be rebound or revised`);
+          }
+          saved = group;
+          return group;
+        }
+        if (input.allowThaw !== true) {
           throw new ConversationScopeError('task-group-frozen', `Task group ${group.id} is frozen and its content cannot change`);
         }
-        if (group.terminalTaskStatus !== terminalStatus || latest.taskContentVersion !== input.contentVersion
-          || latest.taskTitle !== taskTitle || latest.goal !== goal || JSON.stringify(latest.rules) !== JSON.stringify(rules)) {
-          throw new ConversationScopeError('task-group-binding-conflict', `frozen Task group ${group.id} cannot be rebound or revised`);
-        }
-        saved = group;
-        return group;
+        const { frozenAt: _frozenAt, terminalTaskStatus: _terminalTaskStatus, ...unfrozen } = group;
+        next = { ...unfrozen, updatedAt: now };
       }
       if (input.contentVersion < latest.taskContentVersion) {
         throw new ConversationScopeError('task-group-content-conflict', `Task group ${group.id} cannot move to an older Task content version`);
       }
-      let next = group;
       if (input.contentVersion === latest.taskContentVersion) {
         if (latest.taskTitle !== taskTitle || latest.goal !== goal || JSON.stringify(latest.rules) !== JSON.stringify(rules)) {
           throw new ConversationScopeError('task-group-content-conflict', `Task content version ${input.contentVersion} changed after it was bound`);
         }
       } else {
         next = {
-          ...group,
+          ...next,
           content: {
             currentVersion: group.content.currentVersion + 1,
             versions: [...group.content.versions, {

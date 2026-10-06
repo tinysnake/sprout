@@ -184,16 +184,20 @@ release before applying the override. If they cannot finish:
   while the intent to do the work remains alive. It performs an emergency Task
   end, releases the Task lease, and records the Task as `stopped` with permanent
   forced-release facts, unresolved facts, and any unverified context cleanup.
-  It does not record cancellation intent. The Task cannot advance or move to
-  another Environment through ordinary lifecycle controls. ADR-0006 defines
-  Task-level `stopped` separately from the existing stopped outcome of one
-  Agent run.
+  It does not record cancellation intent. While terminal, the Task cannot advance
+  or move to another Environment through ordinary lifecycle controls. Under
+  ADR-0006's #216 amendment, a Human may later reopen it only on its original
+  Environment, after acquiring a fresh lease and preparing a fresh Task context;
+  the permanent forced-release facts remain intact. ADR-0006 defines Task-level
+  `stopped` separately from the existing stopped outcome of one Agent run.
 
 The Task status does not imply the Environment Worker proved the engine stopped.
 After Force Release the Environment may be assigned again without Worker proof
-or fresh enrollment because the Human has explicitly accepted that risk. The
-Environment, Task, lease, and run histories continue to show the override even
-after the Environment becomes Green.
+or fresh enrollment because the Human has explicitly accepted that risk. A
+reopened Task can reacquire its original Environment only when it is available;
+reopen never takes a lease from another holder. The Environment, Task, lease,
+and run histories continue to show the override even after the Environment
+becomes Green.
 
 This is a narrow exception to ADR-0005 and ADR-0006's normal Task-end safety
 rule. ADR-0006 records the owner's ruling that emergency Force Release yields
