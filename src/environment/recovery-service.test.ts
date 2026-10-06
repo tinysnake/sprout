@@ -207,7 +207,14 @@ test('overdue blocked lease exposes durable recovery and Human Force Release wit
     acknowledgedRisks: true, typedConfirmation: FORCE_RELEASE_CONFIRMATION, reason: 'Human releases overdue blocked work',
   });
   assert.equal(pool.getLease(leaseId)?.state, 'released');
-  assert.equal((await built.store.get('task-1'))?.status, 'cancelled');
+  const stoppedTask = await built.store.get('task-1');
+  assert.equal(stoppedTask?.status, 'stopped');
+  assert.equal(stoppedTask?.endDisposition, undefined);
+  assert.equal(stoppedTask?.blockerReason, 'Task stopped by the Human operator using Force Release; unresolved facts recorded.');
+  assert.equal(stoppedTask?.forcedRelease?.actor, 'operator');
+  assert.equal(stoppedTask?.forcedRelease?.reason, 'Human releases overdue blocked work');
+  assert.ok(stoppedTask?.forcedRelease?.unresolvedFacts.length);
+  assert.ok(stoppedTask?.forcedRelease?.at);
   assert.equal((await built.recovery.forceReleaseHistory('mac-1')).length, 1);
   assert.equal((await pool.acquireLeaseRevalidated({ instanceId: 'mac-1', capability: 'agent-run', holderId: 'other', ttlMs: 1000 })).ok, true);
 });
