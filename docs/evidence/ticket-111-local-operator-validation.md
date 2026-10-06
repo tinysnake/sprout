@@ -429,6 +429,10 @@ POST /api/tasks/<force-task>/recovery {action:discard,reason:<operator-reason>} 
   "Ordinary recovery requires an acknowledged terminal outcome, engine fence, and safe held context."
   SQLite: lease remains recovering; Task remains in recovery
 
+Historical Ticket #111 Force Release evidence below records the behavior observed
+before #215. Its `cancelled` Task outcome is retained as a historical observation;
+current Force Release records Task `stopped` with intent preserved.
+
 POST /api/environments/recovery/<force-lease>/force-release -> 201
   acknowledgedRisks=true; typedConfirmation="FORCE RELEASE"; reason=<operator-reason>
   SQLite: recovery phase=resolved; decision=force-released

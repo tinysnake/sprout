@@ -75,8 +75,9 @@ export interface RecoveryHolderActions {
    */
   discardTask?(taskId: string): Promise<void>;
   /**
-   * Emergency Task end for Force Release: abandon the Task, record the permanent
-   * forced-release disposition, and preserve the Project workspace.
+   * Emergency Task end for Force Release: stop Task execution while preserving
+   * work intent, record the permanent forced-release facts, and preserve the
+   * Project workspace.
    */
   forceReleaseTask?(input: {
     readonly taskId: string;

@@ -11,7 +11,7 @@ interface TaskGroupSyncInput {
   readonly constraints: readonly string[];
   readonly lead: { readonly memberId: string; readonly kind: 'human' | 'agent' };
   readonly contentVersion: number;
-  readonly status: 'in-progress' | 'done' | 'failed' | 'cancelled';
+  readonly status: 'in-progress' | 'done' | 'failed' | 'stopped' | 'cancelled';
 }
 
 function fixture() {
@@ -44,7 +44,7 @@ async function sync(scopes: ConversationScopeService, input: TaskGroupSyncInput)
       readonly kind: string;
       readonly taskId: string;
       readonly frozenAt?: number;
-      readonly terminalTaskStatus?: 'done' | 'failed' | 'cancelled';
+      readonly terminalTaskStatus?: 'done' | 'failed' | 'stopped' | 'cancelled';
       readonly content: { readonly currentVersion: number; readonly versions: readonly {
         readonly taskContentVersion: number;
         readonly taskTitle: string;
@@ -138,6 +138,20 @@ test('terminal task freezes the task-group while preserving its readable scope r
   });
   assert.equal((await f.scopes.listScopes('project-alpha')).some((entry) => entry.id === scope.id), true);
   await assert.rejects(sync(f.scopes, task('task-freeze', {
+    title: 'Must not revise frozen scope', contentVersion: 2,
+  })), /frozen/i);
+});
+
+test('Force Release stops a terminal Task group while preserving its readable scope record', async () => {
+  const f = fixture();
+  const scope = await sync(f.scopes, task('task-stop-group'));
+  const stopped = await sync(f.scopes, task('task-stop-group', { status: 'stopped' }));
+  assert.equal(stopped.terminalTaskStatus, 'stopped');
+  assert.equal(stopped.frozenAt, 100);
+  assert.deepEqual(await f.scopes.scopeState(scope.id, 'operator'), {
+    scopeId: scope.id, writable: false, reason: 'task-group-frozen',
+  });
+  await assert.rejects(sync(f.scopes, task('task-stop-group', {
     title: 'Must not revise frozen scope', contentVersion: 2,
   })), /frozen/i);
 });

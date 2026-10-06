@@ -213,11 +213,15 @@ The Human decision to accept a Task completion claim or require correction. Acce
 _Avoid_: Agent self-approval, Agent run completion
 
 **Task end**:
-The Human-authorized act that normally has the environment worker recycle the Task context directory and then releases the Task lease. Accepted work becomes completed and abandoned work becomes cancelled only after this succeeds. Only Task end ends a Task's hold on its Environment instance; a failed, stopped, or interrupted agent run does not. Force Release is the explicit emergency Task-end exception when the Human accepts that proof or cleanup cannot be completed.
+The Human-authorized act that normally has the environment worker recycle the Task context directory and then releases the Task lease. Accepted work becomes completed and abandoned work becomes cancelled only after this succeeds. Only Task end ends a Task's hold on its Environment instance; a failed, stopped, or interrupted agent run does not. Force Release is the explicit emergency Task-end exception when the Human accepts that proof or cleanup cannot be completed, and it records a stopped Task while preserving the live intent to do the work.
 _Avoid_: Stop, cancel
 
+**Task stop**:
+The Task-level terminal outcome recorded by emergency Force Release: execution is terminated because the Environment must be released while intent to do the work remains alive. The permanent forced-release facts preserve the actor, reason, time, and unresolved cleanup facts. This is distinct from an Agent run's `stopped` status and from deliberate Task cancellation.
+_Avoid_: Agent run stop, cancellation, normal Task discard
+
 **Task discard**:
-The Human decision to abandon a begun Task, including during recovery, and authorize normal Task end toward cancellation. The Task becomes cancelled only after Task end recycles its Task context and releases its lease; the Project workspace and its work remain preserved. Force Release is a separate emergency decision rather than a successful normal discard.
+The Human decision to abandon a begun Task, including during recovery, and authorize normal Task end toward cancellation. The Task becomes cancelled only after Task end recycles its Task context and releases its lease; the Project workspace and its work remain preserved. Force Release is a separate emergency decision and ends the Task as stopped while intent remains alive.
 _Avoid_: Delete Project workspace, automatic cleanup
 
 **Task lease**:
@@ -273,7 +277,7 @@ The state an environment instance's lease enters after a timeout, holder loss, o
 _Avoid_: Cleanup, lock timeout
 
 **Force Release**:
-The Human-only emergency recovery decision that makes an Environment instance reassignable despite unresolved proof or cleanup after ordinary recovery has been attempted. It permanently records the acknowledged risks and unresolved facts; for a Task-held lease it abandons and cancels the Task through an emergency Task end without deleting the Project workspace.
+The Human-only emergency recovery decision that makes an Environment instance reassignable despite unresolved proof or cleanup after ordinary recovery has been attempted. It permanently records the acknowledged risks and unresolved facts; for a Task-held lease it ends the Task as stopped while preserving work intent and without deleting the Project workspace.
 _Avoid_: Automatic expiry, normal release, lease steal
 
 **Operational event**:

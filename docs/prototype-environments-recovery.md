@@ -168,7 +168,7 @@ To prevent early self-hosted recovery defects from locking an operator out of an
    - **Mandatory Operator Reason**: The operator must provide a written reason (e.g. *"Host machine kernel panic; worker cannot reconnect"*).
    - **Risk Acknowledgement & Typed Confirmation**: The operator must check the risk acknowledgement box **and** type `FORCE RELEASE` in full uppercase before the authorize button is enabled.
 4. **Outcome & Workspace Guarantee**:
-   - The affected Task is cancelled with a permanent `forced release` disposition recording the actor, timestamp, reason, and unresolved facts.
+   - The affected Task is stopped with permanent forced-release facts recording the actor, timestamp, reason, and unresolved facts. Its intent remains alive; it is not recorded as cancelled.
    - The Project workspace on host is **preserved**. Unrecycled scratch context is noted as leftover data.
    - The Environment is unlocked to `clear` / Green (`Force Released by Operator...`) and becomes reassignable.
    - A durable forced release audit record is created and displayed in history.

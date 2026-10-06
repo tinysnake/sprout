@@ -372,7 +372,9 @@ export function taskLifecycleSentence(task: Task): string {
   const lease = usable(task.environmentLeaseId)
     ? task.environmentLifecycleState === 'recovery'
       ? 'Lease recovering'
-      : 'Lease held'
+      : task.environmentLifecycleState === 'ended' || task.environmentLifecycleState === 'discarded'
+        ? 'Lease released'
+        : 'Lease held'
     : 'No lease';
   return `${phase} · ${run} · ${lease}`;
 }
@@ -393,11 +395,15 @@ function lifecyclePhase(task: Task): string {
     case 'ending':
       return 'Task ending';
     case 'ended':
-      return task.endDisposition === 'cancelled' ? 'Task cancelled' : 'Task completed';
+      if (task.status === 'stopped') return 'Task stopped';
+      if (task.status === 'cancelled' || task.endDisposition === 'cancelled') return 'Task cancelled';
+      if (task.status === 'failed') return 'Task failed';
+      return 'Task completed';
     case 'recovery':
       return 'Task recovery';
     case 'discarded':
-      return 'Task cancelled';
+      if (task.status === 'stopped') return 'Task stopped';
+      return task.status === 'cancelled' ? 'Task cancelled' : 'Task discarded';
     default:
       switch (task.status) {
         case 'in-progress':
@@ -406,9 +412,12 @@ function lifecyclePhase(task: Task): string {
           return 'Task blocked';
         case 'done':
           return 'Task completed';
+        case 'stopped':
+          return 'Task stopped';
         case 'cancelled':
-        case 'failed':
           return 'Task cancelled';
+        case 'failed':
+          return 'Task failed';
         default:
           return `Task ${task.status}`;
       }
