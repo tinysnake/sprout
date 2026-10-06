@@ -471,6 +471,86 @@ export class TaskEnvironmentLifecycle {
     return this.#recycleThenRelease(ending);
   }
 
+  /** Reopen a terminal Task on its original Environment without starting a run. */
+  async reopen(taskId: string, actor: TaskActor, reason: string): Promise<Task> {
+    const task = await this.#require(taskId);
+    this.#assertHuman(task, actor);
+    if (!isTerminalTaskStatus(task.status)) throw new Error(`Task ${taskId} is not terminal and cannot be reopened`);
+    if (task.activeRunId !== undefined || task.environmentLifecycleState === 'recovery') {
+      throw new Error(`Task ${taskId} has active or unresolved Environment work and cannot be reopened`);
+    }
+    if (!['ended', 'discarded'].includes(task.environmentLifecycleState ?? '') || !task.environmentInstanceId) {
+      throw new Error(`Task ${taskId} has no safely reusable Environment binding`);
+    }
+    const contextAgentId = task.admission?.contextAgentId ?? task.assignedAgentId
+      ?? (task.admission?.lead.memberKind === 'agent' ? task.admission.lead.memberId : undefined);
+    if (!contextAgentId) throw new Error(`Task ${taskId} has no Environment context Agent`);
+    const contextAgent = await this.#resolveAgent(contextAgentId);
+    if (!contextAgent || !await this.#agentEligible(contextAgentId, task.projectId, task.environmentInstanceId)) {
+      throw new Error(`Task ${taskId} cannot prepare its original Environment with a current Project Agent`);
+    }
+    await this.#pool.revalidateTaskLease(task.environmentInstanceId);
+    const acquired = this.#pool.reserveTaskLease({
+      instanceId: task.environmentInstanceId,
+      capability: contextAgent.capability,
+      holderId: task.id,
+      taskId: task.id,
+      ttlMs: this.#leaseTtlMs,
+    });
+    if (!acquired.ok) throw new TaskEnvironmentLeaseRefusal(task.environmentInstanceId, acquired, true);
+
+    const at = this.#clock.now();
+    const { completedAt, endDisposition, recoveryState, activeRunId, pendingCompletionClaimId, blockerReason, ...rest } = task;
+    const beginning: Task = {
+      ...rest,
+      status: task.blocker !== undefined ? 'blocked' : 'in-progress',
+      ...(task.blocker !== undefined ? { blockerReason: task.blocker.reason } : {}),
+      environmentLeaseId: acquired.lease.id,
+      environmentLifecycleState: 'beginning',
+      controlHistory: [...(task.controlHistory ?? []), {
+        action: 'reopened', actor, at, reason, fromStatus: task.status,
+        ...(completedAt !== undefined ? { previousCompletedAt: completedAt } : {}),
+        ...(endDisposition !== undefined ? { previousEndDisposition: endDisposition } : {}),
+      }],
+      updatedAt: at,
+    };
+    let committed = false;
+    try {
+      await this.#withTaskGroupLock(taskId, async () => {
+        await this.#store.saveBeginningWithLease(beginning, acquired.lease);
+        committed = true;
+        this.#pool.adoptLease(acquired.lease);
+        await this.ensureTaskGroup(beginning);
+      });
+    } catch (error) {
+      if (!committed) {
+        this.#pool.abandonReservation(acquired.lease.id);
+        throw error;
+      }
+      await this.#toRecovery(beginning, 'beginning');
+      throw error;
+    }
+
+    try {
+      await this.#prepare(beginning, contextAgentId);
+    } catch (error) {
+      await this.#toRecovery(beginning, 'beginning');
+      throw error;
+    }
+    const ready: Task = {
+      ...beginning,
+      environmentLifecycleState: task.blocker !== undefined ? 'blocked' : 'idle',
+      updatedAt: this.#clock.now(),
+    };
+    try {
+      await this.#store.save(ready);
+    } catch (error) {
+      await this.#toRecovery(beginning, 'beginning');
+      throw error;
+    }
+    return ready;
+  }
+
   async recover(taskId: string, action: TaskRecoveryAction, actor?: TaskActor): Promise<Task> {
     const task = await this.#require(taskId);
     if (task.admission !== undefined) this.#assertHuman(task, actor);
