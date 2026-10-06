@@ -4,7 +4,8 @@ import { after, test } from 'node:test';
 import { JSDOM } from 'jsdom';
 import type { MessageView, ProjectEventView } from '../../../../../src/web/views.ts';
 import type { ActiveChatRun, ChatService } from '../types.ts';
-import type { ConversationScopeView } from '../../../adapters/conversation-api.ts';
+import type { ConversationScopeView, TaskGroupScopeView } from '../../../adapters/conversation-api.ts';
+import { TASK_STATUSES, isTerminalTaskStatus } from '../../../../../src/task/model.ts';
 
 // Vue renders the real ChatView. JSDOM supplies events; only layout measurements,
 // animation frames and ResizeObserver deliveries are simulated (JSDOM has no layout).
@@ -101,7 +102,27 @@ function message(id: string, scopeId = 'channel', authorKind: 'human' | 'agent' 
 function event(id: string, createdAt: number, originScopeIds?: readonly string[]): ProjectEventView {
   return { id, projectId: 'project', kind: 'agent-run-failure', summary: id, producerId: 'agent', producerKind: 'agent', disposition: 'recorded', responsibleAgentIds: [], ...(originScopeIds !== undefined ? { originScopeIds } : {}), createdAt };
 }
-async function page(query = '', options: { channelMessages?: number; directMessages?: number; events?: readonly ProjectEventView[]; taskGroup?: boolean; shell?: boolean; height?: number; automaticEvents?: boolean } = {}) {
+const terminalTaskStatuses = TASK_STATUSES.filter(
+  (status): status is NonNullable<TaskGroupScopeView['terminalTaskStatus']> => isTerminalTaskStatus(status),
+);
+function taskGroup(id: string, taskTitle: string, terminalTaskStatus?: TaskGroupScopeView['terminalTaskStatus']): TaskGroupScopeView {
+  return {
+    id, projectId: 'project', kind: 'task-group', taskId: `task-${id}`, taskTitle,
+    status: terminalTaskStatus === undefined ? 'active' : 'frozen',
+    ...(terminalTaskStatus === undefined ? {} : { terminalTaskStatus, frozenAt: 2 }),
+    createdAt: 1, updatedAt: 1,
+    content: { currentVersion: 1, versions: [{ version: 1, taskContentVersion: 1, at: 1, actorMemberId: 'operator', reason: 'Task admitted.', taskTitle, goal: 'Verify migrations.', rules: ['Keep history isolated.'] }] },
+  };
+}
+function workingGroup(): ConversationScopeView {
+  return {
+    id: 'working-group', projectId: 'project', kind: 'working-group', creatorId: 'operator', status: 'active',
+    createdAt: 1, updatedAt: 1,
+    content: { currentVersion: 1, versions: [{ version: 1, at: 1, actorMemberId: 'operator', reason: 'Created for review.', displayName: 'Review group', goal: 'Review work.', rules: [] }] },
+    memberships: [], lifecycle: [],
+  };
+}
+async function page(query = '', options: { channelMessages?: number; directMessages?: number; events?: readonly ProjectEventView[]; taskGroup?: boolean; taskGroups?: readonly TaskGroupScopeView[]; workingGroup?: boolean; taskGroupMessages?: boolean; shell?: boolean; height?: number; automaticEvents?: boolean } = {}) {
   frames.clear(); extraHeight = 0; scrollWrites = 0;
   viewportHeight = options.height ?? 200;
   automaticScrollEvents = options.automaticEvents ?? false;
@@ -113,17 +134,16 @@ async function page(query = '', options: { channelMessages?: number; directMessa
   let releaseRefresh: (() => void) | undefined;
   const eventOriginRequests: string[] = [];
   dom.window.document.body.innerHTML = '<div id="app"></div>';
-  const scopes: ConversationScopeView[] = [
+  let scopes: ConversationScopeView[] = [
     { id: 'channel', projectId: 'project', kind: 'project', createdAt: 1, updatedAt: 1 },
     { id: 'direct', projectId: 'project', kind: 'direct', participants: ['operator', 'agent'], createdAt: 1, updatedAt: 1 },
   ];
-  if (options.taskGroup) scopes.push({
-    id: 'task-group-42', projectId: 'project', kind: 'task-group', taskId: 'task-42',
-    taskTitle: 'Verify migration rollback coverage', status: 'active', createdAt: 1, updatedAt: 1,
-    content: { currentVersion: 1, versions: [{ version: 1, taskContentVersion: 1, at: 1, actorMemberId: 'operator', reason: 'Task admitted.', taskTitle: 'Verify migration rollback coverage', goal: 'Verify migrations.', rules: ['Keep history isolated.'] }] },
-  });
+  if (options.taskGroup) scopes.push(taskGroup('task-group-42', 'Verify migration rollback coverage'));
+  scopes.push(...(options.taskGroups ?? []));
+  if (options.workingGroup) scopes.push(workingGroup());
   let messages = Array.from({ length: options.channelMessages ?? 8 }, (_, i) => message(`message-${i + 1}`));
   messages.push(...Array.from({ length: options.directMessages ?? 5 }, (_, i) => message(`direct-${i + 1}`, 'direct')));
+  if (options.taskGroupMessages) messages.push(...(options.taskGroups ?? []).map((scope) => message(`history-${scope.id}`, scope.id, 'agent')));
   let events: ProjectEventView[] = [...(options.events ?? [])];
   let activeRuns: readonly ActiveChatRun[] = [];
   let runStatusListener: Parameters<ChatService['subscribeRunStatuses']>[0] | undefined;
@@ -159,7 +179,11 @@ async function page(query = '', options: { channelMessages?: number; directMessa
     },
     listRoutingBatches: async () => ({ batches: [], windows: [] }),
     listActiveRuns: async () => activeRuns,
-    inspectScope: async (id: string) => ({ scope: scopes.find((scope) => scope.id === id)!, state: { scopeId: id, writable: true }, context: { scopeId: id, projectId: 'project', kind: 'project', project: { contentVersion: 1, goal: '', rules: [] } } }),
+    inspectScope: async (id: string) => {
+      const scope = scopes.find((item) => item.id === id)!;
+      const frozenTaskGroup = scope.kind === 'task-group' && scope.status === 'frozen';
+      return { scope, state: { scopeId: id, writable: !frozenTaskGroup, ...(frozenTaskGroup ? { reason: 'task-group-frozen' } : {}) }, context: { scopeId: id, projectId: 'project', kind: 'project', project: { contentVersion: 1, goal: '', rules: [] } } };
+    },
     subscribeRunStatuses: (listener) => { runStatusListener = listener; return () => { runStatusListener = undefined; }; },
     postMessage: async (input: { scopeId: string; body: string }) => {
       const sent = message('message-20', input.scopeId, 'human'); messages.push(sent);
@@ -196,6 +220,11 @@ async function page(query = '', options: { channelMessages?: number; directMessa
       activeRuns = status === 'completed' ? [] : [{ id: 'chat-run', agentId: 'agent', status }];
       runStatusListener?.({ id: 'chat-run', status });
       await flush();
+    },
+    async endTaskGroup(id: string, status: NonNullable<TaskGroupScopeView['terminalTaskStatus']>) {
+      scopes = scopes.map((scope) => scope.kind === 'task-group' && scope.id === id ? taskGroup(id, scope.taskTitle, status) : scope);
+      runStatusListener?.({ id: 'chat-run', status: 'completed' });
+      await flush(); await paint();
     },
     button: () => dom.window.document.querySelector<HTMLButtonElement>('.chat-jump-latest'),
     scroll(top: number) { list.dispatchEvent(new dom.window.WheelEvent('wheel', { deltaY: -100 })); positions.set(list, top); list.dispatchEvent(new dom.window.Event('scroll')); },
@@ -408,6 +437,84 @@ test('landscape touch devices above the desktop breakpoint still follow keyboard
     vv.geometry.height = 300; vv.change(); await paint();
     assert.equal(dom.window.document.querySelector<HTMLElement>('.sprout-app-shell')!.style.height, '300px');
   } finally { p.close(); vv.restore(); }
+});
+
+test('terminal task groups fold by default while active tasks and other scope kinds stay in the main list', async () => {
+  const active = taskGroup('active-task', 'Keep the release moving');
+  const closed = terminalTaskStatuses.map((status) => taskGroup(`closed-${status}`, `Closed ${status}`, status));
+  const p = await page('', { taskGroups: [active, ...closed], workingGroup: true });
+  const doc = dom.window.document;
+  try {
+    const closedToggle = doc.querySelector<HTMLButtonElement>('.chat-closed-tasks-toggle');
+    assert.equal(closedToggle?.textContent?.trim(), `Closed tasks (${terminalTaskStatuses.length})`);
+    assert.equal(closedToggle?.getAttribute('aria-expanded'), 'false');
+    const closedSection = closedToggle?.closest('.chat-section');
+    assert.ok(closedSection, 'closed tasks have one scope-list section');
+    assert.equal(closedSection.querySelectorAll('.chat-scope-card').length, 0, 'closed rows are hidden while collapsed');
+    assert.equal(doc.querySelectorAll('.chat-scope-card[data-scope-id^="closed-"]').length, 0);
+    const activeCard = doc.querySelector<HTMLElement>('[data-scope-id="active-task"]');
+    assert.ok(activeCard, 'the active task group remains visible');
+    assert.equal(activeCard.dataset['scopeKind'], 'task-group');
+    assert.match(activeCard.textContent ?? '', /Keep the release moving/);
+    assert.doesNotMatch(activeCard.textContent ?? '', /Frozen/);
+    assert.ok([...doc.querySelectorAll('.chat-section h2')].some((heading) => heading.textContent === 'Task Groups (1)'), 'the main task section counts only active groups');
+    assert.match(doc.querySelector('.chat-section')?.textContent ?? '', /Project Channels/);
+    assert.ok(doc.querySelector('[data-scope-id="channel"]'), 'the Project channel remains visible');
+    assert.ok(doc.querySelector('[data-scope-id="working-group"]'), 'the Working group remains visible');
+    assert.ok(doc.querySelector('[data-scope-id="direct"]'), 'the direct conversation remains visible');
+
+    closedToggle!.click(); await flush();
+    assert.equal(closedToggle!.getAttribute('aria-expanded'), 'true');
+    assert.ok(closedToggle!.querySelector('.rotate-180'), 'the supported chevron rotates when the fold is open');
+    assert.equal(closedSection.querySelectorAll('.chat-scope-card').length, terminalTaskStatuses.length);
+    for (const group of closed) {
+      const card = closedSection.querySelector<HTMLElement>(`[data-scope-id="${group.id}"]`);
+      assert.ok(card, `${group.taskTitle} appears under the fold`);
+      assert.match(card.textContent ?? '', /Frozen/);
+    }
+    closedToggle!.click(); await flush();
+    assert.equal(closedToggle!.getAttribute('aria-expanded'), 'false');
+    assert.equal(closedSection.querySelectorAll('.chat-scope-card').length, 0, 'the closed section collapses again');
+  } finally { p.close(); }
+});
+
+test('a task ending on the run-status stream moves its scope into the collapsed closed section', async () => {
+  const terminalStatus = terminalTaskStatuses[0];
+  assert.ok(terminalStatus, 'the Task model defines at least one terminal status');
+  const active = taskGroup('ending-task', 'Finish the release', undefined);
+  const p = await page('', { taskGroups: [active] });
+  const doc = dom.window.document;
+  try {
+    assert.ok(doc.querySelector('[data-scope-id="ending-task"]'), 'the in-progress task group starts in the main list');
+    await p.endTaskGroup(active.id, terminalStatus);
+    assert.equal(doc.querySelector('[data-scope-id="ending-task"]'), null, 'the run-status refresh removes it from the main list');
+    const closedToggle = doc.querySelector<HTMLButtonElement>('.chat-closed-tasks-toggle');
+    assert.equal(closedToggle?.textContent?.trim(), 'Closed tasks (1)');
+    assert.equal(closedToggle?.getAttribute('aria-expanded'), 'false');
+    closedToggle?.click(); await flush();
+    assert.ok(closedToggle?.closest('.chat-section')?.querySelector(`[data-scope-id="${active.id}"]`), 'the refreshed group is available inside the fold');
+  } finally { p.close(); }
+});
+
+test('a frozen task group opened from the fold preserves history and stays read-only', async () => {
+  const terminalStatus = terminalTaskStatuses[0];
+  assert.ok(terminalStatus, 'the Task model defines at least one terminal status');
+  const closed = taskGroup('closed-history', 'Review completed work', terminalStatus);
+  const p = await page('', { taskGroups: [closed], taskGroupMessages: true });
+  const doc = dom.window.document;
+  try {
+    const closedToggle = doc.querySelector<HTMLButtonElement>('.chat-closed-tasks-toggle');
+    assert.equal(closedToggle?.getAttribute('aria-expanded'), 'false');
+    closedToggle?.click(); await flush();
+    const card = doc.querySelector<HTMLButtonElement>(`[data-scope-id="${closed.id}"]`);
+    assert.ok(card, 'the frozen conversation can be opened from its expanded fold');
+    assert.match(card.textContent ?? '', /Frozen/);
+    card.click(); await paint();
+    assert.equal(p.router.currentRoute.value.params['scopeId'], closed.id);
+    assert.ok(doc.querySelector(`[data-message-id="history-${closed.id}"]`), 'the task conversation history remains readable');
+    assert.match(doc.querySelector('.chat-readonly-banner')?.textContent ?? '', /Task has ended.*read-only/);
+    assert.equal(doc.querySelector<HTMLInputElement>('.chat-composer input')?.disabled, true, 'a frozen task group cannot accept new text');
+  } finally { p.close(); }
 });
 
 test('task-groups appear with a task marker and title and open from the Human scope list', async () => {

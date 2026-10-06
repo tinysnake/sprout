@@ -3861,6 +3861,7 @@ class StateManager {
       (t) =>
         t.taskLeadId === agentId &&
         t.lifecycle !== 'completed' &&
+        t.lifecycle !== 'stopped' &&
         t.lifecycle !== 'cancelled' &&
         t.lifecycle !== 'rejected' &&
         t.lifecycle !== 'withdrawn'
@@ -4670,7 +4671,7 @@ class StateManager {
     // intentional admission hold, so it is a valid validation surface too.
     const leadEligibility = this.evaluateTaskLeadEligibility(task);
     if (!leadEligibility.success) {
-      if (task.lifecycle !== 'proposed' && task.lifecycle !== 'completed' && task.lifecycle !== 'cancelled') {
+      if (task.lifecycle !== 'proposed' && task.lifecycle !== 'completed' && task.lifecycle !== 'stopped' && task.lifecycle !== 'cancelled') {
         this.keepTaskBlockedForLeadSelection(task, leadEligibility.reason ?? 'Task lead is unavailable.');
       }
       const reason = `Cannot validate Task #${taskId}: ${leadEligibility.reason} Human lead replacement is required.`;
@@ -5875,6 +5876,7 @@ class StateManager {
         t.projectId === projectId &&
         t.taskLeadId === memberId &&
         t.lifecycle !== 'completed' &&
+        t.lifecycle !== 'stopped' &&
         t.lifecycle !== 'cancelled' &&
         t.lifecycle !== 'rejected' &&
         t.lifecycle !== 'withdrawn'
