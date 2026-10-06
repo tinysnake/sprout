@@ -641,6 +641,7 @@ function renderTaskDetailPage(
   // Section 6: Live Controls Sticky Action Bar (Two-Stage Pause, Interrupt, Resume, Discard)
   if (
     selectedTask.lifecycle !== 'completed' &&
+    selectedTask.lifecycle !== 'stopped' &&
     selectedTask.lifecycle !== 'cancelled' &&
     selectedTask.lifecycle !== 'proposed' &&
     selectedTask.lifecycle !== 'rejected'
