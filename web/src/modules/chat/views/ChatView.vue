@@ -491,10 +491,6 @@ async function loadOlderTimeline(viewport: HTMLElement) {
       [scopeId]: { ...messagePages.value[scopeId]!, hasOlder: state.messageHasOlder, loading: true, limited: state.limited, pagedOlder: state.pagedOlder },
     };
     await nextTick();
-    if (!current() || anchorId === undefined || anchorTop === undefined) return;
-    const currentAnchor = [...viewport.querySelectorAll<HTMLElement>('[data-message-id], [data-event-id]')]
-      .find((row) => row.dataset['messageId'] === anchorId || row.dataset['eventId'] === anchorId);
-    if (currentAnchor) scrollProgrammatically((element) => { element.scrollTop += currentAnchor.getBoundingClientRect().top - anchorTop; });
   } catch {
     if (current()) actionError.value = 'Older chat rows could not be loaded. Scroll up to retry.';
   } finally {
@@ -502,6 +498,14 @@ async function loadOlderTimeline(viewport: HTMLElement) {
       state.loading = false;
       const latest = messagePages.value[scopeId] ?? previousMessagePage;
       messagePages.value = { ...messagePages.value, [scopeId]: { ...latest, loading: false, limited: state.limited, pagedOlder: state.pagedOlder } };
+      // Restore against the final layout, after the temporary loading row and
+      // its flex gap have been removed. A pre-removal measurement drifts when
+      // that transient content disappears after the anchor write.
+      await nextTick();
+      if (!current() || anchorId === undefined || anchorTop === undefined) return;
+      const currentAnchor = [...viewport.querySelectorAll<HTMLElement>('[data-message-id], [data-event-id]')]
+        .find((row) => row.dataset['messageId'] === anchorId || row.dataset['eventId'] === anchorId);
+      if (currentAnchor) scrollProgrammatically((element) => { element.scrollTop += currentAnchor.getBoundingClientRect().top - anchorTop; });
     }
   }
 }
