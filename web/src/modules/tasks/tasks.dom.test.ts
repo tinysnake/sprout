@@ -136,7 +136,7 @@ function appServices(conflictCodes: readonly string[] = [], snapshot = overview)
     task('recovery-ending', 'recovery', { recoveryState: 'ending', endDisposition: 'completed' }),
     task('recovery-cancelled-ending', 'recovery', { recoveryState: 'ending', endDisposition: 'cancelled' }),
     task('completed', 'ended', { status: 'done', endDisposition: 'completed' }),
-    task('stopped', 'discarded', { status: 'stopped', forcedRelease: { actor: 'operator', reason: 'Emergency environment recovery', unresolvedFacts: ['Engine stop was not proved.'], at: time } }),
+    task('stopped', 'discarded', { status: 'stopped', endDisposition: 'completed', forcedRelease: { actor: 'operator', reason: 'Emergency environment recovery', unresolvedFacts: ['Engine stop was not proved.'], at: time } }),
     task('cancelled', 'discarded', { status: 'cancelled', endDisposition: 'cancelled', pauseState: 'paused', blocker: { reason: 'The approval was pending when the Task ended.', requiredAction: 'Record approval.', responsible: { kind: 'external-condition', condition: 'Approval arrives.' }, nextAdvancer: { memberId: 'agent-a', memberKind: 'agent' }, createdBy: { memberId: 'operator', memberKind: 'human' }, createdAt: time } }),
   ];
   const details = new Map(allTasks.map((entry) => [entry.id, taskDetail(entry,
@@ -278,7 +278,7 @@ test('Project Tasks renders distinct production lifecycle states and keeps activ
   try {
     const { app, router, calls } = await mountTasks(vite, doc);
     const text = doc.body.textContent ?? '';
-    for (const state of ['Proposed', 'Active · run running', 'Active · run idle', 'Task pause requested', 'Paused', 'Blocked', 'Awaiting validation', 'Ending', 'Recovery', 'Completed', 'Cancelled']) {
+    for (const state of ['Proposed', 'Active · run running', 'Active · run idle', 'Task pause requested', 'Paused', 'Blocked', 'Awaiting validation', 'Ending', 'Recovery', 'Completed', 'Stopped', 'Cancelled']) {
       assert.ok(text.includes(state), `renders ${state}`);
     }
     assert.match(text, /No Environment lease/);

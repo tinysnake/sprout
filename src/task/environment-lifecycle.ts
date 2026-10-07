@@ -1039,11 +1039,12 @@ export class TaskEnvironmentLifecycle {
     if (!task.environmentLeaseId || releaseTaskLease === undefined) {
       throw new Error('Force Release lease-release capability is unavailable');
     }
+    const { endDisposition: _endDisposition, ...taskWithoutEndDisposition } = task;
     const forced: Task = omit(
       omit(
         omit(
           {
-            ...task,
+            ...taskWithoutEndDisposition,
             status: 'stopped' as const,
             environmentLifecycleState: 'discarded' as const,
             forcedRelease: { actor: input.actor, reason: sanitizeOperatorText(input.reason, { maxLength: 2000, fallback: 'Human Force Release' }),
@@ -1059,9 +1060,9 @@ export class TaskEnvironmentLifecycle {
     );
     const leaseId = task.environmentLeaseId;
     return this.#withTaskGroupLock(task.id, async () => {
-      // One transaction commits the terminal Task row and the Task-held lease
+      // One transaction commits the Force Released Task row and the Task-held lease
       // release together. Without the explicit release capability above, unfinished
-      // work remains in recovery rather than claiming a terminal outcome.
+      // work remains in recovery rather than claiming a Force Release outcome.
       await this.#store.saveTerminalWithLease(forced, leaseId);
       this.#resolvePauseRetryGate(taskId);
       releaseTaskLease(leaseId);

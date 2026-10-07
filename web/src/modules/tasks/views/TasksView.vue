@@ -299,6 +299,7 @@ function proposalStage(proposal: TaskProposal): string {
   return 'Begun';
 }
 function taskStage(task: TaskView): string {
+  if (task.status === 'stopped') return 'Stopped';
   if (task.environmentLifecycleState === 'recovery') return 'Recovery';
   if (task.environmentLifecycleState === 'ending') return 'Ending';
   if (task.environmentLifecycleState === 'beginning') return 'Beginning';

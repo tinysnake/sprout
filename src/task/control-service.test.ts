@@ -442,6 +442,14 @@ test('Force Release stops the Task and freezes its group without claiming normal
   const taskGroupSnapshots: Task[] = [];
   const s = await scenario({ taskGroupEvents, taskGroupSnapshots });
   await s.lifecycle.workerChannelLost('task-1');
+  const recovery = (await s.tasks.get('task-1'))!;
+  await s.store.save({
+    ...recovery,
+    endDisposition: 'cancelled',
+    controlHistory: [...(recovery.controlHistory ?? []), {
+      action: 'end-requested', actor: human, at: 45, disposition: 'cancelled', reason: 'Discard requested before Force Release.',
+    }],
+  });
   taskGroupEvents.length = 0;
   const saveTerminalWithLease = s.store.saveTerminalWithLease.bind(s.store);
   s.store.saveTerminalWithLease = async (task, leaseId) => {
@@ -457,7 +465,8 @@ test('Force Release stops the Task and freezes its group without claiming normal
   assert.deepEqual(taskGroupEvents, ['lock-enter', 'terminal-save', 'group-sync', 'lock-exit']);
   assert.equal(forced?.status, 'stopped');
   assert.equal(forced?.environmentLifecycleState, 'discarded');
-  assert.equal(forced?.endDisposition, undefined);
+  assert.equal(forced?.endDisposition, undefined, 'Force Release retains active intent instead of the prior ended disposition');
+  assert.equal(forced?.controlHistory?.at(-1)?.action, 'end-requested', 'the append-only control history retains the prior end request');
   assert.equal(forced?.blockerReason, 'Task stopped by the Human operator using Force Release; unresolved facts recorded.');
   assert.equal(taskGroupSnapshots.at(-1)?.status, 'stopped');
   assert.equal(toTaskView(forced!).taskContextState, 'cleanup-unproved-force-release');
