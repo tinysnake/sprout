@@ -97,7 +97,7 @@ state depends on color alone.
   exposure is unsupported, and network membership is not Sprout authority.
 - Operator credential recovery and rotation happen on the host. Credentials
   have no default value and are never durable URL credentials.
-- Agents, Workers, and wake models never receive the operator credential.
+- Sprout does not supply the operator credential to Agents, Workers, or wake models. It must never be copied into shared prose; wake-model routing text has [ADR-0007’s limited redaction guarantee](adr/0007-message-and-wake-routing-semantics.md#wake-model-privacy-guarantee-amended-2026-10-07), reconciled by #220 Option A on 2026-10-07.
 - Version mismatch is visible and refused. Sprout does not guess across an
   unsupported protocol or schema range.
 - A non-empty durable store receives one consistent local safety copy before a

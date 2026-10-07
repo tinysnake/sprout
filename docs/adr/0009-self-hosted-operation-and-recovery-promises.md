@@ -34,7 +34,10 @@ Operator credentials are initialized and recovered on the Sprout host, have no
 default value, and never appear as durable URL credentials. Web can list and
 revoke browser sessions or revoke all other sessions. Host-local credential
 recovery or rotation invalidates existing sessions. Agents, Environment
-Workers, and wake models never receive the operator credential.
+Workers, and wake models are not supplied the operator credential by Sprout.
+It must never be copied into shared prose; detection of arbitrary values in
+wake-model routing text has the [limited guarantee in ADR-0007](0007-message-and-wake-routing-semantics.md#wake-model-privacy-guarantee-amended-2026-10-07),
+reconciled by #220 Option A on 2026-10-07.
 
 The Web experience has mobile and desktop capability parity. A browser that
 cannot reach the Sprout instance may show its last observed state as stale, but
