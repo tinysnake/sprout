@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 
 import { join } from 'node:path';
 
-import { DatabaseSync } from 'node:sqlite';import { SchemaTooNewError, SchemaTooOldError, MigrationSafetyCopyError, SchemaMigrationError, getSchemaVersion, sanitizePath, defaultSafetyCopyPath, type MigrationStep } from './schema.ts';
+import { DatabaseSync } from 'node:sqlite';import { CURRENT_SCHEMA_VERSION, SchemaTooNewError, SchemaTooOldError, MigrationSafetyCopyError, SchemaMigrationError, getSchemaVersion, sanitizePath, defaultSafetyCopyPath, type MigrationStep } from './schema.ts';
 
 import { SqliteStore } from './db.ts';import { SqliteSessionKeyStore } from '../run/sqlite-store.ts';
 
@@ -156,7 +156,7 @@ test('directly constructed domain adapters enforce schema coordination and safet
     // 2. Direct SqliteLeaseStore on a future schema throws SchemaTooNewError
     const futureDbPath = join(dir, 'future.db');
     const seedFuture = new DatabaseSync(futureDbPath);
-    seedFuture.exec('PRAGMA user_version = 19; CREATE TABLE dummy (id TEXT);');
+    seedFuture.exec(`PRAGMA user_version = ${CURRENT_SCHEMA_VERSION + 1}; CREATE TABLE dummy (id TEXT);`);
     seedFuture.close();
 
     assert.throws(

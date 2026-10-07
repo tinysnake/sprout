@@ -10,6 +10,7 @@ import type {
 } from '../engine/port.ts';
 import { EngineResumeRefusedError } from '../engine/port.ts';
 import { EventQueue } from '../engine/event-queue.ts';
+import { redactSensitiveText } from '../environment/privacy.ts';
 import { JsonRpcError, type JsonRpcTransport } from '../engine/jsonrpc.ts';
 import {
   WORKER_ERROR_CODES,
@@ -57,6 +58,41 @@ export interface WorkerClientOptions {
   readonly engines: readonly WorkerEngineDeclaration[];
 }
 
+const taskGroupCapabilities = new WeakMap<JsonRpcTransport, Map<string, NonNullable<StartSessionRequest['postTaskGroupMessage']>>>();
+function taskGroupRegistry(transport: JsonRpcTransport) {
+  let registry = taskGroupCapabilities.get(transport);
+  if (registry) return registry;
+  registry = new Map();
+  taskGroupCapabilities.set(transport, registry);
+  const capabilities = registry;
+  transport.onServerRequest(message => {
+    if (message.method !== WORKER_METHODS.taskGroupMessage) return;
+    const params = message.params as { sessionId?: string; input?: import('../engine/port.ts').AgentTaskGroupMessageInput } | null;
+    void (async () => {
+      try {
+        const post = typeof params?.sessionId === 'string' ? capabilities.get(params.sessionId) : undefined;
+        if (!post || !params?.input) throw new Error('Task-group post capability is unavailable');
+        transport.respond(message.id, await post(params.input));
+      } catch (error) {
+        const capabilityError = error as Error & { readonly status?: unknown; readonly code?: unknown; readonly reason?: unknown };
+        if (error instanceof Error && typeof capabilityError.status === 'number' && Number.isInteger(capabilityError.status) && typeof capabilityError.code === 'string') {
+          const status = capabilityError.status;
+          if (status >= 400 && status <= 599) {
+            transport.respondError(message.id, status, JSON.stringify({
+              error: redactSensitiveText(error.message),
+              code: capabilityError.code,
+              ...(typeof capabilityError.reason === 'string' ? { reason: capabilityError.reason } : {}),
+            }));
+            return;
+          }
+        }
+        transport.respondError(message.id, -32000, redactSensitiveText(error instanceof Error ? error.message : 'Task-group post refused'));
+      }
+    })();
+  });
+  return registry;
+}
+
 /** Raised when the channel to a worker dies while a session is still live. */
 type ChannelClosedHandler = (reason: string) => void;
 
@@ -64,7 +100,7 @@ export class WorkerClient implements EngineAdapter {
   readonly id: string;
   readonly capabilities: EngineCapabilities;
   readonly #transport: JsonRpcTransport;
-  /** Live sessions, so a dead channel can fail their in-flight turns. */
+  /** Live sessions, so a dead channel can interrupt their in-flight turns. */
   readonly #live = new Set<(reason: string) => void>();
   #closed = false;
 
@@ -134,6 +170,7 @@ export class WorkerClient implements EngineAdapter {
         {
           engine: this.id,
           agentId: request.agentId,
+          ...(request.postTaskGroupMessage !== undefined ? { taskGroupMessagesEnabled: true } : {}),
           ...(request.runId !== undefined ? { runId: request.runId } : {}),
           workingDirectory: request.workingDirectory,
           ...(request.model !== undefined ? { model: request.model } : {}),
@@ -161,7 +198,14 @@ export class WorkerClient implements EngineAdapter {
       throw new Error(WORKER_DIAGNOSTICS.sessionStartFailed);
     }
 
-    return new WorkerEngineSession(
+    const groupRegistry = taskGroupRegistry(this.#transport);
+    if (request.postTaskGroupMessage) groupRegistry.set(started.sessionId, request.postTaskGroupMessage);
+    const removeGroupCapability = () => {
+      groupRegistry.delete(started.sessionId);
+      this.#live.delete(removeGroupCapability);
+    };
+    this.#live.add(removeGroupCapability);
+    const session = new WorkerEngineSession(
       {
         transport: this.#transport,
         sessionId: started.sessionId,
@@ -177,6 +221,9 @@ export class WorkerClient implements EngineAdapter {
         return () => this.#live.delete(handler);
       },
     );
+    const close = session.close.bind(session);
+    session.close = async () => { removeGroupCapability(); await close(); };
+    return session;
   }
 }
 
@@ -281,10 +328,11 @@ class WorkerEngineSession implements EngineSession {
       }
       finish(sanitizeEngineTurnResult(params.result));
     });
-    // A dead channel must fail the turn: the worker can never report on it again,
-    // so waiting for a settlement that cannot arrive would hang the run.
+    // Channel loss interrupts unfinished work (ADR-0009). This settles the
+    // Core's wait without claiming the remote engine stopped; recovery still
+    // requires the Worker's retained settlement and engine fence.
     const offClosed = this.#watchChannel(() => {
-      finish({ status: 'failed', message: WORKER_DIAGNOSTICS.channelClosed });
+      finish({ status: 'interrupted' });
     });
 
     void this.#transport

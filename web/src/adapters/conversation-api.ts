@@ -1,4 +1,5 @@
 import type { BrowserTransport, BrowserTransportState } from '../transport/browser-transport.js';
+import type { TaskStatus } from '../../../src/task/model.ts';
 
 /**
  * Typed browser port for conversation scopes and Working groups (#95).
@@ -76,10 +77,35 @@ export interface WorkingGroupScopeView extends ConversationScopeBaseView {
   readonly lifecycle: readonly WorkingGroupLifecycleView[];
 }
 
+export interface TaskGroupContentVersionView {
+  readonly version: number;
+  readonly taskContentVersion: number;
+  readonly at: number;
+  readonly actorMemberId: string;
+  readonly reason: string;
+  readonly taskTitle: string;
+  readonly goal: string;
+  readonly rules: readonly string[];
+}
+
+export interface TaskGroupScopeView extends ConversationScopeBaseView {
+  readonly kind: 'task-group';
+  readonly taskId: string;
+  readonly taskTitle: string;
+  readonly status: 'active' | 'frozen';
+  readonly frozenAt?: number;
+  readonly terminalTaskStatus?: TaskStatus;
+  readonly content: {
+    readonly currentVersion: number;
+    readonly versions: readonly TaskGroupContentVersionView[];
+  };
+}
+
 export type ConversationScopeView =
   | ProjectChannelScopeView
   | DirectConversationScopeView
-  | WorkingGroupScopeView;
+  | WorkingGroupScopeView
+  | TaskGroupScopeView;
 
 /** The read-only admission state of one scope for the acting member. */
 export interface ScopeStateView {
@@ -108,6 +134,14 @@ export interface ScopeContextView {
     readonly goal: string;
     readonly rules: readonly string[];
   };
+  readonly taskGroup?: {
+    readonly taskId: string;
+    readonly taskTitle: string;
+    readonly contentVersion: number;
+    readonly taskContentVersion: number;
+    readonly goal: string;
+    readonly rules: readonly string[];
+  };
 }
 
 export interface ScopeInspectionView {
@@ -127,6 +161,8 @@ export interface CreateWorkingGroupInput {
 export interface ConversationBrowserAdapter {
   state(): BrowserTransportState;
   subscribeState(listener: (state: BrowserTransportState) => void): () => void;
+  listUnread(): Promise<readonly import('../../../src/web/chat-read-router.ts').UnreadScopeCount[]>;
+  markRead(scopeId: string, messageIds: readonly string[]): Promise<import('../../../src/web/chat-read-router.ts').UnreadScopeCount>;
   /** Every scope of one Project: the Project channel, direct conversations, Working groups. */
   listScopes(projectId: string): Promise<readonly ConversationScopeView[]>;
   /** Open (idempotently) one Project-scoped direct conversation. */
@@ -185,6 +221,13 @@ export function createConversationBrowserAdapter(
   return {
     state: () => transport.state(),
     subscribeState: (listener) => transport.subscribeState(listener),
+    async listUnread() {
+      const response = await transport.request<{ readonly scopes: readonly import('../../../src/web/chat-read-router.ts').UnreadScopeCount[] }>('/api/chat/unread');
+      return response.scopes;
+    },
+    async markRead(scopeId, messageIds) {
+      return transport.request<import('../../../src/web/chat-read-router.ts').UnreadScopeCount>(`/api/scopes/` + encodeURIComponent(scopeId) + '/read', jsonCommand({ messageIds }));
+    },
     async listScopes(projectId) {
       const response = await transport.request<{ readonly scopes: readonly ConversationScopeView[] }>(
         `/api/projects/${encodeURIComponent(projectId)}/scopes`,

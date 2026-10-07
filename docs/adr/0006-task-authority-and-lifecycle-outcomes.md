@@ -46,6 +46,9 @@ Human-created and Agent-proposed work use the same authority boundary:
    Agent, Sprout then submits a separately observable first Task-lead run. A
    Human Task lead does not cause an automatic Agent run.
 
+An optional explanatory reason may accompany approve-and-begin; if omitted, no
+approval or initial-run reason is written.
+
 The approved boundary contains the Task goal, constraints, validation criteria,
 Task lead, current Project permissions, and selected Environment instance. The
 lead may choose any Project Agent that remains permitted and compatible with
@@ -78,9 +81,17 @@ instance, an Agent Task lead may:
 - state a routable blocker and its required next action; and
 - submit a Task completion claim for Human validation.
 
-Every advance records its initiator, target Agent, reason, and Task content
-version. There is no automatic infinite retry: failure, denied authority, or an
-uncertain next step produces a blocker or a validation request. M2 does not add
+**Amendment (2026-10-04; #196, Owner ruling: Option A):** When the Task lead
+is an Agent and has not filed a pending claim, the authorized Human may submit
+a Human-substituted completion claim. It records the Human as actor and the
+Agent lead as the substituted lead; validation and safe Task end remain
+Human-controlled.
+
+Every deliberate advance records its initiator, target Agent, reason, and Task
+content version. The automatic initial run following approve-and-begin records
+its actor, target, and content version, and carries a reason only when the Human
+supplied the optional begin reason. There is no automatic infinite retry:
+failure, denied authority, or an uncertain next step produces a blocker or a validation request. M2 does not add
 a general workflow, scheduling, or budget engine merely to bound this autonomy.
 One active run, explicit authority, complete audit, and Human pause and stop
 controls are the bounds.
@@ -101,9 +112,11 @@ The authority boundary is explicit rather than inferred from status names:
 | Advance with an eligible Agent | Human or Task lead within the approved boundary |
 | Stop an active nested run | Human, or the Task lead for a run it initiated |
 | State a Task blocker | Human or Task lead |
-| Make a Task completion claim | Task lead |
+| Make a Task completion claim | Task lead; Human may submit a substitute claim on an Agent-led Task |
 | Pause or resume a Task | Human only |
 | Validate, correct, end, recover, discard, or Force Release a Task | Human only |
+| Reopen an ended Task | Human only |
+| Resume a Force Released `stopped` Task | Human only |
 
 Sprout may carry out the consequences of an authorized command—acquiring a
 lease, admitting a run, reconciling interruption, or cleaning Task context—but
@@ -143,10 +156,12 @@ responsible Human, Agent, external condition, or recovery mechanism, and who
 will advance the Task when that condition changes. A prose-only or ownerless
 blocked state is not accepted. Blocked Tasks keep their Task lease.
 
-A Task lead's completion claim contains a fact-form outcome summary, acceptance
-or validation evidence, durable changes or artifacts, known limitations and
-remaining risks, and a recommended disposition. It excludes private reasoning
-and raw transcripts. The Task then awaits Human validation with its lease held.
+A completion claim contains a fact-form outcome summary, acceptance or
+validation evidence, durable changes or artifacts, known limitations and
+remaining risks, and a recommended disposition. An Agent-led Task may receive a
+Human-substituted claim when its lead has not filed one; the claim records both
+the Human actor and substituted Agent lead. Claims exclude private reasoning and
+raw transcripts. The Task then awaits Human validation with its lease held.
 
 The Human may accept the claim or record a correction. Correction returns the
 Task to deliberate advancement on the same Environment instance and lease.
@@ -179,11 +194,31 @@ proof or cleanup cannot complete:
 Cleanup or release failure normally remains recovery and cannot be displayed as
 completed or cancelled. ADR-0009 adds one explicit exception for an otherwise
 stuck Local Operator MVP: a Human may use Force Release, acknowledge the
-unresolved proof or cleanup, abandon the Task through an emergency Task end,
-and leave a permanent forced-release disposition. Long idle, paused, blocked,
-or validation periods may produce Human attention and reminders, but never
-start a run, end the Task, or make its Environment instance reassignable
-automatically.
+unresolved proof or cleanup, and terminate the current Task execution while
+recording status `stopped`. `stopped` preserves live work intent in the
+active-intent family; the Environment lease is released, but the Task is not an
+ended outcome. Its permanent forced-release facts record the actor, time,
+reason, and unresolved facts. Force Release does not record `cancelled` or
+cancellation intent. Long idle, paused, blocked, or validation periods may
+produce Human attention and reminders, but never start a run, end the Task, or
+make its Environment instance reassignable automatically.
+
+The owner states the distinction directly: “Emergency Force Release不应该直接cancel task，而是stop task。需要修改。” (`Emergency Force Release should not directly cancel the Task; it should stop the Task. This needs to change.`) `stopped` is a Task-level active-intent status, distinct from the `stopped` outcome for an Agent run. A stopped run does not end the Task. Deliberate Human discard still produces `cancelled` after normal Task context cleanup and lease release.
+
+**Amendment (2026-10-06; #216, owner ruling: “我认为任何ended task与github issue一样，需要有重新open的功能。”)** A Human may reopen every Task status in the ended family, as defined by `isEndedTaskStatus` over the product Task status data. This uses the same Human authority as discard and approval; Task leads, Agents, and clients without an authenticated operator session cannot reopen. Reopen is an explicit control action, never an automatic consequence of advancement.
+
+Reopen appends a distinct `reopened` control-history event with actor, time, reason, prior status, and the previous completion timestamp and end disposition when present. It clears the current ended status, completion timestamp, and current end disposition while retaining every prior control-history event, completion claim, run link, and permanent `forcedRelease` fact. The Task keeps its existing Environment binding: reopening acquires a fresh lease on that same instance and prepares a fresh Task context. It does not alter the Project workspace or start a run; the next run still requires a deliberate advance. Existing blockers and pauses continue to gate advancement. `stopped` is not eligible for Reopen because it remains active intent.
+
+The Task group keeps its original scope identity and readable messages. Reopen lifts its persisted ended-state freeze and synchronizes current Task content under the same serialization boundary as the Task transition. If the Task has an active run or unresolved recovery, lacks a valid Environment binding, or the same Environment cannot be safely leased and prepared, reopen is refused without changing its ended state; a preparation failure after the reopen commit enters the existing recovery lifecycle. `rejected` and `withdrawn` are TaskProposal outcomes, not Task statuses; they have no Task lease or Task group and remain governed by the proposal lifecycle.
+
+**Amendment (2026-10-07; #218, owner correction):** “不对啊，active task不需要reopen，且stop和cancelled不一样，不只是改个文字这么简单。在stopped和paused状态的的task 也属于active task，我应该可以直接点击resume之类的按钮让其继续运行才对” (An active Task does not need Reopen; stopped differs from cancelled; stopped and paused Tasks are active and should continue through Resume.) The product status data assigns `todo`, `in-progress`, `blocked`, and `stopped` to the active-intent family, and `done`, `failed`, and `cancelled` to the ended family. A paused Task remains in its active status with the orthogonal pause state set.
+
+A Human resumes a Force Released `stopped` Task directly. Resume is distinct from Reopen: it reuses the original Environment binding with a fresh lease and Task context, records a `resumed` event rather than `reopened`, preserves all prior control and run history plus permanent `forcedRelease` facts, clears the Force Release blocker notice, and starts no run. If the new context cannot be prepared, the durable beginning transition remains visible in the existing recovery lifecycle. The stopped Task group stays frozen and read-only while the Environment is released, but appears in the active Task-group list rather than `Closed tasks (N)`. Resume thaws that same scope identity and preserves append-only group content. Ended Task groups remain in `Closed tasks (N)`.
+
+| Task status family | Statuses | Human action |
+| --- | --- | --- |
+| Active intent | `todo`, `in-progress`, `blocked`, `stopped` (and `paused` as an orthogonal pause state) | Resume paused or Force Released stopped Tasks; advance only when lifecycle gates permit |
+| Ended | `done`, `failed`, `cancelled` | Reopen |
 
 ## Operator-visible state
 
@@ -192,14 +227,16 @@ sentences such as `Task paused · No active Agent run · Lease held`:
 
 | Lifecycle | Outcome vocabulary |
 | --- | --- |
-| Task | proposed, active, Task pause requested, paused, blocked, awaiting validation, ending, recovery, completed, cancelled, rejected, withdrawn |
+| Task | proposed, active, Task pause requested, paused, blocked, awaiting validation, ending, recovery, completed, stopped, cancelled, rejected, withdrawn |
 | Agent run | queued, running, completed, failed, stopped, interrupted |
 | Task lease | none, acquiring, held, recovering, releasing, released |
 
 There is no automatic terminal Task `failed` outcome in this product model. A
 failure leaves unfinished work blocked or recovering until a Human decides how
-to proceed. Internal implementations may need finer states, but must not collapse
-Task state, Agent-run state, and Environment-lease state into one label.
+to proceed. `stopped` is a Task outcome for an emergency Force Release while
+intent remains alive; the Agent-run `stopped` outcome describes only that run.
+Internal implementations may need finer states, but must not collapse Task
+state, Agent-run state, and Environment-lease state into one label.
 
 Every proposal, revision, authority decision, run request and settlement,
 pause, stop, resume, blocker, completion claim, validation, correction, end, and

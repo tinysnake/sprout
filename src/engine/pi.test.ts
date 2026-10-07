@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 
 import { PiEngineAdapter, PiSession } from './pi.ts';
+import { sanitizedTurnFailure } from './turn-failure.ts';
 import type { AgentRunEvent } from './port.ts';
 
 /**
@@ -195,6 +196,18 @@ test('a Pi turn totals token usage reported for each completed assistant message
     status: 'completed',
     text: 'Done.',
     tokenUsage: { promptTokens: 280, completionTokens: 55, totalTokens: 335 },
+    detailedTokens: {
+      inputTokens: 280,
+      uncachedInputTokens: 280,
+      cachedInputTokens: 0,
+      cacheWriteInputTokens: 0,
+      outputTokens: 55,
+      reasoningOutputTokens: 0,
+      totalTokens: 335,
+    },
+    billingBasis: 'unknown',
+    source: 'pi-protocol:message_end',
+    sourceVersion: 'pi 0.85.1',
   });
 });
 
@@ -272,7 +285,7 @@ test('a process that exits without settling the turn fails it instead of hanging
   assert.equal(result.status, 'failed');
   assert.match(
     result.status === 'failed' ? result.message : '',
-    /exited without settling the turn/,
+    /the engine ended the turn without a recognized outcome/,
   );
 });
 
@@ -286,7 +299,55 @@ test('an engine error terminates the turn as failed', async () => {
   await collect(turn.events);
   const result = await turn.completion;
 
-  assert.deepEqual(result, { status: 'failed', message: 'model unavailable' });
+  // The engine's own detail is never reported: only the stable class (#182).
+  assert.deepEqual(result, {
+    status: 'failed',
+    message: sanitizedTurnFailure('pi', 'engine-error'),
+  });
+});
+
+test('a turn ending with an error stop reason settles as failed, not as an empty completion', async () => {
+  // The live failure this contract exists for (#182): `pi --mode json` reported
+  // the upstream 400 as the assistant message's stop reason and settled the
+  // agent loop, and the adapter used to record that as `completed` with empty
+  // text and zero usage.
+  const raw = '400 Model is unavailable raw-upstream-body';
+  const { adapter } = adapterFor((process) => {
+    process.line({ type: 'agent_start' });
+    process.line({ type: 'turn_start' });
+    process.line({
+      type: 'message_end',
+      message: { role: 'assistant', content: [], stopReason: 'error', errorMessage: raw },
+    });
+    process.line({ type: 'turn_end', message: { role: 'assistant', content: [], stopReason: 'error' } });
+    process.line({ type: 'agent_end', messages: [], willRetry: false });
+    process.line({ type: 'agent_settled' });
+  });
+
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const turn = session.run('go');
+  await collect(turn.events);
+  const result = await turn.completion;
+
+  assert.deepEqual(result, {
+    status: 'failed',
+    message: sanitizedTurnFailure('pi', 'error-stop-reason'),
+  });
+  assert.ok(!JSON.stringify(result).includes(raw), 'no upstream body in the turn result');
+});
+
+test('a successful turn that produced no text completes with empty text', async () => {
+  const { adapter } = adapterFor((process) => {
+    process.line({ type: 'message_end', message: { role: 'assistant', content: [], stopReason: 'stop' } });
+    process.line({ type: 'agent_settled' });
+  });
+
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const turn = session.run('go');
+  await collect(turn.events);
+  const result = await turn.completion;
+
+  assert.deepEqual(result, { status: 'completed', text: '' });
 });
 
 test('Pi declares incremental streaming rather than inheriting Codex behaviour', async () => {

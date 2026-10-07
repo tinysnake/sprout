@@ -69,7 +69,7 @@ test('a Task begin then end commits and releases its Task-held lease in one boun
     );
     assert.equal(store.leases.get('lease-task')?.state, 'active');
 
-    await store.tasks.saveTerminalWithLease(
+    await store.tasks.saveTaskAndReleaseLease(
       sampleTask({ status: 'done', environmentLeaseId: 'lease-task', environmentLifecycleState: 'ended', completedAt: 5 }),
       'lease-task',
     );
@@ -110,9 +110,9 @@ test('every composed adapter writes, reopens from the file, and reads back', asy
       workingDirectory: '/work', key: 'sk-1', updatedAt: 6,
     });
     await first.collaboration.postMessage({
-      message: { id: 'msg-1', projectId: 'project-sprout', channel: 'project',
+      message: { id: 'msg-1', projectId: 'project-sprout', scopeId: 'channel-project-sprout', channel: 'project',
         author: { id: 'agent-scout', kind: 'agent' }, body: 'hi', recipients: [], deliveryKey: 'd-1', createdAt: 7 },
-      plan: { messageId: 'msg-1', decisions: [{ agentId: 'agent-scout', reason: 'direct-recipient' }], observations: [] },
+      plan: { inputId: 'msg-1', decisions: [{ agentId: 'agent-scout', reason: 'direct-recipient' }], observations: [] },
       now: 7,
     });
     first.close();

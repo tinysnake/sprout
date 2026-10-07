@@ -1,8 +1,8 @@
-import type { AgentRunEvent, EngineTurnResult, TokenUsage } from '../engine/port.ts';
+import type { AgentRunEvent, EngineTurnResult, TokenUsage, DetailedTokenDimensions } from '../engine/port.ts';
 import type { AgentWorkOption } from '../agent/model.ts';
 import type { WorkspaceSelectionKind } from '../project/access.ts';
 
-export type { TokenUsage } from '../engine/port.ts';
+export type { TokenUsage, DetailedTokenDimensions } from '../engine/port.ts';
 
 /**
  * The durable workspace facts one run was admitted under (#93, ADR-0008).
@@ -22,7 +22,12 @@ export interface RunWorkspaceBinding {
 }
 
 /** The observable lifecycle of one agent run. */
-export type AgentRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'interrupted';
+export type AgentRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'stopped' | 'interrupted';
+
+/** Sprout's trusted classification at settlement, never inferred from failure text. */
+export type RunFailureClass = 'admission' | 'environment' | 'restart' | 'execution';
+/** A product-owned reason for an intentional Chat interruption. */
+export type RunInterruptionReason = 'human-stop';
 
 /**
  * One bounded activation of an agent, as the core and the Web client see it.
@@ -41,7 +46,13 @@ export interface AgentRun {
    * project at submission. Persisted so the choice survives a restart.
    */
   readonly environmentInstanceId: string;
-  /** The project whose environment set produced `environmentInstanceId`. */
+  /**
+   * The project whose environment set produced `environmentInstanceId`.
+   *
+   * A run that failed before environment resolution records the Project scope
+   * its submission named instead (#181), so an environment-disconnected
+   * admission failure still durably belongs to a Project.
+   */
   readonly projectId?: string;
   /**
    * The durable Task this run advances, when it is a Task run (#28).
@@ -87,8 +98,20 @@ export interface AgentRun {
    * there was no prior run to summarise.
    */
   readonly handOff?: RunHandOff;
+  /**
+   * The original run this run is the bounded reconnect retry of (#181).
+   *
+   * Present on exactly the one linked retry run and absent on every original,
+   * so "has this run already used its one retry?" is a durable fact on the run
+   * record itself and a retry run can never re-enter the retry set.
+   */
+  readonly retryOfRunId?: string;
   readonly leaseId?: string;
   readonly failure?: string;
+  /** Absent on legacy rows; consumers treat absence as execution. */
+  readonly failureClass?: RunFailureClass;
+  /** Product-owned reason when a Human stops a one-round run from Chat. */
+  readonly interruptionReason?: RunInterruptionReason;
   readonly result?: EngineTurnResult;
   /** Distinct machine-evidence history; never silently replaces a run's interrupted outcome. */
   readonly recoverySettlement?: { readonly status: 'completed' | 'failed' | 'interrupted' | 'stopped'; readonly eventCount: number };
@@ -96,6 +119,8 @@ export interface AgentRun {
   readonly recoveredEvents?: readonly { readonly turnId: string; readonly sequence: number; readonly event: AgentRunEvent }[];
   /** Provider-reported consumption for this run, when the engine exposes it. */
   readonly tokenUsage?: TokenUsage;
+  /** Detailed token dimensions preserving input, cached, cache write, output, reasoning detail. */
+  readonly detailedTokens?: DetailedTokenDimensions;
   readonly createdAt: number;
   readonly completedAt?: number;
 }

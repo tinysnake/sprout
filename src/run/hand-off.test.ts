@@ -193,6 +193,16 @@ test('a prior run with no terminal result still reports the environment move', (
   assert.match(handOff.text, /Interrupted in mac-mini-1/);
 });
 
+test('intentional stop is distinct from unexpected interruption in later hand-off context', () => {
+  const history: readonly AgentRun[] = [run({
+    id: 'prior', status: 'stopped', result: { status: 'interrupted' },
+  })];
+  const handOff = buildHandOffContext(history, identity);
+  assert.ok(handOff);
+  assert.match(handOff.text, /Stopped in mac-mini-1/);
+  assert.doesNotMatch(handOff.text, /Interrupted in/);
+});
+
 test('the no-result notice still respects an unusually small character bound', () => {
   // A prior run with no terminal result at all produces the notice rather than a
   // fact line. It needs its own bound: an unusually small budget must be honoured

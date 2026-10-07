@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
+import { createFeedTestAdapter } from './feed-test-fixture.ts';
 import { JSDOM } from 'jsdom';
 
 // 1. Initialize JSDOM and globals BEFORE importing any Vue or Vite modules
@@ -105,6 +106,7 @@ async function deterministicAppOptions(vite: { ssrLoadModule: (id: string) => Pr
     '/src/modules/agents/adapters/fixture-adapter.ts'
   )) as typeof import('../modules/agents/adapters/fixture-adapter.ts');
   const projectsModule = (await vite.ssrLoadModule('/src/modules/projects/adapters/fixture-adapter.ts')) as typeof import('../modules/projects/adapters/fixture-adapter.ts');
+  const chatModule = (await vite.ssrLoadModule('/src/modules/chat/adapters/fixture-adapter.ts')) as typeof import('../modules/chat/adapters/fixture-adapter.ts');
   const environmentService = new module.FixtureEnvironmentService();
   const agentService = new agentsModule.FixtureAgentService();
   return {
@@ -112,6 +114,8 @@ async function deterministicAppOptions(vite: { ssrLoadModule: (id: string) => Pr
     environmentService,
     agentService,
     projectService: new projectsModule.FixtureProjectService(agentService, environmentService),
+    feedService: createFeedTestAdapter(),
+    chatService: new chatModule.FixtureChatService(),
   };
 }
 
@@ -188,7 +192,7 @@ async function productionReconcilingAppOptions(vite: { ssrLoadModule: (id: strin
   };
 }
 
-test('M77-NAV-002: an unknown task detail deep link renders not-found and never substitutes a record', async () => {
+test('M77-NAV-002: a Task detail deep link requires production authority and never substitutes a record', async () => {
   const { dom, vite, cleanup } = await setupProductionDom();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
@@ -204,15 +208,10 @@ test('M77-NAV-002: an unknown task detail deep link renders not-found and never 
     const doc = dom.window.document;
 
     assert.equal(router.currentRoute.value.params['taskId'], 'does-not-exist', 'the requested URL is preserved');
-    assert.ok(doc.querySelector('.tasks-not-found-state'), 'an explicit not-found state is rendered');
-    assert.match(doc.body.textContent ?? '', /Task Not Found/);
+    assert.match(doc.body.textContent ?? '', /Task and Project authority are unavailable/);
     assert.doesNotMatch(doc.body.textContent ?? '', /#101/, 'the first task is not substituted');
-    assert.equal(doc.querySelector('.operating-stage-card'), null, 'no other task detail is shown');
-
-    (doc.querySelector('.tasks-not-found-return') as HTMLButtonElement).click();
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    assert.equal(router.currentRoute.value.path, '/project/tasks', 'the return control recovers to the task list');
-    assert.match(doc.body.textContent ?? '', /Project Tasks & Operating Loop/, 'the task list is restored');
+    assert.doesNotMatch(doc.body.textContent ?? '', /Task Operating Stage & Specification/,
+      'the page does not render prototype Task facts without production authority');
 
     app.unmount();
   } finally {

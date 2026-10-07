@@ -6,10 +6,10 @@
  * in-memory adapter in tests and the SQLite adapter in production.
  *
  * Each scope is stored as one JSON document keyed by its stable id — a
- * Project channel, one Project-scoped direct conversation, or one Working
- * group with its content versions and membership history — because the
- * versions belong to the scope as a whole and must never be rewritten
- * piecemeal.
+ * Project channel, one Project-scoped direct conversation, one Working group
+ * with its content versions and membership history, or one Task group bound
+ * to a Task — because the versions belong to the scope as a whole and must
+ * never be rewritten piecemeal.
  *
  * `update` is the one way a recorded document is rewritten: the row read, the
  * synchronous mutation, and the conditional write form one uninterruptible
@@ -61,9 +61,9 @@ export interface ConversationScopeStore {
    * Remove one Project-channel row by identity; a missing row is a no-op.
    *
    * Fenced in storage to rows of kind `project`: a row carrying any other
-   * kind — a Working group with lifecycle and membership history above all —
-   * is refused. Used only to roll back or reap an interrupted Project-channel
-   * preparation (ADR-0008: lifecycle facts are never deleted).
+   * kind — a Working group or Task group with durable history — is refused.
+   * Used only to roll back or reap an interrupted Project-channel preparation
+   * (ADR-0008: lifecycle facts are never deleted).
    */
   removeProjectChannel(scopeId: string): Promise<void>;
 }

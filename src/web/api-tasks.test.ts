@@ -360,7 +360,7 @@ test('a begun Task rejects terminal PATCH status changes', async () => {
       body: JSON.stringify({ status: 'done' }),
     });
     assert.equal(terminalPatch.status, 409);
-    assert.match((await terminalPatch.json() as { error: string }).error, /must end through the Task environment lifecycle/);
+    assert.match((await terminalPatch.json() as { error: string }).error, /must change status through the Task environment lifecycle/);
   });
 });
 

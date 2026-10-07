@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { RouterLink } from 'vue-router';
 import type { ActiveLeaseHolder } from '../types.js';
 import StatusPill from '../../../primitives/StatusPill.vue';
 import Icon from '../../../primitives/Icon.vue';
@@ -29,7 +30,15 @@ defineProps<{
     </div>
 
     <div class="text-[10px] text-[var(--text-muted)] pt-1.5 border-t border-[var(--purple-agent-border)]">
-      Safety Guarantee: Lease is held continuously from Task begin to end across runs, idle gaps, and human validation. No automatic timeout.
+      Safety Guarantee: Lease is held continuously from Task begin to end across runs, idle gaps, and human validation. No automatic release on timeout.
+    </div>
+
+    <div v-if="lease.holderKind === 'task'" class="text-xs text-[var(--text-secondary)]">
+      <RouterLink
+        :to="{ name: 'project-task-detail', params: { taskId: lease.holderId } }"
+        class="task-controls-link underline text-[var(--purple-agent)]"
+      >Open Task controls</RouterLink>
+      to resume work or enter a reason and choose Discard Task. Discard ends unfinished work.
     </div>
   </div>
 </template>

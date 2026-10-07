@@ -21,11 +21,23 @@
  * cleanup.
  */
 
-import type { Message, WakeRequest } from '../collaboration/model.ts';
+import type { Message, TaskGroupMessageEnvelope, WakeRequest } from '../collaboration/model.ts';
+import type { ProjectEvent } from '../collaboration/events.ts';
+import type {
+  RoutingAttempt,
+  RoutingBatch,
+  RoutingBatchInput,
+  RoutingInputOutcome,
+  RoutingWindow,
+} from '../collaboration/routing.ts';
+import type {
+  RoutingBatchEvidence,
+  RoutingInputEvidence,
+} from '../collaboration/coordinator.ts';
 import { sanitizeObservedReadiness } from '../environment/readiness-observation.ts';
 import type { AgentRun, TokenUsage } from '../run/model.ts';
 import type { Agent, AgentWorkOption } from '../agent/model.ts';
-import type { Task, TaskRunLink, TaskWithRuns } from '../task/model.ts';
+import type { Task, TaskRunLink, TaskStatus, TaskWithRuns } from '../task/model.ts';
 import { normalizeEnrollment, type EnvironmentEnrollment } from '../environment/enrollment.ts';
 import type { EnvironmentRecoveryRecord, ForceReleaseRecord } from '../environment/recovery.ts';
 import {
@@ -52,11 +64,12 @@ import {
   READINESS_SOURCES,
 } from '../environment/readiness.ts';
 import type { ProjectAuthority } from '../project/authority-model.ts';
-import { workingGroupStatus } from '../conversation/model.ts';
+import { currentTaskGroupContent, taskGroupStatus, workingGroupStatus } from '../conversation/model.ts';
 import type {
   ConversationScope,
   ScopeContext,
   ScopeState,
+  TaskGroupScope,
   WorkingGroupScope,
 } from '../conversation/model.ts';
 import {
@@ -184,19 +197,24 @@ export function toRunView(run: AgentRun): RunView {
 /**
  * The client-facing shape of one Message.
  *
- * The conversation unit only: author, body, reply link, and ordering. A reply's
- * body is already the run's final assistant text, so tool calls, tool output, and
- * raw reasoning have no path into this view — they were never stored as a
- * Message in the first place.
+ * The conversation unit only: scope, author, body, reply link, and ordering.
+ * A reply's body is already the run's final assistant text, so tool calls,
+ * tool output, and raw reasoning have no path into this view — they were never
+ * stored as a Message in the first place.
  */
 export interface MessageView {
   readonly id: string;
   readonly projectId: string;
+  /** The conversation scope this Message was posted to (#95, #96). */
+  readonly scopeId: string;
   readonly channel: string;
   readonly authorId: string;
   readonly authorKind: string;
   readonly body: string;
+  readonly kind?: Message['kind'];
   readonly recipients: readonly string[];
+  /** Present for Task-group messages; authoritative channel-stamped routing facts. */
+  readonly envelope?: TaskGroupMessageEnvelope;
   readonly inReplyTo?: string;
   readonly createdAt: number;
 }
@@ -205,11 +223,14 @@ export function toMessageView(message: Message): MessageView {
   return {
     id: message.id,
     projectId: message.projectId,
+    scopeId: message.scopeId,
     channel: message.channel,
     authorId: message.author.id,
     authorKind: message.author.kind,
     body: message.body,
+    ...(message.kind !== undefined ? { kind: message.kind } : {}),
     recipients: message.recipients,
+    ...(message.envelope !== undefined ? { envelope: message.envelope } : {}),
     ...(message.inReplyTo !== undefined ? { inReplyTo: message.inReplyTo } : {}),
     createdAt: message.createdAt,
   };
@@ -228,6 +249,8 @@ export interface WakeView {
   readonly reason: string;
   readonly status: string;
   readonly runId?: string;
+  /** The frozen routing batch, for a model-assisted wake (#97). */
+  readonly batchId?: string;
 }
 
 export function toWakeView(wake: WakeRequest): WakeView {
@@ -236,6 +259,242 @@ export function toWakeView(wake: WakeRequest): WakeView {
     reason: wake.reason,
     status: wake.status,
     ...(wake.runId !== undefined ? { runId: wake.runId } : {}),
+    ...(wake.batchId !== undefined ? { batchId: wake.batchId } : {}),
+  };
+}
+
+/**
+ * The client-facing shape of one Project event (#96).
+ *
+ * A durable system-produced fact with its declared routing disposition — the
+ * evidence a human needs to answer "why did (or didn't) this route" without
+ * consulting internal logs (ADR-0007). Free text below has already passed the
+ * privacy boundary at publication, so no credential, host, or path shape can
+ * appear here.
+ */
+export interface ProjectEventView {
+  readonly originScopeIds?: readonly string[];
+  readonly id: string;
+  readonly projectId: string;
+  readonly kind: string;
+  readonly summary: string;
+  readonly detail?: string;
+  readonly producerId: string;
+  readonly producerKind: string;
+  readonly disposition: string;
+  readonly responsibleAgentIds: readonly string[];
+  readonly createdAt: number;
+}
+
+export function toProjectEventView(event: ProjectEvent): ProjectEventView {
+  return {
+    id: event.id,
+    projectId: event.projectId,
+    kind: event.kind,
+    summary: event.summary,
+    ...(event.detail !== undefined ? { detail: event.detail } : {}),
+    ...(event.originScopeIds !== undefined ? { originScopeIds: event.originScopeIds } : {}),
+    producerId: event.producer.id,
+    producerKind: event.producer.kind,
+    disposition: event.disposition,
+    responsibleAgentIds: event.responsibleAgentIds,
+    createdAt: event.createdAt,
+  };
+}
+
+/**
+ * The client-facing shape of one collection window (#97).
+ *
+ * The fixed deadline, the durable cursor, and the membership count are exactly
+ * the facts that answer "when will these inputs be judged, and were they all
+ * collected?" without consulting internal logs (ADR-0007).
+ */
+export interface RoutingWindowView {
+  readonly id: string;
+  readonly projectId: string;
+  readonly openedAt: number;
+  readonly deadlineAt: number;
+  readonly intervalMs: number;
+  readonly status: string;
+  readonly cursor?: string;
+  readonly inputCount: number;
+  readonly closedAt?: number;
+}
+
+export function toRoutingWindowView(window: RoutingWindow): RoutingWindowView {
+  return {
+    id: window.id,
+    projectId: window.projectId,
+    openedAt: window.openedAt,
+    deadlineAt: window.deadlineAt,
+    intervalMs: window.intervalMs,
+    status: window.status,
+    ...(window.cursor !== undefined ? { cursor: window.cursor } : {}),
+    inputCount: window.inputCount,
+    ...(window.closedAt !== undefined ? { closedAt: window.closedAt } : {}),
+  };
+}
+
+/** One frozen batch input: the bounded excerpt plus its truncation evidence. */
+export interface RoutingBatchInputView {
+  readonly inputId: string;
+  readonly position: number;
+  readonly excerpt: string;
+  readonly truncated: boolean;
+  readonly excerptChars: number;
+  readonly contentChars: number;
+}
+
+export function toRoutingBatchInputView(input: RoutingBatchInput): RoutingBatchInputView {
+  return {
+    inputId: input.inputId,
+    position: input.position,
+    excerpt: input.excerpt,
+    truncated: input.truncated,
+    excerptChars: input.excerptChars,
+    contentChars: input.contentChars,
+  };
+}
+
+/** One settled wake-model attempt: identity, timing, and failure kind. */
+export interface RoutingAttemptView {
+  readonly id: string;
+  readonly batchId: string;
+  readonly attemptNumber: number;
+  readonly modelId: string;
+  readonly startedAt: number;
+  readonly finishedAt: number;
+  readonly status: string;
+  readonly errorKind?: string;
+  readonly errorDetail?: string;
+}
+
+export function toRoutingAttemptView(attempt: RoutingAttempt): RoutingAttemptView {
+  return {
+    id: attempt.id,
+    batchId: attempt.batchId,
+    attemptNumber: attempt.attemptNumber,
+    modelId: attempt.modelId,
+    startedAt: attempt.startedAt,
+    finishedAt: attempt.finishedAt,
+    status: attempt.status,
+    ...(attempt.errorKind !== undefined ? { errorKind: attempt.errorKind } : {}),
+    ...(attempt.errorDetail !== undefined ? { errorDetail: attempt.errorDetail } : {}),
+  };
+}
+
+/** One input's explicit result in a settled batch, with model rationale. */
+export interface RoutingOutcomeView {
+  readonly inputId: string;
+  readonly status: string;
+  readonly assignments: readonly { readonly agentId: string; readonly rationale: string }[];
+  /** Model judgement, not fact — the UI labels it as such. */
+  readonly rationale?: string;
+  readonly detail?: string;
+  readonly settledAt: number;
+}
+
+export function toRoutingOutcomeView(outcome: RoutingInputOutcome): RoutingOutcomeView {
+  return {
+    inputId: outcome.inputId,
+    status: outcome.status,
+    assignments: outcome.assignments.map((assignment) => ({
+      agentId: assignment.agentId,
+      rationale: assignment.rationale,
+    })),
+    ...(outcome.rationale !== undefined ? { rationale: outcome.rationale } : {}),
+    ...(outcome.detail !== undefined ? { detail: outcome.detail } : {}),
+    settledAt: outcome.settledAt,
+  };
+}
+
+/** The complete human-inspectable evidence for one frozen routing batch. */
+export interface RoutingBatchDetailView {
+  readonly batch: {
+    readonly id: string;
+    readonly projectId: string;
+    readonly windowId: string;
+    readonly splitIndex: number;
+    readonly splitCount: number;
+    readonly cutoffAt: number;
+    readonly status: string;
+    readonly error?: string;
+    readonly createdAt: number;
+    readonly settledAt?: number;
+    readonly bounds: RoutingBatch['bounds'];
+    /** The frozen manifest: inputs, candidates, bounds, truncations, exclusions. */
+    readonly manifest: RoutingBatch['manifest'];
+    /** The frozen context snapshot length; the bytes are the batch's own. */
+    readonly contextChars: number;
+  };
+  readonly window?: RoutingWindowView;
+  readonly inputs: readonly RoutingBatchInputView[];
+  readonly attempts: readonly RoutingAttemptView[];
+  readonly outcomes: readonly RoutingOutcomeView[];
+  readonly wakes: readonly WakeView[];
+  readonly replies: readonly { readonly idempotencyKey: string; readonly messageId: string }[];
+}
+
+export function toRoutingBatchDetailView(evidence: RoutingBatchEvidence): RoutingBatchDetailView {
+  return {
+    batch: {
+      id: evidence.batch.id,
+      projectId: evidence.batch.projectId,
+      windowId: evidence.batch.windowId,
+      splitIndex: evidence.batch.splitIndex,
+      splitCount: evidence.batch.splitCount,
+      cutoffAt: evidence.batch.cutoffAt,
+      status: evidence.batch.status,
+      ...(evidence.batch.error !== undefined ? { error: evidence.batch.error } : {}),
+      createdAt: evidence.batch.createdAt,
+      ...(evidence.batch.settledAt !== undefined ? { settledAt: evidence.batch.settledAt } : {}),
+      bounds: evidence.batch.bounds,
+      manifest: evidence.batch.manifest,
+      contextChars: evidence.batch.context.length,
+    },
+    ...(evidence.window !== undefined ? { window: toRoutingWindowView(evidence.window) } : {}),
+    inputs: evidence.inputs.map(toRoutingBatchInputView),
+    attempts: evidence.attempts.map(toRoutingAttemptView),
+    outcomes: evidence.outcomes.map(toRoutingOutcomeView),
+    wakes: evidence.wakes.map(toWakeView),
+    replies: evidence.replies.map((reply) => ({ ...reply })),
+  };
+}
+
+/** The durable non-wake outcome for one input, as exposed on evidence routes. */
+export interface WakeObservationView {
+  readonly agentId: string;
+  readonly status: string;
+  readonly reason: string;
+  readonly detail: string;
+}
+
+/** The complete causal routing evidence for one Message or Project event. */
+export interface RoutingEvidenceView {
+  readonly input:
+    | { readonly kind: 'message'; readonly message: MessageView }
+    | { readonly kind: 'event'; readonly event: ProjectEventView };
+  readonly window?: RoutingWindowView;
+  readonly batches: readonly RoutingBatchDetailView[];
+  readonly deterministicWakes: readonly WakeView[];
+  readonly observations: readonly WakeObservationView[];
+}
+
+export function toRoutingEvidenceView(evidence: RoutingInputEvidence): RoutingEvidenceView {
+  return {
+    input:
+      'disposition' in evidence.input
+        ? { kind: 'event', event: toProjectEventView(evidence.input) }
+        : { kind: 'message', message: toMessageView(evidence.input) },
+    ...(evidence.window !== undefined ? { window: toRoutingWindowView(evidence.window) } : {}),
+    batches: evidence.batches.map(toRoutingBatchDetailView),
+    deterministicWakes: evidence.deterministicWakes.map(toWakeView),
+    observations: evidence.observations.map((observation) => ({
+      agentId: observation.agentId,
+      status: observation.status,
+      reason: observation.reason,
+      detail: observation.detail,
+    })),
   };
 }
 
@@ -279,8 +538,16 @@ export interface TaskView {
   readonly constraints: readonly string[];
   readonly status: string;
   readonly assignedAgentId?: string;
+  readonly admission?: Task['admission'];
   readonly environmentPreference?: { readonly kind: string; readonly id: string };
   readonly blockerReason?: string;
+  readonly blocker?: Task['blocker'];
+  readonly completionClaims?: Task['completionClaims'];
+  readonly pendingCompletionClaimId?: string;
+  readonly pauseState?: Task['pauseState'];
+  readonly controlHistory?: Task['controlHistory'];
+  readonly endDisposition?: Task['endDisposition'];
+  readonly forcedRelease?: Task['forcedRelease'];
   readonly environmentInstanceId?: string;
   readonly environmentLeaseId?: string;
   readonly environmentLifecycleState?: string;
@@ -302,10 +569,18 @@ export function toTaskView(task: Task): TaskView {
     constraints: task.constraints,
     status: task.status,
     ...(task.assignedAgentId !== undefined ? { assignedAgentId: task.assignedAgentId } : {}),
+    ...(task.admission !== undefined ? { admission: task.admission } : {}),
     ...(task.environmentPreference !== undefined
       ? { environmentPreference: task.environmentPreference }
       : {}),
     ...(task.blockerReason !== undefined ? { blockerReason: task.blockerReason } : {}),
+    ...(task.blocker !== undefined ? { blocker: task.blocker } : {}),
+    ...(task.completionClaims !== undefined ? { completionClaims: task.completionClaims } : {}),
+    ...(task.pendingCompletionClaimId !== undefined ? { pendingCompletionClaimId: task.pendingCompletionClaimId } : {}),
+    ...(task.pauseState !== undefined ? { pauseState: task.pauseState } : {}),
+    ...(task.controlHistory !== undefined ? { controlHistory: task.controlHistory } : {}),
+    ...(task.endDisposition !== undefined ? { endDisposition: task.endDisposition } : {}),
+    ...(task.forcedRelease !== undefined ? { forcedRelease: task.forcedRelease } : {}),
     ...(task.environmentInstanceId !== undefined ? { environmentInstanceId: task.environmentInstanceId } : {}),
     ...(task.environmentLeaseId !== undefined ? { environmentLeaseId: task.environmentLeaseId } : {}),
     ...(task.environmentLifecycleState !== undefined ? { environmentLifecycleState: task.environmentLifecycleState } : {}),
@@ -323,6 +598,7 @@ export function toTaskView(task: Task): TaskView {
  * a human needs to decide whether cleanup is pending, retryable, or complete.
  */
 export function toTaskContextState(task: Task): string {
+  if (task.forcedRelease !== undefined) return 'cleanup-unproved-force-release';
   switch (task.environmentLifecycleState) {
     case undefined: return 'not-created';
     case 'beginning': return 'preparing';
@@ -350,6 +626,10 @@ export interface TaskRunLinkView {
   readonly agentId: string;
   readonly sequence: number;
   readonly linkedAt: number;
+  readonly actor?: TaskRunLink['actor'];
+  readonly reason?: string;
+  readonly contentVersion?: number;
+  readonly requestedAt?: number;
   readonly summary?: {
     readonly status: string;
     readonly summary: string;
@@ -367,6 +647,10 @@ export function toTaskRunLinkView(link: TaskRunLink): TaskRunLinkView {
     agentId: link.agentId,
     sequence: link.sequence,
     linkedAt: link.linkedAt,
+    ...(link.actor !== undefined ? { actor: link.actor } : {}),
+    ...(link.reason !== undefined ? { reason: link.reason } : {}),
+    ...(link.contentVersion !== undefined ? { contentVersion: link.contentVersion } : {}),
+    ...(link.requestedAt !== undefined ? { requestedAt: link.requestedAt } : {}),
     ...(link.summary !== undefined
       ? {
           summary: {
@@ -1261,10 +1545,35 @@ export interface WorkingGroupScopeView extends ConversationScopeBaseView {
   readonly lifecycle: readonly WorkingGroupLifecycleView[];
 }
 
+export interface TaskGroupContentVersionView {
+  readonly version: number;
+  readonly taskContentVersion: number;
+  readonly at: number;
+  readonly actorMemberId: string;
+  readonly reason: string;
+  readonly taskTitle: string;
+  readonly goal: string;
+  readonly rules: readonly string[];
+}
+
+export interface TaskGroupScopeView extends ConversationScopeBaseView {
+  readonly kind: 'task-group';
+  readonly taskId: string;
+  readonly taskTitle: string;
+  readonly status: 'active' | 'frozen';
+  readonly frozenAt?: number;
+  readonly terminalTaskStatus?: TaskStatus;
+  readonly content: {
+    readonly currentVersion: number;
+    readonly versions: readonly TaskGroupContentVersionView[];
+  };
+}
+
 export type ConversationScopeView =
   | ProjectChannelScopeView
   | DirectConversationScopeView
-  | WorkingGroupScopeView;
+  | WorkingGroupScopeView
+  | TaskGroupScopeView;
 
 /** The read-only admission state of one scope for the acting member. */
 export interface ScopeStateView {
@@ -1290,6 +1599,14 @@ export interface ScopeContextView {
   readonly workingGroup?: {
     readonly displayName: string;
     readonly contentVersion: number;
+    readonly goal: string;
+    readonly rules: readonly string[];
+  };
+  readonly taskGroup?: {
+    readonly taskId: string;
+    readonly taskTitle: string;
+    readonly contentVersion: number;
+    readonly taskContentVersion: number;
     readonly goal: string;
     readonly rules: readonly string[];
   };
@@ -1373,6 +1690,22 @@ function toWorkingGroupContentView(group: WorkingGroupScope): WorkingGroupScopeV
   };
 }
 
+function toTaskGroupContentView(group: TaskGroupScope): TaskGroupScopeView['content'] {
+  return {
+    currentVersion: group.content.currentVersion,
+    versions: group.content.versions.map((version) => ({
+      version: version.version,
+      taskContentVersion: version.taskContentVersion,
+      at: version.at,
+      actorMemberId: sanitizeIdentifier(version.actorMemberId, { fallback: 'unknown-member', kind: 'generic' }),
+      reason: sanitizeOperatorText(version.reason, { fallback: 'Task content version bound to this group.', maxLength: 320 }),
+      taskTitle: sanitizeOperatorText(version.taskTitle, { fallback: 'Task group', maxLength: 120 }),
+      goal: sanitizeProjectText(version.goal),
+      rules: version.rules.map((rule) => sanitizeProjectText(rule)),
+    })),
+  };
+}
+
 export function toConversationScopeView(scope: ConversationScope): ConversationScopeView {
   const base = {
     id: sanitizeScopeId(scope.id),
@@ -1395,14 +1728,27 @@ export function toConversationScopeView(scope: ConversationScope): ConversationS
       ),
     };
   }
+  if (scope.kind === 'working-group') {
+    return {
+      ...base,
+      kind: 'working-group',
+      creatorId: sanitizeIdentifier(scope.creatorId, { fallback: 'unknown-member', kind: 'generic' }),
+      status: workingGroupStatus(scope) === 'disbanded' ? 'disbanded' : 'active',
+      content: toWorkingGroupContentView(scope),
+      memberships: scope.memberships.map(toWorkingGroupMembershipView),
+      lifecycle: scope.lifecycle.map(toWorkingGroupLifecycleView),
+    };
+  }
+  const content = currentTaskGroupContent(scope);
   return {
     ...base,
-    kind: 'working-group',
-    creatorId: sanitizeIdentifier(scope.creatorId, { fallback: 'unknown-member', kind: 'generic' }),
-    status: workingGroupStatus(scope) === 'disbanded' ? 'disbanded' : 'active',
-    content: toWorkingGroupContentView(scope),
-    memberships: scope.memberships.map(toWorkingGroupMembershipView),
-    lifecycle: scope.lifecycle.map(toWorkingGroupLifecycleView),
+    kind: 'task-group',
+    taskId: sanitizeIdentifier(scope.taskId, { fallback: 'unknown-task', kind: 'generic' }),
+    taskTitle: sanitizeOperatorText(content.taskTitle, { fallback: 'Task group', maxLength: 120 }),
+    status: taskGroupStatus(scope),
+    ...(scope.frozenAt !== undefined ? { frozenAt: scope.frozenAt } : {}),
+    ...(scope.terminalTaskStatus !== undefined ? { terminalTaskStatus: scope.terminalTaskStatus } : {}),
+    content: toTaskGroupContentView(scope),
   };
 }
 
@@ -1437,6 +1783,18 @@ export function toScopeContextView(context: ScopeContext): ScopeContextView {
             contentVersion: context.workingGroup.contentVersion,
             goal: sanitizeProjectText(context.workingGroup.goal),
             rules: context.workingGroup.rules.map((rule) => sanitizeProjectText(rule)),
+          },
+        }
+      : {}),
+    ...(context.taskGroup !== undefined
+      ? {
+          taskGroup: {
+            taskId: sanitizeIdentifier(context.taskGroup.taskId, { fallback: 'unknown-task', kind: 'generic' }),
+            taskTitle: sanitizeOperatorText(context.taskGroup.taskTitle, { fallback: 'Task group', maxLength: 120 }),
+            contentVersion: context.taskGroup.contentVersion,
+            taskContentVersion: context.taskGroup.taskContentVersion,
+            goal: sanitizeProjectText(context.taskGroup.goal),
+            rules: context.taskGroup.rules.map((rule) => sanitizeProjectText(rule)),
           },
         }
       : {}),

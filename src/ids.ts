@@ -14,8 +14,27 @@ export interface IdFactory {
   lease(): string;
   /** Ids for durable collaboration Messages (prototype #25). */
   message(): string;
+  /** Ids for durable Project events (#96). */
+  projectEvent(): string;
   /** Ids for durable Tasks (#28). */
   task(): string;
+  /**
+   * Ids for durable routing windows, batches, and attempts (#97).
+   *
+   * Optional so a hand-rolled factory that only names runs and tasks stays
+   * valid; the collaboration coordinator falls back to its own factory for
+   * routing identity when the supplied one does not provide them.
+   */
+  routingWindow?(): string;
+  routingBatch?(): string;
+  routingAttempt?(): string;
+  /**
+   * Ids for durable reconnect-retry triggers (#181).
+   *
+   * Optional so a hand factory that predates the retry seam stays valid; the
+   * retry service falls back to its own factory when the supplied one has none.
+   */
+  retryTrigger?(): string;
 }
 
 export function createIdFactory(): IdFactory {
@@ -23,6 +42,11 @@ export function createIdFactory(): IdFactory {
     run: () => `run-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
     lease: () => `lease-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
     message: () => `msg-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
+    projectEvent: () => `evt-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
     task: () => `task-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
+    routingWindow: () => `win-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
+    routingBatch: () => `bat-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
+    routingAttempt: () => `att-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
+    retryTrigger: () => `trigger-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`,
   };
 }

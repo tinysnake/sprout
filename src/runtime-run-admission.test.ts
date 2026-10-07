@@ -14,9 +14,8 @@ test('a Message delivered to the graph wakes its Agent, runs the scripted engine
   const { runtime } = await build({ turns: [scriptedTurn('composition reply')] });
 
   const delivered = await runtime.collaboration.deliver({
-    projectId: PROJECT_ID,
-    channel: 'project',
-    author: { id: 'human', kind: 'human' },
+    scopeId: `channel-${PROJECT_ID}`,
+    author: { id: 'operator', kind: 'human' },
     body: '@scout please answer',
     deliveryKey: 'composition-delivery-1',
     awaitReply: true,
@@ -112,9 +111,8 @@ test('a Message run records its admitted work option and configuration version (
   const { runtime } = await build({ turns: [scriptedTurn('option reply')] });
 
   const delivered = await runtime.collaboration.deliver({
-    projectId: PROJECT_ID,
-    channel: 'project',
-    author: { id: 'human', kind: 'human' },
+    scopeId: `channel-${PROJECT_ID}`,
+    author: { id: 'operator', kind: 'human' },
     body: '@scout please answer',
     deliveryKey: 'option-delivery-1',
     awaitReply: true,

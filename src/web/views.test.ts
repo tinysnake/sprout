@@ -110,6 +110,7 @@ test('a message view carries the conversation unit and never raw run output', ()
   const message: Message = {
     id: 'message-1',
     projectId: 'project-sprout',
+    scopeId: 'dm-1',
     channel: 'direct',
     author: { id: 'agent-scout', kind: 'agent' },
     body: 'Scout: replied.',
@@ -123,6 +124,7 @@ test('a message view carries the conversation unit and never raw run output', ()
   assert.deepEqual(view, {
     id: 'message-1',
     projectId: 'project-sprout',
+    scopeId: 'dm-1',
     channel: 'direct',
     authorId: 'agent-scout',
     authorKind: 'agent',
@@ -134,11 +136,43 @@ test('a message view carries the conversation unit and never raw run output', ()
   assert.equal('deliveryKey' in view, false, 'the idempotency key stays server-side');
 });
 
+test('a Task-group Message view preserves its stamped envelope for routing consumers', () => {
+  const view = toMessageView({
+    id: 'message-task-group',
+    projectId: 'project-sprout',
+    scopeId: 'task-group-1',
+    channel: 'task-group',
+    author: { id: 'agent-scout', kind: 'agent' },
+    body: 'Review complete. @agent-ranger',
+    recipients: [],
+    envelope: {
+      kind: 'handoff',
+      sender: { id: 'agent-scout', kind: 'agent' },
+      taskId: 'task-1',
+      runId: 'run-1',
+      workItemId: 'task-1',
+      groupId: 'task-group-1',
+      to: ['agent-ranger'],
+    },
+    deliveryKey: 'task-group-view-1',
+    createdAt: 10,
+  });
+  assert.deepEqual(view.envelope, {
+    kind: 'handoff',
+    sender: { id: 'agent-scout', kind: 'agent' },
+    taskId: 'task-1',
+    runId: 'run-1',
+    workItemId: 'task-1',
+    groupId: 'task-group-1',
+    to: ['agent-ranger'],
+  });
+});
+
 test('a wake view exposes the reason, status, and linked run only', () => {
   assert.deepEqual(
     toWakeView({
       id: 'wake-1',
-      messageId: 'message-1',
+      inputId: 'message-1',
       projectId: 'project-sprout',
       agentId: 'agent-scout',
       reason: 'direct-recipient',
@@ -153,7 +187,7 @@ test('a wake view exposes the reason, status, and linked run only', () => {
 
   const withoutRun = toWakeView({
     id: 'wake-2',
-    messageId: 'message-1',
+    inputId: 'message-1',
     projectId: 'project-sprout',
     agentId: 'agent-ranger',
     reason: 'broadcast',

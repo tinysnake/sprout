@@ -1,4 +1,7 @@
 import { existsSync } from 'node:fs';
+import { OperatorDiagnostics } from './operations/module.ts';
+import { MemoryOperationalStore, type OperationalStore } from './operations/service.ts';
+import { createOperatorRouter } from './web/operator-router.ts';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -16,6 +19,7 @@ import type { CollaborationStore } from './collaboration/store.ts';
 import type { EngineAdapter } from './engine/port.ts';
 import type { EnvironmentDefinition, EnvironmentInstance } from './environment/model.ts';
 import {
+  ADMISSION_CAPABILITY,
   EnvironmentCatalog,
   projectCatalogEntry,
   type EnvironmentCatalogEntry,
@@ -58,10 +62,18 @@ import {
 import {
   ConversationScopeService,
   type ConversationProjectPort,
+  type TaskGroupSyncInput,
 } from './conversation/service.ts';
+import { currentTaskGroupContent, isTaskGroup, projectChannelScopeId } from './conversation/model.ts';
 import type { ConversationScopeStore } from './conversation/store.ts';
 import type { AgentRun } from './run/model.ts';
 import { RunOrchestrator } from './run/orchestrator.ts';
+import {
+  RunReconnectRetry,
+  RunReconnectRetryShutdownError,
+  type RunReconnectRetryReconcileResult,
+} from './run/reconnect-retry.ts';
+import type { RunReconnectRetryStore } from './run/reconnect-retry-store.ts';
 import type { SessionKeyStore } from './run/session-key-store.ts';
 import { SqliteStore } from './store/db.ts';
 import type { OperatorSessionStore } from './auth/store.ts';
@@ -72,15 +84,30 @@ import {
   type TaskContextWorker,
 } from './task/environment-lifecycle.ts';
 import { TaskService } from './task/service.ts';
-import { isTerminalTaskStatus } from './task/model.ts';
+import { TaskProposalService } from './task/proposal-service.ts';
+import { TaskAdmissionService } from './task/admission-service.ts';
+import { TaskControlService } from './task/control-service.ts';
+import type { TaskProposalStore } from './task/proposal-store.ts';
+import { createTaskProposalRouter } from './web/task-proposal-router.ts';
+import { createTaskAdmissionRouter } from './web/task-admission-router.ts';
+import { createTaskControlRouter } from './web/task-control-router.ts';
+import { createFeedRouter } from './web/feed-router.ts';
+import { createCollaborationAttentionRouter } from './web/collaboration-attention-router.ts';
+import { createFeedProjection, type FeedChatActivityOrigin, type FeedTaskGroup } from './web/feed.ts';
+import { isActiveIntentTaskStatus } from './task/model.ts';
+import type { Task } from './task/model.ts';
 import type { TaskStore } from './task/store.ts';
 import type { WorkerInfo, WorkerReadinessProbeResult } from './worker/protocol.ts';
 import type { ValidateWorkspaceParams, ValidateWorkspaceResult } from './worker/protocol.ts';
+import { createAgentTaskGroupMessageSender } from './collaboration/agent-task-group.ts';
 import { createRunApi, type RunApi } from './web/api.ts';
 import { createEnvironmentRouter } from './web/environment-router.ts';
 import { createAgentRouter } from './web/agent-router.ts';
 import { createProjectRouter } from './web/project-router.ts';
 import { createConversationRouter } from './web/conversation-router.ts';
+import { createChatReadRouter } from './web/chat-read-router.ts';
+import { createChatRunRouter } from './web/chat-run-router.ts';
+import { createUsageRouter } from './web/usage-router.ts';
 import { toRunWorkOptionAttribution } from './web/views.ts';
 import { EnvironmentArchiveService } from './environment/archive.ts';
 import {
@@ -92,6 +119,10 @@ import { effectiveWorkOptions } from './agent/model.ts';
 import { readinessRequirements } from './environment/readiness.ts';
 import { EnvironmentReadinessWorkflow } from './environment/readiness-workflow.ts';
 import { EnrollmentWorkerPort } from './worker/enrollment-port.ts';
+import type { UsageStore } from './usage/store.ts';
+import { InMemoryUsageStore } from './usage/store.ts';
+import { UsageService } from './usage/service.ts';
+import { UsageAwareRoutingModelPort } from './usage/routing-adapter.ts';
 import type { WorkerConnectionEpochStore } from './environment/worker-epoch-store.ts';
 import { SUPPORTED_WORKER_PROTOCOL } from './environment/enrollment-service.ts';
 import { workSafetyFromRecovery } from './environment/recovery.ts';
@@ -138,12 +169,17 @@ export type { TaskContextWorker };
  * the in-memory adapters, so the same graph is exercised either way.
  */
 export interface RuntimeStores {
+  readonly operations?: OperationalStore;
+  readonly schemaVersion?: number;
   readonly runs: RunStore;
+  /** The bounded reconnect-retry gate, trigger, and per-run rows (#181). */
+  readonly runReconnectRetries: RunReconnectRetryStore;
   readonly leases: LeaseStore;
   readonly projects: ProjectStore;
   readonly sessionKeys: SessionKeyStore;
   readonly collaboration: CollaborationStore;
   readonly tasks: TaskStore;
+  readonly taskProposals: TaskProposalStore;
   /** The durable one-Operator identity and browser-session boundary. */
   readonly operatorSessions: OperatorSessionStore;
   /** The durable Environment enrollment authority decisions (#87). */
@@ -162,8 +198,10 @@ export interface RuntimeStores {
   readonly projectAuthorities: ProjectAuthorityStore;
   /** The durable Project Environment access and workspace bindings (#93). */
   readonly projectAccess: ProjectAccessStore;
-  /** The durable conversation scopes and Working groups (#95). */
+  /** The durable Project channels, direct scopes, Working groups, and Task groups (#95, #210). */
   readonly conversationScopes: ConversationScopeStore;
+  /** The durable usage activities and append-only observations (#105). */
+  readonly usage?: UsageStore;
   /** Atomic insert boundary for first Project + Environment/workspace setup. */
   readonly projectCreation?: ProjectCreationStore;
   close(): void;
@@ -254,6 +292,10 @@ export interface SproutReconciliation {
   readonly admittedRunIds: readonly string[];
   /** Input Message ids whose reply the collaboration pass (re)projected. */
   readonly projectedMessageIds: readonly string[];
+  /** What the bounded reconnect-retry pass armed, triggered, queued, dispatched, and settled (#181). */
+  readonly reconnectRetries: RunReconnectRetryReconcileResult;
+  /** Run ids whose system failure event the collaboration pass published (#180). */
+  readonly failureEventRunIds: readonly string[];
 }
 
 /** The wired runtime graph, plus the two lifecycle commands over it. */
@@ -262,6 +304,9 @@ export interface SproutRuntime {
   readonly api: RunApi;
   readonly orchestrator: RunOrchestrator;
   readonly tasks: TaskService;
+  readonly taskProposals: TaskProposalService;
+  readonly taskAdmissions: TaskAdmissionService;
+  readonly taskControls: TaskControlService;
   readonly collaboration: CollaborationCoordinator;
   readonly pool: EnvironmentPool;
   readonly agents: AgentRegistry;
@@ -288,8 +333,10 @@ export interface SproutRuntime {
   readonly projectService: ProjectService;
   /** The Project Environment access and workspace capability (#93). */
   readonly projectAccess: ProjectAccessService;
-  /** The conversation scope and Working group capability (#95). */
+  /** The Project conversation scopes, Working groups, and Task groups (#95, #210). */
   readonly conversationScopes: ConversationScopeService;
+  /** The truthful Usage and cost observation capability (#105). */
+  readonly usage: UsageService;
   /**
    * How this Sprout instance reaches its production Worker (ADR-0012 / E2).
    * `configured` is the M1 carrier path retained only for an injected
@@ -365,6 +412,9 @@ export interface SproutRuntimeOptions {
   readonly onWorkerLog?: (line: string) => void;
   /** Non-wake outcomes for one Message, logged so a suppression is never silent. */
   readonly onObservation?: CollaborationCoordinatorOptions['onObservation'];
+  /** Trusted host-composed wake model, never supplied through Human HTTP. */
+  readonly routingModel?: CollaborationCoordinatorOptions['routingModel'];
+  readonly taskGroupModel?: CollaborationCoordinatorOptions['taskGroupModel'];
 }
 
 /** Explicit private composition injection, used only by adapter tests. */
@@ -374,6 +424,33 @@ export type SproutTestComposition = {
     workerGateway: WorkerGateway;
     readinessWorkflow: EnvironmentReadinessWorkflow;
 };
+
+function taskGroupSyncInput(task: Task): TaskGroupSyncInput | undefined {
+  const admission = task.admission;
+  if (admission === undefined) return undefined;
+  const contentRevision = [...(task.controlHistory ?? [])].reverse().find(
+    (event) => event.action === 'content-revised',
+  );
+  const lastControlEvent = task.controlHistory?.at(-1);
+  return {
+    taskId: task.id,
+    projectId: task.projectId,
+    title: task.title,
+    goal: task.goal,
+    constraints: task.constraints,
+    lead: { memberId: admission.lead.memberId, kind: admission.lead.memberKind },
+    contentVersion: contentRevision?.action === 'content-revised'
+      ? contentRevision.contentVersion
+      : admission.contentVersion,
+    status: task.status,
+    allowThaw: lastControlEvent?.action === 'reopened'
+      || (lastControlEvent?.action === 'resumed' && lastControlEvent.fromStatus === 'stopped'),
+    ...(contentRevision?.action === 'content-revised' ? {
+      versionActor: { memberId: contentRevision.actor.memberId, kind: contentRevision.actor.memberKind },
+      reason: contentRevision.reason,
+    } : {}),
+  };
+}
 
 export function createSproutRuntime(options: SproutRuntimeOptions): Promise<SproutRuntime> {
   return composeSproutRuntime(options);
@@ -567,7 +644,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       },
       hasUnfinishedTask: async (projectId) => {
         const projectTasks = await openedStores.tasks.list({ projectId });
-        return projectTasks.some((task) => !isTerminalTaskStatus(task.status));
+        return projectTasks.some((task) => isActiveIntentTaskStatus(task.status));
       },
       // A lease — active or recovering, run-held or Task-held — whose run or
       // Task belongs to this Project means recovery still owns the Environment
@@ -633,7 +710,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       memberHasUnfinishedTask: async (projectId, memberId) => {
         const projectTasks = await openedStores.tasks.list({ projectId });
         return projectTasks.some(
-          (task) => !isTerminalTaskStatus(task.status) && task.assignedAgentId === memberId,
+          (task) => isActiveIntentTaskStatus(task.status) && task.assignedAgentId === memberId,
         );
       },
     };
@@ -669,9 +746,13 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
             contentVersion: authority.content.currentVersion,
             goal: content.goal,
             rules: [...content.rules],
+            wakePolicy: content.wakePolicy,
+            routingIntervalMs: content.routingIntervalMs,
             members: content.memberships.map((membership) => ({
               memberId: membership.memberId,
               memberKind: membership.memberKind,
+              responsibilities: [...membership.responsibilities],
+              collaborationInstructions: membership.collaborationInstructions,
               ...(membership.endedAt !== undefined ? { endedAt: membership.endedAt } : {}),
               ...(membership.endedReason !== undefined
                 ? { endedReason: membership.endedReason }
@@ -687,6 +768,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           contentVersion: 0,
           goal: configured.goal,
           rules: [...configured.rules],
+          // A host-configured M1 Project carries no policy record: it projects
+          // the ADR-0007 defaults, exactly like migration and the template.
+          wakePolicy: 'explicit-only' as const,
+          routingIntervalMs: 30_000,
           members: [
             // The local Human is a member of every Project (ADR-0008); the M1
             // projection carries no durable membership rows, so it attributes
@@ -695,22 +780,46 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
             ...configured.memberships.map((membership) => ({
               memberId: membership.agentId,
               memberKind: 'agent' as const,
+              responsibilities: [...membership.responsibilities],
+              collaborationInstructions: membership.collaborationInstructions,
             })),
           ],
         };
       },
     };
     /**
-     * The conversation scope and Working group capability (#95): the invariant
-     * Project channel, Project-scoped direct conversations, and temporary
-     * Working groups with durable membership history (ADR-0008). It holds no
-     * Message, wake, run, Task, or lease port, so scope commands can never
-     * wake an Agent or create work by themselves.
+     * Project channels, direct scopes, Working groups, and Task groups (#95,
+     * #210). Task groups observe Task state through a read-only port; Task
+     * lifecycle and authority remain with the Task services. Scope operations
+     * hold no Message, wake, run, or lease port, so they cannot create work.
      */
+    const taskProposals = new TaskProposalService({
+      store: stores.taskProposals,
+      projects: conversationProjects,
+      agents: projectAgentAuthority,
+      origins: {
+        getWorkingGroup: id => openedStores.conversationScopes.get(id).then(scope => scope?.kind === 'working-group' ? scope : undefined),
+        getMessage: id => openedStores.collaboration.getMessage(id),
+      },
+    });
+    const taskStoreForConversation = stores.tasks;
     const conversationScopes = new ConversationScopeService({
       store: stores.conversationScopes,
       projects: conversationProjects,
+      tasks: {
+        async taskFacts(taskId) {
+          const task = await taskStoreForConversation.get(taskId);
+          return task === undefined ? undefined : { projectId: task.projectId, status: task.status };
+        },
+      },
     });
+    const syncTaskGroup = async (task: Task): Promise<void> => {
+      const input = taskGroupSyncInput(task);
+      if (input !== undefined) await conversationScopes.syncTaskGroup(input);
+    };
+    const reconcileTaskGroups = async (): Promise<void> => {
+      for (const task of await taskStoreForConversation.list()) await syncTaskGroup(task);
+    };
     // Hydrate the Project channel invariant for every Project that already
     // exists before this composition serves: durable authority records from
     // earlier runs and the host-configured projection each gain their one
@@ -787,7 +896,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         if (
           projectTasks.some(
             (task) =>
-              !isTerminalTaskStatus(task.status) && task.environmentInstanceId === environmentInstanceId,
+              isActiveIntentTaskStatus(task.status) && task.environmentInstanceId === environmentInstanceId,
           )
         ) {
           return true;
@@ -930,29 +1039,40 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
      */
     let recovery: EnvironmentRecoveryService;
 
-    const orchestrator = new RunOrchestrator({
+    const resolveAgent = async (agentId: string): Promise<AgentDefinition | undefined> => {
+      const durable = await agentService.get(agentId);
+      if (durable === undefined) return agents.get(agentId);
+      if (durable.status !== 'active') return undefined;
+      const configuration = currentConfiguration(durable);
+      const seed = agents.get(agentId);
+      return {
+        id: durable.id,
+        name: durable.displayName,
+        engine: configuration.options[0]!.engine,
+        capability: seed?.capability ?? 'agent-run',
+        workOptions: configuration.options,
+        configurationVersion: configuration.version,
+        ...(configuration.instructions !== undefined ? { instructions: configuration.instructions } : {}),
+        ...(seed?.workingDirectory !== undefined ? { workingDirectory: seed.workingDirectory } : {}),
+      };
+    };
+
+    const orchestrator: RunOrchestrator = new RunOrchestrator({
+      taskGroupPosts: (run, assertActive) => createAgentTaskGroupMessageSender({
+        run,
+        assertActive,
+        runs: orchestrator,
+        tasks: openedStores.tasks,
+        pool,
+        scopes: conversationScopes,
+        collaboration,
+      }),
       // Resolved per run *for the resolved instance*, so a worker that died is
       // replaced before the next run instead of failing it against a dead channel
       // (ADR-0003), and so execution follows the leased instance (F1, #18).
       engines: (requestedInstanceId) => runtimeEnvironment.adapters(requestedInstanceId),
       agents,
-      resolveAgent: async (agentId) => {
-        const durable = await agentService.get(agentId);
-        if (durable === undefined) return agents.get(agentId);
-        if (durable.status !== 'active') return undefined;
-        const configuration = currentConfiguration(durable);
-        const seed = agents.get(agentId);
-        return {
-          id: durable.id,
-          name: durable.displayName,
-          engine: configuration.options[0]!.engine,
-          capability: seed?.capability ?? 'agent-run',
-          workOptions: configuration.options,
-          configurationVersion: configuration.version,
-          ...(configuration.instructions !== undefined ? { instructions: configuration.instructions } : {}),
-          ...(seed?.workingDirectory !== undefined ? { workingDirectory: seed.workingDirectory } : {}),
-        };
-      },
+      resolveAgent,
       // Observed engine facts (#87) per instance, so run admission can take the
       // Agent's first compatible work option before any engine accepts the
       // work (#90, ADR-0008). The facts are the readiness store's durable
@@ -1006,10 +1126,21 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       leaseTtlMs,
     });
 
+    const usageStore = stores.usage ?? new InMemoryUsageStore();
+    const usageService = new UsageService({
+      store: usageStore,
+    });
+    orchestrator.subscribe((run) => {
+      void usageService.recordRunActivity(run).catch(() => {
+        process.stderr.write('Usage telemetry write failed; record dropped.\n');
+      });
+    });
+
     taskLifecycle = new TaskEnvironmentLifecycle({
       store: stores.tasks,
       pool,
       agents,
+      resolveAgent,
       projects,
       runs: orchestrator,
       worker: {
@@ -1018,14 +1149,18 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         recycle: async (input) =>
           (await runtimeEnvironment.contexts(input.environmentInstanceId)).recycle(input),
       },
+      taskGroups: {
+        sync: syncTaskGroup,
+        withTaskGroupLock: (taskId, action) => conversationScopes.withTaskGroupLock(taskId, action),
+      },
       leaseTtlMs,
       // Every Task entry into recovery opens the durable recovery record that
       // protects its lease (#88). The callback only records; the lifecycle keeps
       // ownership of the Task state it just made durable.
-      onRecovery: async ({ leaseId, hadActiveRun, runId }) => {
+      onRecovery: async ({ leaseId, hadActiveRun, runId, cause }) => {
         await recovery.open({
           leaseId,
-          cause: 'worker-channel-lost',
+          cause: cause ?? 'worker-channel-lost',
           hadActiveRun,
           ...(runId !== undefined ? { runId } : {}),
         });
@@ -1035,7 +1170,21 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       // override needs this capability the Environment domain explicitly grants.
       forceReleaseLease: (leaseId) => pool.releaseTaskLease(leaseId) !== undefined,
     });
+    for (const task of await stores.tasks.list()) {
+      if (task.admission !== undefined) await syncTaskGroup(task);
+    }
     tasks = new TaskService({ store: stores.tasks, runs: orchestrator, lifecycle: taskLifecycle });
+    const taskAdmissions = new TaskAdmissionService({
+      proposals: taskProposals,
+      proposalStore: stores.taskProposals,
+      tasks,
+      lifecycle: taskLifecycle,
+      projects,
+      agentAuthority: projectAgentAuthority,
+    });
+    const taskControls = new TaskControlService({
+      tasks, lifecycle: taskLifecycle, proposals: taskProposals, runs: orchestrator,
+    });
 
     recovery = new EnvironmentRecoveryService({
       store: stores.recovery,
@@ -1053,10 +1202,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       holders: {
         clearIdleTask: (taskId) => taskLifecycle.clearIdleRecovery(taskId),
         resumeTask: async (taskId) => {
-          await taskLifecycle.recover(taskId, 'resume');
+          await taskControls.recoverForHuman(taskId, { action: 'resume', reason: 'Human resolved Environment recovery' });
         },
         discardTask: async (taskId) => {
-          await taskLifecycle.recover(taskId, 'discard');
+          await taskControls.recoverForHuman(taskId, { action: 'discard', reason: 'Human discarded Environment recovery' });
         },
         forceReleaseTask: (input) => taskLifecycle.forceRelease(input.taskId, input),
       },
@@ -1069,25 +1218,62 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     });
 
     /**
-     * The collaboration coordinator: durable Messages, the M1 wake contract, and
-     * automatic final-result projection (#26).
+     * The collaboration coordinator: scope-governed Messages, Project events,
+     * deterministic routing, collection windows, wake-model-assisted batches,
+     * and automatic final-result projection (#26, #96, #97).
      *
      * It shares the process's one durable store and the run orchestrator, so a
-     * reply is projected from the same run record the core persisted. No wake model
-     * is configured at M1, which the contract handles explicitly: an unaddressed
-     * project-channel Message fails open to one wake per other member (see
-     * `src/collaboration/wake.ts`) rather than being silently dropped.
+     * reply is projected from the same run record the core persisted. Direct
+     * recipients, exact mentions, exact broadcasts, and addressed Project
+     * events resolve deterministically against the Project's member facts
+     * through the conversation-scope service (ADR-0007). An eligible
+     * unaddressed input collects into the Project's durable routing window;
+     * each frozen batch is judged by the composed wake model when one exists
+     * (configuring a real low-cost wake model remains future work) and fails
+     * closed with visible per-input outcomes when none does. Task summaries
+     * remain omitted until explicit per-input relevance can be established.
      */
+    const usageRoutingModel = options.routingModel === undefined ? undefined
+      : new UsageAwareRoutingModelPort({ inner: options.routingModel });
     const collaboration = new CollaborationCoordinator({
-      projects,
+      scopes: conversationScopes,
+      ...(options.taskGroupModel ? { taskGroupModel: options.taskGroupModel } : {}),
+      taskGroupFacts: async scopeId => {
+        const scope = await conversationScopes.getScope(scopeId);
+        if (scope?.kind !== 'task-group') return undefined;
+        const task = await tasks.get(scope.taskId);
+        const lead = task?.admission?.lead;
+        if (!task || !lead) return undefined;
+        const latest = [...(task.controlHistory ?? [])].reverse().find(event => event.action === 'content-revised');
+        const currentLead = latest?.action === 'content-revised' ? latest.content.lead : lead;
+        const contract = await conversationScopes.projectContract(scope.projectId);
+        return {
+          lead: { id: currentLead.memberId, kind: currentLead.memberKind },
+          assignedAgentIds: task.assignedAgentId ? [task.assignedAgentId] : [],
+          roles: (contract?.members ?? []).map(member => ({ agentId: member.memberId, keys: member.responsibilities ?? [] })),
+        };
+      },
       store: stores.collaboration,
       runs: orchestrator,
+      ...(usageRoutingModel !== undefined ? { routingModel: usageRoutingModel } : {}),
+      onRoutingAttempt: async (attempt, projectId) => {
+        const telemetry = usageRoutingModel?.takeTelemetry(attempt.id);
+        try {
+          await usageService.recordRoutingAttemptActivity(attempt, {
+            ...telemetry, batchId: attempt.batchId, projectId,
+            // The lifecycle's start/settlement is authoritative, not native latency.
+            durationMs: Math.max(0, attempt.finishedAt - attempt.startedAt),
+          });
+        } catch {
+          process.stderr.write('Usage telemetry write failed; record dropped.\n');
+        }
+      },
       onObservation:
         options.onObservation ??
-        (({ messageId, observation }) => {
+        (({ inputId, observation }) => {
           process.stderr.write(
             `[collaboration] ${observation.status} (${observation.agentId}) ` +
-              `on message ${messageId}: ${observation.detail}\n`,
+              `on input ${inputId}: ${observation.detail}\n`,
           );
         }),
     });
@@ -1145,6 +1331,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     // Refreshes read several independently durable sources. A slow older read
     // must never publish after a newer epoch/readiness observation: doing so
     // would turn a current fact back into a stale catalog projection.
+    let operations: OperatorDiagnostics | undefined;
     let catalogProjectionRevision = 0;
     const refreshEnvironmentCatalog = async (): Promise<readonly EnvironmentCatalogEntry[]> => {
       const revision = ++catalogProjectionRevision;
@@ -1193,10 +1380,15 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       }
       if (revision !== catalogProjectionRevision) return environmentCatalog.entries();
       environmentCatalog.update(inputs);
+      await operations?.capture();
       publishCatalogMembership();
       return environmentCatalog.entries();
     };
-    const publishCatalogMembership = (): void => {
+    // Late-bound so every catalog publication — connection accept, channel
+    // loss, readiness commit, authority change — hands the bounded reconnect
+    // retry one observation without ordering the graph backwards (#181).
+    let noteRunReconnectRetry: (acceptedInstanceId?: string) => Promise<void> = async () => undefined;
+    const publishCatalogMembership = (acceptedInstanceId?: string): void => {
       if (configuredCarrierPresent) {
         // An injected test/development carrier keeps exactly its one static
         // instance and immediate eligibility; the enrollment catalog is not its
@@ -1206,12 +1398,22 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           instances: [configuredInstance],
           eligibleInstanceIds: [configuredInstance.id],
         });
+        void noteRunReconnectRetry(acceptedInstanceId).catch(() => {
+          process.stderr.write(
+            '[run-retry] environment state observation failed; durable retry state is unchanged\n',
+          );
+        });
         return;
       }
       pool.synchronize({
         definitions: environmentCatalog.entries().map((entry) => entry.definition),
         instances: environmentCatalog.entries().map((entry) => entry.instance),
         eligibleInstanceIds: environmentCatalog.eligibleInstanceIds(),
+      });
+      void noteRunReconnectRetry(acceptedInstanceId).catch(() => {
+        process.stderr.write(
+          '[run-retry] environment state observation failed; durable retry state is unchanged\n',
+        );
       });
     };
     // Authority decisions now schedule a catalog re-projection, so approval,
@@ -1256,6 +1458,37 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       workerGateway.verifyObservationAuthority(authority, scope);
     currentWorkerConnectionEpoch = (enrollmentId) =>
       workerGateway.currentConnectionEpoch(enrollmentId);
+    // The bounded reconnect retry for environment-disconnected run admissions
+    // (#181): one durable gate/trigger/retry state machine over the run,
+    // Project, pool, and gateway facts this graph already keeps. Every catalog
+    // publication feeds it one observation through `noteRunReconnectRetry`
+    // above; it never dials a Worker, never touches routing, and submits at
+    // most one linked retry per failed run.
+    const runReconnectRetry = new RunReconnectRetry({
+      store: durableStores.runReconnectRetries,
+      runs: orchestrator,
+      projects: () =>
+        projects.list().map((project) => ({
+          projectId: project.id,
+          instanceIds: project.availableEnvironmentInstanceIds,
+        })),
+      // Under an injected test/development carrier the one static instance
+      // cannot disconnect; under the enrollment catalog only a live accepted
+      // Worker connection counts (ADR-0012).
+      isConnected: (instanceId) =>
+        (configuredCarrierPresent && configuredInstance.id === instanceId) ||
+        workerGateway.liveFor(instanceId) !== undefined,
+      canAdmitWork: (instanceId) =>
+        (configuredCarrierPresent && configuredInstance.id === instanceId) ||
+        pool.requiresLease(instanceId, ADMISSION_CAPABILITY) !== undefined,
+      onRetrySettled: (input) => collaboration.projectRetryReply(input),
+    });
+    noteRunReconnectRetry = (acceptedInstanceId) =>
+      runReconnectRetry.noteEnvironmentState(acceptedInstanceId)
+        .then(() => undefined)
+        .catch((error: unknown) => {
+          if (!(error instanceof RunReconnectRetryShutdownError)) throw error;
+        });
     const enrollmentEnvironment = new EnrollmentWorkerPort({
       gateway: workerGateway,
       ...(options.onWorkerLog !== undefined ? { onLog: options.onWorkerLog } : {}),
@@ -1292,7 +1525,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       // republish until some later event (#162).
       catalogProjectionRevision += 1;
       environmentCatalog.setEpoch(acceptance.enrollment.id, acceptance.epoch.epoch);
-      publishCatalogMembership();
+      publishCatalogMembership(acceptance.enrollment.environmentInstanceId);
       void refreshEnvironmentCatalog().catch(() => undefined);
       // The Worker's own readiness is observed over the accepted inbound channel
       // (never by dialing one), so the catalog can reach eligibility once the
@@ -1544,12 +1777,128 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     };
     const requestWorkerProbe = (enrollmentId: string) => readinessWorkflow.request(enrollmentId);
 
+    operations = new OperatorDiagnostics({ store: stores.operations ?? new MemoryOperationalStore(), schema: stores.schemaVersion ?? null, auth: operatorSessions, enrollments, recovery,
+      connected: (instanceId) => workerGateway.liveFor(instanceId) !== undefined,
+      run: async (id) => {
+        const run = orchestrator.get(id) ?? await durableStores.runs.get(id);
+        return run ? { id: run.id, ...(run.projectId !== undefined ? { projectId: run.projectId } : {}), agentId: run.agentId } : undefined;
+      },
+      task: async (id) => {
+        const task = await tasks.get(id);
+        return task ? { id: task.id, projectId: task.projectId } : undefined;
+      },
+    });
+    await operations.start();
+    await operations.capture();
+    // The read-only Feed/Attention projection (#103) includes Task-group facts
+    // as curated activity and consumes durable #211 escalation events by their
+    // Project-event identity and declared Human-attention disposition.
+    const feedTaskGroups = async (): Promise<FeedTaskGroup[]> => {
+      const [projectsNow, taskRows] = await Promise.all([projectService.list(), tasks.list()]);
+      const taskById = new Map(taskRows.map((task) => [task.id, task]));
+      const projectIds = new Set([
+        ...projectsNow.map((project) => project.id),
+        ...projects.list().map((project) => project.id),
+        ...taskRows.map((task) => task.projectId),
+      ]);
+      const scopes = (await Promise.all([...projectIds].map((projectId) =>
+        openedStoresForCatalog.conversationScopes.listForProject(projectId),
+      ))).flat();
+      return scopes.filter(isTaskGroup).map((group) => ({
+        scopeId: group.id,
+        projectId: group.projectId,
+        taskId: group.taskId,
+        taskTitle: currentTaskGroupContent(group).taskTitle,
+        ...(taskById.get(group.taskId)?.admission?.lead.memberKind !== undefined
+          ? { leadKind: taskById.get(group.taskId)!.admission!.lead.memberKind }
+          : {}),
+        createdAt: group.createdAt,
+      }));
+    };
+    const feed = createFeedProjection({
+      projects: async () => {
+        const refs = (await projectService.list()).map((project) => ({ id: project.id, displayName: project.displayName }));
+        const known = new Set(refs.map((ref) => ref.id));
+        for (const configured of projects.list()) {
+          if (!known.has(configured.id)) refs.push({ id: configured.id, displayName: configured.id });
+        }
+        return refs;
+      },
+      tasks: () => tasks.list(),
+      proposals: async () => {
+        const ids = new Set((await projectService.list()).map((project) => project.id));
+        for (const configured of projects.list()) ids.add(configured.id);
+        return (await Promise.all([...ids].map((id) => taskProposals.list(id)))).flat();
+      },
+      events: () => collaboration.listEvents(),
+      enrollments: () => enrollments.list(),
+      recoveries: () => recovery.list(),
+      runs: () => orchestrator.list(),
+      routingBatches: () => collaboration.listRoutingBatches(),
+      wakeFailures: () => openedStoresForCatalog.collaboration.listWakeFailures(),
+      attentionResolutions: () => openedStoresForCatalog.collaboration.listAttentionResolutions(),
+      taskGroups: feedTaskGroups,
+      taskGroupMessages: async () => {
+        const [taskGroups, messages] = await Promise.all([
+          feedTaskGroups(),
+          collaboration.listMessages(),
+        ]);
+        const groups = new Map(taskGroups.map((group) => [group.scopeId, group]));
+        return messages.flatMap((message) => {
+          const group = groups.get(message.scopeId);
+          if (group === undefined || group.projectId !== message.projectId) return [];
+          return [{
+            id: message.id,
+            projectId: message.projectId,
+            scopeId: message.scopeId,
+            kind: message.kind ?? 'status',
+            authorKind: message.author.kind,
+            ...(message.inReplyTo !== undefined ? { inReplyTo: message.inReplyTo } : {}),
+            createdAt: message.createdAt,
+          }];
+        });
+      },
+      taskGroupEscalations: () => collaboration.listTaskGroupEscalations(),
+      chatActivityOrigins: async ({ events: eventRows, routingBatches }) => {
+        const [messages, wakes] = await Promise.all([
+          collaboration.listMessages(),
+          collaboration.listWakeRequests(),
+        ]);
+        const messagesById = new Map(messages.map((message) => [message.id, message]));
+        const eventsById = new Map(eventRows.map((event) => [event.id, event]));
+        const batchesById = new Map(routingBatches.map((batch) => [batch.id, batch]));
+        return wakes.flatMap((wake): FeedChatActivityOrigin[] => {
+          if (!wake.runId) return [];
+          const message = messagesById.get(wake.inputId);
+          if (message?.projectId === wake.projectId) {
+            return [{ runId: wake.runId, projectId: wake.projectId, agentId: wake.agentId, scopeId: message.scopeId, messageId: message.id }];
+          }
+          const event = eventsById.get(wake.inputId);
+          if (event?.projectId === wake.projectId) {
+            return [{ runId: wake.runId, projectId: wake.projectId, agentId: wake.agentId, scopeId: projectChannelScopeId(event.projectId), eventId: event.id }];
+          }
+          const batch = batchesById.get(wake.inputId) ?? (wake.batchId ? batchesById.get(wake.batchId) : undefined);
+          const input = batch?.projectId === wake.projectId && batch.manifest.inputs.length === 1
+            ? batch.manifest.inputs[0]
+            : undefined;
+          if (!input) return [];
+          return input.kind === 'message' && input.scopeId !== ''
+            ? [{ runId: wake.runId, projectId: wake.projectId, agentId: wake.agentId, scopeId: input.scopeId, messageId: input.inputId }]
+            : input.kind === 'event'
+              ? [{ runId: wake.runId, projectId: wake.projectId, agentId: wake.agentId, scopeId: projectChannelScopeId(wake.projectId), eventId: input.inputId }]
+              : [];
+        });
+      },
+    });
+
     const api = createRunApi({
       orchestrator,
       agents,
       // The project channel is served over the same core: delivery, wake dispatch,
-      // and projected replies all go through the one coordinator above.
+      // and projected replies all go through the one coordinator above, governed
+      // by the conversation-scope service below.
       collaboration,
+      conversationScopes,
       // Members the Web composer may address (#27); read-only from the registry.
       projects,
       // Durable multi-run Tasks (#28): create, list, inspect, and advance.
@@ -1566,6 +1915,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       // (#88) are composed through the same seam and delegate every safety rule
       // to the recovery service.
       routers: [
+        createOperatorRouter(operations),
         createEnvironmentRouter({ enrollments, recovery, archive, requestProbe: requestWorkerProbe }),
         // Durable Project, template-snapshot, and membership authority (#92),
         // composed through the same #85 additive seam. Only the authenticated
@@ -1583,6 +1933,38 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         // one implementation; the routes sit behind the operator browser
         // boundary, so their actor is the authenticated Human by construction.
         createConversationRouter({ scopes: conversationScopes }),
+        createChatReadRouter({ scopes: conversationScopes, store: openedStoresForCatalog.collaboration, agents: agentService }),
+        createChatRunRouter({ collaboration, scopes: conversationScopes, runs: orchestrator }),
+        createTaskProposalRouter({ proposals: taskProposals }),
+        createUsageRouter({ usage: usageService }),
+        createTaskAdmissionRouter({ admissions: taskAdmissions }),
+        createTaskControlRouter({
+          controls: taskControls,
+          end: async (taskId, input) => {
+            const task = await tasks.get(taskId);
+            if (environmentSource === 'enrollment' && task?.environmentLeaseId !== undefined &&
+                task.environmentLifecycleState === 'recovery' && task.recoveryState === 'ending' &&
+                task.endDisposition === 'completed') {
+              await recovery.resume(task.environmentLeaseId, { reason: input.reason });
+              return (await tasks.get(taskId))!;
+            }
+            return taskControls.endForHuman(taskId, input);
+          },
+          recover: async (taskId, input) => {
+            const task = await tasks.get(taskId);
+            if (environmentSource !== 'enrollment' || task?.environmentLeaseId === undefined ||
+                task.environmentLifecycleState !== 'recovery') {
+              return taskControls.recoverForHuman(taskId, input);
+            }
+            if (input.action === 'resume') await recovery.resume(task.environmentLeaseId, { reason: input.reason });
+            else await recovery.discard(task.environmentLeaseId, { reason: input.reason });
+            return (await tasks.get(taskId))!;
+          },
+        }),
+        // The read-only Feed/Attention projection (#103) through the same
+        // additive seam: one GET snapshot, no dismiss or snooze command.
+        createFeedRouter({ feed }),
+        createCollaborationAttentionRouter({ store: openedStoresForCatalog.collaboration }),
         // Portable Agent identities and ordered work options (#90). The
         // compatibility projection reads the same durable observed readiness
         // facts the readiness summary does, so the browser and admission can
@@ -1689,6 +2071,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       projectService,
       projectAccess: projectAccessService,
       conversationScopes,
+      taskProposals,
+      usage: usageService,
+      taskAdmissions,
+      taskControls,
       workerGateway: gatewayView,
       enrollmentEnvironment,
       environmentSource,
@@ -1703,6 +2089,11 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         const recoveredRuns = await orchestrator.reconcileOrphanedRuns();
         await tasks.reconcileEnvironmentLifecycle();
         await recovery.reconcileAfterRestart();
+        // A process may stop after Task persistence but before its separate
+        // conversation-scope write. Rebuild every admitted Task group from the
+        // durable Task record before serving; ended and Force Released Tasks
+        // therefore freeze their scopes during the same restart pass.
+        await reconcileTaskGroups();
         // Recovery may have moved a lease into (or out of) recovery, so the
         // catalog's work-safety projection is re-derived before serving.
         await refreshEnvironmentCatalog();
@@ -1710,9 +2101,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         // Project save leaves a channel row with no Project behind it — the
         // rollback cannot run on termination. Restart reconciliation removes
         // exactly those abandoned preparations before anything is served;
-        // every channel whose Project exists and every Working group record
-        // (history is never deleted, ADR-0008) survives, and a preparation
-        // still in flight in this process is never reaped (#95).
+        // every channel whose Project exists, every Working group, and every
+        // Task group survives, and a preparation still in flight in this
+        // process is never reaped (#95, #210).
         await conversationScopes.removeOrphanProjectChannels();
         // Working group participation ends cascade from an ended Project
         // membership (#95); materializing them here means a process that died
@@ -1720,10 +2111,16 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         // pass is idempotent, so a healthy restart changes nothing.
         await conversationScopes.syncAll();
         const reconciled = await collaboration.reconcile();
+        // Runs last: the bounded reconnect retry rebuilds any interrupted
+        // eligibility set, dispatches queued retries under their durable ids,
+        // and settles finished ones — never a second retry for one run (#181).
+        const reconnectRetries = await runReconnectRetry.reconcile();
         const result: SproutReconciliation = {
           recoveredRuns,
           admittedRunIds: reconciled.admittedRunIds,
           projectedMessageIds: reconciled.projectedMessageIds,
+          reconnectRetries,
+          failureEventRunIds: reconciled.failureEventRunIds,
         };
         lastReconciliation = result;
         return result;
@@ -1747,8 +2144,13 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       },
 
       async close(): Promise<void> {
-        // End every open event stream before anything else: `server.close` waits
-        // for existing connections, and an SSE stream never ends by itself.
+        // Stop reconnect observations as shutdown starts. Drain concurrently
+        // with transport and Worker teardown so only the remaining store wait
+        // consumes the reconnect queue's bounded deadline.
+        const reconnectRetryDrain = runReconnectRetry.stopAcceptingAndDrain();
+        // The API ends SSE and releases upgraded Worker sockets with a bounded
+        // going-away handshake before awaiting HTTP close. Keep the gateway and
+        // stores alive here so channel-loss observers can preserve recovery.
         await api.close();
         // The enrollment-backed connections are owned by the gateway; the port
         // stops reaching them before they are torn down.
@@ -1759,6 +2161,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         // destroyed here: `rm` is the only irrecoverable action (#4), so its
         // lifecycle is an explicit operator decision rather than a side effect.
         if (environment !== undefined) await environment.close();
+        await reconnectRetryDrain;
         activeStores.close();
       },
     };

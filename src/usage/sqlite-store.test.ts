@@ -1,0 +1,722 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+
+import { SqliteUsageStore } from './sqlite-store.ts';
+import { assertUsageObservation } from './model.ts';
+import type { UsageActivity, UsageObservation } from './model.ts';
+import { SqliteStore } from '../store/db.ts';
+
+function withTempStore(run: (store: SqliteUsageStore, db: DatabaseSync, dir: string) => Promise<void> | void): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-usage-store-test-'));
+  const dbPath = join(dir, 'usage.db');
+  const db = new DatabaseSync(dbPath);
+  const store = new SqliteUsageStore({ db });
+  return Promise.resolve()
+    .then(() => run(store, db, dir))
+    .finally(() => {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    });
+}
+
+test('record and retrieve usage activity with correlation links', async () => {
+  await withTempStore(async (store) => {
+    const activity: UsageActivity = {
+      id: 'act-run-1',
+      kind: 'agent_run',
+      correlation: {
+        runId: 'run-1',
+        taskId: 'task-1',
+        projectId: 'project-sprout',
+        agentId: 'agent-codex',
+        environmentInstanceId: 'env-1',
+      },
+      engine: 'codex',
+      model: 'gpt-4o',
+      status: 'completed',
+      createdAt: 1000,
+      settledAt: 2500,
+      wallDurationMs: 1500,
+    };
+
+    await store.recordActivity(activity);
+
+    const fetched = await store.getActivity('act-run-1');
+    assert.deepEqual(fetched, activity);
+
+    const byRun = await store.getActivityByRunId('run-1');
+    assert.deepEqual(byRun, activity);
+
+    const routingActivity: UsageActivity = {
+      id: 'act-att-1',
+      kind: 'routing_attempt',
+      correlation: {
+        attemptId: 'att-1',
+        batchId: 'batch-1',
+        projectId: 'project-sprout',
+      },
+      engine: 'routing-model',
+      model: 'wake-model-1',
+      status: 'completed',
+      createdAt: 3000,
+      settledAt: 3200,
+      wallDurationMs: 200,
+    };
+
+    await store.recordActivity(routingActivity);
+
+    const byAttempt = await store.getActivityByAttemptId('att-1');
+    assert.deepEqual(byAttempt, routingActivity);
+
+    // Routing attempt does NOT have agentId or taskId
+    assert.equal(byAttempt?.correlation.agentId, undefined);
+    assert.equal(byAttempt?.correlation.taskId, undefined);
+  });
+});
+
+test('SQLite rejects unreadable Agent-run attribution on raw insert and update', async () => {
+  await withTempStore(async (store, db) => {
+    let insertError: unknown;
+    try {
+      db.prepare(`INSERT INTO usage_activities
+        (id, kind, run_id, agent_id, engine, model, status, created_at)
+        VALUES ('raw-invalid-run', 'agent_run', 'valid-run', NULL, 'pi', 'model', 'completed', 3)`).run();
+    } catch (error) { insertError = error; }
+    if (insertError === undefined) {
+      await assert.rejects(store.listActivities(), /Invalid usage activity attribution/);
+    }
+    assert.ok(insertError !== undefined, 'raw insert must reject an Agent run without a nonempty agent_id');
+    assert.match(String(insertError), /invalid usage activity attribution/i);
+    assert.deepEqual(await store.listActivities(), [], 'a rejected write leaves activity reads clean');
+
+    // Seed an invalid preexisting row solely to exercise the UPDATE trigger independently.
+    const insertTriggerSql = (db.prepare(`SELECT sql FROM sqlite_master
+      WHERE type = 'trigger' AND name = 'usage_activity_attribution_insert'`).get() as { sql: string } | undefined)?.sql;
+    assert.ok(insertTriggerSql, 'SqliteUsageStore must install the INSERT attribution trigger');
+    db.exec('DROP TRIGGER usage_activity_attribution_insert');
+    db.prepare(`INSERT INTO usage_activities
+      (id, kind, run_id, agent_id, engine, model, status, created_at)
+      VALUES ('raw-invalid-update', 'agent_run', 'update-run', NULL, 'pi', 'model', 'completed', 4)`).run();
+    db.exec(insertTriggerSql);
+    assert.ok(db.prepare(`SELECT 1 FROM sqlite_master
+      WHERE type = 'trigger' AND name = 'usage_activity_attribution_insert'`).get(),
+    'the INSERT attribution trigger is restored before continuing');
+    assert.throws(
+      () => db.prepare("UPDATE usage_activities SET status = 'active' WHERE id = 'raw-invalid-update'").run(),
+      /invalid usage activity attribution/i,
+    );
+    db.prepare("DELETE FROM usage_activities WHERE id = 'raw-invalid-update'").run();
+    assert.deepEqual(await store.listActivities(), []);
+  });
+});
+
+test('SQLite attribution triggers reject empty and non-TEXT required IDs on insert and update', async () => {
+  await withTempStore(async (store, db) => {
+    const baseline = await store.listActivities();
+    const requiredIds = [
+      { label: 'Agent-run run_id', kind: 'agent_run', column: 'run_id' },
+      { label: 'Agent-run agent_id', kind: 'agent_run', column: 'agent_id' },
+      { label: 'Routing attempt attempt_id', kind: 'routing_attempt', column: 'attempt_id' },
+      { label: 'Routing attempt batch_id', kind: 'routing_attempt', column: 'batch_id' },
+      { label: 'Routing attempt project_id', kind: 'routing_attempt', column: 'project_id' },
+    ] as const;
+    const invalidIds = requiredIds.flatMap((required) => [
+      { ...required, label: `${required.label} empty string`, value: '' },
+      { ...required, label: `${required.label} BLOB`, value: new Uint8Array([0x61]) },
+    ]);
+    const insertInvalidActivity = (id: string, invalid: (typeof invalidIds)[number]): void => {
+      const values: {
+        run_id: string | Uint8Array | null;
+        attempt_id: string | Uint8Array | null;
+        batch_id: string | Uint8Array | null;
+        project_id: string | Uint8Array | null;
+        agent_id: string | Uint8Array | null;
+      } = {
+        run_id: invalid.kind === 'agent_run' ? `run-${id}` : null,
+        attempt_id: invalid.kind === 'routing_attempt' ? `attempt-${id}` : null,
+        batch_id: invalid.kind === 'routing_attempt' ? `batch-${id}` : null,
+        project_id: invalid.kind === 'routing_attempt' ? `project-${id}` : null,
+        agent_id: invalid.kind === 'agent_run' ? `agent-${id}` : null,
+      };
+      values[invalid.column] = invalid.value;
+      db.prepare(`INSERT INTO usage_activities
+        (id, kind, run_id, attempt_id, batch_id, project_id, agent_id, engine, model, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pi', 'model', 'completed', 3)`)
+        .run(id, invalid.kind, values.run_id, values.attempt_id, values.batch_id, values.project_id, values.agent_id);
+    };
+    const insertTriggerSql = (db.prepare(`SELECT sql FROM sqlite_master
+      WHERE type = 'trigger' AND name = 'usage_activity_attribution_insert'`).get() as { sql: string } | undefined)?.sql;
+    assert.ok(insertTriggerSql, 'SqliteUsageStore must install the INSERT attribution trigger');
+
+    const acceptedWrites: string[] = [];
+    for (const [index, invalid] of invalidIds.entries()) {
+      const insertId = `invalid-id-insert-${index}`;
+      let insertError: unknown;
+      try { insertInvalidActivity(insertId, invalid); } catch (error) { insertError = error; }
+      if (insertError === undefined) {
+        acceptedWrites.push(`${invalid.label} INSERT`);
+        db.prepare('DELETE FROM usage_activities WHERE id = ?').run(insertId);
+      } else {
+        assert.match(String(insertError), /invalid usage activity attribution/i, `${invalid.label} INSERT error`);
+      }
+      assert.deepEqual(await store.listActivities(), baseline, `${invalid.label}: activity reads are clean after INSERT`);
+
+      const updateId = `invalid-id-update-${index}`;
+      db.exec('DROP TRIGGER usage_activity_attribution_insert');
+      insertInvalidActivity(updateId, invalid);
+      db.exec(insertTriggerSql);
+      assert.ok(db.prepare(`SELECT 1 FROM sqlite_master
+        WHERE type = 'trigger' AND name = 'usage_activity_attribution_insert'`).get(),
+      'the INSERT attribution trigger is restored before continuing');
+      let updateError: unknown;
+      try { db.prepare("UPDATE usage_activities SET status = 'active' WHERE id = ?").run(updateId); }
+      catch (error) { updateError = error; }
+      if (updateError === undefined) acceptedWrites.push(`${invalid.label} UPDATE`);
+      else assert.match(String(updateError), /invalid usage activity attribution/i, `${invalid.label} UPDATE error`);
+      db.prepare('DELETE FROM usage_activities WHERE id = ?').run(updateId);
+      assert.deepEqual(await store.listActivities(), baseline, `${invalid.label}: activity reads are clean after UPDATE`);
+    }
+    assert.deepEqual(acceptedWrites, [], `invalid required IDs must not be accepted: ${acceptedWrites.join(', ')}`);
+  });
+});
+
+test('list activities with multi-dimensional filtering', async () => {
+  await withTempStore(async (store) => {
+    await store.recordActivity({
+      id: 'act-1',
+      kind: 'agent_run',
+      correlation: { runId: 'run-1', projectId: 'p1', taskId: 't1', agentId: 'a1' },
+      engine: 'codex',
+      model: 'gpt-4o',
+      status: 'completed',
+      createdAt: 1000,
+      settledAt: 1500,
+      wallDurationMs: 500,
+    });
+    await store.recordActivity({
+      id: 'act-2',
+      kind: 'agent_run',
+      correlation: { runId: 'run-2', projectId: 'p1', taskId: 't2', agentId: 'a2' },
+      engine: 'pi',
+      model: 'claude-3-5-sonnet',
+      status: 'active',
+      createdAt: 2000,
+    });
+    await store.recordActivity({
+      id: 'act-3',
+      kind: 'routing_attempt',
+      correlation: { attemptId: 'att-1', batchId: 'b1', projectId: 'p1' },
+      engine: 'routing',
+      model: 'wake-1',
+      status: 'completed',
+      createdAt: 3000,
+      settledAt: 3100,
+      wallDurationMs: 100,
+    });
+
+    const byKind = await store.listActivities({ kind: 'routing_attempt' });
+    assert.equal(byKind.length, 1);
+    assert.equal(byKind[0]?.id, 'act-3');
+
+    const finalized = await store.listActivities({ provisional: false });
+    assert.equal(finalized.length, 2);
+    assert.deepEqual(finalized.map((a) => a.id), ['act-1', 'act-3']);
+
+    const provisional = await store.listActivities({ provisional: true });
+    assert.equal(provisional.length, 1);
+    assert.equal(provisional[0]?.id, 'act-2');
+
+    const byProject = await store.listActivities({ projectId: 'p1' });
+    assert.equal(byProject.length, 3);
+
+    const byAgent = await store.listActivities({ agentId: 'a1' });
+    assert.equal(byAgent.length, 1);
+    assert.equal(byAgent[0]?.id, 'act-1');
+
+    const offsetOnly = await store.listActivities({ offset: 1 });
+    assert.deepEqual(offsetOnly.map((activity) => activity.id), ['act-2', 'act-3']);
+  });
+});
+
+test('cost coverage distinguishes available known zero from pending and unavailable estimates', async () => {
+  await withTempStore(async (store) => {
+    const items = [
+      { id: 'known-zero', kind: 'agent_run' as const, correlation: { runId: 'run-zero', projectId: 'p1', agentId: 'a1' } },
+      { id: 'pending-cost', kind: 'routing_attempt' as const, correlation: { attemptId: 'attempt-pending', batchId: 'batch-1', projectId: 'p1' } },
+      { id: 'no-cost', kind: 'agent_run' as const, correlation: { runId: 'run-unavailable', projectId: 'p1', agentId: 'a2' } },
+    ];
+    for (const item of items) {
+      await store.recordActivity({
+        ...item, engine: item.kind === 'agent_run' ? 'pi' : 'routing-model', model: 'model-v1',
+        status: 'completed', createdAt: 1000, settledAt: 1100, wallDurationMs: 100,
+      });
+      const status = item.id === 'known-zero' ? 'available' : item.id === 'pending-cost' ? 'pending' : 'unavailable';
+      await store.recordObservation({
+        id: `obs-${item.id}`, activityId: item.id, observedAt: 1100, source: 'test', sourceVersion: '1',
+        completeness: 'unavailable', durations: { sproutWallDurationMs: 100 },
+        billedCost: { status: 'unavailable', currency: 'USD' },
+        costEstimate: status === 'available'
+          ? { status, currency: 'USD', apiEquivalentUsdMicros: 0, valuationProvenance: 'provider_estimated' }
+          : status === 'pending'
+            ? { status, currency: 'USD', reason: 'provider response pending' }
+            : { status, currency: 'USD', reason: 'provider unavailable' },
+        billingBasis: 'unknown', isEffective: true,
+      });
+    }
+
+    const aggregate = await store.getAggregate({ projectId: 'p1' });
+    assert.deepEqual(aggregate.costCoverage, { available: 1, pending: 1, unavailable: 1 });
+    assert.equal(aggregate.cost.apiEquivalentUsdMicros, 0, 'a reported zero is retained as a known amount');
+    assert.equal(aggregate.cost.byProvenance.provider_estimated, 0);
+    assert.equal(aggregate.tokens.inputTokens, undefined, 'unknown token dimensions are not substituted with zero');
+  });
+});
+
+test('persistence refuses available cost facts without safe integer amounts', async () => {
+  await withTempStore(async (store) => {
+    await store.recordActivity({
+      id: 'cost-activity', kind: 'agent_run',
+      correlation: { runId: 'cost-run', agentId: 'agent-1' },
+      engine: 'pi', model: 'work-v1', status: 'completed', createdAt: 1000, settledAt: 1100,
+    });
+    const base = {
+      activityId: 'cost-activity', observedAt: 1100,
+      source: 'pi', sourceVersion: '1', completeness: 'complete' as const,
+      durations: { sproutWallDurationMs: 100 },
+      billingBasis: 'unknown' as const, isEffective: true,
+    };
+    await assert.rejects(store.recordObservation({
+      ...base, id: 'missing-estimate',
+      billedCost: { status: 'unavailable', currency: 'USD' },
+      costEstimate: { status: 'available', currency: 'USD' },
+    }), /available.*amount.*provenance/i);
+    await assert.rejects(store.recordObservation({
+      ...base, id: 'fractional-estimate',
+      billedCost: { status: 'unavailable', currency: 'USD' },
+      costEstimate: { status: 'available', currency: 'USD', apiEquivalentUsdMicros: 0.5, valuationProvenance: 'provider_estimated' },
+    }), /safe amount/i);
+    await assert.rejects(store.recordObservation({
+      ...base, id: 'fractional-bill',
+      billedCost: { status: 'available', currency: 'USD', billedUsdMicros: 0.5 },
+      costEstimate: { status: 'unavailable', currency: 'USD', reason: 'not available' },
+    }), /safe amount/i);
+    const unsupportedProvenance: UsageObservation = {
+      ...base,
+      id: 'unsupported-provenance',
+      billedCost: { status: 'unavailable', currency: 'USD' },
+      costEstimate: {
+        status: 'available', currency: 'USD', apiEquivalentUsdMicros: 1,
+        valuationProvenance: 'unsupported' as never,
+      },
+    };
+    assert.throws(
+      () => assertUsageObservation(unsupportedProvenance),
+      /valuation provenance/i,
+      'the runtime model assertion must reject provenance outside its allowed values',
+    );
+  });
+});
+
+test('raw SQLite rejects fractional available estimates and billed amounts on insert and update', async () => {
+  await withTempStore(async (store, db) => {
+    await store.recordActivity({
+      id: 'cost-activity', kind: 'agent_run',
+      correlation: { runId: 'cost-run', agentId: 'agent-1' },
+      engine: 'pi', model: 'work-v1', status: 'completed', createdAt: 1000, settledAt: 1100,
+    });
+    const insert = (
+      id: string,
+      estimateStatus: 'available' | 'unavailable', estimate: number | null,
+      billedStatus: 'available' | 'unavailable', billed: number | null,
+    ) => db.prepare(`INSERT INTO usage_observations
+      (id, activity_id, observed_at, source, source_version, completeness, wall_duration_ms,
+       billed_cost_status, billed_usd_micros, cost_estimate_status, cost_estimate_usd_micros,
+       valuation_provenance, billing_basis)
+      VALUES (?, 'cost-activity', 1100, 'raw-test', '1', 'complete', 100, ?, ?, ?, ?, ?, 'unknown')`)
+      .run(id, billedStatus, billed, estimateStatus, estimate, estimateStatus === 'available' ? 'provider_estimated' : null);
+
+    let insertError: unknown;
+    try { insert('fractional-estimate-insert', 'available', 0.5, 'unavailable', null); }
+    catch (error) { insertError = error; }
+    if (insertError === undefined) {
+      const aggregate = await store.getAggregate({});
+      assert.equal(aggregate.cost.apiEquivalentUsdMicros, 0.5, 'fractional raw estimate is exported by aggregation');
+    }
+    assert.ok(insertError !== undefined, 'raw SQLite must reject fractional available estimates');
+    assert.match(String(insertError), /invalid usage observation cost facts/i);
+
+    insert('integer-estimate-update', 'available', 2, 'unavailable', null);
+    assert.throws(
+      () => db.prepare("UPDATE usage_observations SET cost_estimate_usd_micros = 0.5 WHERE id = 'integer-estimate-update'").run(),
+      /invalid usage observation cost facts/i,
+    );
+    assert.throws(
+      () => insert('fractional-bill-insert', 'unavailable', null, 'available', 0.5),
+      /invalid usage observation cost facts/i,
+    );
+    insert('integer-bill-update', 'unavailable', null, 'available', 2);
+    assert.throws(
+      () => db.prepare("UPDATE usage_observations SET billed_usd_micros = 0.5 WHERE id = 'integer-bill-update'").run(),
+      /invalid usage observation cost facts/i,
+    );
+  });
+});
+
+test('record observation and append delayed observation with supersession history', async () => {
+  await withTempStore(async (store) => {
+    const activity: UsageActivity = {
+      id: 'act-1',
+      kind: 'agent_run',
+      correlation: { runId: 'run-1', projectId: 'p1', agentId: 'a1' },
+      engine: 'codex',
+      model: 'gpt-4o',
+      status: 'completed',
+      createdAt: 1000,
+      settledAt: 2000,
+      wallDurationMs: 1000,
+    };
+    await store.recordActivity(activity);
+
+    const obs1: UsageObservation = {
+      id: 'obs-1',
+      activityId: 'act-1',
+      observedAt: 2000,
+      source: 'codex-protocol:thread/tokenUsage/updated',
+      sourceVersion: 'codex-cli 0.154.0',
+      completeness: 'complete',
+      tokens: {
+        inputTokens: 100,
+        uncachedInputTokens: 80,
+        cachedInputTokens: 20,
+        cacheWriteInputTokens: 0,
+        outputTokens: 40,
+        reasoningOutputTokens: 10,
+        totalTokens: 140,
+      },
+      durations: {
+        sproutWallDurationMs: 1000,
+        engineTurnDurationMs: 950,
+      },
+      billedCost: {
+        status: 'unavailable',
+        currency: 'USD',
+        reason: 'provider does not supply per-run invoice facts',
+      },
+      costEstimate: {
+        status: 'available',
+        currency: 'USD',
+        apiEquivalentUsdMicros: 600,
+        valuationProvenance: 'locally_estimated',
+        priceSource: 'codex-price-snapshot',
+        priceSourceVersion: '2026-09-15',
+        valuedAt: 2000,
+      },
+      billingBasis: 'metered_api',
+      isEffective: true,
+    };
+
+    await store.recordObservation(obs1);
+
+    const effective1 = await store.getEffectiveObservation('act-1');
+    assert.deepEqual(effective1, obs1);
+
+    // Delayed observation arrives with provider cost estimate superseding obs1
+    const obs2: UsageObservation = {
+      id: 'obs-2',
+      activityId: 'act-1',
+      observedAt: 2500,
+      source: 'codex.turn_cost',
+      sourceVersion: 'codex-cli 0.154.0',
+      completeness: 'complete',
+      tokens: obs1.tokens,
+      durations: obs1.durations,
+      billedCost: obs1.billedCost,
+      costEstimate: {
+        status: 'available',
+        currency: 'USD',
+        apiEquivalentUsdMicros: 650,
+        valuationProvenance: 'provider_estimated',
+        priceSource: 'codex.turn_cost',
+        priceSourceVersion: 'codex-cli 0.154.0',
+        valuedAt: 2500,
+      },
+      billingBasis: 'metered_api',
+      supersedesObservationId: 'obs-1',
+      supersessionReason: 'Delayed provider backend cost estimate received via OTLP',
+      isEffective: true,
+    };
+
+    await store.recordObservation(obs2);
+
+    // Effective observation is now obs2
+    const effective2 = await store.getEffectiveObservation('act-1');
+    assert.equal(effective2?.id, 'obs-2');
+    assert.equal(effective2?.costEstimate.valuationProvenance, 'provider_estimated');
+    assert.equal(effective2?.costEstimate.apiEquivalentUsdMicros, 650);
+
+    // Prior observation obs1 remains durable and is marked superseded (not overwritten!)
+    const prior = await store.getObservation('obs-1');
+    assert.equal(prior?.id, 'obs-1');
+    assert.equal(prior?.isEffective, false);
+    assert.equal(prior?.supersededAt, 2500);
+    assert.equal(prior?.costEstimate.apiEquivalentUsdMicros, 600);
+
+    // List observations returns both in chronological order
+    const history = await store.listObservations('act-1');
+    assert.equal(history.length, 2);
+    assert.equal(history[0]?.id, 'obs-1');
+    assert.equal(history[0]?.isEffective, false);
+    assert.equal(history[1]?.id, 'obs-2');
+    assert.equal(history[1]?.isEffective, true);
+    assert.equal(history[1]?.supersedesObservationId, 'obs-1');
+    assert.equal(history[1]?.supersessionReason, 'Delayed provider backend cost estimate received via OTLP');
+  });
+});
+
+test('coverage-aware aggregation separates work-model and routing-model and detects mixed provenance', async () => {
+  await withTempStore(async (store) => {
+    // 1. Work-model run: complete tokens, locally estimated cost
+    await store.recordActivity({
+      id: 'act-1',
+      kind: 'agent_run',
+      correlation: { runId: 'run-1', projectId: 'p1', taskId: 't1', agentId: 'a1' },
+      engine: 'codex',
+      model: 'gpt-4o',
+      status: 'completed',
+      createdAt: 1000,
+      settledAt: 2000,
+      wallDurationMs: 1000,
+    });
+    await store.recordObservation({
+      id: 'obs-1',
+      activityId: 'act-1',
+      observedAt: 2000,
+      source: 'codex',
+      sourceVersion: '1.0',
+      completeness: 'complete',
+      tokens: { inputTokens: 100, uncachedInputTokens: 80, cachedInputTokens: 20, outputTokens: 50, totalTokens: 150 },
+      durations: { sproutWallDurationMs: 1000 },
+      billedCost: { status: 'unavailable', currency: 'USD' },
+      costEstimate: { status: 'available', currency: 'USD', apiEquivalentUsdMicros: 700, valuationProvenance: 'locally_estimated' },
+      billingBasis: 'metered_api',
+      isEffective: true,
+    });
+
+    // 2. Work-model run: partial tokens on failure, harness calculated cost
+    await store.recordActivity({
+      id: 'act-2',
+      kind: 'agent_run',
+      correlation: { runId: 'run-2', projectId: 'p1', taskId: 't1', agentId: 'a2' },
+      engine: 'pi',
+      model: 'claude-3-5-sonnet',
+      status: 'failed',
+      createdAt: 2000,
+      settledAt: 2500,
+      wallDurationMs: 500,
+    });
+    await store.recordObservation({
+      id: 'obs-2',
+      activityId: 'act-2',
+      observedAt: 2500,
+      source: 'pi',
+      sourceVersion: '1.0',
+      completeness: 'partial',
+      tokens: { inputTokens: 50, uncachedInputTokens: 50, cachedInputTokens: 0, outputTokens: 10, totalTokens: 60 },
+      durations: { sproutWallDurationMs: 500 },
+      billedCost: { status: 'unavailable', currency: 'USD' },
+      costEstimate: { status: 'available', currency: 'USD', apiEquivalentUsdMicros: 300, valuationProvenance: 'harness_calculated' },
+      billingBasis: 'subscription_included',
+      isEffective: true,
+    });
+
+    // 3. Routing attempt: telemetry unavailable, duration measured
+    await store.recordActivity({
+      id: 'act-3',
+      kind: 'routing_attempt',
+      correlation: { attemptId: 'att-1', batchId: 'b1', projectId: 'p1' },
+      engine: 'routing',
+      model: 'wake-1',
+      status: 'completed',
+      createdAt: 3000,
+      settledAt: 3100,
+      wallDurationMs: 100,
+    });
+    await store.recordObservation({
+      id: 'obs-3',
+      activityId: 'act-3',
+      observedAt: 3100,
+      source: 'routing-model',
+      sourceVersion: '1.0',
+      completeness: 'unavailable',
+      durations: { sproutWallDurationMs: 100 },
+      billedCost: { status: 'unavailable', currency: 'USD' },
+      costEstimate: { status: 'unavailable', currency: 'USD', reason: 'telemetry unavailable' },
+      billingBasis: 'unknown',
+      isEffective: true,
+    });
+
+    const aggregate = await store.getAggregate({ projectId: 'p1', groupBy: 'task' });
+
+    assert.equal(aggregate.totalActivities, 3);
+    assert.equal(aggregate.totalSproutWallDurationMs, 1600);
+
+    // Token coverage has 1 complete, 1 partial, 1 unavailable -> observed_incomplete
+    assert.deepEqual(aggregate.tokenCoverage, { complete: 1, partial: 1, unavailable: 1 });
+    assert.equal(aggregate.tokens.status, 'observed_incomplete');
+    assert.equal(aggregate.tokens.inputTokens, 150);
+    assert.equal(aggregate.tokens.outputTokens, 60);
+    assert.equal(aggregate.tokens.totalTokens, 210);
+
+    // Cost coverage has 2 available, 0 pending, 1 unavailable
+    assert.deepEqual(aggregate.costCoverage, { available: 2, pending: 0, unavailable: 1 });
+    assert.equal(aggregate.cost.apiEquivalentUsdMicros, 1000);
+    // Two different provenances -> mixed_provenance
+    assert.equal(aggregate.cost.status, 'mixed_provenance');
+    assert.equal(aggregate.cost.byProvenance.locally_estimated, 700);
+    assert.equal(aggregate.cost.byProvenance.harness_calculated, 300);
+
+    // Work-model subtotal has only act-1 and act-2
+    assert.equal(aggregate.workModelSubtotal?.totalActivities, 2);
+    assert.equal(aggregate.workModelSubtotal?.cost.apiEquivalentUsdMicros, 1000);
+    assert.equal(aggregate.workModelSubtotal?.totalSproutWallDurationMs, 1500);
+
+    // Routing-model subtotal has only act-3
+    assert.equal(aggregate.routingModelSubtotal?.totalActivities, 1);
+    assert.equal(aggregate.routingModelSubtotal?.tokenCoverage.unavailable, 1);
+    assert.equal(aggregate.routingModelSubtotal?.cost.apiEquivalentUsdMicros, undefined);
+    assert.equal(aggregate.routingModelSubtotal?.cost.status, 'unavailable');
+    assert.equal(aggregate.routingModelSubtotal?.totalSproutWallDurationMs, 100);
+
+    // Grouping by task: t1 contains act-1 and act-2
+    assert.ok(aggregate.groups?.['t1']);
+    assert.equal(aggregate.groups?.['t1']?.totalActivities, 2);
+  });
+});
+
+test('survives close and reopen on SqliteStore handle', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-usage-reopen-test-'));
+  const dbPath = join(dir, 'sprout.db');
+
+  const store1 = new SqliteStore({ filename: dbPath });
+  await store1.usage.recordActivity({
+    id: 'act-perm-1',
+    kind: 'agent_run',
+    correlation: { runId: 'run-p1', projectId: 'sprout', agentId: 'agent-p1' },
+    engine: 'codex',
+    model: 'gpt-4o',
+    status: 'completed',
+    createdAt: 1000,
+    settledAt: 2000,
+    wallDurationMs: 1000,
+  });
+  await store1.usage.recordObservation({
+    id: 'obs-perm-1',
+    activityId: 'act-perm-1',
+    observedAt: 2000,
+    source: 'codex',
+    sourceVersion: '0.154.0',
+    completeness: 'complete',
+    tokens: { inputTokens: 500, outputTokens: 200, totalTokens: 700 },
+    durations: { sproutWallDurationMs: 1000 },
+    billedCost: { status: 'unavailable', currency: 'USD' },
+    costEstimate: { status: 'available', currency: 'USD', apiEquivalentUsdMicros: 2500, valuationProvenance: 'locally_estimated' },
+    billingBasis: 'metered_api',
+    isEffective: true,
+  });
+  store1.close();
+
+  const store2 = new SqliteStore({ filename: dbPath });
+  const restoredActivity = await store2.usage.getActivity('act-perm-1');
+  assert.equal(restoredActivity?.id, 'act-perm-1');
+  assert.equal(restoredActivity?.model, 'gpt-4o');
+
+  const restoredObs = await store2.usage.getEffectiveObservation('act-perm-1');
+  assert.equal(restoredObs?.id, 'obs-perm-1');
+  assert.equal(restoredObs?.tokens?.totalTokens, 700);
+  assert.equal(restoredObs?.costEstimate.apiEquivalentUsdMicros, 2500);
+
+  store2.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('SQLite rejects Routing attempts that claim Agent or Task ownership', async () => {
+  await withTempStore(async (store) => {
+    await assert.rejects(store.recordActivity({
+      id: 'misattributed-routing', kind: 'routing_attempt',
+      correlation: { attemptId: 'attempt-1', batchId: 'batch-1', projectId: 'p1', taskId: 't1', agentId: 'a1' },
+      engine: 'routing-model', model: 'wake-v1', status: 'completed', createdAt: 1000, settledAt: 1100,
+    } as unknown as UsageActivity), /attribution|routing/i);
+    const validAttempt: UsageActivity = {
+      id: 'routing-attempt', kind: 'routing_attempt',
+      correlation: { attemptId: 'attempt-1', batchId: 'batch-1', projectId: 'p1' },
+      engine: 'routing-model', model: 'wake-v1', status: 'completed', createdAt: 1000, settledAt: 1100,
+    };
+    await store.recordActivity(validAttempt);
+    await assert.rejects(store.recordActivity({
+      ...validAttempt, kind: 'agent_run', correlation: { runId: 'run-1', agentId: 'agent-1' },
+    } as unknown as UsageActivity), /identity|immutable/i);
+    await assert.rejects(store.recordActivity({ ...validAttempt, id: 'duplicate-attempt-activity' }), /unique|constraint/i);
+  });
+});
+
+test('aggregate preserves missing measurement values and returns settlement-range drill-down identities', async () => {
+  await withTempStore(async (store) => {
+    await store.recordActivity({
+      id: 'settled-at-start', kind: 'agent_run',
+      correlation: { runId: 'run-at-start', projectId: 'p1', agentId: 'a2' },
+      engine: 'pi', model: 'work-v1', status: 'completed', createdAt: 100, settledAt: 1000, wallDurationMs: 900,
+    });
+    await store.recordActivity({
+      id: 'work-in-range', kind: 'agent_run',
+      correlation: { runId: 'run-in-range', projectId: 'p1', taskId: 't1', agentId: 'a1' },
+      engine: 'pi', model: 'work-v1', status: 'completed', createdAt: 1000, settledAt: 2000, wallDurationMs: 1000,
+    });
+    await store.recordObservation({
+      id: 'work-observation', activityId: 'work-in-range', observedAt: 9000,
+      source: 'pi', sourceVersion: '1', completeness: 'partial', tokens: { inputTokens: 7 },
+      durations: { sproutWallDurationMs: 1000 },
+      billedCost: { status: 'unavailable', currency: 'USD' },
+      costEstimate: { status: 'unavailable', currency: 'USD', reason: 'not reported' },
+      billingBasis: 'unknown', isEffective: true,
+    });
+    await store.recordActivity({
+      id: 'routing-in-range', kind: 'routing_attempt',
+      correlation: { attemptId: 'attempt-in-range', batchId: 'batch-1', projectId: 'p1' },
+      engine: 'routing-model', model: 'wake-v1', status: 'failed', createdAt: 1100, settledAt: 2400, wallDurationMs: 300,
+    });
+    await store.recordActivity({
+      id: 'settled-at-end', kind: 'agent_run',
+      correlation: { runId: 'run-at-end', projectId: 'p1', agentId: 'a2' },
+      engine: 'pi', model: 'work-v1', status: 'completed', createdAt: 1500, settledAt: 2500, wallDurationMs: 1000,
+    });
+
+    const filter = { projectId: 'p1', from: 1000, to: 2500, timeZone: 'America/Los_Angeles' };
+    const aggregate = await store.getAggregate(filter as never) as unknown as {
+      totalActivities: number;
+      tokenCoverage: { complete: number; partial: number; unavailable: number };
+      tokens: { inputTokens?: number; outputTokens?: number; status: string };
+      cost: { apiEquivalentUsdMicros?: number; status: string };
+      totalSproutWallDurationMs?: number;
+      activityIdentities?: readonly { kind: string; runId?: string; attemptId?: string }[];
+      timeRange?: { from?: number; to?: number; timeZone: string; bounds: string; attribution: string };
+    };
+    assert.equal(aggregate.totalActivities, 3);
+    assert.deepEqual(aggregate.tokenCoverage, { complete: 0, partial: 1, unavailable: 2 });
+    assert.equal(aggregate.tokens.inputTokens, 7);
+    assert.equal(aggregate.tokens.outputTokens, undefined);
+    assert.equal(aggregate.cost.apiEquivalentUsdMicros, undefined);
+    assert.equal(aggregate.totalSproutWallDurationMs, 2200);
+    assert.deepEqual(aggregate.activityIdentities?.map(({ kind, runId, attemptId }) => ({ kind, runId, attemptId })), [
+      { kind: 'agent_run', runId: 'run-at-start', attemptId: undefined },
+      { kind: 'agent_run', runId: 'run-in-range', attemptId: undefined },
+      { kind: 'routing_attempt', runId: undefined, attemptId: 'attempt-in-range' },
+    ]);
+    assert.deepEqual(aggregate.timeRange, {
+      from: 1000, to: 2500, timeZone: 'America/Los_Angeles', bounds: '[start, end)', attribution: 'settlement',
+    });
+  });
+});

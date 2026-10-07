@@ -385,11 +385,11 @@ test('Environments: Human-only emergency Force Release requires typed confirmati
     // Authorize Force Release
     confirmBtn.click();
 
-    // Verify Environment is force-released, task permanently cancelled with forced release disposition
+    // Verify Environment is force-released and the Task is stopped with permanent force-release facts.
     const env = stateManager.getSnapshot().environments.find((e) => e.id === 'env-recovery')!;
     const task = stateManager.getSnapshot().tasks.find((t) => t.id === 'task-104')!;
 
-    assert.equal(task.lifecycle, 'cancelled');
+    assert.equal(task.lifecycle, 'stopped');
     assert.equal(task.leaseLifecycle, 'released');
     assert.equal(task.activeRunId, undefined);
     assert.equal(task.runs.find((run) => run.id === 'run-206')?.lifecycle, 'stopped', 'Force Release settles an active run first');

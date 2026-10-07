@@ -5,36 +5,38 @@
  * within one Project, containing a subset of current Project members together
  * with an optional goal and rules, its own channel, and durable membership
  * history", and the ticket's **conversation scope** is the durable identity of
- * one of the three routine communication contexts ADR-0008 settles:
+ * one of four communication contexts:
  *
  * 1. the one Project channel every Project has (an invariant of the Project);
  * 2. one Project-scoped direct conversation between two current members —
  *    its identity is bound to exactly one Project, so a pair that shares two
- *    Projects has two distinct conversations; and
+ *    Projects has two distinct conversations;
  * 3. one Working group channel, whose participants are the current members of
- *    one Working group inside exactly one Project.
+ *    one Working group inside exactly one Project; and
+ * 4. one Task group, bound to exactly one Task and shared by current Project
+ *    members for the duration of that Task (ADR-0014).
  *
- * One scope record is one channel: a Working group and its channel are the
- * same durable document, which is what makes creation atomic — there is no
- * second write that could exist without the other. Nothing here stores a
- * Message: conversation history stays in the collaboration store, and a
- * disbanded or read-only scope never deletes it.
+ * A Working group and its channel are the same durable document. A Task group
+ * is one document bound to a Task and carries versioned Task context. Nothing
+ * here stores a Message: conversation history stays in the collaboration
+ * store, and a read-only scope never deletes it.
  *
- * Read-only is derived, never destructive: an archived Project, a disbanded
- * Working group, and an ended membership each render their scopes read-only
- * (ADR-0008), while configuration, membership history, and attribution remain
- * durable for audit and possible restore.
+ * An archived Project, a disbanded Working group, an ended membership, or an
+ * ended Task status makes its affected scope read-only. Force Release also
+ * freezes a stopped Task group while preserving the stopped Task's active intent;
+ * its recorded facts and attribution remain durable.
  *
  * Privacy: no field here may carry a credential, provider/account identity,
  * hostname, address, absolute path, or raw command. Free text passes the
  * shared privacy boundary before it becomes durable.
  */
 
+import type { TaskStatus } from '../task/model.ts';
 import { createHash } from 'node:crypto';
 import { redactSensitiveText, sanitizeOperatorText } from '../environment/privacy.ts';
 
 /** Which conversation scope a durable record describes. */
-export type ConversationScopeKind = 'project' | 'direct' | 'working-group';
+export type ConversationScopeKind = 'project' | 'direct' | 'working-group' | 'task-group';
 
 /** Which kind of member a member id names: the local Human or an Agent. */
 export type ConversationMemberKind = 'human' | 'agent';
@@ -167,11 +169,43 @@ export interface WorkingGroupScope extends ConversationScopeBase {
   readonly lifecycle: readonly WorkingGroupLifecycleEvent[];
 }
 
+/** One immutable snapshot of the Task content governing a Task group. */
+export interface TaskGroupContentVersion {
+  readonly version: number;
+  /** The Task content version this scope version was copied from. */
+  readonly taskContentVersion: number;
+  readonly at: number;
+  readonly actorMemberId: string;
+  readonly reason: string;
+  readonly taskTitle: string;
+  readonly goal: string;
+  readonly rules: readonly string[];
+}
+
+/**
+ * A temporary conversation scope bound permanently to one Task. Participation
+ * is projected from current Project membership at read time. Content versions
+ * preserve the exact Task goal and constraints presented to the group; an ended
+ * status or Force Release freezes the scope without deleting its history.
+ */
+export interface TaskGroupScope extends ConversationScopeBase {
+  readonly kind: 'task-group';
+  readonly taskId: string;
+  readonly content: {
+    readonly currentVersion: number;
+    readonly versions: readonly TaskGroupContentVersion[];
+  };
+  readonly frozenAt?: number;
+  /** The status retained when this scope was frozen; `stopped` is active intent. */
+  readonly terminalTaskStatus?: TaskStatus;
+}
+
 /** One durable conversation scope. */
 export type ConversationScope =
   | ProjectChannelScope
   | DirectConversationScope
-  | WorkingGroupScope;
+  | WorkingGroupScope
+  | TaskGroupScope;
 
 export type ConversationScopeErrorCode =
   | 'invalid-identity'
@@ -190,6 +224,9 @@ export type ConversationScopeErrorCode =
   | 'human-membership-required'
   | 'archived-project-is-read-only'
   | 'working-group-disbanded'
+  | 'task-group-binding-conflict'
+  | 'task-group-content-conflict'
+  | 'task-group-frozen'
   | 'not-disbanded'
   | 'members-not-eligible'
   | 'stale-scope-write';
@@ -355,6 +392,30 @@ export function activeWorkingGroupMembers(
   return group.memberships.filter((membership) => membership.endedAt === undefined);
 }
 
+export function taskGroupScopeId(taskId: string): string {
+  const digest = createHash('sha256').update(taskId).digest('hex');
+  return `tg-${digest.slice(0, 32)}`;
+}
+
+/** The Task group's current lifecycle status, derived from its frozen fact. */
+export function taskGroupStatus(group: TaskGroupScope): 'active' | 'frozen' {
+  return group.frozenAt === undefined ? 'active' : 'frozen';
+}
+
+/** Whether a scope is a Task group record. */
+export function isTaskGroup(scope: ConversationScope): scope is TaskGroupScope {
+  return scope.kind === 'task-group';
+}
+
+/** The Task group's latest bound Task content version. */
+export function currentTaskGroupContent(group: TaskGroupScope): TaskGroupContentVersion {
+  const latest = group.content.versions.at(-1);
+  if (latest === undefined || latest.version !== group.content.currentVersion) {
+    throw new ConversationScopeError('task-group-content-conflict', `task group ${group.id} content history is inconsistent`);
+  }
+  return latest;
+}
+
 /** Whether a scope is a Working group record. */
 export function isWorkingGroup(
   scope: ConversationScope,
@@ -366,6 +427,9 @@ export function isWorkingGroup(
 export type ScopeStateReason =
   | 'project-archived'
   | 'working-group-disbanded'
+  | 'task-group-frozen'
+  | 'task-group-task-unavailable'
+  | 'task-group-lifecycle-unavailable'
   | 'membership-ended'
   | 'not-a-member'
   | 'not-a-participant';
@@ -402,6 +466,17 @@ export interface ScopeWorkingGroupContext {
   readonly rules: readonly string[];
 }
 
+export interface ScopeTaskGroupContext {
+  readonly taskId: string;
+  readonly taskTitle: string;
+  /** The version of this scope's Task-specific content projection. */
+  readonly contentVersion: number;
+  /** The originating Task content version. */
+  readonly taskContentVersion: number;
+  readonly goal: string;
+  readonly rules: readonly string[];
+}
+
 /**
  * The durable goal/rules facts that govern one scope, ready for later routing
  * and run context.
@@ -418,4 +493,6 @@ export interface ScopeContext {
   readonly project: ScopeProjectContext;
   /** Present only for a Working group scope. */
   readonly workingGroup?: ScopeWorkingGroupContext;
+  /** Present only for a Task group scope. */
+  readonly taskGroup?: ScopeTaskGroupContext;
 }

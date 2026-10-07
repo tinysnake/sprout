@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
+import { createFeedTestAdapter, pendingEnrollmentSnapshot } from './feed-test-fixture.ts';
 import { JSDOM } from 'jsdom';
+import type { BrowserEventSource } from '../transport/browser-transport.ts';
 
 // 1. Initialize JSDOM and globals BEFORE importing any Vue or Vite modules
 const initialHtml = await readFile(new URL('../../app/index.html', import.meta.url), 'utf8');
@@ -105,6 +107,8 @@ async function deterministicAppOptions(vite: { ssrLoadModule: (id: string) => Pr
     '/src/modules/agents/adapters/fixture-adapter.ts'
   )) as typeof import('../modules/agents/adapters/fixture-adapter.ts');
   const projectsModule = (await vite.ssrLoadModule('/src/modules/projects/adapters/fixture-adapter.ts')) as typeof import('../modules/projects/adapters/fixture-adapter.ts');
+  const chatModule = (await vite.ssrLoadModule('/src/modules/chat/adapters/fixture-adapter.ts')) as typeof import('../modules/chat/adapters/fixture-adapter.ts');
+  const settingsModule = (await vite.ssrLoadModule('/src/modules/settings/adapters/fixture-adapter.ts')) as typeof import('../modules/settings/adapters/fixture-adapter.ts');
   const environmentService = new module.FixtureEnvironmentService();
   const agentService = new agentsModule.FixtureAgentService();
   return {
@@ -112,6 +116,9 @@ async function deterministicAppOptions(vite: { ssrLoadModule: (id: string) => Pr
     environmentService,
     agentService,
     projectService: new projectsModule.FixtureProjectService(agentService, environmentService),
+    feedService: createFeedTestAdapter(),
+    chatService: new chatModule.FixtureChatService(),
+    settingsService: new settingsModule.FixtureSettingsService(),
   };
 }
 
@@ -216,7 +223,8 @@ test('Production Web: settings view tabs and responsive visibility', async () =>
     await new Promise((resolve) => setTimeout(resolve, 80));
 
     assert.match(doc.body.textContent ?? '', /Platform & Protocol Compatibility/);
-    assert.match(doc.body.textContent ?? '', /Carrier & Transport Security/);
+    assert.match(doc.body.textContent ?? '', /Worker connection facts/);
+    assert.match(doc.body.textContent ?? '', /Transport carrier and socket permissions are not reported/);
 
     // 3. Click Status Strip card to switch back to Access & Security
     const accessCard = doc.querySelector('.settings-status-card') as HTMLButtonElement;
@@ -408,34 +416,132 @@ test('Feed pending enrollment attention card opens its authoritative detail and 
   const { dom, vite, cleanup } = await setupProductionDom();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
-    const { app, pinia, router } = createSproutApp(await deterministicAppOptions(vite));
+    const options = await deterministicAppOptions(vite);
+    options.feedService = createFeedTestAdapter(pendingEnrollmentSnapshot([
+      { id: 'env-pending', displayName: 'Pending Environment' },
+    ]));
+    const { app, pinia, router } = createSproutApp(options);
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
-    await router.push('/feed?scope=infra&urgency=attention');
+    await router.push('/feed?scope=feed:infra&urgency=attention');
     app.mount(appMount);
     await new Promise((resolve) => setTimeout(resolve, 80));
 
-    const card = [...dom.window.document.querySelectorAll<HTMLButtonElement>('.feed-attention-card')]
-      .find((item) => item.textContent?.includes('Pending Host Enrollment:'));
-    assert.ok(card, 'the live pending enrollment appears in Attention');
+    const card = dom.window.document.querySelector('[data-attention-id="enrollment:env-pending"]') as HTMLButtonElement | null;
+    assert.ok(card, 'the production Feed projection contains this pending enrollment');
+    assert.match(card.textContent ?? '', /Pending Environment/);
     card.click();
     await new Promise((resolve) => setTimeout(resolve, 40));
 
     assert.equal(router.currentRoute.value.fullPath, '/manage/environments/env-pending');
     const { useAppStore } = await vite.ssrLoadModule('/src/stores/app.ts') as typeof import('../stores/app.ts');
-    assert.equal(useAppStore(pinia).returnContext?.to, '/feed?scope=infra&urgency=attention&activity=all');
+    assert.equal(useAppStore(pinia).returnContext?.to,
+      router.resolve({ name: 'feed', query: { scope: 'feed:infra', urgency: 'attention', activity: 'all' } }).fullPath);
     app.unmount();
   } finally {
     await cleanup();
   }
 });
 
-test('Feed hides a pending enrollment attention item when its enrollment is absent', async () => {
+test('production page composition shares one transport, CSRF token, connection state, and authentication expiry', async () => {
+  const { vite, cleanup } = await setupProductionDom();
+  try {
+    const [{ createProductionAppOptions }, transportModule] = await Promise.all([
+      vite.ssrLoadModule('/src/app/main.ts') as Promise<typeof import('../app/main.ts')>,
+      vite.ssrLoadModule('/src/transport/browser-transport.ts') as Promise<typeof import('../transport/browser-transport.ts')>,
+    ]);
+    const calls: { path: string; method: string; csrf: string | null }[] = [];
+    let nextTimer = 0;
+    const staleTimers = new Map<number, () => void>();
+    let authenticationRevoked = false;
+    const source: BrowserEventSource = {
+      onopen: null,
+      onmessage: null,
+      onerror: null,
+      addEventListener() {},
+      close() {},
+    };
+    const transport = transportModule.createBrowserTransport({
+      fetch: async (input, init) => {
+        const path = String(input);
+        const method = init?.method ?? 'GET';
+        const csrf = new Headers(init?.headers).get('x-sprout-csrf');
+        calls.push({ path, method, csrf });
+        if (authenticationRevoked) return new Response('{}', { status: 401 });
+        if (path === '/api/auth/session' && method === 'POST') {
+          return new Response(JSON.stringify({ csrfToken: 'test-csrf-token' }), { status: 200 });
+        }
+        if (path === '/api/tasks/task-1/pause') {
+          return new Response(JSON.stringify({ task: {} }), { status: 200 });
+        }
+        return new Response('{}', { status: 200 });
+      },
+      eventSource: () => source,
+      setTimeout: ((callback: TimerHandler) => {
+        const id = ++nextTimer;
+        if (typeof callback === 'function') staleTimers.set(id, callback as () => void);
+        return id;
+      }) as typeof globalThis.setTimeout,
+      clearTimeout: ((id: ReturnType<typeof globalThis.setTimeout>) => {
+        staleTimers.delete(Number(id));
+      }) as typeof globalThis.clearTimeout,
+    });
+    const options = createProductionAppOptions(transport);
+    assert.equal(options.connectionSource, transport);
+
+    const sharedReaders = [
+      options.feedService!, options.taskService!, options.chatService!,
+      options.operatorSession!, options.settingsService!,
+    ];
+    assert.ok(sharedReaders.every((reader) => reader.state().connection === 'online'));
+    const unsubscribe = transport.events(() => undefined);
+    source.onerror?.(new Event('error'));
+    assert.ok(sharedReaders.every((reader) => reader.state().connection === 'reconnecting'),
+      'Feed, Tasks, Chat, Settings, and Shell observe the same unsettled transport');
+    source.onopen?.(new Event('open'));
+    assert.ok(sharedReaders.every((reader) => reader.state().connection === 'online'));
+    [...staleTimers.values()].at(-1)?.();
+    assert.ok(sharedReaders.every((reader) => reader.state().connection === 'stale'),
+      'the same liveness timeout marks every page stale');
+    source.onerror?.(new Event('error'));
+    assert.ok(sharedReaders.every((reader) => reader.state().connection === 'reconnecting'));
+    source.onopen?.(new Event('open'));
+    assert.ok(sharedReaders.every((reader) => reader.state().connection === 'online'));
+    unsubscribe();
+
+    await options.operatorSession!.signIn('test-only-credential');
+    await options.taskService!.pause('task-1', 'verify shared CSRF');
+    assert.equal(calls.find((call) => call.path === '/api/tasks/task-1/pause')?.csrf, 'test-csrf-token',
+      'the session adapter installs CSRF proof used by the Task adapter');
+
+    await options.runService!.getRun('run-audit');
+    assert.ok(calls.some((call) => call.path === '/api/runs/run-audit' && call.method === 'GET'),
+      'the production run inspector uses the shared transport and existing route');
+
+    authenticationRevoked = true;
+    const authRequired = (error: unknown) => error instanceof transportModule.BrowserRequestError
+      && error.kind === 'authentication-required';
+    await assert.rejects(options.feedService!.load(), authRequired);
+    await assert.rejects(options.taskService!.listTasks('project-1'), authRequired);
+    await assert.rejects(options.runService!.getRun('run-audit'), authRequired);
+    await assert.rejects(options.chatService!.listScopes('project-1'), authRequired);
+    await assert.rejects(options.settingsService!.loadSettings(), authRequired);
+    await assert.rejects(options.operatorSession!.listSessions(), authRequired);
+    await assert.rejects(options.environmentService!.listEnvironments(), authRequired);
+    await assert.rejects(options.agentService!.listAgents(), authRequired);
+    await assert.rejects(options.projectService!.listProjects(), authRequired);
+    await assert.rejects(options.usageService!.getAggregate({}), authRequired);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('Feed shows pending enrollment attention only when the Feed projection contains it', async () => {
   const { dom, vite, cleanup } = await setupProductionDom();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
     const options = await deterministicAppOptions(vite);
-    options.environmentService.listEnvironments = async () => [];
+    assert.ok((await options.environmentService.listEnvironments()).some((environment) => environment.enrollmentStatus === 'pending'));
     const { app, router } = createSproutApp(options);
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
@@ -444,10 +550,10 @@ test('Feed hides a pending enrollment attention item when its enrollment is abse
     await new Promise((resolve) => setTimeout(resolve, 80));
 
     assert.equal(
-      [...dom.window.document.querySelectorAll('.feed-attention-card')]
-        .some((item) => item.textContent?.includes('Pending Host Enrollment:')),
+      [...dom.window.document.querySelectorAll('[data-attention-id]')]
+        .some((item) => item.getAttribute('data-attention-id')?.startsWith('enrollment:')),
       false,
-      'a stale fixture card is not rendered without its live enrollment'
+      'Environment authority does not create a second Feed attention source'
     );
     app.unmount();
   } finally {

@@ -16,8 +16,10 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import EnvironmentsView from '../modules/environments/views/EnvironmentsView.vue';
 import AgentsView from '../modules/agents/views/AgentsView.vue';
 import FeedView from '../views/FeedView.vue';
-import ProjectView from '../views/ProjectView.vue';
+import TasksView from '../modules/tasks/views/TasksView.vue';
 import ProjectsView from '../modules/projects/views/ProjectsView.vue';
+import ChatView from '../modules/chat/views/ChatView.vue';
+import RoutingInspectorView from '../modules/chat/views/RoutingInspectorView.vue';
 import UsageView from '../views/UsageView.vue';
 import SettingsView from '../views/SettingsView.vue';
 
@@ -46,25 +48,37 @@ export const routes: RouteRecordRaw[] = [
       {
         path: 'tasks',
         name: 'project-tasks',
-        component: ProjectView,
+        component: TasksView,
+        meta: { destination: 'project', tab: 'tasks' },
+      },
+      {
+        path: 'tasks/proposals/:proposalId',
+        name: 'project-task-proposal',
+        component: TasksView,
         meta: { destination: 'project', tab: 'tasks' },
       },
       {
         path: 'tasks/:taskId',
         name: 'project-task-detail',
-        component: ProjectView,
+        component: TasksView,
         meta: { destination: 'project', tab: 'tasks' },
       },
       {
         path: 'chat',
         name: 'project-chat',
-        component: ProjectView,
+        component: ChatView,
+        meta: { destination: 'project', tab: 'chat' },
+      },
+      {
+        path: 'chat/routing/:batchId',
+        name: 'project-chat-routing',
+        component: RoutingInspectorView,
         meta: { destination: 'project', tab: 'chat' },
       },
       {
         path: 'chat/:scopeId',
         name: 'project-chat-scope',
-        component: ProjectView,
+        component: ChatView,
         meta: { destination: 'project', tab: 'chat' },
       },
     ],

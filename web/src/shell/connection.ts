@@ -101,15 +101,14 @@ export interface ConnectionPresentation {
  * Maps the transport state to product language.
  *
  * Every state carries text, so connection status never depends on colour, and
- * loading is distinguished from connected rather than assumed to be one.
+ * Request loading is informational; only the SSE connection determines control.
  */
 export function describeConnection(state: BrowserTransportState): ConnectionPresentation {
-  if (state.loading) {
+  if (state.connection === 'offline') {
     return {
-      status: 'yellow',
-      label: 'Checking Connection',
-      announce:
-        'Checking connection to Sprout. Control actions wait for the check to finish.',
+      status: 'red',
+      label: 'Offline',
+      announce: 'Offline. Shown facts are cached and control actions are unavailable rather than queued.',
       controlAvailable: false,
     };
   }
@@ -138,12 +137,6 @@ export function describeConnection(state: BrowserTransportState): ConnectionPres
         controlAvailable: false,
       };
     default:
-      return {
-        status: 'red',
-        label: 'Offline',
-        announce:
-          'Offline. Shown facts are cached and control actions are unavailable rather than queued.',
-        controlAvailable: false,
-      };
+      return { status: 'red', label: 'Offline', announce: 'Offline. Shown facts are cached and control actions are unavailable rather than queued.', controlAvailable: false };
   }
 }

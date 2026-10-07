@@ -10,13 +10,40 @@ import {
   hostConfiguration,
   PROJECT_ID,
 } from './runtime-test-harness.ts';
-import { projectChannelScopeId, isWorkingGroup, workingGroupStatus } from './conversation/model.ts';
+import { projectChannelScopeId, isWorkingGroup, taskGroupStatus, workingGroupStatus } from './conversation/model.ts';
+import type { Task } from './task/model.ts';
+
+function admittedTask(id: string, status: Task['status']): Task {
+  return {
+    id,
+    projectId: PROJECT_ID,
+    title: `Task ${id}`,
+    goal: `Goal ${id}`,
+    constraints: [`Constraint ${id}`],
+    status,
+    admission: {
+      proposalId: `proposal-${id}`,
+      proposalRevision: 1,
+      contentVersion: 1,
+      validationCriteria: [],
+      lead: { memberId: 'scout', memberKind: 'agent' },
+      contextAgentId: 'scout',
+      approvedBy: { memberId: 'operator', memberKind: 'human' },
+      approvedAt: 100,
+    },
+    environmentLifecycleState: status === 'done' ? 'ended' : 'idle',
+    createdAt: 100,
+    updatedAt: 100,
+    ...(status === 'done' ? { completedAt: 200 } : {}),
+  };
+}
 
 /**
  * Runtime composition evidence for conversation scopes and Working groups
- * (#95): the Project channel invariant rides the Project authority's
- * prepare/commit bridge, Working group creation performs no work, and the
- * ended-membership cascade survives a restart reconciliation.
+ * (#95), plus Task groups (#210): the Project channel invariant rides the
+ * Project authority's prepare/commit bridge; Task groups are created from
+ * admitted Task facts, including restart recovery; Working group creation
+ * performs no work; ended-membership cascades survive reconciliation.
  */
 
 test('every composed Project gets its one Project channel with the Project itself', async () => {
@@ -42,6 +69,87 @@ test('every composed Project gets its one Project channel with the Project itsel
       [projectChannelScopeId(project.id)],
       'one Project, one channel',
     );
+  } finally {
+    await runtime.close();
+  }
+});
+
+test('startup reconciliation creates missing admitted Task groups and freezes terminal ones', async () => {
+  const { runtime, stores } = await build({ listen: false });
+  try {
+    const activeTask = admittedTask('restart-active', 'in-progress');
+    const revisedTask: Task = {
+      ...admittedTask('restart-revised', 'in-progress'),
+      title: 'Revised title',
+      goal: 'Revised goal',
+      constraints: ['Revised constraint'],
+      controlHistory: [{
+        action: 'content-revised',
+        actor: { memberId: 'operator', memberKind: 'human' },
+        at: 150,
+        reason: 'Clarified acceptance context',
+        contentVersion: 2,
+        previous: {
+          title: 'Task restart-revised', goal: 'Goal restart-revised', constraints: ['Constraint restart-revised'],
+          validationCriteria: [], lead: { memberId: 'scout', memberKind: 'agent' },
+        },
+        content: {
+          title: 'Revised title', goal: 'Revised goal', constraints: ['Revised constraint'],
+          validationCriteria: [], lead: { memberId: 'scout', memberKind: 'agent' },
+        },
+      }],
+    };
+    const terminalTask = admittedTask('restart-done', 'done');
+    const stoppedTask = admittedTask('restart-stopped', 'stopped');
+    const cancelledTask = admittedTask('restart-cancelled', 'cancelled');
+    const failedTask = admittedTask('restart-failed', 'failed');
+    await stores.tasks.create(activeTask);
+    await stores.tasks.create(revisedTask);
+    await stores.tasks.create(terminalTask);
+    await stores.tasks.create(stoppedTask);
+    await stores.tasks.create(cancelledTask);
+    await stores.tasks.create(failedTask);
+
+    await runtime.reconcile();
+
+    const groups = (await stores.conversationScopes.listForProject(PROJECT_ID))
+      .filter((scope) => scope.kind === 'task-group');
+    const activeGroup = groups.find((group) => group.taskId === activeTask.id);
+    const revisedGroup = groups.find((group) => group.taskId === revisedTask.id);
+    const terminalGroup = groups.find((group) => group.taskId === terminalTask.id);
+    const stoppedGroup = groups.find((group) => group.taskId === stoppedTask.id);
+    const cancelledGroup = groups.find((group) => group.taskId === cancelledTask.id);
+    const failedGroup = groups.find((group) => group.taskId === failedTask.id);
+    assert.ok(activeGroup, 'the admitted Task gets a scope even if the original admission write was interrupted');
+    assert.equal(activeGroup.content.currentVersion, 1);
+    assert.equal(activeGroup.content.versions[0]?.taskTitle, activeTask.title);
+    assert.equal(activeGroup.content.versions[0]?.goal, activeTask.goal);
+    assert.deepEqual(activeGroup.content.versions[0]?.rules, activeTask.constraints);
+    assert.equal(taskGroupStatus(activeGroup), 'active');
+    assert.ok(revisedGroup, 'reconciliation uses the current content revision, not the original admission version');
+    assert.equal(revisedGroup.content.versions[0]?.taskContentVersion, 2);
+    assert.equal(revisedGroup.content.versions[0]?.taskTitle, revisedTask.title);
+    assert.equal(revisedGroup.content.versions[0]?.goal, revisedTask.goal);
+    assert.deepEqual(revisedGroup.content.versions[0]?.rules, revisedTask.constraints);
+    assert.equal(revisedGroup.content.versions[0]?.actorMemberId, 'operator');
+    assert.ok(terminalGroup, 'a terminal Task still gets its durable conversation history scope');
+    assert.equal(taskGroupStatus(terminalGroup), 'frozen');
+    assert.equal(terminalGroup.terminalTaskStatus, 'done');
+    assert.ok(stoppedGroup);
+    assert.equal(stoppedGroup.terminalTaskStatus, 'stopped');
+    assert.equal(taskGroupStatus(stoppedGroup), 'frozen');
+    assert.ok(cancelledGroup);
+    assert.equal(cancelledGroup.terminalTaskStatus, 'cancelled');
+    assert.equal(taskGroupStatus(cancelledGroup), 'frozen');
+    assert.ok(failedGroup);
+    assert.equal(failedGroup.terminalTaskStatus, 'failed');
+    assert.equal(taskGroupStatus(failedGroup), 'frozen');
+
+    const firstPass = JSON.stringify(groups);
+    await runtime.reconcile();
+    const secondPass = (await stores.conversationScopes.listForProject(PROJECT_ID))
+      .filter((scope) => scope.kind === 'task-group');
+    assert.equal(JSON.stringify(secondPass), firstPass, 'repeat reconciliation appends no duplicate snapshots or freeze facts');
   } finally {
     await runtime.close();
   }

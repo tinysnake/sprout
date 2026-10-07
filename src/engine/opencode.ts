@@ -116,7 +116,8 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
     return new OpenCodeSession({
       binaryPath,
       workingDirectory: request.workingDirectory,
-      options: this.#options,
+      options: request.sessionEnvironment === undefined ? this.#options
+        : { ...this.#options, env: { ...(this.#options.env ?? process.env), ...request.sessionEnvironment } },
       sessionId: `oc-${++this.#sessionCounter}-${Date.now().toString(36)}`,
       ...(delivery !== undefined ? { contractDelivery: delivery } : {}),
       ...(contractEnv !== undefined ? { contractEnv } : {}),
@@ -244,9 +245,14 @@ export class OpenCodeSession implements EngineSession {
       if (settled) return;
       settled = true;
       this.#settle = undefined;
-      if (result.status === 'failed') queue.fail(new Error(result.message));
+      const settledResult: EngineTurnResult = {
+        ...result,
+        ...(state.tokenUsage !== undefined ? { tokenUsage: state.tokenUsage } : {}),
+        ...(state.detailedTokens !== undefined ? { detailedTokens: state.detailedTokens } : {}),
+      };
+      if (settledResult.status === 'failed') queue.fail(new Error(settledResult.message));
       else queue.end();
-      resolveCompletion(result);
+      resolveCompletion(settledResult);
     };
     this.#settle = finish;
 

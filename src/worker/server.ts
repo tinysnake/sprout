@@ -30,6 +30,7 @@ import {
   type WorkerReadinessProbeParams,
   type WorkerReadinessProbeResult,
 } from './protocol.ts';
+import { createAgentTaskGroupMessageBridge } from './agent-task-group-bridge.ts';
 import { WorkerWorkspace } from './workspace.ts';
 import type { WorkerRecoveryJournal } from './recovery-journal.ts';
 import {
@@ -77,6 +78,7 @@ export interface EnvironmentWorkerOptions {
   readonly recoveryJournal?: WorkerRecoveryJournal;
 }
 interface LiveSession {
+  readonly closeTaskGroupMessageBridge?: () => Promise<void>;
   readonly engine: string;
   readonly session: EngineSession;
   readonly events: EventSink;
@@ -274,24 +276,43 @@ export class EnvironmentWorker {
     // Fence conservatively before an engine can start, not after it returns.
     this.#options.recoveryJournal?.engineStarted();
 
-    const session = await adapter.startSession({
-      agentId: params.agentId,
-      workingDirectory: params.projectWorkspaceId === undefined
-        ? params.workingDirectory
-        : await this.#requireWorkspace().projectWorkingDirectory(
-          params.projectWorkspaceId,
-          params.projectWorkspacePath,
-          params.projectWorkspaceKind,
-        ),
-      ...(params.model !== undefined ? { model: params.model } : {}),
-      ...(params.effort !== undefined ? { effort: params.effort } : {}),
-      ...(params.instructions !== undefined ? { instructions: params.instructions } : {}),
-      ...(params.resumeSessionKey !== undefined
-        ? { resumeSessionKey: params.resumeSessionKey }
-        : {}),
-    });
-
+    let taskGroupMessagesActive = true;
+    const postTaskGroupMessage = params.taskGroupMessagesEnabled ? async (input: import('../engine/port.ts').AgentTaskGroupMessageInput) => {
+      if (!taskGroupMessagesActive || this.#closed || !this.#sessions.has(sessionId)) throw new Error('Task-group post capability expired');
+      return this.#transport.request<import('../engine/port.ts').AgentTaskGroupMessageResult>(WORKER_METHODS.taskGroupMessage, { sessionId, input });
+    } : undefined;
     const sessionId = `session-${this.#options.recoveryJournal?.snapshot().epoch ?? 'local'}-${++this.#counter}`;
+    const taskGroupBridge = postTaskGroupMessage ? await createAgentTaskGroupMessageBridge(postTaskGroupMessage) : undefined;
+    let session: EngineSession;
+    try {
+      session = await adapter.startSession({
+        ...(postTaskGroupMessage !== undefined ? { postTaskGroupMessage } : {}),
+        ...(taskGroupBridge !== undefined ? {
+          sessionEnvironment: taskGroupBridge.environment,
+        } : {}),
+        agentId: params.agentId,
+        workingDirectory: params.projectWorkspaceId === undefined
+          ? params.workingDirectory
+          : await this.#requireWorkspace().projectWorkingDirectory(
+            params.projectWorkspaceId,
+            params.projectWorkspacePath,
+            params.projectWorkspaceKind,
+          ),
+        ...(params.model !== undefined ? { model: params.model } : {}),
+        ...(params.effort !== undefined ? { effort: params.effort } : {}),
+        ...(params.instructions !== undefined || taskGroupBridge !== undefined ? {
+          instructions: (params.instructions ?? '') + (taskGroupBridge?.instructions ?? ''),
+        } : {}),
+        ...(params.resumeSessionKey !== undefined
+          ? { resumeSessionKey: params.resumeSessionKey }
+          : {}),
+      });
+    } catch (error) {
+      taskGroupMessagesActive = false;
+      await taskGroupBridge?.close();
+      throw error;
+    }
+
     // Every contract delivery is reported, not just a refusal. An operator must
     // be able to tell from the log whether the contract reached the engine and
     // through which mechanism, for every mechanism — including the two ordinary
@@ -302,6 +323,7 @@ export class EnvironmentWorker {
       this.#options.onLog?.(contractDeliveryDiagnostic(delivery));
     }
     this.#sessions.set(sessionId, {
+      ...(taskGroupBridge !== undefined ? { closeTaskGroupMessageBridge: async () => { taskGroupMessagesActive = false; await taskGroupBridge.close(); } } : {}),
       engine: params.engine,
       runId: params.runId,
       session,
@@ -385,7 +407,7 @@ export class EnvironmentWorker {
         }
         live.events.settled(
           turnId,
-          sanitizeEngineTurnResult(await turn.completion),
+          sanitizeEngineTurnResult(await turn.completion, live.engine),
           live.session.engineSessionKey,
         );
       } catch {
@@ -414,6 +436,7 @@ export class EnvironmentWorker {
   async #closeSession(params: CloseParams): Promise<Record<string, never>> {
     const live = this.#sessions.get(params.sessionId);
     if (live) {
+      await live.closeTaskGroupMessageBridge?.();
       await live.session.close();
       if (live.running !== undefined) await settleOrTimeout([live.running]);
       this.#sessions.delete(params.sessionId);
@@ -439,6 +462,7 @@ export class EnvironmentWorker {
     let fenced = true;
     const running: Promise<void>[] = [];
     for (const [sessionId, live] of this.#sessions) {
+      await live.closeTaskGroupMessageBridge?.();
       this.#sessions.delete(sessionId);
       if (live.running !== undefined) running.push(live.running);
       await live.session.close().catch(() => { fenced = false; });

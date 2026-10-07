@@ -103,7 +103,7 @@ export function createBrowserTransport(options: BrowserTransportOptions = {}): B
 
   function snapshot(): BrowserTransportState {
     const loading = inFlightRequests > 0;
-    return { status: loading ? 'loading' : connection, connection, loading };
+    return { status: connection, connection, loading };
   }
 
   function publish(): void {
@@ -145,15 +145,13 @@ export function createBrowserTransport(options: BrowserTransportOptions = {}): B
           const body = await response.json().catch(() => undefined);
           throw responseFailure(response.status, body);
         }
-        setConnection('online');
         return await response.json() as T;
       } catch (error) {
         if (error instanceof BrowserRequestError) {
-          // HTTP reached Sprout, even if this session is no longer authorized.
-          setConnection('online');
+          // An HTTP response says nothing about SSE liveness.
           throw error;
         }
-        setConnection(navigatorOnline() ? 'offline' : 'offline');
+        setConnection('offline');
         throw new BrowserRequestError('unavailable');
       } finally {
         inFlightRequests -= 1;
@@ -192,6 +190,11 @@ export function createBrowserTransport(options: BrowserTransportOptions = {}): B
       source.onerror = () => {
         if (!closed) setConnection(navigatorOnline() ? 'reconnecting' : 'offline');
       };
+      source.addEventListener('heartbeat', () => {
+        if (closed) return;
+        resetStaleTimer();
+        setConnection('online');
+      });
       source.addEventListener('run', (event: MessageEvent<string>) => received(event, 'run'));
       source.onmessage = (event: MessageEvent<string>) => received(event, 'message');
       return () => {

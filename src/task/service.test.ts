@@ -365,7 +365,7 @@ test('a failed run blocks the Task and records the failure as its summary', asyn
   assert.equal(run.status, 'failed');
   const blocked = await scenario.service.get(task.id);
   assert.equal(blocked?.status, 'blocked');
-  assert.match(blocked?.blockerReason ?? '', /run .* failed: engine exploded/);
+  assert.match(blocked?.blockerReason ?? '', /run .* failed; inspect the bounded run summary/);
   const withRuns = await scenario.service.getWithRuns(task.id);
   assert.equal(withRuns?.runs[0]?.summary?.status, 'failed');
   assert.equal(withRuns?.runs[0]?.summary?.summary, 'engine exploded');
@@ -429,6 +429,28 @@ test('advancing a terminal Task is refused', async () => {
   });
   await scenario.service.update(task.id, { status: 'cancelled' });
   await assert.rejects(scenario.service.advance(task.id), /cancelled and cannot be advanced/);
+});
+
+
+
+
+test('generic Task updates cannot create or clear Force Released stopped status', async () => {
+  const scenario = build();
+  const task = await scenario.service.create({
+    projectId: 'project-sprout',
+    title: 'Force Released work',
+    goal: 'Keep active intent behind Human Resume.',
+    assignedAgentId: 'agent-scout',
+  });
+
+  await assert.rejects(scenario.service.update(task.id, { status: 'stopped' }), /status stopped is controlled by Force Release and Human Resume/);
+  await scenario.taskStore.save({
+    ...task,
+    status: 'stopped',
+    environmentLifecycleState: 'discarded',
+    forcedRelease: { actor: 'operator', reason: 'Recovery override', unresolvedFacts: ['cleanup unproved'], at: 2 },
+  });
+  await assert.rejects(scenario.service.update(task.id, { status: 'in-progress' }), /status stopped is controlled by Force Release and Human Resume/);
 });
 
 

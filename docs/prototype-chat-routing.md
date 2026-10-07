@@ -4,6 +4,12 @@
 
 This retained prototype artifact documents the design, interaction models, decision evidence, and architectural boundaries for **Chat Scopes and Wake-Routing Inspection** in the Sprout M2 Local Operator product (Ticket #64, Scope #44). It builds directly upon the shared shell baseline (#61), Feed & Attention baseline (#62), and Multi-View Project baseline (#63), preserving the message and wake-routing semantics settled in ADR-0007 and the project/agent management journeys settled in ADR-0008.
 
+**Historical status:** This prototype predates Ticket #214. Its direct-message
+scope represents Human-to-Agent chat. Any Agent-to-Agent direct-message examples
+are superseded: current direct-message and Agent collaboration contracts are in
+[agent-direct-messages.md](agent-direct-messages.md), ADR-0007, ADR-0014, and
+ADR-0015.
+
 The interactive prototype artifact is executable via `npm run prototype`, with full DOM test coverage in `web/src/prototype/chat.dom.test.ts` and `web/src/prototype/project.dom.test.ts`.
 
 ---
@@ -40,7 +46,7 @@ Under ADR-0008 and ADR-0007, routine collaboration is organized into three stric
 |---|---|---|---|
 | **Project Channel (`#general`)** | All current Project members | Governed by Project wake policy (`explicit-only` vs `wake-model-assisted`). Exact mentions & `@all` route deterministically; unaddressed inputs enter fixed 30s collection window under assisted policy. | Archived project makes channel read-only. |
 | **Working Group Channel** | Subset of current Project members | Governed by Project wake policy for WG members. Creator is automatically enrolled upon creation. | Disbanded WG makes channel read-only while preserving all history and configuration for potential restore. |
-| **Project-Scoped Direct Message** | Operator + 1 specific Project Agent | **100% Deterministic addressing**. Always wakes the recipient immediately, completely bypassing wake policy and collection windows. | Ended agent membership makes DM read-only, preserving attribution and historical messages. |
+| **Project-Scoped Direct Message** | Operator + 1 specific Project Agent | Human-authored messages wake the recipient immediately and bypass wake policy and collection windows. Agent-authored direct sends are unsupported; Agent collaboration uses Task-group posts (ADR-0014/0015). | Ended agent membership makes DM read-only, preserving attribution and historical messages. |
 
 ---
 
@@ -82,7 +88,7 @@ ADR-0007 establishes a strict separation between deterministic addressing and pr
 ```
 
 ### Addressing Invariants
-1. **Direct DM**: Direct messages always route as `addressed` and wake the recipient immediately.
+1. **Direct DM**: Human-authored direct messages always route as `addressed` and wake the recipient immediately.
 2. **Exact Mentions**: `@Programmer` wakes only `@Programmer`, evaluated as whole tokens (e.g. `@forge` does not match `@forge-two`).
 3. **`@all` Broadcast**: Wakes every active agent member in the Project except the author.
 4. **Author Exclusion**: The author is never woken by their own message.
@@ -108,17 +114,19 @@ Under ADR-0007 and ADR-0008, the wake model receives only curated Project-shared
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ FROZEN ROUTING CONTEXT MANIFEST (ADR-0007)                                  │
 ├──────────────────────────────────────┬──────────────────────────────────────┤
-│ ✅ INCLUDED IN ROUTING CONTEXT       │ ❌ STRICTLY EXCLUDED (PRIVACY BOUNDARY)│
+│ ✅ INCLUDED IN ROUTING CONTEXT       │ ❌ NO INDEPENDENT SOURCE              │
 ├──────────────────────────────────────┼──────────────────────────────────────┤
 │ 1. Batch inputs (ID, author, text)   │ 1. Direct Messages & DM histories    │
 │ 2. Project Contract (Goal & Rules)   │ 2. Agent private memory & scratchpads│
 │ 3. Candidate Agent responsibilities  │ 3. Engine sessions & raw transcripts │
 │ 4. Recent Project channel messages   │ 4. Tool call outputs & stdin/stdout  │
-│ 5. Public Task state summaries       │ 5. Overlay/engine credentials & keys │
-│ 6. Non-routing projected replies     │ 6. Host paths & private network facts│
+│ 5. Public Task state summaries       │ 5. Credential and key records        │
+│ 6. Non-routing projected replies     │ 6. Host/private-network records      │
 │                                      │ 7. Transient Environment capacity    │
 └──────────────────────────────────────┴──────────────────────────────────────┘
 ```
+
+**Source-exclusion limit:** These items have no independent source in the builder. A sensitive value copied into included prose may survive unless it matches a recognized redaction pattern; see [ADR-0007’s limited guarantee](adr/0007-message-and-wake-routing-semantics.md#wake-model-privacy-guarantee-amended-2026-10-07).
 
 > **Why Transient Environment Capacity is Excluded:** Transient worker disconnection or busy status must never cause the wake model to silently substitute a different agent for the one whose declared Project responsibility best matches the user's input.
 
@@ -195,7 +203,7 @@ In accordance with ADR-0007:
 3. **Fixed 30s Collection Window**: Fixed window avoids debounce starvation and batches burst inputs.
 4. **Non-Routing Projected Replies**: Projected output cannot become automatic input, preventing recursive loops.
 5. **Automatic Retry & Fail-Closed Fallback**: 2 attempts maximum; fails closed with durable error.
-6. **Strict Privacy Boundaries**: DMs, private memory, sessions, transcripts, credentials, host paths, and transient capacity excluded from routing context.
+6. **Routing Privacy Boundaries** (reconciled 2026-10-07 by #220 Option A): DMs, private memory, sessions, transcripts, credential/host records, and transient capacity are excluded as sources. Recognized sensitive patterns in admitted prose are redacted; unlabelled opaque values may reach the wake model. See [ADR-0007’s limited guarantee](adr/0007-message-and-wake-routing-semantics.md#wake-model-privacy-guarantee-amended-2026-10-07).
 7. **Observational Evidence Only**: No manual route-now or retry buttons in MVP.
 8. **Non-Destructive Lifecycles**: Disbanding WGs and ending memberships preserve full history and attribution.
 

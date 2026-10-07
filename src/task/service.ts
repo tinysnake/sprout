@@ -25,11 +25,12 @@
  */
 
 import type { EnvironmentPreference } from '../environment/model.ts';
+import { sanitizeOperatorText } from '../environment/privacy.ts';
 import { createIdFactory, type IdFactory } from '../ids.ts';
 import type { AgentRun } from '../run/model.ts';
 import { buildTaskContext, renderTaskPrompt } from './context.ts';
 import {
-  isTerminalTaskStatus,
+  isEndedTaskStatus,
   type Task,
   type TaskRunSummary,
   type TaskStatus,
@@ -126,7 +127,7 @@ export class TaskService {
         : {}),
       createdAt: now,
       updatedAt: now,
-      ...(isTerminalTaskStatus(status) ? { completedAt: now } : {}),
+      ...(isEndedTaskStatus(status) ? { completedAt: now } : {}),
     };
     return this.#store.create(task);
   }
@@ -143,17 +144,39 @@ export class TaskService {
     return this.#store.getWithRuns(taskId);
   }
 
+  /** Persist the failed outcome of the separately submitted Agent-lead begin run. */
+  async recordInitialRunFailure(taskId: string): Promise<Task> {
+    const task = await this.#require(taskId);
+    if (!task.admission || task.admission.lead.memberKind !== 'agent') {
+      throw new Error(`task ${taskId} has no Agent-lead admission run`);
+    }
+    if (task.admission.initialRunFailed) return task;
+    const failed: Task = {
+      ...task,
+      admission: { ...task.admission, initialRunFailed: true },
+      updatedAt: this.#clock.now(),
+    };
+    await this.#store.save(failed);
+    return failed;
+  }
+
   /**
    * Apply a partial update to a Task.
    *
-   * Moving into a terminal status stamps `completedAt`; moving back out of one
+   * Moving into an ended status stamps `completedAt`; moving back out of one
    * clears it, so a Task that is reopened does not claim a completion time it no
    * longer has.
    */
   async update(taskId: string, patch: UpdateTaskInput): Promise<Task> {
     const task = await this.#require(taskId);
-    if (task.environmentLifecycleState !== undefined && patch.status !== undefined && isTerminalTaskStatus(patch.status)) {
-      throw new Error(`task ${taskId} must end through the Task environment lifecycle`);
+    if (task.status === 'stopped' || patch.status === 'stopped') {
+      throw new Error(`Task ${taskId} status stopped is controlled by Force Release and Human Resume`);
+    }
+    if (task.environmentLifecycleState !== undefined && patch.status !== undefined && isEndedTaskStatus(patch.status)) {
+      throw new Error(`task ${taskId} must change status through the Task environment lifecycle`);
+    }
+    if (task.admission !== undefined && (patch.title !== undefined || patch.goal !== undefined || patch.constraints !== undefined)) {
+      throw new Error(`task ${taskId} content is bound to proposal version ${task.admission.contentVersion}`);
     }
     if (patch.title !== undefined) assertRequired(patch.title, 'title');
     if (patch.goal !== undefined) assertRequired(patch.goal, 'goal');
@@ -172,7 +195,7 @@ export class TaskService {
     const withAgent = clearOrSet(next, 'assignedAgentId', patch.assignedAgentId);
     const withPreference = clearOrSet(withAgent, 'environmentPreference', patch.environmentPreference);
     const withBlocker = clearOrSet(withPreference, 'blockerReason', patch.blockerReason);
-    const withCompletion = isTerminalTaskStatus(status)
+    const withCompletion = isEndedTaskStatus(status)
       ? { ...withBlocker, completedAt: task.completedAt ?? now }
       : omit(withBlocker, 'completedAt');
     await this.#store.save(withCompletion);
@@ -187,6 +210,20 @@ export class TaskService {
    * run is linked into the Task's sequence by the orchestrator through `link`,
    * and its settlement is reported through `onRunSettled`.
    */
+  async advanceWithAttribution(taskId: string, input: {
+    readonly agentId: string;
+    readonly actor: import('./model.ts').TaskActor;
+    readonly reason?: string;
+    readonly contentVersion: number;
+    readonly prompt?: string;
+  }): Promise<{ readonly task: Task; readonly runId: string }> {
+    if (!this.#lifecycle) throw new Error('Task environment lifecycle is not configured');
+    const task = await this.#require(taskId);
+    return this.#lifecycle.advanceRun(taskId, input.agentId, input.prompt ?? defaultAdvancePrompt(task), {
+      actor: input.actor, ...(input.reason !== undefined ? { reason: input.reason } : {}), contentVersion: input.contentVersion,
+    });
+  }
+
   async advance(
     taskId: string,
     options: AdvanceTaskOptions = {},
@@ -227,7 +264,7 @@ export class TaskService {
   /**
    * Emergency Task end for a Human Force Release (#88, ADR-0009).
    *
-   * Delegates to the Task environment lifecycle, which owns the terminal Task
+   * Delegates to the Task environment lifecycle, which owns the stopped Task
    * state and lease release. Returns the affected run ids so the permanent
    * override outcome can name every run it abandoned.
    */
@@ -268,7 +305,7 @@ export class TaskService {
     // The first run to advance a Task records which agent owns it, so later
     // advances need no explicit agent.
     const task = await this.#store.get(input.taskId);
-    if (task && task.assignedAgentId === undefined) {
+    if (task && task.admission === undefined && task.assignedAgentId === undefined) {
       await this.#store.save({ ...task, assignedAgentId: input.agentId, updatedAt: this.#clock.now() });
     }
   }
@@ -351,9 +388,9 @@ function defaultAdvancePrompt(task: Task): string {
  * as the O5 hand-off).
  */
 function summarizeRun(run: AgentRun): string {
-  if (run.result?.status === 'completed') return run.result.text.trim();
-  if (run.result?.status === 'failed') return run.result.message.trim();
-  return run.failure?.trim() ?? '';
+  const text = run.result?.status === 'completed' ? run.result.text
+    : run.result?.status === 'failed' ? run.result.message : run.failure;
+  return sanitizeOperatorText(text, { maxLength: 4000, fallback: '' }).trim();
 }
 
 /** Set an optional field to a value, or remove it when the patch says `null`. */

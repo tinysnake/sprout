@@ -6,6 +6,7 @@ import { PassThrough } from 'node:stream';
 
 
 import { CodexEngineAdapter, type CodexProcess } from './codex.ts';
+import { sanitizedTurnFailure } from './turn-failure.ts';
 
 import { EngineResumeRefusedError } from './port.ts';
 
@@ -81,8 +82,8 @@ class FakeCodexServer {
     this.#out.write(`${JSON.stringify({ jsonrpc: '2.0', id, result })}\n`);
   }
 
-  reject(id: number, message: string): void {
-    this.#out.write(`${JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32_601, message } })}\n`);
+  reject(id: number, message: string, data?: unknown): void {
+    this.#out.write(`${JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32_601, message, ...(data !== undefined ? { data } : {}) } })}\n`);
   }
 
   notify(method: string, params: unknown): void {
@@ -354,6 +355,15 @@ test('a turn attaches the per-turn Codex token usage notification on completion'
     status: 'completed',
     text: '',
     tokenUsage: { promptTokens: 120, completionTokens: 40, totalTokens: 160 },
+    detailedTokens: {
+      inputTokens: 120,
+      outputTokens: 30,
+      reasoningOutputTokens: 10,
+      totalTokens: 160,
+    },
+    billingBasis: 'unknown',
+    source: 'codex-protocol:thread/tokenUsage/updated',
+    sourceVersion: 'codex-cli 0.154.0',
   });
 });
 
@@ -390,7 +400,32 @@ test('interrupting a turn is reported as interrupted, not as a failure', async (
 });
 
 
+test('turn-start failures classify JSON-RPC data and typed connection loss without engine prose', async () => {
+  for (const disconnected of [false, true]) {
+    const server = new FakeCodexServer((request, self) => {
+      if (request.method === 'initialize') self.respond(request.id, {});
+      if (request.method === 'thread/start') self.respond(request.id, { thread: { id: 'thread-1' } });
+      if (request.method === 'turn/start') {
+        if (disconnected) self.crash();
+        else self.reject(request.id, 'PRIVATE_PROVIDER_BODY', { error: { code: 'model_not_found', message: 'PRIVATE_PROVIDER_BODY' } });
+      }
+    });
+    const session = await startAdapter(server).startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+    const turn = session.run('PRIVATE_PROMPT');
+    await collect(turn);
+    const result = await turn.completion;
+    assert.deepEqual(result, {
+      status: 'failed',
+      message: sanitizedTurnFailure('codex', disconnected ? 'connection-lost' : 'model-rejected'),
+      ...(disconnected ? { retryable: true } : {}),
+    });
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_PROVIDER_BODY|PRIVATE_PROMPT|model_not_found/);
+    await session.close();
+  }
+});
+
 test('a turn error from the engine becomes a failed terminal state', async () => {
+  const raw = 'sandbox denied raw-upstream-body';
   const server = new FakeCodexServer((request, self) => {
     if (request.method === 'initialize') self.respond(request.id, {});
     if (request.method === 'thread/start') self.respond(request.id, { thread: { id: 'thread-1' } });
@@ -398,7 +433,7 @@ test('a turn error from the engine becomes a failed terminal state', async () =>
       self.respond(request.id, { turn: { id: 'turn-1' } });
       queueMicrotask(() => {
         self.notify('turn/completed', {
-          turn: { id: 'turn-1', status: 'failed', error: { message: 'sandbox denied' } },
+          turn: { id: 'turn-1', status: 'failed', error: { message: raw } },
         });
       });
     }
@@ -410,7 +445,12 @@ test('a turn error from the engine becomes a failed terminal state', async () =>
   await collect(turn);
   const result = await turn.completion;
 
-  assert.deepEqual(result, { status: 'failed', message: 'sandbox denied' });
+  // The durable reason is the stable failure class, never the engine's body (#182).
+  assert.deepEqual(result, {
+    status: 'failed',
+    message: sanitizedTurnFailure('codex', 'turn-error'),
+  });
+  assert.ok(!JSON.stringify(result).includes(raw));
 });
 
 

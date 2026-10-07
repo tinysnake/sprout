@@ -1,63 +1,124 @@
 /**
- * The M1 wake contract (ticket #26, settled by the #25 prototype).
+ * The deterministic wake contract (ADR-0007, #96; settled by the #25 prototype).
  *
- * Given one durable Message and the project's members, decide who is woken and
- * why. The decision is pure and deterministic except for the single
- * unaddressed-project-channel case, which consults the low-cost wake model.
+ * Given one durable input — a Message in one of the three conversation scopes,
+ * or a system-produced Project event — decide who is woken and why. The plan
+ * is pure and deterministic: **it never consults a wake model**. That is the
+ * M2 sharpening of the proven M1 path:
  *
- * The governing rule is **prefer an observable extra wake over silently losing
- * addressed work**. Consequences that follow from it:
- *
- * - An addressed Message (direct recipient, exact `@id` mention, unknown `@id`,
- *   or `@all` broadcast) never reaches the wake model at all. Determinism is what prevents
- *   the one silent failure mode: an addressed agent that was never woken leaves
- *   no reply and no run record.
- * - The wake model only ever decides *whether* an unaddressed project Message
- *   engages the room. It never picks recipients, and it never sees an addressed
- *   Message.
- * - When the wake model cannot be constructed, throws, or returns something
- *   unusable, the contract **fails open**: it records a
- *   `wake-model-fail-open` decision for every other member rather than dropping
- *   the Message.
- * - A refusal is recorded as an explicit, durable `suppressed` observation, not
- *   as silence. It is only ever reachable for an unaddressed Message.
+ * - A Project-scoped direct Message, an exact whole-token `@id` mention, an
+ *   exact `@all` broadcast, and an `addressed` Project event wake their
+ *   recipients immediately and never consult the Project's wake policy or
+ *   model (ADR-0007 "Deterministic addressing"). Determinism is what prevents
+ *   the one silent failure mode: an addressed Agent that was never woken
+ *   leaves no reply and no run record.
+ * - An input with no deterministic address stays durable and visible: under
+ *   the Project's `wake-model-assisted` policy it is marked batch-eligible and
+ *   collected into the Project's fixed routing window, where a wake model
+ *   judges the frozen batch (#97); under `explicit-only` (the default) it
+ *   records a durable `suppressed` observation and no model is asked and no
+ *   member is woken by guesswork. The M1 fail-open behaviour (wake everyone
+ *   when the model fails) is a rejected ADR-0007 alternative and no longer
+ *   exists here.
+ * - Recipients are **current Project Agents**. The author (or the event's
+ *   producer) is never woken by its own input, targets are deduplicated per
+ *   input and Agent across every addressing form, and a target that is unknown
+ *   or no longer a Project member produces a durable per-target failure while
+ *   every valid target continues. A Human member is a known non-wakeable
+ *   target, not a failure: Humans are not woken by wake requests.
+ * - A direct conversation and a Working group channel additionally resolve
+ *   against their scope's **current participants** — the pair, or the group's
+ *   active participations. A target outside them is an invalid target for that
+ *   scope and produces a durable per-target failure while valid participants
+ *   still wake, and a broadcast reaches only the scope's participant Agents:
+ *   content stays inside the scope that carries it (ADR-0008). The Project
+ *   channel has no narrower participant set — its participants are every
+ *   current Project member.
  */
 
+import type { ProjectEvent } from './events.ts';
 import type {
   Message,
   WakeDecision,
-  WakeModel,
   WakeObservation,
   WakePlan,
 } from './model.ts';
-import { ProjectRegistry } from '../project/registry.ts';
+import type { WakePolicy } from '../project/authority-model.ts';
 
 /** `@all` is a broadcast; it is matched as a whole token, not as a prefix. */
 const ALL_MENTION = /(?<![\w@])@all(?![\w-])/i;
 
+/** One Project member as routing resolves targets against it. */
+export interface WakeMember {
+  readonly memberId: string;
+  readonly memberKind: 'human' | 'agent';
+  readonly endedAt?: number;
+}
+
+/** The conversation-scope facts the plan resolves a Message's targets in. */
+export interface WakeScopeFacts {
+  /** The scope kind the Message was posted to. */
+  readonly kind: 'project' | 'direct' | 'working-group' | 'task-group';
+  /**
+   * The scope's current participants: the canonical pair for a direct
+   * conversation, the active participations for a Working group. Absent for
+   * the Project channel, whose participants are every current Project member.
+   * A participant-scoped kind that names no participants fails closed —
+   * missing facts never widen a fan-out.
+   */
+  readonly participants?: readonly string[];
+}
+
+export interface WakePlanInput {
+  /** Current and ended Project member facts; one authority for "member". */
+  readonly members: readonly WakeMember[];
+  /** The scope the Message belongs to. */
+  readonly scope: WakeScopeFacts;
+  /**
+   * The Project's wake policy in force for this input (#97). Defaults to
+   * `explicit-only`, the migration and configuration default: an unaddressed
+   * input then records its durable suppressed observation. Under
+   * `wake-model-assisted` the same input instead becomes batch-eligible — no
+   * observation and no model call happen here; the window path owns them.
+   */
+  readonly wakePolicy?: WakePolicy;
+}
+
+/** Exact @id tokens in first-occurrence order, without deciding whether a target is a member. */
+export function parseMentionTargets(body: string): readonly string[] {
+  const targets: string[] = [];
+  const seen = new Set<string>();
+  const tokens = /(?<![\w@])@([a-zA-Z0-9_-]+)(?![\w-])/g;
+  for (const match of body.matchAll(tokens)) {
+    const target = match[1]!;
+    if (seen.has(target)) continue;
+    seen.add(target);
+    targets.push(target);
+  }
+  return targets;
+}
+
 /**
- * Exact agent mentions on the project channel.
+ * Exact agent mentions in a Message body.
  *
  * An agent id is matched as a whole `@id` token, so `@scout` does not match
- * `@scout-two`, matching the same token rule Cumora uses for `@all` and for its
- * reply coordination. The member set is the authority on which ids are real, so
- * a mention of a non-member is reported rather than guessed at.
+ * `@scout-two`, matching the same token rule `@all` uses. The member set is
+ * the authority on which ids are real, so a mention of a non-member (or of a
+ * membership that has ended) is reported rather than guessed at.
  */
 export function parseMentions(
   body: string,
   memberIds: readonly string[],
 ): { readonly members: readonly string[]; readonly unknown: readonly string[] } {
   const members = new Set(memberIds);
-  const mentionedMembers = new Set<string>();
-  const unknownMentions = new Set<string>();
-  const tokens = /(?<![\w@])@([a-zA-Z0-9_-]+)(?![\w-])/g;
+  const mentionedMembers: string[] = [];
+  const unknownMentions: string[] = [];
 
-  for (const match of body.matchAll(tokens)) {
-    const agentId = match[1]!;
-    if (members.has(agentId)) mentionedMembers.add(agentId);
-    else unknownMentions.add(agentId);
+  for (const target of parseMentionTargets(body)) {
+    if (members.has(target)) mentionedMembers.push(target);
+    else unknownMentions.push(target);
   }
-  return { members: [...mentionedMembers], unknown: [...unknownMentions] };
+  return { members: mentionedMembers, unknown: unknownMentions };
 }
 
 /** @deprecated Use `parseMentions` when unknown addressed targets matter. */
@@ -65,218 +126,244 @@ export function parseAgentMentions(body: string, memberIds: readonly string[]): 
   return parseMentions(body, memberIds).members;
 }
 
-export interface WakeContractOptions {
-  readonly projects: ProjectRegistry;
-  /**
-   * The low-cost wake model. Optional: with none configured, an unaddressed
-   * project Message fails open exactly as it would when the model itself fails,
-   * because "no model" and "model broken" are the same product situation —
-   * nobody is confidently judging, so nobody may silently drop the Message.
-   */
-  readonly wakeModel?: WakeModel;
-}
-
 /**
- * Apply the M1 wake contract to one Message.
+ * Apply the deterministic wake contract to one Message.
  *
- * Returns the addresses to wake plus the durable non-wake outcomes. The author
- * is never woken by its own Message, and every other member is a candidate.
+ * Returns the addresses to wake plus the durable non-wake outcomes. The plan
+ * never consults a model and never needs to: every branch is decided from the
+ * input, its scope (including its current participants), and the Project's
+ * member facts.
  */
-export async function planWake(
-  message: Message,
-  options: WakeContractOptions,
-): Promise<WakePlan> {
-  const project = options.projects.get(message.projectId);
-  if (!project) {
-    return {
-      messageId: message.id,
-      decisions: [],
-      observations: [
-        {
-          agentId: '*',
-          status: 'failed',
-          reason: 'direct-recipient',
-          detail: `unknown project: ${message.projectId}`,
-        },
-      ],
-    };
-  }
-  const memberIds = project.memberships.map((membership) => membership.agentId);
-
-  if (message.channel === 'direct') {
-    const resolved = resolveDirect(message, memberIds);
-    return {
-      messageId: message.id,
-      decisions: resolved.decisions,
-      observations: resolved.observations,
-    };
-  }
-
-  // The project channel. A broadcast or an exact mention is deterministic and
-  // never reaches the wake model.
-  if (ALL_MENTION.test(message.body)) {
-    return {
-      messageId: message.id,
-      decisions: others(message, memberIds).map((agentId) => ({
-        agentId,
-        reason: 'broadcast' as const,
-      })),
-      observations: [],
-    };
-  }
-
-  const mentioned = parseMentions(message.body, memberIds);
-  if (mentioned.members.length > 0 || mentioned.unknown.length > 0) {
-    const { decisions, observations } = resolveTargets(
-      message,
-      memberIds,
-      [...mentioned.members, ...mentioned.unknown],
-      'agent-mention',
-    );
-    return { messageId: message.id, decisions, observations };
-  }
-
-  // Unaddressed: the single judgement call. It fails open.
-  return planUnaddressed(message, memberIds, options.wakeModel);
-}
-
-/** A direct Message wakes exactly its declared recipients. */
-function resolveDirect(
-  message: Message,
-  memberIds: readonly string[],
-): { decisions: readonly WakeDecision[]; observations: readonly WakeObservation[] } {
-  return resolveTargets(message, memberIds, message.recipients, 'direct-recipient');
-}
-
-/**
- * Wake each requested target, reporting a target that is not a project member.
- *
- * A target that is not a member cannot be woken; reporting it as `failed` keeps
- * the loss observable instead of pretending the Message had no addressee.
- */
-function resolveTargets(
-  message: Message,
-  memberIds: readonly string[],
-  targets: readonly string[],
-  reason: WakeDecision['reason'],
-): { decisions: readonly WakeDecision[]; observations: readonly WakeObservation[] } {
+export function planWake(message: Message, input: WakePlanInput): WakePlan {
+  const scope = input.scope;
+  // Only the Project channel resolves over the whole Project. The direct pair
+  // and the Working group's participants gate every target; if a scoped kind
+  // arrives without a participant set, the gate is the empty set (fail
+  // closed — missing facts never widen a fan-out).
+  const participants = scope.kind === 'project' || scope.kind === 'task-group' ? undefined : (scope.participants ?? []);
+  const resolver = new TargetResolver({
+    projectId: message.projectId,
+    excludedId: message.author.id,
+    members: input.members,
+    ...(participants !== undefined
+      ? {
+          participants,
+          scopeLabel: scope.kind === 'direct' ? 'direct conversation' : scope.kind === 'task-group' ? 'task group' : 'working group',
+        }
+      : {}),
+  });
   const decisions: WakeDecision[] = [];
   const observations: WakeObservation[] = [];
-  const seen = new Set<string>();
-  for (const agentId of targets) {
-    if (agentId === message.author.id || seen.has(agentId)) continue;
-    seen.add(agentId);
-    if (!memberIds.includes(agentId)) {
-      observations.push({
-        agentId,
-        status: 'failed',
-        reason,
-        detail: `addressed agent is not a member of project ${message.projectId}`,
-      });
-      continue;
-    }
-    decisions.push({ agentId, reason });
-  }
-  return { decisions, observations };
-}
 
-/** Every project member except the author. */
-function others(message: Message, memberIds: readonly string[]): readonly string[] {
-  return memberIds.filter((agentId) => agentId !== message.author.id);
+  if (scope.kind === 'direct') {
+    const pair: readonly string[] = participants ?? [];
+    const targets =
+      message.recipients.length > 0
+        ? message.recipients
+        : pair.filter((memberId) => memberId !== message.author.id);
+    for (const target of dedupe(targets)) {
+      resolver.resolve(target, 'direct-recipient', decisions, observations);
+    }
+    return { inputId: message.id, decisions, observations };
+  }
+
+  // Broadcast and explicit mentions are independent addresses on the same
+  // input. Broadcast excludes nonparticipants silently, but an explicitly
+  // named nonparticipant must still receive a durable failure. Neither form
+  // reaches a model.
+  // Task-group routing consumes the channel-stamped mention list. Other scopes
+  // parse the Message body because they do not carry this envelope.
+  const mentionTargets =
+    scope.kind === 'task-group' && message.envelope !== undefined
+      ? message.envelope.to
+      : parseMentionTargets(message.body);
+  const broadcast =
+    scope.kind === 'task-group' && message.envelope !== undefined
+      ? mentionTargets.some((target) => target.toLowerCase() === 'all')
+      : ALL_MENTION.test(message.body);
+  if (broadcast) {
+    for (const agentId of resolver.currentAgentIds) {
+      if (agentId === message.author.id) continue;
+      if (!resolver.isParticipant(agentId)) continue;
+      decisions.push({ agentId, reason: 'broadcast' });
+    }
+  }
+
+  const targets = dedupe(mentionTargets)
+    .filter((target) => !(broadcast && target.toLowerCase() === 'all'));
+  if (broadcast || targets.length > 0) {
+    for (const target of targets) {
+      if (decisions.some((decision) => decision.agentId === target)) continue;
+      resolver.resolve(target, 'agent-mention', decisions, observations);
+    }
+    return { inputId: message.id, decisions, observations };
+  }
+
+  // No deterministic address: durable and visible, never silent and never
+  // guessed at. Under `wake-model-assisted` the input is eligible for the
+  // Project's next routing batch (#97) — no suppressed observation here,
+  // because a batch outcome (selected, suppressed, or failed) will be its
+  // durable, richer evidence. Under `explicit-only` it stays durable with the
+  // suppressed observation and no model is ever asked.
+  if (input.wakePolicy === 'wake-model-assisted') {
+    return { inputId: message.id, decisions, observations, batchEligible: true };
+  }
+  observations.push({
+    agentId: '*',
+    status: 'suppressed',
+    reason: 'unaddressed',
+    detail:
+      'no deterministic address on this input; it remains durable under the Project wake policy',
+  });
+  return { inputId: message.id, decisions, observations };
 }
 
 /**
- * The unaddressed project-channel case, where the wake model decides.
+ * Apply the deterministic wake contract to one Project event.
  *
- * The model is asked only whether the room should engage. Its verdict never
- * narrows the recipient set: a `true` wakes every other member, and only an
- * explicit `false` suppresses — and even then the suppression is recorded as a
- * durable observation so a human can see that a judgement was made.
- *
- * A model that is missing, throws, or answers with a non-boolean fails open to
- * one extra wake per member.
+ * Only an `addressed` event routes; every other disposition persists without
+ * wake decisions (the disposition itself is the durable evidence). The
+ * responsible Agent targets are resolved against current Project membership
+ * exactly like Message targets: deduplicated, producer-excluded, and failing
+ * durably per target without blocking the valid ones.
  */
-async function planUnaddressed(
-  message: Message,
-  memberIds: readonly string[],
-  wakeModel: WakeModel | undefined,
-): Promise<WakePlan> {
-  const candidates = others(message, memberIds);
-  if (wakeModel === undefined) {
-    return failOpen(
-      message,
-      candidates,
-      'no wake model is configured; failing open to one extra wake per member',
-    );
-  }
-
-  let verdict: { readonly engage: boolean; readonly detail?: string } | undefined;
-  try {
-    verdict = parseWakeModelVerdict(await wakeModel.decide({ message, memberIds }));
-  } catch (error) {
-    return failOpen(
-      message,
-      candidates,
-      `wake model failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-
-  if (verdict === undefined) {
-    return failOpen(message, candidates, 'invalid-verdict: wake model must return an object with boolean engage');
-  }
-
-  if (verdict.engage) {
-    return {
-      messageId: message.id,
-      decisions: candidates.map((agentId) => ({ agentId, reason: 'wake-model' })),
-      observations: [],
-    };
-  }
-
-  // A deliberate, recorded refusal. Reachable only for an unaddressed Message;
-  // an addressed Message never consults the model at all.
-  return {
-    messageId: message.id,
-    decisions: [],
-    observations: [
-      {
-        agentId: '*',
-        status: 'suppressed',
-        reason: 'wake-model',
-        detail: verdict.detail ?? 'wake model judged the room need not engage',
-      },
-    ],
-  };
-}
-
-/** Extract the only two wake-model fields the contract is allowed to trust. */
-function parseWakeModelVerdict(
-  value: unknown,
-): { readonly engage: boolean; readonly detail?: string } | undefined {
-  if (typeof value !== 'object' || value === null) return undefined;
-  const candidate = value as { readonly engage?: unknown; readonly detail?: unknown };
-  const engage = candidate.engage;
-  if (typeof engage !== 'boolean') return undefined;
-  const detail = candidate.detail;
-  return typeof detail === 'string' ? { engage, detail } : { engage };
-}
-
-/** Record a model failure and prefer one observable extra wake per member. */
-function failOpen(
-  message: Message,
-  candidates: readonly string[],
-  detail: string,
+export function planEventWake(
+  event: ProjectEvent,
+  input: { members: readonly WakeMember[]; wakePolicy?: WakePolicy },
 ): WakePlan {
-  return {
-    messageId: message.id,
-    decisions: candidates.map((agentId) => ({ agentId, reason: 'wake-model-fail-open' })),
-    observations: [
-      {
-        agentId: '*',
+  const resolver = new TargetResolver({
+    projectId: event.projectId,
+    excludedId: event.producer.id,
+    members: input.members,
+  });
+  const decisions: WakeDecision[] = [];
+  const observations: WakeObservation[] = [];
+  if (event.disposition !== 'addressed') {
+    // A `wake-eligible` event under wake-model-assisted routing joins the
+    // Project's next routing batch (#97); every other disposition persists as
+    // its own durable evidence with no wake and no eligibility. The field is
+    // present only when the input actually joins a window, exactly as on the
+    // Message path, so callers read one meaning: absent means "not collected".
+    if (event.disposition === 'wake-eligible' && input.wakePolicy === 'wake-model-assisted') {
+      return { inputId: event.id, decisions, observations, batchEligible: true };
+    }
+    return { inputId: event.id, decisions, observations };
+  }
+  for (const target of dedupe(event.responsibleAgentIds)) {
+    resolver.resolve(target, 'event-addressed', decisions, observations);
+  }
+  return { inputId: event.id, decisions, observations };
+}
+
+/** Order-preserving dedupe of routing targets. */
+function dedupe(targets: readonly string[]): readonly string[] {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const target of targets) {
+    if (target === '' || seen.has(target)) continue;
+    seen.add(target);
+    unique.push(target);
+  }
+  return unique;
+}
+
+/** The resolver's scope facts: Project membership plus, optionally, one
+ * participant-scoped conversation's current participants. */
+interface TargetResolverOptions {
+  readonly projectId: string;
+  readonly excludedId: string;
+  readonly members: readonly WakeMember[];
+  /**
+   * The Message scope's current participants. Absent means the Project
+   * channel, whose participants are every current Project member.
+   */
+  readonly participants?: readonly string[];
+  /** The scope label a participant failure names (direct conversation / working group). */
+  readonly scopeLabel?: string;
+}
+
+/**
+ * Resolves one input's targets against the scope's current participants and,
+ * beneath that, the Project's current membership.
+ *
+ * The scope gate comes first: a target outside the conversation's current
+ * participants can never be woken with that scope's content, whatever its
+ * Project membership. The membership classification beneath it is exactly
+ * three-way, so no target can vanish silently: a current Agent wakes, a
+ * current Human member is a known non-wakeable target, and anything else —
+ * unknown or ended — is a durable failure.
+ */
+class TargetResolver {
+  readonly currentAgentIds: readonly string[];
+  readonly currentMemberIds: readonly string[];
+  readonly #members: readonly WakeMember[];
+  readonly #projectId: string;
+  readonly #excludedId: string;
+  readonly #participants: readonly string[] | undefined;
+  readonly #scopeLabel: string;
+  readonly #seen = new Set<string>();
+
+  constructor(options: TargetResolverOptions) {
+    this.#projectId = options.projectId;
+    this.#excludedId = options.excludedId;
+    this.#members = options.members;
+    this.#participants = options.participants;
+    this.#scopeLabel = options.scopeLabel ?? 'conversation scope';
+    this.currentAgentIds = options.members
+      .filter((member) => member.memberKind === 'agent' && member.endedAt === undefined)
+      .map((member) => member.memberId);
+    this.currentMemberIds = options.members
+      .filter((member) => member.endedAt === undefined)
+      .map((member) => member.memberId);
+  }
+
+  /** Whether the member belongs to the scope this input was posted to. */
+  isParticipant(memberId: string): boolean {
+    return this.#participants === undefined || this.#participants.includes(memberId);
+  }
+
+  resolve(
+    target: string,
+    reason: WakeDecision['reason'],
+    decisions: WakeDecision[],
+    observations: WakeObservation[],
+  ): void {
+    if (target === this.#excludedId || this.#seen.has(target)) return;
+    this.#seen.add(target);
+    if (!this.isParticipant(target)) {
+      // A target outside this conversation's participants is an invalid
+      // target for the scope: its content never wakes them, and the refusal
+      // is durable beside the valid wakes. The Project channel has no
+      // narrower participant set, so this gate only bites for direct and
+      // Working-group scopes.
+      observations.push({
+        agentId: target,
         status: 'failed',
-        reason: 'wake-model-fail-open',
-        detail,
-      },
-    ],
-  };
+        reason,
+        detail: `addressed target is not a participant of this ${this.#scopeLabel}`,
+      });
+      return;
+    }
+    if (this.currentAgentIds.includes(target)) {
+      decisions.push({ agentId: target, reason });
+      return;
+    }
+    if (this.currentMemberIds.includes(target)) {
+      // A current Human member of the scope is a known non-wakeable target,
+      // not a failure: wake requests admit Agent runs, and Human attention is
+      // not model- or wake-granted authority.
+      return;
+    }
+    const ended = this.#members.some(
+      (member) => member.memberId === target && member.endedAt !== undefined,
+    );
+    observations.push({
+      agentId: target,
+      status: 'failed',
+      reason,
+      detail: ended
+        ? `addressed target's membership in project ${this.#projectId} has ended`
+        : `addressed target is not a member of project ${this.#projectId}`,
+    });
+  }
 }

@@ -1,0 +1,352 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { randomBytes } from 'node:crypto';
+import { build, INSTANCE_ID, PROJECT_ID, scriptedEnvironment } from '../runtime-test-harness.ts';
+import { taskGroupScopeId, taskGroupStatus } from '../conversation/model.ts';
+import { ScriptedEngineAdapter } from '../engine/scripted.ts';
+import type { TaskView } from './views.ts';
+
+const content = { title: 'Operator-controlled Task', goal: 'Verify safe intervention', constraints: ['Preserve work'], validationCriteria: ['Evidence reviewed'] };
+
+test('authenticated Pause and Interrupt route stop an active Task run and preserve its Task lease', async () => {
+  const credential = randomBytes(32).toString('base64url');
+  let engineInterrupts = 0;
+  const adapter = new ScriptedEngineAdapter({
+    turns: [{ events: [], result: { status: 'completed', text: 'The run should be stopped first.' }, settleAfterMs: 30_000 }],
+    onInterrupt: () => { engineInterrupts += 1; },
+  });
+  const { runtime } = await build({
+    configuration: { operatorCredential: credential }, listen: false,
+    environment: scriptedEnvironment({ adapters: new Map([['scripted', adapter]]) }),
+  });
+  const { port } = await runtime.api.listen(Number(process.env.TASK_STOP_PORT ?? 0));
+  const base = new URL('http://localhost');
+  base.port = String(port);
+  try {
+    const signIn = await fetch(new URL('/api/auth/session', base), {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ credential }),
+    });
+    const cookie = (signIn.headers.get('set-cookie') ?? '').split(';', 1)[0]!;
+    const { csrfToken } = await signIn.json() as { csrfToken: string };
+    const post = (path: string, body: unknown) => fetch(new URL(path, base), {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie, 'x-sprout-csrf': csrfToken }, body: JSON.stringify(body),
+    });
+    const proposalResponse = await post(`/api/projects/${PROJECT_ID}/task-proposals`, content);
+    assert.equal(proposalResponse.status, 201);
+    const { proposal } = await proposalResponse.json() as { proposal: { id: string; revision: number } };
+    const begunResponse = await post(`/api/task-proposals/${proposal.id}/begin`, {
+      expectedRevision: proposal.revision, environmentInstanceId: INSTANCE_ID,
+      lead: { memberId: 'operator', memberKind: 'human' }, reason: 'Human approval',
+    });
+    assert.equal(begunResponse.status, 201);
+    const { task } = await begunResponse.json() as { task: TaskView };
+    const leaseId = task.environmentLeaseId!;
+    const { runId } = await runtime.tasks.advanceWithAttribution(task.id, {
+      agentId: 'scout', actor: { memberId: 'operator', memberKind: 'human' },
+      reason: 'Start a bounded active run', contentVersion: 1,
+    });
+    let liveRun = await runtime.orchestrator.load(runId);
+    for (let attempt = 0; attempt < 500 && liveRun?.status !== 'running'; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      liveRun = await runtime.orchestrator.load(runId);
+    }
+    assert.equal(liveRun?.status, 'running', 'the scripted engine has an active session before interruption');
+    const directInterruptResponse = await post(`/api/tasks/${task.id}/interrupt`, { reason: 'Attempt an interrupt without a Pause request' });
+    assert.equal(directInterruptResponse.status, 409, 'the existing Interrupt route is gated until a Pause request exists');
+    assert.equal(engineInterrupts, 0, 'a refused direct Interrupt leaves the live engine session running');
+
+    const pauseResponse = await post(`/api/tasks/${task.id}/pause`, { reason: 'Stop the current run before review' });
+    assert.equal(pauseResponse.status, 200);
+    assert.equal(((await pauseResponse.json()) as { task: TaskView }).task.pauseState, 'requested');
+    const interruptResponse = await post(`/api/tasks/${task.id}/interrupt`, { reason: 'Stop the current run before review' });
+    assert.equal(interruptResponse.status, 200);
+    const stoppedTask = (await interruptResponse.json() as { task: TaskView }).task;
+    const stoppedRun = await runtime.orchestrator.load(runId);
+    assert.equal(engineInterrupts, 1, 'the route reaches the live EngineSession interrupt');
+    assert.equal(stoppedRun?.status, 'stopped');
+    assert.equal(stoppedRun?.result?.status, 'interrupted');
+    assert.equal(stoppedTask.activeRunId, undefined);
+    assert.equal(stoppedTask.status, 'in-progress');
+    assert.equal(stoppedTask.pauseState, 'paused');
+    assert.equal(stoppedTask.environmentLifecycleState, 'idle');
+    assert.equal(runtime.pool.getLease(leaseId)?.state, 'active', 'stopping a run does not release the Task-held lease');
+    assert.deepEqual(stoppedTask.controlHistory?.filter((event) => ['pause-requested', 'interrupt-requested', 'paused'].includes(event.action)).map((event) => event.action), [
+      'pause-requested', 'interrupt-requested', 'paused',
+    ]);
+  } finally { await runtime.close(); }
+});
+
+test('authenticated Task Resume directly restores a Force Released Task through the Human control route', async () => {
+  const credential = randomBytes(32).toString('base64url');
+  const { runtime } = await build({
+    configuration: { operatorCredential: credential }, listen: false,
+    environment: scriptedEnvironment({ adapters: new Map([['scripted', new ScriptedEngineAdapter({ turns: [] })]]) }),
+  });
+  const { port } = await runtime.api.listen(Number(process.env.TASK_STOPPED_RESUME_PORT ?? 0));
+  const base = new URL('http://localhost');
+  base.port = String(port);
+  try {
+    const signIn = await fetch(new URL('/api/auth/session', base), {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ credential }),
+    });
+    const cookie = (signIn.headers.get('set-cookie') ?? '').split(';', 1)[0]!;
+    const { csrfToken } = await signIn.json() as { csrfToken: string };
+    const post = (path: string, body: unknown, session = true, csrf = true) => fetch(new URL(path, base), {
+      method: 'POST', headers: { 'content-type': 'application/json', ...(session ? { cookie } : {}), ...(csrf ? { 'x-sprout-csrf': csrfToken } : {}) },
+      body: JSON.stringify(body),
+    });
+    const proposalResponse = await post(`/api/projects/${PROJECT_ID}/task-proposals`, content);
+    assert.equal(proposalResponse.status, 201);
+    const { proposal } = await proposalResponse.json() as { proposal: { id: string; revision: number } };
+    const begunResponse = await post(`/api/task-proposals/${proposal.id}/begin`, {
+      expectedRevision: proposal.revision, environmentInstanceId: INSTANCE_ID,
+      lead: { memberId: 'operator', memberKind: 'human' }, reason: 'Human approval',
+    });
+    assert.equal(begunResponse.status, 201);
+    const { task } = await begunResponse.json() as { task: TaskView };
+    const genericSetStopped = await fetch(new URL(`/api/tasks/${task.id}`, base), {
+      method: 'PATCH', headers: { 'content-type': 'application/json', cookie, 'x-sprout-csrf': csrfToken }, body: JSON.stringify({ status: 'stopped' }),
+    });
+    assert.equal(genericSetStopped.status, 409, 'generic Task updates cannot create the Force Release outcome');
+    assert.equal((await runtime.tasks.get(task.id))?.status, 'in-progress');
+    const before = (await runtime.tasks.get(task.id))!;
+    const oldLeaseId = before.environmentLeaseId!;
+    const groupId = taskGroupScopeId(task.id);
+    const groupBefore = await runtime.conversationScopes.getScope(groupId);
+    assert.ok(groupBefore?.kind === 'task-group');
+    await runtime.stores.tasks.save({
+      ...before, status: 'stopped', completedAt: 500, environmentLifecycleState: 'discarded',
+      blockerReason: 'Task stopped by the Human operator using Force Release; unresolved facts recorded.',
+      forcedRelease: { actor: 'operator', reason: 'Emergency release', unresolvedFacts: ['engine stop not proved'], at: 500 },
+    });
+    assert.ok(runtime.pool.releaseTaskLease(oldLeaseId));
+    await runtime.conversationScopes.syncTaskGroup({
+      taskId: task.id, projectId: before.projectId, title: before.title, goal: before.goal,
+      constraints: before.constraints,
+      lead: { memberId: before.admission!.lead.memberId, kind: before.admission!.lead.memberKind },
+      contentVersion: before.admission!.contentVersion, status: 'stopped',
+    });
+    const stoppedGroup = await runtime.conversationScopes.getScope(groupId);
+    assert.ok(stoppedGroup?.kind === 'task-group');
+    assert.equal(stoppedGroup.id, groupBefore.id);
+    assert.equal(taskGroupStatus(stoppedGroup), 'frozen');
+    const stoppedBeforeResume = (await runtime.tasks.get(task.id))!;
+    const historyBeforeResume = stoppedBeforeResume.controlHistory;
+    const genericClearStopped = await fetch(new URL(`/api/tasks/${task.id}`, base), {
+      method: 'PATCH', headers: { 'content-type': 'application/json', cookie, 'x-sprout-csrf': csrfToken }, body: JSON.stringify({ status: 'in-progress' }),
+    });
+    assert.equal(genericClearStopped.status, 409, 'generic Task updates cannot clear Force Released stopped intent');
+    assert.equal((await runtime.tasks.get(task.id))?.status, 'stopped');
+
+    const path = `/api/tasks/${task.id}/resume`;
+    assert.equal((await post(path, { reason: 'Continue the original work.' }, false)).status, 401);
+    assert.equal((await post(path, { reason: 'Continue the original work.' }, true, false)).status, 403);
+    assert.equal((await post(path, { reason: 'Continue the original work.', actor: { memberId: 'scout', memberKind: 'agent' } })).status, 400);
+    const unchangedAfterRefusals = (await runtime.tasks.get(task.id))!;
+    assert.equal(unchangedAfterRefusals.status, 'stopped');
+    assert.equal(unchangedAfterRefusals.environmentLeaseId, oldLeaseId);
+    assert.deepEqual(unchangedAfterRefusals.controlHistory, historyBeforeResume);
+    assert.equal(unchangedAfterRefusals.controlHistory?.some((event) => event.action === 'resumed' || event.action === 'reopened') ?? false, false);
+
+    const resumedResponse = await post(path, { reason: 'Continue the original work.' });
+    assert.equal(resumedResponse.status, 200);
+    const resumed = (await resumedResponse.json() as { task: TaskView }).task;
+    assert.equal(resumed.status, 'in-progress');
+    assert.equal(resumed.environmentLifecycleState, 'idle');
+    assert.equal(resumed.environmentInstanceId, before.environmentInstanceId);
+    assert.notEqual(resumed.environmentLeaseId, oldLeaseId);
+    const resumedGroup = await runtime.conversationScopes.getScope(groupId);
+    assert.ok(resumedGroup?.kind === 'task-group');
+    assert.equal(resumedGroup.id, groupBefore.id, 'Resume thaws the original Task group identity');
+    assert.equal(taskGroupStatus(resumedGroup), 'active');
+    assert.equal(resumedGroup.frozenAt, undefined);
+    assert.equal(resumedGroup.terminalTaskStatus, undefined);
+    assert.equal(resumed.completedAt, undefined);
+    assert.equal(resumed.forcedRelease?.unresolvedFacts[0], 'engine stop not proved');
+    assert.equal(resumed.controlHistory?.at(-1)?.action, 'resumed');
+    assert.deepEqual(resumed.controlHistory?.at(-1)?.actor, { memberId: 'operator', memberKind: 'human' });
+    assert.equal(resumed.controlHistory?.some((event) => event.action === 'reopened'), false);
+  } finally { await runtime.close(); }
+});
+
+test('authenticated Human may submit a marked substitute claim for an Agent-led Task and accept it to completion', async () => {
+  const credential = randomBytes(32).toString('base64url');
+  const { runtime } = await build({
+    configuration: { operatorCredential: credential }, listen: false,
+    environment: scriptedEnvironment({ adapters: new Map([['scripted', new ScriptedEngineAdapter({ turns: [
+      { events: [], result: { status: 'completed', text: 'The bounded Agent work is complete.' } },
+    ] })]]) }),
+  });
+  const { port } = await runtime.api.listen(Number(process.env.TASK_SUBSTITUTION_PORT ?? 0));
+  const base = new URL('http://localhost');
+  base.port = String(port);
+  try {
+    const signIn = await fetch(new URL('/api/auth/session', base), {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ credential }),
+    });
+    const cookie = (signIn.headers.get('set-cookie') ?? '').split(';', 1)[0]!;
+    const { csrfToken } = await signIn.json() as { csrfToken: string };
+    const post = (path: string, body: unknown) => fetch(new URL(path, base), {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie, 'x-sprout-csrf': csrfToken }, body: JSON.stringify(body),
+    });
+    const proposalResponse = await post(`/api/projects/${PROJECT_ID}/task-proposals`, content);
+    assert.equal(proposalResponse.status, 201);
+    const { proposal } = await proposalResponse.json() as { proposal: { id: string; revision: number } };
+    const begunResponse = await post(`/api/task-proposals/${proposal.id}/begin`, {
+      expectedRevision: proposal.revision, environmentInstanceId: INSTANCE_ID,
+      lead: { memberId: 'scout', memberKind: 'agent' }, reason: 'Human approval of Agent-led work',
+    });
+    assert.equal(begunResponse.status, 201);
+    const { task } = await begunResponse.json() as { task: TaskView };
+    const leaseId = (await runtime.tasks.get(task.id))!.environmentLeaseId!;
+    let current = await runtime.tasks.get(task.id);
+    for (let attempt = 0; attempt < 500 && current?.environmentLifecycleState !== 'idle'; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      current = await runtime.tasks.get(task.id);
+    }
+    assert.equal(current?.environmentLifecycleState, 'idle', 'the initial Agent-lead run settles before the claim');
+    assert.equal(current?.activeRunId, undefined);
+
+    const claimBody = {
+      outcomeSummary: 'The approved work is complete', validationEvidence: ['Completion criteria passed'],
+      durableChanges: ['The deliverable is present'], limitations: [], recommendedDisposition: 'complete',
+    };
+    await assert.rejects(
+      runtime.taskControls.submitCompletionClaim(task.id, { memberId: 'scribe', memberKind: 'agent' }, claimBody),
+      /Task lead authority is required/,
+    );
+    const claimResponse = await post(`/api/tasks/${task.id}/completion-claims`, claimBody);
+    assert.equal(claimResponse.status, 200);
+    const pending = (await claimResponse.json() as { task: TaskView }).task;
+    const claim = pending.completionClaims?.find((item) => item.id === pending.pendingCompletionClaimId);
+    assert.equal(pending.environmentLifecycleState, 'awaiting-validation');
+    assert.deepEqual(claim?.actor, { memberId: 'operator', memberKind: 'human' });
+    assert.deepEqual(claim?.substitutedFor, { memberId: 'scout', memberKind: 'agent' });
+    assert.deepEqual(pending.controlHistory?.at(-1), {
+      action: 'completion-claimed', actor: { memberId: 'operator', memberKind: 'human' },
+      at: claim?.at, claimId: claim?.id, substitutedFor: { memberId: 'scout', memberKind: 'agent' },
+    });
+    assert.equal(runtime.pool.getLease(leaseId)?.state, 'active');
+
+    const accepted = await post(`/api/tasks/${task.id}/validation`, {
+      claimId: pending.pendingCompletionClaimId, decision: 'accept', reason: 'Human verified the claim evidence',
+    });
+    assert.equal(accepted.status, 200);
+    const completed = (await accepted.json() as { task: TaskView }).task;
+    assert.equal(completed.status, 'done');
+    assert.equal(completed.endDisposition, 'completed');
+    assert.equal(completed.environmentLifecycleState, 'ended');
+    assert.equal(runtime.pool.getLease(leaseId)?.state, 'released');
+  } finally { await runtime.close(); }
+});
+
+test('authenticated Task controls preserve authority, validation recovery, privacy, and safe terminal ordering over HTTP', async () => {
+  const credential = randomBytes(32).toString('base64url');
+  let cleanupUnavailable = true;
+  let cleaned = false;
+  const { runtime } = await build({
+    configuration: { operatorCredential: credential }, listen: false,
+    environment: scriptedEnvironment({ adapters: new Map([['scripted', new ScriptedEngineAdapter({ turns: [] })]]), contexts: {
+      async prepare() { return { bootstrapInstructions: '' }; },
+      async recycle() {
+        if (cleanupUnavailable) throw new Error('sensitive cleanup diagnostic must stay private');
+        cleaned = true;
+      },
+    } }),
+  });
+  const { port } = await runtime.api.listen(Number(process.env.TASK_REOPEN_PORT ?? 0));
+  const base = new URL('http://localhost');
+  base.port = String(port);
+  try {
+    const signIn = await fetch(new URL('/api/auth/session', base), {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ credential }),
+    });
+    const cookie = (signIn.headers.get('set-cookie') ?? '').split(';', 1)[0]!;
+    const { csrfToken } = await signIn.json() as { csrfToken: string };
+    const post = (path: string, body: unknown, session = true, csrf = true) => fetch(new URL(path, base), {
+      method: 'POST', headers: { 'content-type': 'application/json', ...(session ? { cookie } : {}), ...(csrf ? { 'x-sprout-csrf': csrfToken } : {}) },
+      body: JSON.stringify(body),
+    });
+    const proposalResponse = await post(`/api/projects/${PROJECT_ID}/task-proposals`, content);
+    assert.equal(proposalResponse.status, 201);
+    const { proposal } = await proposalResponse.json() as { proposal: { id: string; revision: number } };
+    const begunResponse = await post(`/api/task-proposals/${proposal.id}/begin`, {
+      expectedRevision: proposal.revision, environmentInstanceId: INSTANCE_ID,
+      lead: { memberId: 'operator', memberKind: 'human' }, reason: 'Human approval',
+    });
+    assert.equal(begunResponse.status, 201);
+    const { task } = await begunResponse.json() as { task: TaskView };
+    const path = `/api/tasks/${task.id}`;
+    const leaseId = (await runtime.tasks.get(task.id))!.environmentLeaseId!;
+    for (const action of ['pause', 'interrupt', 'resume', 'cancel-pause', 'subordinate-stop', 'blockers', 'clear-blocker', 'completion-claims', 'validation', 'end', 'discard', 'recovery', 'content', 'reopen']) {
+      assert.equal((await post(`${path}/${action}`, {}, false)).status, 401, action);
+      assert.equal((await post(`${path}/${action}`, {}, true, false)).status, 403, action);
+      assert.equal((await post(`${path}/${action}`, { actor: { memberId: 'scout', memberKind: 'agent' } })).status, 400, action);
+    }
+    assert.equal((await post(`${path}/end`, { reason: 'premature completion' })).status, 409);
+    const pauseResponse = await post(`${path}/pause`, { reason: 'Human inspection' });
+    assert.equal(pauseResponse.status, 200);
+    assert.equal((await pauseResponse.json() as { task: TaskView }).task.pauseState, 'paused');
+    assert.equal(runtime.pool.getLease(leaseId)?.state, 'active');
+    assert.equal((await post(`${path}/resume`, { reason: 'deliberate resumption' })).status, 200);
+    assert.equal((await post(`${path}/content`, {
+      expectedContentVersion: 1, content: { ...content, goal: 'Updated scope', lead: { memberId: 'operator', memberKind: 'human' } }, reason: 'Clarify scope',
+    })).status, 200);
+    const claimBody = { outcomeSummary: 'Delivered the verified result', validationEvidence: ['Contract checked'], durableChanges: [], limitations: [], recommendedDisposition: 'complete' };
+    assert.equal((await post(`${path}/completion-claims`, { ...claimBody, privateReasoning: 'not a factual field' })).status, 400);
+    const claimResponse = await post(`${path}/completion-claims`, claimBody);
+    assert.equal(claimResponse.status, 200);
+    const claimed = (await claimResponse.json() as { task: TaskView }).task;
+    assert.equal(claimed.completionClaims?.[0]?.contentVersion, 2);
+    assert.equal(runtime.pool.getLease(leaseId)?.state, 'active');
+    const accepted = await post(`${path}/validation`, { claimId: claimed.pendingCompletionClaimId, decision: 'accept', reason: 'Human verified evidence' });
+    assert.equal(accepted.status, 409);
+    assert.doesNotMatch(await accepted.text(), /sensitive cleanup diagnostic/);
+    const recovering = (await runtime.tasks.get(task.id))!;
+    assert.equal(recovering.environmentLifecycleState, 'recovery');
+    assert.equal(recovering.status, 'in-progress');
+    assert.equal(recovering.completedAt, undefined);
+    assert.equal(cleaned, false);
+    assert.equal(runtime.pool.getLease(leaseId)?.state, 'recovering');
+    cleanupUnavailable = false;
+    const recovered = await post(`${path}/recovery`, { action: 'discard', reason: 'Retry accepted end cleanup' });
+    assert.equal(recovered.status, 200);
+    const completed = (await recovered.json() as { task: TaskView }).task;
+    assert.equal(completed.status, 'done');
+    assert.equal(completed.endDisposition, 'completed');
+    assert.equal(cleaned, true);
+    assert.equal(runtime.pool.getLease(leaseId)?.state, 'released');
+
+    const terminalBeforeReopen = (await runtime.tasks.get(task.id))!;
+    const reopenReason = 'Continue the accepted Task on its original Environment.';
+    const forgedAgentAttempt = await post(`${path}/reopen`, {
+      reason: 'Agent attempts to claim Human reopen authority.',
+      actor: { memberId: 'scout', memberKind: 'agent' },
+    });
+    assert.equal(forgedAgentAttempt.status, 400, 'the route rejects a client-supplied Agent actor');
+    assert.match((await forgedAgentAttempt.json() as { error: string }).error, /actor fields are not accepted/);
+    assert.equal((await post(`${path}/reopen`, { reason: reopenReason }, false)).status, 401,
+      'an unauthenticated caller cannot reopen an ended Task');
+    assert.equal((await post(`${path}/reopen`, { reason: reopenReason }, true, false)).status, 403,
+      'an authenticated request without CSRF proof cannot reopen an ended Task');
+    const unchangedAfterRefusals = (await runtime.tasks.get(task.id))!;
+    assert.equal(unchangedAfterRefusals.status, 'done');
+    assert.equal(unchangedAfterRefusals.environmentLifecycleState, 'ended');
+    assert.deepEqual(unchangedAfterRefusals.controlHistory, terminalBeforeReopen.controlHistory);
+    assert.equal(runtime.pool.getLease(leaseId)?.state, 'released');
+
+    const reopenResponse = await post(`${path}/reopen`, { reason: reopenReason });
+    assert.equal(reopenResponse.status, 200);
+    const reopenedTask = (await reopenResponse.json() as { task: TaskView }).task;
+    assert.equal(reopenedTask.status, 'in-progress');
+    assert.equal(reopenedTask.environmentLifecycleState, 'idle');
+    assert.equal(reopenedTask.environmentInstanceId, task.environmentInstanceId);
+    assert.notEqual(reopenedTask.environmentLeaseId, leaseId);
+    assert.equal(runtime.pool.getLease(leaseId)?.state, 'released');
+    assert.equal(runtime.pool.getLease(reopenedTask.environmentLeaseId!)?.state, 'active');
+    const reopenEvent = reopenedTask.controlHistory?.at(-1);
+    assert.ok(reopenEvent?.action === 'reopened');
+    assert.deepEqual(reopenEvent.actor, { memberId: 'operator', memberKind: 'human' });
+    assert.equal(reopenEvent.reason, reopenReason);
+  } finally { await runtime.close(); }
+});

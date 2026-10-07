@@ -7,14 +7,23 @@ before admitting an Agent run, project only a completed run's final assistant
 text as its reply, and reconcile pending wakes and missing projections after a
 restart. It also kept private run events and raw reasoning out of conversation.
 
+Ticket #214's final ruling narrows deterministic direct Messages to Human-authored
+inputs. Agent-authored direct sends are unsupported; the API refuses them with
+HTTP 403 before persistence, while completed Agent replies to Human direct
+Messages remain projected into the same conversation. Explicit Agent
+collaboration belongs to the temporary Task-group scope in ADR-0014 and uses the
+bounded wake orchestration in ADR-0015. Project-channel and Working-group Agent
+posts retain their separate routing contracts.
+
 M1 deliberately used a narrower wake contract: each unaddressed Project-channel
 Message was evaluated immediately, the wake model could only engage every other
 member or nobody, and a missing or failed model woke every other member. Those
 choices proved the path, but they would make a larger Project noisy and make a
 low-cost routing failure create uncontrolled fan-out. The product owner settled
 the M2 semantics in #51. This decision deepens the proven path rather than
-replacing its persistence-before-wake, idempotency, reply-projection, or privacy
-boundaries.
+replacing its persistence-before-wake, idempotency, or reply-projection
+boundaries. The wake-model privacy guarantee below records the later owner
+amendment to value-level detection in routing text.
 
 ## Project wake policies
 
@@ -37,18 +46,56 @@ history.
 The following inputs wake their Agent recipients immediately and never consult
 the wake policy or model:
 
-- a Project-scoped direct Message naming one or more current Agent members;
+- a Human-authored Project-scoped direct Message naming one or more current Agent members;
 - exact, whole-token Agent mentions in a Project-channel Message;
 - an exact `@all` broadcast, which wakes every current Agent member except the
   author; and
 - a Project event with an explicitly responsible Agent.
 
-Human- and Agent-authored Messages use the same deterministic rules. A
-`(Message, Agent)` target is deduplicated when more than one addressing form
-names it. The author is not woken by its own Message. A target that is unknown
-or no longer belongs to the Project produces a durable per-target routing
-failure while other valid targets continue; it never falls through to model
-judgement. Human notification semantics are outside this decision.
+Human-authored direct Messages and Human- or Agent-authored Project-channel and
+Working-group Messages use the same deterministic rules. Agent-authored direct
+sends are unsupported; explicit Agent collaboration uses Task-group posts
+(ADR-0015). Automatically projected Agent replies remain non-routing, as
+specified below. A `(Message, Agent)` target is deduplicated when more than one
+addressing form names it. The author is not woken by its own Message. A target
+that is unknown or no longer belongs to the Project produces a durable
+per-target routing failure while other valid targets continue; it never falls
+through to model judgement. Human notification semantics are outside this
+decision.
+
+A Working group channel follows these same rules resolved against the group's
+**current participants** (ADR-0008): its `@all` broadcast wakes every current
+participant Agent except the author, and its mentions wake participant Agents.
+A current Project member who is not a current participant of that group is an
+invalid target for that scope: naming it produces a durable per-target routing
+failure beside the valid participant wakes, never a wake, so group-only
+content never reaches an Agent outside the group. The Project channel needs no
+narrower gate because its participants are every current Project member.
+
+## Task-group extension
+
+Task groups (ADR-0014) use the hybrid orchestration decision in ADR-0015 rather
+than inheriting Project-channel suppression. Mentions and broadcasts still
+bypass the model, `question` and `escalation` route to the lead, and assignments
+and declared responsibility keys precede bounded ambiguity inference and lead
+fallback. Invalid explicit targets remain durable failures; if none can wake,
+the Agent lead is the last resort. Human leads never force inferred Agent work.
+
+A Message's sender is excluded from every Task-group wake, including model
+selection, lead fallback, and the single idle lead re-wake. Explicit causal
+Agent chains are limited to two Messages: A→B→A may admit B and then A, but a
+further Agent hop emits Human Attention. Automatically projected replies remain
+non-routing, including those produced by a fallback or re-wake. Orchestration
+lifecycle facts cannot recursively enter conversation routing.
+
+A fixed five-minute idle deadline permits one lead re-wake; another five
+minutes without Agent work or a reply emits one durable Human Attention event.
+Human-led groups and sender-excluded or unavailable leads use Attention without
+forcing a wake. Sender exclusion and bounded chains take precedence over the
+wake-time guarantee; these exceptions produce visible escalation rather than
+silent suppression. Stable stage identities bound calls and retries across
+restart. This is a Task-group exception to the Project batch's fail-closed
+model behavior, preserving persistence-before-admission and Human authority.
 
 ## Eligible inputs and routing dispositions
 
@@ -141,12 +188,71 @@ Candidate inputs have priority, followed by their direct thread ancestors and
 then recent shared channel context within the remaining bound. Automatic retry
 uses exactly the same frozen snapshot.
 
-The wake model never receives direct Messages or their replies, Agent-private
-memory, raw reasoning, engine-native sessions, full run transcripts, tool
-output, credentials, host identity, private network facts, or uncurated internal
-events. Temporary Environment availability is also excluded: transient capacity
-must not cause the model to silently substitute a different Agent for the one
-whose Project responsibility best matches the input.
+### Wake-model privacy guarantee (amended 2026-10-07)
+
+The routing builder admits only the Project-shared sources listed above. Direct
+Messages and their replies, Agent-private memory, raw reasoning, engine-native
+sessions, full run transcripts, tool output, structured credential records,
+host and private-network records, and uncurated internal events have no
+independent source in this context. Temporary Environment availability is also
+excluded: transient capacity must not cause the model to silently substitute a
+different Agent for the one whose Project responsibility best matches the input.
+These are source exclusions; copying a sensitive value into an admitted prose
+field does not make it structurally excluded.
+
+At snapshot build, `src/collaboration/routing-context.ts` applies
+`redactSensitiveText` from `src/environment/privacy.ts` to batch input content,
+Project goal and rules, candidate responsibilities and collaboration
+instructions, and ancestor and recent channel Message bodies before rendering
+and truncation. Candidate responsibility and instruction text in the frozen
+manifest passes through the same redactor. Structured credential fields are
+excluded by source selection, not scanned as credential objects. Routing
+identifiers and other metadata are copied separately; the text scanner is not a
+whole-snapshot value validator.
+
+The redactor replaces recognized patterns with category markers: credential
+assignments using supported labels and separators, Authorization and Bearer
+forms, known token formats, PEM blocks, URLs, absolute path forms, and recognized
+host, identity, and network-address forms. This protects more than structured
+fields alone, but remains pattern-based, best-effort value detection. It does
+not prove arbitrary free text is secret-free. **Unlabelled opaque values
+embedded in free text may reach the wake model**, including values that are
+credentials or encode host identity or private-network facts but do not match
+the scanner. The synthetic base64 probe in the
+[#97 F7 review](https://github.com/tinysnake/sprout/issues/97#issuecomment-5894785549)
+and [diagnosis](https://github.com/tinysnake/sprout/issues/97#issuecomment-5894922098)
+survived input excerpts, ancestor/recent context, goal/rules, candidate
+narratives and candidate manifest fields; the persisted snapshot equalled the
+model request and retained the probe. The
+[#77 scope review](https://github.com/tinysnake/sprout/issues/77#issuecomment-6032225837)
+confirmed opaque text still passed through the redactor. These probes used
+synthetic values and establish a possible egress path, not an observed real
+credential disclosure.
+
+Sprout-owned secrets must never enter shared prose (never-in-band hygiene).
+This is a producer obligation; the scanner cannot enforce it for arbitrary
+opaque values. The accepted relaxation concerns only value-level detection in
+wake-model routing text. Direct-message and private-source exclusions,
+authentication, Human authority, session-key boundaries, durability, lease
+ownership, recovery, idempotency, and truthful failure retain their contracts.
+
+**Decision history and effective date:** The
+[#77 owner revision](https://github.com/tinysnake/sprout/issues/77#issuecomment-5902053259)
+and [#97 acceptance amendment](https://github.com/tinysnake/sprout/issues/97#issuecomment-5902056968)
+accepted this limited guarantee on 2026-09-29, after #178 research, with a
+reconciliation trigger before production wake-model configuration or full M2
+acceptance, whichever came first. The
+[#179 owner decision](https://github.com/tinysnake/sprout/issues/179#issuecomment-5945414141)
+superseded the shape-independent sanitization outcome on 2026-10-02 but left
+AC4's ADR/privacy reconciliation outstanding. Full M2 acceptance reached that
+trigger, as recorded by the #77 scope review's blocking F2. On **2026-10-07**, the
+owner chose Option A, verbatim **“我选A”**, in
+[#220 comment 6033732268](https://github.com/tinysnake/sprout/issues/220#issuecomment-6033732268).
+Effective that date, this amendment replaces the former absolute promise that
+credentials, host identity, and private-network facts never reach the wake
+model with the source exclusions and limited redaction guarantee above. It
+satisfies #179 AC4's reconciliation trigger by recording the accepted risk;
+shape-independent sanitization is not implemented or required by this decision.
 
 ## Failure, suppression, admission, and retry
 

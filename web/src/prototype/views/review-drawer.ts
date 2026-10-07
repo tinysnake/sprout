@@ -126,7 +126,7 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
           </label>
           <label class="review-check-item">
             <input type="checkbox" checked disabled />
-            <span><strong>Human-Only Emergency Force Release:</strong> Available strictly when lease is in recovery; requires explicit risk acknowledgement checkbox, operator reason, and typed confirmation (<code>FORCE RELEASE</code>); marks Task cancelled with permanent forced release disposition and frees Environment without deleting Project workspace.</span>
+            <span><strong>Human-Only Emergency Force Release:</strong> Available strictly when lease is in recovery; requires explicit risk acknowledgement checkbox, operator reason, and typed confirmation (<code>FORCE RELEASE</code>); stops the Task while preserving intent, records permanent forced-release facts, and frees the Environment without deleting the Project workspace.</span>
           </label>
           <label class="review-check-item">
             <input type="checkbox" checked disabled />
@@ -263,7 +263,7 @@ export function renderReviewDrawer(state: PrototypeState): HTMLElement | null {
             <strong>Safe Task End vs Project Workspace Preservation:</strong> Task end recycles only Sprout scratch context directories via the host worker; persistent Project workspaces, git repos, and build artifacts are strictly preserved.
           </li>
           <li>
-            <strong>Human-Only Emergency Force Release (ADR-0009):</strong> Emergency escape hatch available only in recovery. Requires explicit risk acknowledgement, operator reason, and typed confirmation (<code>FORCE RELEASE</code>). Permanently cancels Task with forced release disposition and frees Environment without deleting Project workspace.
+            <strong>Human-Only Emergency Force Release (ADR-0009):</strong> Emergency escape hatch available only in recovery. Requires explicit risk acknowledgement, operator reason, and typed confirmation (<code>FORCE RELEASE</code>). Stops the Task while preserving intent, records permanent forced-release facts, and frees Environment without deleting Project workspace.
           </li>
           <li>
             <strong>Host Credential & Path Isolation:</strong> Engine API keys, private keys, and host filesystem absolute paths remain on the host; Web operates with neutral relative paths and withheld worker identity.

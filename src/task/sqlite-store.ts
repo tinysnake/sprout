@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 
+import { serializeTaskControlDocument } from './model.ts';
 import type {
   Task,
   TaskRunLink,
@@ -79,6 +80,8 @@ export class SqliteTaskStore implements TaskStore {
         environment_lifecycle_state TEXT,
         recovery_state TEXT,
         active_run_id TEXT,
+        admission_document TEXT,
+        control_document TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         completed_at INTEGER
@@ -93,6 +96,10 @@ export class SqliteTaskStore implements TaskStore {
         summary_text TEXT,
         summary_agent_id TEXT,
         summary_recorded_at INTEGER,
+        advance_actor TEXT,
+        advance_reason TEXT,
+        content_version INTEGER,
+        requested_at INTEGER,
         PRIMARY KEY (task_id, run_id)
       );
       CREATE INDEX IF NOT EXISTS task_run_links_by_task
@@ -103,6 +110,12 @@ export class SqliteTaskStore implements TaskStore {
     this.#addColumnIfMissing('tasks', 'environment_lifecycle_state', 'TEXT');
     this.#addColumnIfMissing('tasks', 'recovery_state', 'TEXT');
     this.#addColumnIfMissing('tasks', 'active_run_id', 'TEXT');
+    this.#addColumnIfMissing('tasks', 'admission_document', 'TEXT');
+    this.#addColumnIfMissing('tasks', 'control_document', 'TEXT');
+    this.#addColumnIfMissing('task_run_links', 'advance_actor', 'TEXT');
+    this.#addColumnIfMissing('task_run_links', 'advance_reason', 'TEXT');
+    this.#addColumnIfMissing('task_run_links', 'content_version', 'INTEGER');
+    this.#addColumnIfMissing('task_run_links', 'requested_at', 'INTEGER');
   }
 
   #addColumnIfMissing(table: string, column: string, type: string): void {
@@ -115,8 +128,8 @@ export class SqliteTaskStore implements TaskStore {
       .prepare(
         `INSERT OR IGNORE INTO tasks
            (id, project_id, title, goal, constraints, status, assigned_agent_id,
-            environment_preference, blocker_reason, environment_instance_id, environment_lease_id, environment_lifecycle_state, recovery_state, active_run_id, created_at, updated_at, completed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            environment_preference, blocker_reason, environment_instance_id, environment_lease_id, environment_lifecycle_state, recovery_state, active_run_id, admission_document, control_document, created_at, updated_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         task.id,
@@ -133,6 +146,8 @@ export class SqliteTaskStore implements TaskStore {
         task.environmentLifecycleState ?? null,
         task.recoveryState ?? null,
         task.activeRunId ?? null,
+        task.admission !== undefined ? JSON.stringify(task.admission) : null,
+        taskControlDocument(task),
         task.createdAt,
         task.updatedAt,
         task.completedAt ?? null,
@@ -174,16 +189,37 @@ export class SqliteTaskStore implements TaskStore {
   async saveIfUnchanged(task: Task, expected: {
     readonly environmentLifecycleState: Task['environmentLifecycleState'];
     readonly activeRunId: Task['activeRunId'];
+    readonly updatedAt?: number;
+    readonly controlDocument: string | null;
   }): Promise<boolean> {
     const changed = this.#db.prepare(
       `UPDATE tasks
           SET title = ?, goal = ?, constraints = ?, status = ?, assigned_agent_id = ?,
-              environment_preference = ?, blocker_reason = ?, environment_instance_id = ?, environment_lease_id = ?, environment_lifecycle_state = ?, recovery_state = ?, active_run_id = ?, updated_at = ?, completed_at = ?
+              environment_preference = ?, blocker_reason = ?, environment_instance_id = ?, environment_lease_id = ?, environment_lifecycle_state = ?, recovery_state = ?, active_run_id = ?, admission_document = ?, control_document = ?, updated_at = ?, completed_at = ?
         WHERE id = ?
           AND environment_lifecycle_state IS ?
-          AND active_run_id IS ?`,
-    ).run(...this.#taskValues(task), task.id, expected.environmentLifecycleState ?? null, expected.activeRunId ?? null);
+          AND active_run_id IS ?
+          AND (? IS NULL OR updated_at = ?)
+          AND control_document IS ?`,
+    ).run(...this.#taskValues(task), task.id, expected.environmentLifecycleState ?? null, expected.activeRunId ?? null,
+      expected.updatedAt ?? null, expected.updatedAt ?? null, expected.controlDocument);
     return changed.changes === 1;
+  }
+
+  async recordPauseRetryRequired(taskId: string, actor: import('./model.ts').TaskActor, at: number, reason: string): Promise<Task | undefined> {
+    return this.#transactions.immediate(() => {
+      const row = this.#db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as TaskRow | undefined;
+      if (!row) return undefined;
+      const current = toTask(row);
+      if (current.pauseState !== undefined) return current;
+      const retryRequired: Task = {
+        ...current,
+        pauseState: 'retry-required',
+        controlHistory: [...(current.controlHistory ?? []), { action: 'pause-retry-required', actor, at, reason }],
+      };
+      this.#db.prepare('UPDATE tasks SET control_document = ? WHERE id = ?').run(taskControlDocument(retryRequired), taskId);
+      return retryRequired;
+    });
   }
 
   async saveBeginningWithLease(task: Task, lease: EnvironmentLease): Promise<void> {
@@ -194,7 +230,47 @@ export class SqliteTaskStore implements TaskStore {
     });
   }
 
-  async saveTerminalWithLease(task: Task, leaseId: string): Promise<void> {
+  async createBeginningWithLease(task: Task, lease: EnvironmentLease, consumeProposal: () => void): Promise<void> {
+    const leases = this.#requireLeases();
+    this.#transactions.immediate(() => {
+      leases.insertTaskHeldLease(lease);
+      this.#insertTask(task);
+      consumeProposal();
+    });
+  }
+
+  async admitRun(task: Task, input: {
+    readonly runId: string;
+    readonly agentId: string;
+    readonly actor: import('./model.ts').TaskActor;
+    readonly reason?: string;
+    readonly contentVersion: number;
+    readonly now: number;
+  }, expected: {
+    readonly environmentLifecycleState: Task['environmentLifecycleState'];
+    readonly activeRunId: Task['activeRunId'];
+    readonly updatedAt?: number;
+    readonly controlDocument: string | null;
+  }): Promise<boolean> {
+    return this.#transactions.immediate(() => {
+      const changed = this.#db.prepare(
+        `UPDATE tasks SET title = ?, goal = ?, constraints = ?, status = ?, assigned_agent_id = ?,
+         environment_preference = ?, blocker_reason = ?, environment_instance_id = ?, environment_lease_id = ?,
+         environment_lifecycle_state = ?, recovery_state = ?, active_run_id = ?, admission_document = ?, control_document = ?, updated_at = ?, completed_at = ?
+         WHERE id = ? AND environment_lifecycle_state IS ? AND active_run_id IS ? AND (? IS NULL OR updated_at = ?) AND control_document IS ?`,
+      ).run(...this.#taskValues(task), task.id, expected.environmentLifecycleState ?? null, expected.activeRunId ?? null,
+        expected.updatedAt ?? null, expected.updatedAt ?? null, expected.controlDocument);
+      if (changed.changes !== 1) return false;
+      const next = this.#db.prepare('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM task_run_links WHERE task_id = ?').get(task.id) as { sequence: number };
+      this.#db.prepare(`INSERT INTO task_run_links
+        (task_id, run_id, agent_id, sequence, linked_at, advance_actor, advance_reason, content_version, requested_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(task.id, input.runId, input.agentId, next.sequence + 1, input.now, JSON.stringify(input.actor), input.reason ?? null, input.contentVersion, input.now);
+      return true;
+    });
+  }
+
+  async saveTaskAndReleaseLease(task: Task, leaseId: string): Promise<void> {
     const leases = this.#requireLeases();
     this.#transactions.immediate(() => {
       leases.markTaskLeaseReleased(leaseId, task.id);
@@ -215,14 +291,30 @@ export class SqliteTaskStore implements TaskStore {
       task.assignedAgentId ?? null, task.environmentPreference ? JSON.stringify(task.environmentPreference) : null,
       task.blockerReason ?? null, task.environmentInstanceId ?? null, task.environmentLeaseId ?? null,
       task.environmentLifecycleState ?? null, task.recoveryState ?? null, task.activeRunId ?? null,
+      task.admission !== undefined ? JSON.stringify(task.admission) : null,
+      taskControlDocument(task),
       task.updatedAt, task.completedAt ?? null,
     ];
+  }
+
+  #insertTask(task: Task): void {
+    this.#db.prepare(`INSERT INTO tasks
+      (id, project_id, title, goal, constraints, status, assigned_agent_id, environment_preference,
+       blocker_reason, environment_instance_id, environment_lease_id, environment_lifecycle_state,
+       recovery_state, active_run_id, admission_document, control_document, created_at, updated_at, completed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(task.id, task.projectId, task.title, task.goal, JSON.stringify(task.constraints), task.status,
+        task.assignedAgentId ?? null, task.environmentPreference ? JSON.stringify(task.environmentPreference) : null,
+        task.blockerReason ?? null, task.environmentInstanceId ?? null, task.environmentLeaseId ?? null,
+        task.environmentLifecycleState ?? null, task.recoveryState ?? null, task.activeRunId ?? null,
+        task.admission !== undefined ? JSON.stringify(task.admission) : null, taskControlDocument(task), task.createdAt, task.updatedAt,
+        task.completedAt ?? null);
   }
 
   #saveTask(task: Task): void {
     this.#db.prepare(
       `UPDATE tasks SET title = ?, goal = ?, constraints = ?, status = ?, assigned_agent_id = ?,
-       environment_preference = ?, blocker_reason = ?, environment_instance_id = ?, environment_lease_id = ?, environment_lifecycle_state = ?, recovery_state = ?, active_run_id = ?, updated_at = ?, completed_at = ? WHERE id = ?`,
+       environment_preference = ?, blocker_reason = ?, environment_instance_id = ?, environment_lease_id = ?, environment_lifecycle_state = ?, recovery_state = ?, active_run_id = ?, admission_document = ?, control_document = ?, updated_at = ?, completed_at = ? WHERE id = ?`,
     ).run(...this.#taskValues(task), task.id);
   }
 
@@ -318,6 +410,8 @@ interface TaskRow {
   readonly environment_lifecycle_state: string | null;
   readonly recovery_state: string | null;
   readonly active_run_id: string | null;
+  readonly admission_document: string | null;
+  readonly control_document: string | null;
   readonly created_at: number;
   readonly updated_at: number;
   readonly completed_at: number | null;
@@ -333,7 +427,15 @@ interface TaskRunRow {
   readonly summary_text: string | null;
   readonly summary_agent_id: string | null;
   readonly summary_recorded_at: number | null;
+  readonly advance_actor: string | null;
+  readonly advance_reason: string | null;
+  readonly content_version: number | null;
+  readonly requested_at: number | null;
 }
+
+type TaskControlDocument = Pick<Task, 'blocker' | 'completionClaims' | 'pendingCompletionClaimId' | 'pauseState' | 'controlHistory' | 'endDisposition' | 'forcedRelease'>;
+
+const taskControlDocument = serializeTaskControlDocument;
 
 function toTask(row: TaskRow): Task {
   return {
@@ -357,6 +459,8 @@ function toTask(row: TaskRow): Task {
     ...(row.environment_lifecycle_state !== null ? { environmentLifecycleState: row.environment_lifecycle_state as NonNullable<Task['environmentLifecycleState']> } : {}),
     ...(row.recovery_state !== null ? { recoveryState: row.recovery_state as NonNullable<Task['recoveryState']> } : {}),
     ...(row.active_run_id !== null ? { activeRunId: row.active_run_id } : {}),
+    ...(row.admission_document !== null ? { admission: JSON.parse(row.admission_document) as NonNullable<Task['admission']> } : {}),
+    ...(row.control_document !== null ? JSON.parse(row.control_document) as TaskControlDocument : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.completed_at !== null ? { completedAt: row.completed_at } : {}),
@@ -378,6 +482,10 @@ function toLink(row: TaskRunRow): TaskRunLink {
     taskId: row.task_id,
     runId: row.run_id,
     agentId: row.agent_id,
+    ...(row.advance_actor !== null ? { actor: JSON.parse(row.advance_actor) as import('./model.ts').TaskActor } : {}),
+    ...(row.advance_reason !== null ? { reason: row.advance_reason } : {}),
+    ...(row.content_version !== null ? { contentVersion: row.content_version } : {}),
+    ...(row.requested_at !== null ? { requestedAt: row.requested_at } : {}),
     sequence: row.sequence,
     linkedAt: row.linked_at,
     ...(summary !== undefined ? { summary } : {}),

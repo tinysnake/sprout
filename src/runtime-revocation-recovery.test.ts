@@ -163,14 +163,24 @@ test('#171 task recovery actions refuse actionably instead of the protected gene
     const post = (action: string) => fetch(`${h.base}/api/tasks/${task.id}/recovery`, {
       method: 'POST',
       headers: { cookie: h.cookie, 'x-sprout-csrf': h.csrf, 'content-type': 'application/json' },
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ action, reason: 'operator recovery decision' }),
     });
 
-    // The witnessed review sequence: resume succeeds (the Task returns to
-    // deliberate blocked work), then a discard that no longer applies.
     const resumed = await post('resume');
-    assert.equal(resumed.status, 200);
-    assert.equal((await h.runtime.tasks.get(task.id))?.environmentLifecycleState, 'blocked');
+    assert.equal(resumed.status, 409, 'a disconnected Worker cannot authorize ordinary recovery');
+    assert.equal((await resumed.json() as { code: string }).code, 'evidence-not-synchronized');
+    assert.equal((await h.runtime.tasks.get(task.id))?.environmentLifecycleState, 'recovery');
+    assert.equal(h.runtime.pool.getLease(begun.environmentLeaseId!)?.state, 'recovering');
+
+    // An idle Task returns to its exact state only after the same Worker
+    // reconnects and proves the held context and engine fence.
+    await h.connect(enrollmentId, join(dir, 'worker-key.pem'), {
+      engines: new Map([['scripted', new ScriptedEngineAdapter({ turns: [] })]]),
+      readiness: scriptedStartupReadiness,
+      recoveryJournal: new WorkerRecoveryJournal(join(dir, 'worker-recovery.json'), 2),
+    });
+    await waitFor(async () => (await h.runtime.tasks.get(task.id))?.environmentLifecycleState === 'idle',
+      'same-identity idle context proof');
 
     const discarded = await post('discard');
     assert.equal(discarded.status, 409);
@@ -180,8 +190,9 @@ test('#171 task recovery actions refuse actionably instead of the protected gene
     assert.equal(body.code, 'not-awaiting-recovery');
     assert.match(body.error ?? '', /not awaiting recovery/);
 
-    // An inapplicable Task action never resolves the protective record.
-    assert.equal((await h.runtime.recovery.forLease(begun.environmentLeaseId!))?.phase, 'recovery');
+    // The inapplicable action cannot change the resolved decision history.
+    assert.equal((await h.runtime.recovery.listForEnvironment(INSTANCE_ID))
+      .find(record => record.leaseId === begun.environmentLeaseId)?.phase, 'resolved');
   } finally {
     await h.close();
   }

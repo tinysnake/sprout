@@ -1,5 +1,6 @@
 import { refreshRecipientsOnProjectChange } from './recipient-refresh';
 import { eligibleTaskAgents, taskActivity, taskContextState, taskFailureMessage } from './task-controls';
+import { newDeliveryKey } from './utils/delivery-key';
 
 /**
  * The M1 Web client.
@@ -100,6 +101,7 @@ interface TaskWithRunsView {
 interface MessageView {
   readonly id: string;
   readonly projectId: string;
+  readonly scopeId: string;
   readonly channel: string;
   readonly authorId: string;
   readonly authorKind: string;
@@ -107,6 +109,14 @@ interface MessageView {
   readonly recipients: readonly string[];
   readonly inReplyTo?: string;
   readonly createdAt: number;
+}
+
+/** The identity the Web client posts as. There is no authentication at M1. */
+const WEB_AUTHOR_ID = 'operator';
+
+interface ConversationScopeRef {
+  readonly id: string;
+  readonly kind: 'project' | 'direct' | 'working-group';
 }
 
 interface WakeView {
@@ -127,9 +137,6 @@ interface MessageDetail {
   readonly wakes: readonly WakeView[];
   readonly observations: readonly ObservationView[];
 }
-
-/** The identity the Web client posts as. There is no authentication at M1. */
-const WEB_AUTHOR_ID = 'operator';
 
 const form = document.querySelector<HTMLFormElement>('#request-form');
 const agentSelect = document.querySelector<HTMLSelectElement>('#agent');
@@ -300,8 +307,10 @@ messageFormEl.addEventListener('submit', async (event) => {
           (input) => input.value,
         )
       : [];
-  if (channel === 'direct' && recipients.length === 0) {
-    showMessageError('A direct message needs at least one recipient.');
+  // A Project-scoped direct conversation is a pair (#95), so the composer
+  // names exactly one partner and the server resolves the durable scope.
+  if (channel === 'direct' && recipients.length !== 1) {
+    showMessageError('A direct message names exactly one recipient.');
     return;
   }
 
@@ -309,12 +318,47 @@ messageFormEl.addEventListener('submit', async (event) => {
   if (submit) submit.disabled = true;
   hideMessageError();
   try {
+    // Messages are posted to one conversation scope (#96): the Project channel
+    // for a channel Message, or the Project-scoped direct conversation opened
+    // (idempotently) for this pair.
+    let scopeId: string;
+    if (channel === 'project') {
+      const scopesResponse = await fetch(
+        `/api/projects/${encodeURIComponent(project.id)}/scopes`,
+      );
+      if (!scopesResponse.ok) {
+        showMessageError('This Project has no conversation scopes yet.');
+        return;
+      }
+      const scopes = (await scopesResponse.json()) as { scopes: readonly ConversationScopeRef[] };
+      const scope = scopes.scopes.find((candidate) => candidate.kind === 'project');
+      if (!scope) {
+        showMessageError('This Project has no channel yet.');
+        return;
+      }
+      scopeId = scope.id;
+    } else {
+      const opened = await fetch(
+        `/api/projects/${encodeURIComponent(project.id)}/scopes/direct`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ participants: [WEB_AUTHOR_ID, recipients[0]] }),
+        },
+      );
+      if (!opened.ok) {
+        const failure = (await opened.json().catch(() => ({}))) as { error?: string };
+        showMessageError(failure.error ?? `the direct conversation was refused (${opened.status})`);
+        return;
+      }
+      const conversation = (await opened.json()) as { scope: ConversationScopeRef };
+      scopeId = conversation.scope.id;
+    }
     const response = await fetch('/api/messages', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        projectId: project.id,
-        channel,
+        scopeId,
         authorId: WEB_AUTHOR_ID,
         authorKind: 'human',
         body,
@@ -843,14 +887,6 @@ function formatTime(timestamp: number): string {
 
 function truncate(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
-}
-
-function newDeliveryKey(): string {
-  const random =
-    typeof crypto !== 'undefined' && 'randomUUID' in crypto
-      ? crypto.randomUUID()
-      : Math.random().toString(36).slice(2);
-  return `web-${random}`;
 }
 
 function showMessageError(text: string): void {

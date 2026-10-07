@@ -31,6 +31,7 @@ export type EnvironmentRecoveryCause =
   | 'worker-channel-lost'
   | 'sprout-restart'
   | 'begin-failed'
+  | 'lease-overdue'
   | 'cleanup-failed';
 
 /**

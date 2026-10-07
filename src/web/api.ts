@@ -6,8 +6,21 @@ import { WebSocketServer } from 'ws';
 import { createWebSocketStream } from 'ws';
 
 import type { RunOrchestrator } from '../run/orchestrator.ts';
+import { runFailureReason } from '../run/failure-reason.ts';
 import type { AgentRegistry } from '../agent/registry.ts';
 import type { CollaborationCoordinator } from '../collaboration/coordinator.ts';
+import { AgentDirectMessageForbiddenError, MessageDeliveryError } from '../collaboration/coordinator.ts';
+import type { MessageAuthor, TaskGroupMessageKind } from '../collaboration/model.ts';
+import { ProjectEventError } from '../collaboration/events.ts';
+import {
+  DEFAULT_MESSAGE_PAGE_SIZE,
+  DEFAULT_PROJECT_EVENT_PAGE_SIZE,
+  MAX_MESSAGE_PAGE_SIZE,
+  MAX_PROJECT_EVENT_PAGE_SIZE,
+} from '../collaboration/store.ts';
+import { ConversationScopeError } from '../conversation/model.ts';
+import type { ConversationScopeService } from '../conversation/service.ts';
+import { redactSensitiveText } from '../environment/privacy.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
 import type { TaskService } from '../task/service.ts';
 import type { TaskStatus } from '../task/model.ts';
@@ -15,10 +28,15 @@ import { TaskRecoveryRefusal } from '../task/environment-lifecycle.ts';
 import type { OperatorSessionService, AuthenticatedBrowserSession } from '../auth/service.ts';
 import { composeApiRouters, type ApiRouter } from './router.ts';
 import type { WorkerGateway } from '../worker/gateway.ts';
+import { WORKER_DIAGNOSTICS } from '../worker/diagnostics.ts';
 import {
   summarizeRunHistory,
   toMessageView,
+  toProjectEventView,
   toProjectView,
+  toRoutingBatchDetailView,
+  toRoutingEvidenceView,
+  toRoutingWindowView,
   toRunView,
   toTaskView,
   toTaskWithRunsView,
@@ -34,6 +52,16 @@ export * from './views.ts';
 
 /** The single machine-authenticated Worker upgrade path (ADR-0012). */
 export const WORKER_CONNECT_PATH = '/api/worker/connect';
+
+const TASK_GROUP_MESSAGE_KINDS: readonly TaskGroupMessageKind[] = [
+  'status', 'question', 'escalation', 'handoff', 'assignment',
+];
+function isTaskGroupMessageKind(value: unknown): value is TaskGroupMessageKind {
+  return typeof value === 'string' && TASK_GROUP_MESSAGE_KINDS.includes(value as TaskGroupMessageKind);
+}
+
+/** Allow a remote close acknowledgement, without holding Core shutdown indefinitely. */
+export const WORKER_CONNECTION_SHUTDOWN_DEADLINE_MS = 5_000;
 
 /**
  * The Web seam for M1.
@@ -59,6 +87,16 @@ export interface RunApiOptions {
    */
   readonly collaboration?: CollaborationCoordinator;
   /**
+   * The conversation-scope authority Message delivery governs against (#95,
+   * #96).
+   *
+   * Required beside `collaboration`: a Message is posted to exactly one scope,
+   * and the routes resolve the scope, the acting author's admission state, and
+   * the Project's Human membership from this service rather than trusting
+   * request JSON. Without it the message routes are not served.
+   */
+  readonly conversationScopes?: ConversationScopeService;
+  /**
    * The projects the client may address (#27).
    *
    * Optional like `collaboration`: a run-only build serves no project list, and
@@ -83,7 +121,7 @@ export interface RunApiOptions {
   /** Static files (the Vite build) to serve alongside the API. */
   readonly staticRoot?: string;
   readonly readFile?: (path: string) => Promise<Buffer | undefined>;
-  /** Interval for SSE keep-alive comments. Exposed so tests need not wait. */
+  /** Interval for SSE heartbeat events. Exposed so tests need not wait. */
   readonly keepAliveMs?: number;
   /** Additive M2 domain routers, run after transport authorization. */
   readonly routers?: readonly ApiRouter[];
@@ -103,7 +141,7 @@ export interface RunApi {
 }
 
 export function createRunApi(options: RunApiOptions): RunApi {
-  const { orchestrator, agents, collaboration, projects, tasks, auth } = options;
+  const { orchestrator, agents, collaboration, conversationScopes, projects, tasks, auth } = options;
   /** Open event streams, so `close` can end them instead of hanging. */
   const streams = new Set<ServerResponse>();
   const additiveRouters = composeApiRouters(options.routers ?? []);
@@ -122,13 +160,21 @@ export function createRunApi(options: RunApiOptions): RunApi {
     });
   });
 
+  let shuttingDown = false;
+  let closing: Promise<void> | undefined;
+  let workerSockets: WebSocketServer | undefined;
   // The machine-authentication boundary (#115). A Worker initiates this upgrade
   // off-loopback only over WSS; loopback may use WS. It is handled before the
   // browser `request` path and never reads a cookie, CSRF token, or Human actor.
   if (options.workerGateway !== undefined) {
     const gateway = options.workerGateway;
     const wss = new WebSocketServer({ noServer: true });
+    workerSockets = wss;
     server.on('upgrade', (request, socket, head) => {
+      if (shuttingDown) {
+        socket.destroy();
+        return;
+      }
       const url = new URL(request.url ?? '/', 'http://localhost');
       if (url.pathname !== WORKER_CONNECT_PATH) {
         socket.destroy();
@@ -158,7 +204,15 @@ export function createRunApi(options: RunApiOptions): RunApi {
 
   async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const url = new URL(request.url ?? '/', 'http://localhost');
-    const segments = url.pathname.split('/').filter((part) => part !== '');
+    let segments: string[];
+    try {
+      // Split before decoding so an encoded slash remains inside one path id.
+      // Decode exactly once at the dispatcher, not independently in each route.
+      segments = url.pathname.split('/').filter((part) => part !== '').map((part) => decodeURIComponent(part));
+    } catch {
+      sendJson(response, 400, { error: 'invalid URL path encoding' });
+      return;
+    }
     // A request stream is one-shot. Routers and preserved routes share this
     // memoized reader so an exploratory router cannot consume another route's
     // command payload.
@@ -274,57 +328,107 @@ export function createRunApi(options: RunApiOptions): RunApi {
       return;
     }
 
-    // POST /api/messages — deliver one Message to a project channel and wake
-    // whoever the M1 wake contract addresses.
-    if (request.method === 'POST' && url.pathname === '/api/messages' && collaboration) {
+    // POST /api/messages — deliver one Message to one conversation scope and
+    // wake whoever the deterministic wake contract addresses (#96). The scope
+    // is the single source of the Message's Project, channel, and admission
+    // state; the routes keep no routing logic of their own.
+    if (
+      request.method === 'POST' &&
+      url.pathname === '/api/messages' &&
+      collaboration &&
+      conversationScopes
+    ) {
       const body = await readBody();
-      const projectId = typeof body.projectId === 'string' ? body.projectId : '';
-      const channel = body.channel;
-      const authorId = auth ? 'operator' : typeof body.authorId === 'string' ? body.authorId : '';
-      const authorKind = auth ? 'human' : body.authorKind === 'agent' ? 'agent' : 'human';
-      const text = typeof body.body === 'string' ? body.body : '';
+      const scopeId = typeof body.scopeId === 'string' ? body.scopeId : '';
+      const rawText = body.body;
       const deliveryKey = typeof body.deliveryKey === 'string' ? body.deliveryKey : '';
       const awaitReply = body.awaitReply !== false;
-      if (
-        projectId === '' ||
-        authorId === '' ||
-        text === '' ||
-        deliveryKey === '' ||
-        (channel !== 'direct' && channel !== 'project')
-      ) {
-        sendJson(response, 400, {
-          error: 'projectId, channel, authorId, body, and deliveryKey are required',
-        });
+      if (scopeId === '' || typeof rawText !== 'string' || deliveryKey === '') {
+        sendJson(response, 400, { error: 'scopeId, body, and deliveryKey are required' });
         return;
       }
       // An authenticated browser is the only source of Human authority. In the
       // protected runtime an Agent/Worker cannot select an authority kind or a
       // different Human id through request JSON.
       if (auth && (body.authorKind === 'agent' || body.authorKind === 'worker')) {
-        sendJson(response, 403, { error: 'browser commands are Human-only' });
-        return;
-      }
-      if (
-        (body.recipients !== undefined &&
-          (!Array.isArray(body.recipients) || !body.recipients.every((value) => typeof value === 'string'))) ||
-        (channel === 'direct' && (!Array.isArray(body.recipients) || body.recipients.length === 0)) ||
-        (channel === 'project' && Array.isArray(body.recipients) && body.recipients.length > 0)
-      ) {
-        sendJson(response, 400, {
-          error: 'direct messages require string recipients; project messages cannot have recipients',
+        sendJson(response, 403, {
+          error: 'browser commands are Human-only',
+          code: 'agent-direct-message-forbidden',
         });
         return;
       }
-      const recipients = body.recipients as readonly string[] | undefined;
-      const delivered = await collaboration.deliver({
-        projectId,
-        channel,
-        author: { id: authorId, kind: authorKind },
-        body: text,
-        ...(recipients !== undefined ? { recipients } : {}),
-        deliveryKey,
-        awaitReply,
-      });
+      const scope = await conversationScopes.getScope(scopeId);
+      if (scope === undefined) {
+        sendJson(response, 404, { error: `unknown conversation scope: ${scopeId}` });
+        return;
+      }
+      if (scope.kind !== 'task-group' && rawText === '') {
+        sendJson(response, 400, { error: 'scopeId, body, and deliveryKey are required' });
+        return;
+      }
+      const text = rawText;
+      const rawTaskGroupKind = body.kind;
+      if (
+        rawTaskGroupKind !== undefined &&
+        (scope.kind !== 'task-group' || !isTaskGroupMessageKind(rawTaskGroupKind))
+      ) {
+        sendJson(response, 400, { error: 'kind must be a supported Task-group Message kind on a task-group scope' });
+        return;
+      }
+      const recipients = body.recipients;
+      if (
+        recipients !== undefined &&
+        (!Array.isArray(recipients) || !recipients.every((value) => typeof value === 'string'))
+      ) {
+        sendJson(response, 400, { error: 'recipients must be an array of member ids' });
+        return;
+      }
+      if (scope.kind !== 'direct' && Array.isArray(recipients) && recipients.length > 0) {
+        sendJson(response, 400, { error: 'only direct messages can name recipients' });
+        return;
+      }
+      let author: MessageAuthor;
+      if (auth) {
+        // The acting author is the Project's Human membership resolved from the
+        // authority, never a client-supplied identity.
+        try {
+          const actor = await conversationScopes.humanAuthority(scope.projectId);
+          author = { id: actor.memberId, kind: actor.kind };
+        } catch (error) {
+          sendDomainFailure(response, error);
+          return;
+        }
+      } else {
+        const authorId = typeof body.authorId === 'string' ? body.authorId : '';
+        if (authorId === '') {
+          sendJson(response, 400, { error: 'authorId is required' });
+          return;
+        }
+        author = {
+          id: authorId,
+          kind: body.authorKind === 'agent' || body.authorKind === 'worker' ? 'agent' : 'human',
+        };
+      }
+      let delivered: Awaited<ReturnType<CollaborationCoordinator['deliver']>>;
+      try {
+        delivered = await collaboration.deliver({
+          scopeId,
+          author,
+          body: text,
+          ...(rawTaskGroupKind !== undefined
+            ? {
+                kind: rawTaskGroupKind as TaskGroupMessageKind,
+                taskGroupKind: rawTaskGroupKind as TaskGroupMessageKind,
+              }
+            : {}),
+          ...(Array.isArray(recipients) ? { recipients: recipients as readonly string[] } : {}),
+          deliveryKey,
+          awaitReply,
+        });
+      } catch (error) {
+        sendDomainFailure(response, error);
+        return;
+      }
       sendJson(response, delivered.duplicate ? 200 : 202, {
         message: toMessageView(delivered.message),
         duplicate: delivered.duplicate,
@@ -334,11 +438,35 @@ export function createRunApi(options: RunApiOptions): RunApi {
       return;
     }
 
-    // GET /api/messages — the durable conversation, newest last.
+    // GET /api/messages — a bounded newest window, or a preceding page when
+    // ?before=<messageId> is supplied. Ordering is (createdAt, id).
     if (request.method === 'GET' && url.pathname === '/api/messages' && collaboration) {
-      sendJson(response, 200, {
-        messages: (await collaboration.listMessages()).map(toMessageView),
+      const rawScopeId = url.searchParams.get('scopeId');
+      const scopeId = rawScopeId !== null && rawScopeId !== '' ? rawScopeId : undefined;
+      const rawLimit = url.searchParams.get('limit');
+      let limit = DEFAULT_MESSAGE_PAGE_SIZE;
+      if (rawLimit !== null) {
+        if (!/^[1-9]\d*$/.test(rawLimit) || !Number.isSafeInteger(Number(rawLimit))) {
+          sendJson(response, 400, { error: 'limit must be a positive integer' });
+          return;
+        }
+        limit = Math.min(Number(rawLimit), MAX_MESSAGE_PAGE_SIZE);
+      }
+      const rawBefore = url.searchParams.get('before');
+      if (rawBefore === '') {
+        sendJson(response, 400, { error: 'before must name a message cursor' });
+        return;
+      }
+      const page = await collaboration.listMessagesPage({
+        ...(scopeId !== undefined ? { scopeId } : {}),
+        limit,
+        ...(rawBefore !== null ? { before: rawBefore } : {}),
       });
+      if (page === undefined) {
+        sendJson(response, 404, { error: `unknown message cursor: ${rawBefore}` });
+        return;
+      }
+      sendJson(response, 200, { messages: page.messages.map(toMessageView) });
       return;
     }
 
@@ -362,9 +490,175 @@ export function createRunApi(options: RunApiOptions): RunApi {
       sendJson(response, 200, {
         observations: await collaboration.listObservations(messageId),
         wakes: (await collaboration.listWakeRequests())
-          .filter((wake) => wake.messageId === messageId)
+          .filter((wake) => wake.inputId === messageId)
           .map(toWakeView),
       });
+      return;
+    }
+
+    // GET /api/projects/:id/events — durable Project events with their declared
+    // routing dispositions (#96, ADR-0007). Events are system-produced, so
+    // publication stays an in-process Module contract; this route is read-only
+    // evidence.
+    if (
+      request.method === 'GET' &&
+      segments.length === 4 &&
+      segments[0] === 'api' &&
+      segments[1] === 'projects' &&
+      segments[3] === 'events' &&
+      collaboration
+    ) {
+      const projectId = segments[2] ?? '';
+      const rawLimit = url.searchParams.get('limit');
+      let limit = DEFAULT_PROJECT_EVENT_PAGE_SIZE;
+      if (rawLimit !== null) {
+        if (!/^[1-9]\d*$/.test(rawLimit) || !Number.isSafeInteger(Number(rawLimit))) {
+          sendJson(response, 400, { error: 'limit must be a positive integer' });
+          return;
+        }
+        limit = Math.min(Number(rawLimit), MAX_PROJECT_EVENT_PAGE_SIZE);
+      }
+      const rawBefore = url.searchParams.get('before');
+      if (rawBefore === '') {
+        sendJson(response, 400, { error: 'before must name a project event cursor' });
+        return;
+      }
+      const rawOriginScopeId = url.searchParams.get('originScopeId');
+      if (rawOriginScopeId === '') {
+        sendJson(response, 400, { error: 'originScopeId must not be empty' });
+        return;
+      }
+      const page = await collaboration.listEventsPage({
+        projectId,
+        limit,
+        ...(rawBefore !== null ? { before: rawBefore } : {}),
+        ...(rawOriginScopeId !== null ? { originScopeId: rawOriginScopeId } : {}),
+      });
+      if (page === undefined) {
+        sendJson(response, 404, { error: `unknown project event cursor: ${rawBefore}` });
+        return;
+      }
+      sendJson(response, 200, { events: page.events.map(toProjectEventView), hasOlder: page.hasOlder });
+      return;
+    }
+
+    // GET /api/project-events/:id/observations — the routing evidence for one
+    // Project event: its wake requests and durable non-wake outcomes.
+    if (
+      request.method === 'GET' &&
+      segments.length === 4 &&
+      segments[0] === 'api' &&
+      segments[1] === 'project-events' &&
+      segments[3] === 'observations' &&
+      collaboration
+    ) {
+      const eventId = segments[2] ?? '';
+      const event = (await collaboration.listEvents()).find(
+        (candidate) => candidate.id === eventId,
+      );
+      if (!event) {
+        sendJson(response, 404, { error: `unknown project event: ${eventId}` });
+        return;
+      }
+      sendJson(response, 200, {
+        event: toProjectEventView(event),
+        observations: await collaboration.listObservations(event.id),
+        wakes: (await collaboration.listWakeRequests())
+          .filter((wake) => wake.inputId === event.id)
+          .map(toWakeView),
+      });
+      return;
+    }
+
+    // GET /api/projects/:id/routing-batches — the durable assisted-routing
+    // evidence for one Project: collection windows and frozen batches (#97,
+    // ADR-0007). Read-only; the MVP exposes no routing controls.
+    if (
+      request.method === 'GET' &&
+      segments.length === 4 &&
+      segments[0] === 'api' &&
+      segments[1] === 'projects' &&
+      segments[3] === 'routing-batches' &&
+      collaboration
+    ) {
+      const projectId = segments[2] ?? '';
+      const [windows, batches] = await Promise.all([
+        collaboration.listRoutingWindows(projectId),
+        collaboration.listRoutingBatches(projectId),
+      ]);
+      sendJson(response, 200, {
+        windows: windows.map(toRoutingWindowView),
+        batches: batches.map((batch) => ({
+          id: batch.id,
+          projectId: batch.projectId,
+          windowId: batch.windowId,
+          splitIndex: batch.splitIndex,
+          splitCount: batch.splitCount,
+          cutoffAt: batch.cutoffAt,
+          status: batch.status,
+          ...(batch.error !== undefined ? { error: batch.error } : {}),
+          createdAt: batch.createdAt,
+          ...(batch.settledAt !== undefined ? { settledAt: batch.settledAt } : {}),
+        })),
+      });
+      return;
+    }
+
+    // GET /api/routing-batches/:id — the complete causal evidence for one
+    // frozen batch: window, inputs (with truncation markers), attempts,
+    // per-input outcomes, WakeRequests, and projected replies.
+    if (
+      request.method === 'GET' &&
+      segments.length === 3 &&
+      segments[0] === 'api' &&
+      segments[1] === 'routing-batches' &&
+      collaboration
+    ) {
+      const evidence = await collaboration.getRoutingBatchEvidence(segments[2] ?? '');
+      if (evidence === undefined) {
+        sendJson(response, 404, { error: `unknown routing batch: ${segments[2] ?? ''}` });
+        return;
+      }
+      sendJson(response, 200, { routingBatch: toRoutingBatchDetailView(evidence) });
+      return;
+    }
+
+    // GET /api/messages/:id/routing — the causal routing chain of one Message:
+    // collection window, batches with attempts and outcomes, deterministic
+    // wakes, and durable non-wake observations.
+    if (
+      request.method === 'GET' &&
+      segments.length === 4 &&
+      segments[0] === 'api' &&
+      segments[1] === 'messages' &&
+      segments[3] === 'routing' &&
+      collaboration
+    ) {
+      const evidence = await collaboration.routingEvidenceForInput(segments[2] ?? '');
+      if (evidence === undefined) {
+        sendJson(response, 404, { error: `unknown message: ${segments[2] ?? ''}` });
+        return;
+      }
+      sendJson(response, 200, { routing: toRoutingEvidenceView(evidence) });
+      return;
+    }
+
+    // GET /api/project-events/:id/routing — the same causal chain for one
+    // Project event (`wake-eligible` inputs route through batches).
+    if (
+      request.method === 'GET' &&
+      segments.length === 4 &&
+      segments[0] === 'api' &&
+      segments[1] === 'project-events' &&
+      segments[3] === 'routing' &&
+      collaboration
+    ) {
+      const evidence = await collaboration.routingEvidenceForInput(segments[2] ?? '');
+      if (evidence === undefined) {
+        sendJson(response, 404, { error: `unknown project event: ${segments[2] ?? ''}` });
+        return;
+      }
+      sendJson(response, 200, { routing: toRoutingEvidenceView(evidence) });
       return;
     }
 
@@ -374,8 +668,13 @@ export function createRunApi(options: RunApiOptions): RunApi {
       return;
     }
 
-    // POST /api/tasks — create a durable multi-run Task (#28).
+    // The protected runtime creates Tasks only through Human approve-and-begin.
+    // The unauthenticated M1 transport seam retains its legacy fixture API.
     if (request.method === 'POST' && url.pathname === '/api/tasks' && tasks) {
+      if (auth) {
+        sendJson(response, 409, { code: 'proposal-required', error: 'create a Task proposal and approve-and-begin it' });
+        return;
+      }
       const body = await readBody();
       const projectId = typeof body.projectId === 'string' ? body.projectId : '';
       const title = typeof body.title === 'string' ? body.title : '';
@@ -442,8 +741,13 @@ export function createRunApi(options: RunApiOptions): RunApi {
       tasks
     ) {
       const taskId = segments[2] ?? '';
-      if ((await tasks.get(taskId)) === undefined) {
+      const existingTask = await tasks.get(taskId);
+      if (existingTask === undefined) {
         sendJson(response, 404, { error: `unknown task: ${taskId}` });
+        return;
+      }
+      if (auth) {
+        sendJson(response, 409, { code: 'use-task-advances', error: 'use the attributed Task advance command' });
         return;
       }
       const body = await readBody();
@@ -468,10 +772,14 @@ export function createRunApi(options: RunApiOptions): RunApi {
       return;
     }
 
-    // POST /api/tasks/:id/begin — select and retain a Task-held environment.
+    // POST /api/tasks/:id/begin — legacy M1 entry point, disabled behind Human auth.
     if (request.method === 'POST' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'begin' && tasks) {
       const taskId = segments[2] ?? '';
       if ((await tasks.get(taskId)) === undefined) { sendJson(response, 404, { error: `unknown task: ${taskId}` }); return; }
+      if (auth) {
+        sendJson(response, 409, { code: 'proposal-required', error: 'only an approved proposal can begin a Task' });
+        return;
+      }
       const body = await readBody();
       const selection = parseEnvironmentPreference(body.selection);
       if (selection === 'invalid' || selection === null) { sendJson(response, 400, { error: 'selection must be { kind: "definition" | "instance", id }' }); return; }
@@ -654,6 +962,16 @@ export function createRunApi(options: RunApiOptions): RunApi {
       return;
     }
 
+    // Chat-only minimal status projection: never serialize prompt or run events.
+    if (request.method === 'GET' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'runs' && segments[3] === 'status') {
+      const run = orchestrator.get(segments[2] ?? '') ?? (await orchestrator.load(segments[2] ?? ''));
+      if (!run) { sendJson(response, 404, { error: 'unknown run' }); return; }
+      sendJson(response, 200, { id: run.id, status: run.status,
+        ...(run.status === 'failed' ? { failureReason: runFailureReason(run) } : {}),
+      });
+      return;
+    }
+
     // GET /api/runs/:id — inspect one run.
     if (
       request.method === 'GET' &&
@@ -761,7 +1079,10 @@ export function createRunApi(options: RunApiOptions): RunApi {
     for (const record of eventLog.after(cursor)) send(record);
     const unsubscribe = eventLog.subscribe(send);
 
-    const keepAlive = setInterval(() => response.write(': ping\n\n'), options.keepAliveMs ?? 15_000);
+    const keepAlive = setInterval(() => {
+      if (response.writableEnded) return;
+      response.write(': ping\n\nevent: heartbeat\ndata: \n\n');
+    }, options.keepAliveMs ?? 15_000);
     // An unref'd timer cannot keep the process alive on its own.
     keepAlive.unref?.();
 
@@ -783,20 +1104,48 @@ export function createRunApi(options: RunApiOptions): RunApi {
           resolve({ port: typeof address === 'object' && address ? address.port : port });
         });
       }),
-    close: () =>
-      new Promise((resolve, reject) => {
-        // End every open event stream first: `server.close` waits for existing
-        // connections, and an SSE stream never ends by itself.
+    close: () => {
+      closing ??= (async () => {
+        shuttingDown = true;
+        // End SSE and stop the listener before destroying ordinary HTTP sockets.
+        // closeAllConnections does not cover upgraded Worker WebSockets.
         for (const stream of streams) stream.end();
         streams.clear();
         unsubscribeRunEvents();
+        const httpClosed = new Promise<void>((resolve, reject) => {
+          if (!server.listening) return resolve();
+          server.close((error) => (error ? reject(error) : resolve()));
+        });
         server.closeAllConnections?.();
-        // A transport that never listened (construction refused, or the caller
-        // closed before opening the surface) has nothing to stop.
-        if (!server.listening) return resolve();
-        server.close((error) => (error ? reject(error) : resolve()));
-      }),
+        await Promise.all([httpClosed, closeWorkerSockets(workerSockets)]);
+      })();
+      return closing;
+    },
   };
+}
+
+/** Release accepted and handshaking sockets before HTTP shutdown can finish. */
+async function closeWorkerSockets(wss: WebSocketServer | undefined): Promise<void> {
+  if (wss === undefined || wss.clients.size === 0) return;
+  const pending = new Set(wss.clients);
+  await new Promise<void>((resolve) => {
+    // Five seconds matches the reconnect-observation drain's budget: allow a
+    // short network delay, then release a peer that never acknowledges close.
+    const deadline = setTimeout(() => {
+      process.stderr.write(`[worker] shutdown deadline exceeded; terminating ${pending.size} connection(s)\n`);
+      for (const socket of pending) socket.terminate();
+    }, WORKER_CONNECTION_SHUTDOWN_DEADLINE_MS);
+    for (const socket of pending) {
+      socket.once('close', () => {
+        pending.delete(socket);
+        if (pending.size === 0) {
+          clearTimeout(deadline);
+          resolve();
+        }
+      });
+      socket.close(1001, WORKER_DIAGNOSTICS.coreGoingAway);
+    }
+  });
 }
 
 /** `undefined` when absent, `null` when the request asked to clear it. */
@@ -820,6 +1169,7 @@ const TASK_STATUS_VALUES: readonly TaskStatus[] = [
   'blocked',
   'done',
   'failed',
+  'stopped',
   'cancelled',
 ];
 
@@ -923,6 +1273,50 @@ async function readJson(request: IncomingMessage): Promise<Record<string, unknow
   } catch {
     return {};
   }
+}
+
+/**
+ * Shape the Message/Project-event domain failures onto the HTTP contract:
+ * unknown targets are 404, malformed publication is 400, an author outside
+ * the scope is 403, and a scope that is read-only for the author is 409. The
+ * typed code travels verbatim; the message passes the privacy boundary as
+ * defence in depth, so no diagnostic raised along the delivery path can carry
+ * a credential, host, or path onto the wire.
+ */
+function sendDomainFailure(response: ServerResponse, error: unknown): void {
+  if (error instanceof AgentDirectMessageForbiddenError) {
+    sendJson(response, error.status, {
+      error: redactSensitiveText(error.message),
+      code: error.code,
+    });
+    return;
+  }
+  if (error instanceof MessageDeliveryError) {
+    const status =
+      error.reason === 'not-a-member' || error.reason === 'not-a-participant' ? 403 : 409;
+    sendJson(response, status, {
+      error: redactSensitiveText(error.message),
+      code: error.code,
+      reason: error.reason,
+    });
+    return;
+  }
+  if (error instanceof ConversationScopeError) {
+    const status =
+      error.code === 'unknown-scope' || error.code === 'unknown-project'
+        ? 404
+        : error.code === 'human-membership-required' || error.code === 'not-a-project-member'
+          ? 403
+          : 400;
+    sendJson(response, status, { error: redactSensitiveText(error.message), code: error.code });
+    return;
+  }
+  if (error instanceof ProjectEventError) {
+    const status = error.code === 'unknown-project' ? 404 : 400;
+    sendJson(response, status, { error: redactSensitiveText(error.message), code: error.code });
+    return;
+  }
+  throw error;
 }
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {

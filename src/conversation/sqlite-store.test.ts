@@ -15,10 +15,11 @@ import {
   type ConversationScope,
   type DirectConversationScope,
   type ProjectChannelScope,
+  type TaskGroupScope,
   type WorkingGroupScope,
 } from './model.ts';
 import type { ConversationProjectFacts } from './service.ts';
-import { getSchemaVersion, defaultSafetyCopyPath } from '../store/schema.ts';
+import { CURRENT_SCHEMA_VERSION, getSchemaVersion, defaultSafetyCopyPath } from '../store/schema.ts';
 
 /**
  * Persistence and restart behaviour for conversation scopes (#95).
@@ -87,6 +88,11 @@ test('every conversation scope kind round-trips through SQLite', async () => {
     await scopes.endWorkingGroupMember(group.id, { memberId: 'operator', kind: 'human' }, 'scribe', {
       reason: 'membership tidied',
     });
+    const taskGroup = await scopes.syncTaskGroup({
+      taskId: 'task-sqlite', projectId: 'project-alpha', title: 'SQLite Task group',
+      goal: 'Round-trip the Task scope.', constraints: ['Preserve the JSON record.'],
+      lead: { memberId: 'operator', kind: 'human' }, contentVersion: 1, status: 'in-progress',
+    });
 
     const loadedChannel = await store.get(channel.id);
     assert.deepEqual(loadedChannel, channel, 'the Project channel document is byte-identical');
@@ -96,20 +102,23 @@ test('every conversation scope kind round-trips through SQLite', async () => {
     const loadedGroup = (await store.get(group.id)) as WorkingGroupScope;
     assert.equal(loadedGroup.content.currentVersion, 1);
     assert.equal(loadedGroup.content.versions[0]?.rules[0], 'No loss.');
+    const loadedTaskGroup = (await store.get(taskGroup.id)) as TaskGroupScope;
+    assert.equal(loadedTaskGroup.taskId, 'task-sqlite');
+    assert.equal(loadedTaskGroup.content.versions[0]?.goal, 'Round-trip the Task scope.');
     const ended = loadedGroup.memberships.find((entry) => entry.memberId === 'scribe');
     assert.equal(ended?.endedAt, 5_000);
     assert.equal(ended?.endedReason, 'membership tidied');
     assert.ok(loadedGroup.memberships.some((entry) => entry.memberId === 'scout' && entry.endedAt === undefined));
 
     const forProject = await store.listForProject('project-alpha');
-    assert.equal(forProject.length, 3);
+    assert.equal(forProject.length, 4);
     assert.deepEqual(
       forProject.map((scope) => scope.kind),
-      ['project', 'direct', 'working-group'],
-      'scopes list oldest first',
+      ['project', 'direct', 'task-group', 'working-group'],
+      'scopes list oldest first and includes Task groups without a table migration',
     );
     assert.equal((await store.listForProject('project-other')).length, 0);
-    assert.equal((await store.list()).length, 3);
+    assert.equal((await store.list()).length, 4);
   });
 });
 
@@ -219,7 +228,7 @@ test('scopes, history, and lifecycle survive a restart reopen', async () => {
   }
 });
 
-test('an existing pre-scope database receives the conversation scope table through migration v18', async () => {
+test('an existing pre-scope database receives the conversation scope table through forward migration', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-conversation-migrate-'));
   const path = join(directory, 'sprout.db');
   try {
@@ -237,7 +246,7 @@ test('an existing pre-scope database receives the conversation scope table throu
     try {
       // Probe through a second connection: the adapter owns no version accessor.
       const probe = new DatabaseSync(path);
-      assert.equal(getSchemaVersion(probe), 18);
+      assert.equal(getSchemaVersion(probe), CURRENT_SCHEMA_VERSION);
       probe.close();
       assert.ok(existsSync(defaultSafetyCopyPath(path)), 'the pre-migration safety copy exists');
       const scopes: readonly ConversationScope[] = await store.list();

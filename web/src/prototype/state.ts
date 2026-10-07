@@ -3861,6 +3861,7 @@ class StateManager {
       (t) =>
         t.taskLeadId === agentId &&
         t.lifecycle !== 'completed' &&
+        t.lifecycle !== 'stopped' &&
         t.lifecycle !== 'cancelled' &&
         t.lifecycle !== 'rejected' &&
         t.lifecycle !== 'withdrawn'
@@ -4275,13 +4276,13 @@ class StateManager {
   }
 
   /**
-   * Complete the safe Task-end boundary after its lease and run checks pass.
-   * This is the only normal cancellation/completion path that clears an
-   * Environment lease projection or lease-recovery evidence.
+   * Finalize the Task-end boundary after lease and run checks pass. Normal
+   * completion and discard require recycled Task context; emergency Force
+   * Release records `stopped` while retaining unresolved cleanup facts.
    */
   private completeTaskEnd(
     task: TaskItem,
-    terminal: 'completed' | 'cancelled',
+    terminal: 'completed' | 'stopped' | 'cancelled',
     env: EnvironmentInstance
   ) {
     task.lifecycle = terminal;
@@ -4305,7 +4306,9 @@ class StateManager {
       env.trafficLight = 'green';
       env.trafficLightReason = terminal === 'completed'
         ? 'Task completed cleanly · Scratch context recycled by worker · Lease released'
-        : 'Task discarded cleanly · Scratch context recycled by worker · Lease released';
+        : terminal === 'stopped'
+          ? 'Task stopped after emergency Force Release · Lease released'
+          : 'Task discarded cleanly · Scratch context recycled by worker · Lease released';
     }
     this.state.attentionItems = this.state.attentionItems.filter((a) => a.referenceId !== task.id);
   }
@@ -4543,7 +4546,7 @@ class StateManager {
   ): { success: boolean; reason?: string } {
     const task = this.state.tasks.find((t) => t.id === taskId);
     if (!task) return { success: false, reason: 'Task not found.' };
-    if (task.lifecycle === 'completed' || task.lifecycle === 'cancelled' || task.lifecycle === 'rejected' || task.lifecycle === 'withdrawn') {
+    if (task.lifecycle === 'completed' || task.lifecycle === 'stopped' || task.lifecycle === 'cancelled' || task.lifecycle === 'rejected' || task.lifecycle === 'withdrawn') {
       const reason = `Cannot revise completed Task #${taskId}: terminal Task content is immutable.`;
       this.notify(reason);
       return { success: false, reason };
@@ -4668,7 +4671,7 @@ class StateManager {
     // intentional admission hold, so it is a valid validation surface too.
     const leadEligibility = this.evaluateTaskLeadEligibility(task);
     if (!leadEligibility.success) {
-      if (task.lifecycle !== 'proposed' && task.lifecycle !== 'completed' && task.lifecycle !== 'cancelled') {
+      if (task.lifecycle !== 'proposed' && task.lifecycle !== 'completed' && task.lifecycle !== 'stopped' && task.lifecycle !== 'cancelled') {
         this.keepTaskBlockedForLeadSelection(task, leadEligibility.reason ?? 'Task lead is unavailable.');
       }
       const reason = `Cannot validate Task #${taskId}: ${leadEligibility.reason} Human lead replacement is required.`;
@@ -4783,7 +4786,7 @@ class StateManager {
     const task = this.state.tasks.find((t) => t.id === taskId);
     if (!task) return { success: false, reason: 'Task not found.' };
     if (task.lifecycle === 'cancelled') return { success: true };
-    if (task.lifecycle === 'completed' || task.lifecycle === 'rejected' || task.lifecycle === 'withdrawn') {
+    if (task.lifecycle === 'completed' || task.lifecycle === 'stopped' || task.lifecycle === 'rejected' || task.lifecycle === 'withdrawn') {
       const reason = `Cannot discard Task #${taskId}: terminal Task lifecycle is ${task.lifecycle}.`;
       this.notify(reason);
       return { success: false, reason };
@@ -4991,7 +4994,7 @@ class StateManager {
       unresolvedFacts,
       risksAcknowledged: true,
     };
-    this.completeTaskEnd(task, 'cancelled', env);
+    this.completeTaskEnd(task, 'stopped', env);
     env.trafficLightReason = `Force Released by Operator: "${reason}". Environment reassignable.`;
     env.forcedReleaseRecord = {
       actor: 'Operator (Human Emergency Force Release)',
@@ -5003,7 +5006,7 @@ class StateManager {
     this.state.attentionItems = this.state.attentionItems.filter((a) => a.referenceId !== taskId && a.referenceId !== envId);
     this.closeInspector();
 
-    this.notify(`EMERGENCY FORCE RELEASE authorized by Operator. Task #${taskId} cancelled with permanent forced release disposition. Environment ${envId} reassignable.`);
+    this.notify(`EMERGENCY FORCE RELEASE authorized by Operator. Task #${taskId} stopped with permanent forced release facts. Environment ${envId} reassignable.`);
     return { success: true };
   }
 
@@ -5873,6 +5876,7 @@ class StateManager {
         t.projectId === projectId &&
         t.taskLeadId === memberId &&
         t.lifecycle !== 'completed' &&
+        t.lifecycle !== 'stopped' &&
         t.lifecycle !== 'cancelled' &&
         t.lifecycle !== 'rejected' &&
         t.lifecycle !== 'withdrawn'

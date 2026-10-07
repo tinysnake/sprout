@@ -55,6 +55,7 @@ function build(options: {
   onInterrupt?: () => void;
   projects?: readonly Project[];
   agent?: AgentDefinition;
+  taskContext?: boolean;
 }) {
   const pool = new EnvironmentPool({
     definitions: [definition],
@@ -84,6 +85,7 @@ function build(options: {
     pool,
     store,
     leaseTtlMs: 60_000,
+    ...(options.taskContext ? { tasks: { prompt: async ({ prompt }: { readonly taskId: string; readonly prompt: string }) => prompt, link: async () => {} } } : {}),
   });
   return { orchestrator, adapter, pool, store, registry };
 }
@@ -213,10 +215,56 @@ test('the user can stop a running run and the lease is released', async () => {
   const stopped = await orchestrator.stop(id);
 
   assert.equal(interrupted, true, 'the adapter received an interrupt');
-  assert.equal(stopped.status, 'interrupted');
+  assert.equal(stopped.status, 'stopped', 'an intentional Human stop is distinct from unexpected interruption');
   assert.equal(stopped.result?.status, 'interrupted');
   assert.equal(pool.activeLease('mac-mini-1'), undefined);
-  assert.equal((await orchestrator.waitFor(id)).status, 'interrupted');
+  assert.equal((await orchestrator.waitFor(id)).status, 'stopped');
+});
+
+
+test('a Chat interruption settles with its product reason and releases the lease before another run is admitted', async () => {
+  const { orchestrator, pool } = build({
+    turns: [
+      { events: [{ type: 'notice', text: 'working' }], result: completed, settleAfterMs: 5_000 },
+      { events: successEvents, result: completed },
+    ],
+  });
+
+  const first = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'long chat run', projectId: 'project-sprout' });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const interrupted = await orchestrator.interrupt(first.id);
+
+  assert.equal(interrupted.status, 'interrupted');
+  assert.equal(interrupted.interruptionReason, 'human-stop');
+  assert.equal(pool.leases().find((lease) => lease.runId === first.id)?.state, 'released');
+  const next = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'next message', projectId: 'project-sprout' });
+  assert.equal((await orchestrator.waitFor(next.id)).status, 'completed');
+});
+
+
+test('Chat interruption refuses Task runs and leaves their Task-held lease to Task controls', async () => {
+  let interrupted = false;
+  const { orchestrator, pool } = build({
+    taskContext: true,
+    onInterrupt: () => { interrupted = true; },
+    turns: [{ events: [{ type: 'notice', text: 'task work' }], result: completed, settleAfterMs: 5_000 }],
+  });
+  const reserved = pool.acquireLease({
+    instanceId: 'mac-mini-1', capability: 'agent-run', holderId: 'task-1', taskId: 'task-1', ttlMs: 60_000,
+  });
+  assert.ok(reserved.ok);
+  const { id } = await orchestrator.submit({
+    agentId: 'agent-scout', prompt: 'task work', projectId: 'project-sprout', taskId: 'task-1',
+    environmentInstanceId: 'mac-mini-1', environmentLeaseId: reserved.lease.id,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  await assert.rejects(orchestrator.interrupt(id), /Task runs are controlled from Tasks/);
+  assert.equal(interrupted, false, 'Chat interruption never reaches the Task engine session');
+  assert.equal(pool.getLease(reserved.lease.id)?.state, 'active');
+  assert.equal((await orchestrator.stop(id)).status, 'stopped', 'Task controls retain the existing stop outcome');
+  assert.equal(pool.getLease(reserved.lease.id)?.state, 'active', 'settling a nested run does not release the Task-held lease');
 });
 
 

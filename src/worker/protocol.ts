@@ -15,6 +15,7 @@ import type { AgentRunEvent, EngineTurnResult, StandingInstructionsChannel, Stre
  */
 
 export const WORKER_METHODS = {
+  taskGroupMessage: 'agent/task-group-message',
   /** Identify the worker and the engines it can host. */
   info: 'worker/info',
   /** Execute the Worker-owned, non-inference readiness probe. */
@@ -170,6 +171,7 @@ export interface WorkerInfo {
 }
 
 export interface StartSessionParams {
+  readonly taskGroupMessagesEnabled?: boolean;
   /** Which engine the worker should host for this session. */
   readonly engine: string;
   readonly agentId: string;
@@ -210,6 +212,9 @@ export interface TaskContextMaterialization {
   readonly taskTitle: string;
   readonly taskGoal: string;
   readonly taskConstraints: readonly string[];
+  /** Bound proposal snapshot fields, absent only for legacy Tasks. */
+  readonly taskValidationCriteria?: readonly string[];
+  readonly taskContentVersion?: number;
   readonly taskStatus: string;
   readonly priorRunSummaries: string;
   readonly agentId: string;

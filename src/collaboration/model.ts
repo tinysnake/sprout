@@ -1,52 +1,100 @@
 /**
- * The M1 collaboration vocabulary (ticket #26, from the #25 prototype).
+ * The collaboration vocabulary: Messages, Project events, and wake requests.
  *
- * This is the production Message and wake vocabulary. It mirrors `docs/goal.md`
- * and `CONTEXT.md`, and lives entirely in the core: nothing here is depended on
- * by the engine port or the environment-worker protocol (ADR-0003). Persistence
- * is behind `CollaborationStore` (ADR-0002), with SQLite as the M1 backend.
+ * This is the production Message, Project-event, and wake vocabulary. It
+ * mirrors `docs/goal.md` and `CONTEXT.md`, and lives entirely in the core:
+ * nothing here is depended on by the engine port or the environment-worker
+ * protocol (ADR-0003). Persistence is behind `CollaborationStore` (ADR-0002),
+ * with SQLite as the backend.
  *
- * - A **Message** is conversation on a channel. It is deliberately not a Task:
- *   a Task is durable multi-run work with state, while a Message is a single
- *   durable piece of conversation.
- * - A **Wake request** is the durable, per-recipient decision that one Message
- *   should start one Agent run. It is what makes "persistence-before-wake" and
- *   idempotent retry observable.
+ * - A **Message** is one durable piece of Human- or Agent-authored conversation
+ *   in exactly one conversation scope: the Project channel, one Project-scoped
+ *   direct conversation, one Working group channel, or one Task group (#95,
+ *   #96, #210). It is
+ *   deliberately not a Task, a run event, or a system-produced Project event.
+ * - A **Project event** is a durable system-produced fact exposed in a
+ *   Project. Every event declares one **routing disposition** (ADR-0007); only
+ *   an `addressed` event routes deterministically, and publication without a
+ *   valid disposition is refused.
+ * - A **Wake request** is the durable, per-recipient decision that one input
+ *   (a Message or a Project event) should start one Agent run. It is what
+ *   makes "persistence-before-wake" and idempotent retry observable.
  * - A **reply** is not a separate entity: it is an Agent-authored Message whose
- *   `inReplyTo` points at the input it answers. Keeping one durable conversation
- *   unit is what stops the run's raw events or private reasoning from becoming a
- *   parallel, unsanitized conversation.
+ *   `inReplyTo` points at the Message it answers (an event-triggered reply
+ *   lands on the Project channel with no `inReplyTo`). Keeping one durable
+ *   conversation unit is what stops the run's raw events or private reasoning
+ *   from becoming a parallel, unsanitized conversation.
+ *
+ * Routing here is deterministic by construction (ADR-0007): the wake contract
+ * in `wake.ts` never consults a model. Wake-model-assisted judgement over
+ * unaddressed inputs is the routing batch's job (#97): an eligible input
+ * collects into a durable window and only the frozen batch reaches a model.
  */
 
-/** Which channel a Message was posted on. */
-export type MessageChannel = 'direct' | 'project';
+/**
+ * Which conversation scope a Message belongs to.
+ *
+ * The value mirrors `ConversationScopeKind`: a Message lives in exactly one of
+ * the three Project-owned communication contexts (#95, ADR-0008).
+ */
+export type MessageChannel = 'project' | 'direct' | 'working-group' | 'task-group';
 
 /** Who authored a Message. */
 export type AuthorKind = 'human' | 'agent';
+
+/** The bounded message category available on Task-group posts. */
 
 export interface MessageAuthor {
   readonly id: string;
   readonly kind: AuthorKind;
 }
 
+/** Server-stamped routing context attached to every Task-group Message. */
+export interface TaskGroupMessageEnvelope {
+  readonly kind: TaskGroupMessageKind;
+  readonly sender: MessageAuthor;
+  readonly taskId: string;
+  readonly runId?: string;
+  /** The Task is the current work item in this conversation scope. */
+  readonly workItemId: string;
+  readonly groupId: string;
+  /** Ordered exact @mentions parsed from the free-form body. */
+  readonly to: readonly string[];
+}
+
 /**
  * One durable piece of conversation.
  *
  * The minimum fields that make causality from Message to reply reconstructible:
- * the channel it belongs to, who wrote it, what it says, whom it addresses, and
- * an idempotency key so a repeated delivery cannot create a second Message.
+ * the conversation scope it belongs to, who wrote it, what it says, whom it
+ * addresses, and an idempotency key so a repeated delivery cannot create a
+ * second Message.
+ *
+ * `scopeId` is the durable conversation-scope identity (#95). An empty string
+ * is only ever a migrated legacy row written before scopes existed: it remains
+ * readable history and can never receive a new Message, because delivery
+ * resolves its scope first.
  *
  * Deliberately absent: the agent run's events, tool output, and raw reasoning.
  * Those stay in the run record (`AgentRun.events`) and never enter conversation.
  */
+export type TaskGroupMessageKind = 'status' | 'question' | 'escalation' | 'handoff' | 'assignment';
+
 export interface Message {
   readonly id: string;
   readonly projectId: string;
+  /** The conversation scope this Message was posted to. */
+  readonly scopeId: string;
+  /** The kind of that scope; redundant with the scope record, kept for reads. */
   readonly channel: MessageChannel;
   readonly author: MessageAuthor;
   readonly body: string;
-  /** Explicit addressees for a direct Message; empty for a project Message. */
+  /** Task-group routing intent and lifecycle label; omission means status. */
+  readonly kind?: TaskGroupMessageKind;
+  /** Explicit addressees for a direct Message; empty for channel Messages. */
   readonly recipients: readonly string[];
+  /** Present on Task-group Messages; stamped by the channel write path. */
+  readonly envelope?: TaskGroupMessageEnvelope;
   /** Idempotency key: repeated delivery of the same key yields one Message. */
   readonly deliveryKey: string;
   /** The Message this one answers, when it is a reply. */
@@ -55,24 +103,27 @@ export interface Message {
 }
 
 /**
- * Why one recipient was woken.
+ * Why one recipient was woken, or why an input woke nobody.
  *
- * Every value is deterministic except `wake-model` and `wake-model-fail-open`,
- * which are the only outcomes that depend on judgement. Keeping the reason
- * durable is what lets a human see whether an addressed Message was woken
- * directly or routed by the low-cost model.
+ * Every value is deterministic: the plan that produces these never consults a
+ * model (ADR-0007). Keeping the reason durable is what lets a human see
+ * exactly why an input did or did not start a run.
  */
 export type WakeReason =
-  /** The Message named this agent as a direct recipient. */
+  | 'task-lead'
+  | 'task-assignment'
+  /** The input named this agent as a direct recipient. */
   | 'direct-recipient'
-  /** The Message mentioned this agent by exact `@id` on the project channel. */
+  /** The input mentioned this agent by exact whole-token `@id`. */
   | 'agent-mention'
-  /** The Message broadcast to the whole project (`@all`). */
+  /** The input broadcast to the whole Project (`@all`). */
   | 'broadcast'
-  /** Unaddressed on the project channel; the wake model chose to engage. */
-  | 'wake-model'
-  /** Unaddressed and the wake model failed; failed open to an extra wake. */
-  | 'wake-model-fail-open';
+  /** The Project event declared this agent as its responsible target. */
+  | 'event-addressed'
+  /** The wake model selected this agent for one frozen routing batch (#97). */
+  | 'routing-model'
+  /** No deterministic addressing form applied; the input stayed durable. */
+  | 'unaddressed';
 
 /** The durable lifecycle of one wake request. */
 export type WakeStatus =
@@ -80,27 +131,33 @@ export type WakeStatus =
   | 'pending'
   /** Exactly one Agent run was admitted for this wake request. */
   | 'admitted'
-  /** The wake model deliberately did not engage; recorded, never silent. */
+  /** Routing deliberately woke nobody; recorded, never silent. */
   | 'suppressed'
   /** The wake could not be delivered (unknown member, no environment). */
   | 'failed';
 
 /**
- * The durable per-recipient decision that a Message should start a run.
+ * The durable per-recipient decision that an input should start a run.
  *
- * The `(messageId, agentId)` pair is the idempotency identity: a repeated
- * delivery of the same Message reuses the existing wake request instead of
- * admitting a second run.
+ * `inputId` names the causal input: a Message id, or a Project event id for an
+ * `addressed` event. For a model-assisted wake it is the routing batch id and
+ * `batchId` is set: a batch wake is identified by `(batch, Agent)`, while the
+ * deterministic Message-and-Agent identity stays unchanged (ADR-0007).
+ * The `(inputId, agentId)` pair is the idempotency identity: a repeated
+ * delivery of the same input — or a repeated settlement of the same batch —
+ * reuses the existing wake request instead of admitting a second run.
  */
 export interface WakeRequest {
   readonly id: string;
-  readonly messageId: string;
+  readonly inputId: string;
   readonly projectId: string;
   readonly agentId: string;
   readonly reason: WakeReason;
   readonly status: WakeStatus;
-  /** Always `${messageId}:${agentId}`; the store enforces uniqueness. */
+  /** Always `${inputId}:${agentId}`; the store enforces uniqueness. */
   readonly idempotencyKey: string;
+  /** The frozen routing batch this wake came from, when it is model-assisted. */
+  readonly batchId?: string;
   /** The Agent run admitted for this wake, once one was. */
   readonly runId?: string;
   /** Why a wake was suppressed or failed, when there is something to say. */
@@ -127,31 +184,21 @@ export interface WakeObservation {
   readonly detail: string;
 }
 
-/** The pure result of applying the wake contract to one Message. */
+/** The pure result of applying the wake contract to one input. */
 export interface WakePlan {
-  readonly messageId: string;
+  /** The Message or Project event this plan was computed for. */
+  readonly inputId: string;
   readonly decisions: readonly WakeDecision[];
   readonly observations: readonly WakeObservation[];
-}
-
-/** What the low-cost wake model decided about an unaddressed project Message. */
-export interface WakeModelVerdict {
-  readonly engage: boolean;
-  readonly detail?: string;
-}
-
-/**
- * The low-cost judgement the M1 wake model performs.
- *
- * It only ever decides *whether* an unaddressed project-channel Message should
- * engage the project. It never picks recipients and never sees an addressed
- * Message: exact mentions, direct recipients, and broadcasts are deterministic.
- * Failing to construct one (or an error inside it) is modelled as a thrown
- * error and handled by the wake contract, which fails open.
- */
-export interface WakeModel {
-  decide(input: {
-    readonly message: Message;
-    readonly memberIds: readonly string[];
-  }): Promise<WakeModelVerdict>;
+  /**
+   * True when this unaddressed input is eligible for the next routing batch
+   * (#97): no deterministic address applied, the scope is eligible (Project
+   * channel or Working group channel; never a direct conversation), and the
+   * Project's wake policy is `wake-model-assisted`.
+   *
+   * Under `explicit-only` an unaddressed input instead records the durable
+   * suppressed observation, and a deterministically addressed input is never
+   * batch-eligible — explicit addresses bypass the window entirely.
+   */
+  readonly batchEligible?: boolean;
 }

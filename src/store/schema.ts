@@ -25,13 +25,13 @@ import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 18;
+export const CURRENT_SCHEMA_VERSION = 30;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 18;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 30;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -213,6 +213,9 @@ export class MigrationSafetyCopyError extends SchemaError {
   }
 }
 
+/** Only fixed, non-sensitive validation guidance may cross the migration error boundary. */
+class UsageMigrationValidationError extends Error {}
+
 /** Error thrown when forward migration fails during execution. */
 export class SchemaMigrationError extends SchemaError {
   readonly fromVersion: number;
@@ -224,6 +227,7 @@ export class SchemaMigrationError extends SchemaError {
     readonly safetyCopyPath?: string | undefined;
     readonly fromVersion: number;
     readonly toVersion: number;
+    readonly validationGuidance?: string | undefined;
   }) {
     const sanitizedDb = sanitizePath(input.databasePath);
     const sanitizedCopy = input.safetyCopyPath ? sanitizePath(input.safetyCopyPath) : undefined;
@@ -234,6 +238,7 @@ export class SchemaMigrationError extends SchemaError {
     const guidance =
       `Schema migration from v${input.fromVersion} to v${input.toVersion} failed and was rolled back. ` +
       `The database was not modified.${copyNotice} ` +
+      (input.validationGuidance ? `${input.validationGuidance} ` : '') +
       `Please ensure the service is stopped, inspect host diagnostics, verify database integrity, and resolve the issue or restore from the pre-migration safety copy before restarting Sprout.`;
     super(message, { guidance, databasePath: input.databasePath });
     this.name = 'SchemaMigrationError';
@@ -846,6 +851,474 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
       `);
     },
   },
+  {
+    fromVersion: 18,
+    toVersion: 19,
+    name: 'scoped_messages_and_project_events',
+    migrate: (db) => {
+      // Messages now live in exactly one conversation scope (#96), and Project
+      // events are durable system-produced facts with a required routing
+      // disposition (ADR-0007). Wake requests and observations key on the
+      // causal *input* — a Message id or a Project event id — so `message_id`
+      // becomes `input_id`.
+      //
+      // Backfill: a legacy Project-channel Message's scope is the invariant
+      // Project channel (`channel-<project>`), which is exact. A legacy direct
+      // Message predates scope identity (its pair is not recoverable from the
+      // recipients alone), so it keeps an empty scope id: readable history
+      // that can never receive a new Message, because delivery resolves its
+      // scope first. No credential, hostname, address, or path has a column.
+      const messages = db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'collaboration_messages'")
+        .get();
+      if (messages !== undefined) {
+        const columns = db.prepare('PRAGMA table_info(collaboration_messages)').all() as unknown as readonly { name: string }[];
+        if (!columns.some((column) => column.name === 'scope_id')) {
+          db.exec("ALTER TABLE collaboration_messages ADD COLUMN scope_id TEXT NOT NULL DEFAULT '';");
+        }
+        db.exec(
+          "UPDATE collaboration_messages SET scope_id = 'channel-' || project_id " +
+            "WHERE channel = 'project' AND scope_id = '';",
+        );
+      }
+      for (const table of ['collaboration_wake_requests', 'collaboration_observations']) {
+        const exists = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+        if (exists === undefined) continue;
+        const columns = db.prepare(`PRAGMA table_info(${table})`).all() as unknown as readonly { name: string }[];
+        if (columns.some((column) => column.name === 'message_id')) {
+          db.exec(`ALTER TABLE ${table} RENAME COLUMN message_id TO input_id;`);
+        }
+      }
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS project_events (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          summary TEXT NOT NULL,
+          detail TEXT,
+          producer_id TEXT NOT NULL,
+          producer_kind TEXT NOT NULL,
+          disposition TEXT NOT NULL,
+          responsible_agents TEXT NOT NULL,
+          delivery_key TEXT NOT NULL UNIQUE,
+          origin_scope_ids TEXT NOT NULL DEFAULT '[]',
+          origin_message_id TEXT,
+          created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS project_events_project
+          ON project_events(project_id);
+      `);
+    },
+  },
+  {
+    fromVersion: 19,
+    toVersion: 20,
+    name: 'routing_windows_batches_attempts',
+    migrate: (db) => {
+      // Wake-model-assisted routing (#97): durable collection windows with
+      // cursor/deadline, frozen chronological batches with their bounded
+      // context snapshot and manifest, append-only attempts, and per-input
+      // outcomes. A model-assisted WakeRequest also names its batch, so the
+      // wake table gains a nullable batch_id. No credential, hostname,
+      // address, or path has a column; context and excerpts hold only
+      // Project-shared conversation content already durable in this database.
+      const wakeTable = db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'collaboration_wake_requests'")
+        .get();
+      if (wakeTable !== undefined) {
+        const columns = db
+          .prepare('PRAGMA table_info(collaboration_wake_requests)')
+          .all() as unknown as readonly { name: string }[];
+        if (!columns.some((column) => column.name === 'batch_id')) {
+          db.exec('ALTER TABLE collaboration_wake_requests ADD COLUMN batch_id TEXT;');
+        }
+      }
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS collaboration_routing_windows (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          opened_at INTEGER NOT NULL,
+          deadline_at INTEGER NOT NULL,
+          interval_ms INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          cursor TEXT,
+          input_count INTEGER NOT NULL DEFAULT 0,
+          closed_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS collaboration_routing_windows_project
+          ON collaboration_routing_windows(project_id, status);
+        CREATE TABLE IF NOT EXISTS collaboration_window_inputs (
+          window_id TEXT NOT NULL,
+          input_id TEXT NOT NULL,
+          joined_at INTEGER NOT NULL,
+          PRIMARY KEY (window_id, input_id)
+        );
+        CREATE TABLE IF NOT EXISTS collaboration_routing_batches (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          window_id TEXT NOT NULL,
+          split_index INTEGER NOT NULL,
+          split_count INTEGER NOT NULL,
+          cutoff_at INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          bounds TEXT NOT NULL,
+          manifest TEXT NOT NULL,
+          context TEXT NOT NULL,
+          error TEXT,
+          created_at INTEGER NOT NULL,
+          settled_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS collaboration_routing_batches_project
+          ON collaboration_routing_batches(project_id);
+        CREATE TABLE IF NOT EXISTS collaboration_routing_batch_inputs (
+          batch_id TEXT NOT NULL,
+          input_id TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          excerpt TEXT NOT NULL,
+          truncated INTEGER NOT NULL,
+          excerpt_chars INTEGER NOT NULL,
+          content_chars INTEGER NOT NULL,
+          PRIMARY KEY (batch_id, input_id)
+        );
+        CREATE TABLE IF NOT EXISTS collaboration_routing_attempts (
+          id TEXT PRIMARY KEY,
+          batch_id TEXT NOT NULL,
+          attempt_number INTEGER NOT NULL,
+          model_id TEXT NOT NULL,
+          started_at INTEGER NOT NULL,
+          finished_at INTEGER NOT NULL,
+          status TEXT NOT NULL,
+          error_kind TEXT,
+          error_detail TEXT
+        );
+        CREATE INDEX IF NOT EXISTS collaboration_routing_attempts_batch
+          ON collaboration_routing_attempts(batch_id);
+        CREATE TABLE IF NOT EXISTS collaboration_routing_outcomes (
+          batch_id TEXT NOT NULL,
+          input_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          assignments TEXT NOT NULL,
+          rationale TEXT,
+          detail TEXT,
+          settled_at INTEGER NOT NULL,
+          PRIMARY KEY (batch_id, input_id)
+        );
+        CREATE INDEX IF NOT EXISTS collaboration_routing_outcomes_input
+          ON collaboration_routing_outcomes(input_id);
+      `);
+    },
+  },
+  {
+    fromVersion: 20,
+    toVersion: 21,
+    name: 'routing_attempt_recovery',
+    migrate: (db) => {
+      if (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'collaboration_routing_attempts'").get() === undefined) return;
+      const columns = db.prepare('PRAGMA table_info(collaboration_routing_attempts)').all() as unknown as readonly { name: string }[];
+      if (!columns.some((column) => column.name === 'judgement')) {
+        db.exec('ALTER TABLE collaboration_routing_attempts ADD COLUMN judgement TEXT;');
+      }
+      // v20 did not constrain attempt numbers. Repeated restarts could record
+      // several calls with the same number. Preserve every historical call and
+      // its status, assigning chronological ordinals only in affected batches.
+      // Recovery counts rows, so no duplicate can create an unearned retry.
+      db.exec(`
+        WITH ranked AS (
+          SELECT id, ROW_NUMBER() OVER (
+            PARTITION BY batch_id ORDER BY started_at, rowid
+          ) AS ordinal
+          FROM collaboration_routing_attempts
+          WHERE batch_id IN (
+            SELECT batch_id FROM collaboration_routing_attempts
+            GROUP BY batch_id, attempt_number HAVING COUNT(*) > 1
+          )
+        )
+        UPDATE collaboration_routing_attempts
+          SET attempt_number = (SELECT ordinal FROM ranked WHERE ranked.id = collaboration_routing_attempts.id)
+          WHERE id IN (SELECT id FROM ranked);
+      `);
+      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS collaboration_routing_attempt_number
+        ON collaboration_routing_attempts(batch_id, attempt_number);`);
+    },
+  },
+  {
+    fromVersion: 21,
+    toVersion: 22,
+    name: 'task_proposals_and_content_versions',
+    migrate(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS task_proposals (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          document TEXT NOT NULL,
+          revision INTEGER NOT NULL CHECK (revision >= 1)
+        );
+        CREATE INDEX IF NOT EXISTS task_proposals_project ON task_proposals(project_id);
+      `);
+    },
+  },
+  {
+    fromVersion: 22,
+    toVersion: 23,
+    name: 'task_proposal_working_group_provenance',
+    migrate(db) {
+      const table = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'task_proposals'").get();
+      if (table === undefined) return;
+      const columns = db.prepare('PRAGMA table_info(task_proposals)').all() as unknown as readonly { name: string }[];
+      if (!columns.some(column => column.name === 'working_group_id')) {
+        db.exec('ALTER TABLE task_proposals ADD COLUMN working_group_id TEXT;');
+      }
+      if (!columns.some(column => column.name === 'source_message_id')) {
+        db.exec('ALTER TABLE task_proposals ADD COLUMN source_message_id TEXT;');
+      }
+    },
+  },
+  {
+    fromVersion: 23,
+    toVersion: 24,
+    name: 'operational_diagnostics',
+    migrate: (db) => db.exec(`CREATE TABLE IF NOT EXISTS operational_events (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      subject TEXT NOT NULL, kind TEXT NOT NULL, state TEXT NOT NULL, at INTEGER NOT NULL
+    ); CREATE INDEX IF NOT EXISTS operational_events_subject ON operational_events(subject, kind, sequence);`),
+  },
+  {
+    fromVersion: 24,
+    toVersion: 25,
+    name: 'usage_activities_and_observations',
+    migrate: (db) => {
+      // Usage activities represent work-model runs and wake-model routing attempts.
+      // Observations are append-only facts with detailed token dimensions, Sprout
+      // wall duration, independent billed cost and API-equivalent estimates,
+      // valuation provenance, and supersession history (ADR-0010, #105).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS usage_activities (
+          id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL,
+          run_id TEXT,
+          attempt_id TEXT,
+          batch_id TEXT,
+          project_id TEXT,
+          task_id TEXT,
+          agent_id TEXT,
+          environment_instance_id TEXT,
+          engine TEXT NOT NULL,
+          model TEXT NOT NULL,
+          status TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          settled_at INTEGER,
+          wall_duration_ms INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS usage_activities_kind_idx ON usage_activities (kind);
+        CREATE INDEX IF NOT EXISTS usage_activities_run_id_idx ON usage_activities (run_id);
+        CREATE INDEX IF NOT EXISTS usage_activities_attempt_id_idx ON usage_activities (attempt_id);
+        CREATE INDEX IF NOT EXISTS usage_activities_project_id_idx ON usage_activities (project_id);
+        CREATE INDEX IF NOT EXISTS usage_activities_task_id_idx ON usage_activities (task_id);
+        CREATE INDEX IF NOT EXISTS usage_activities_agent_id_idx ON usage_activities (agent_id);
+        CREATE INDEX IF NOT EXISTS usage_activities_model_idx ON usage_activities (model);
+        CREATE INDEX IF NOT EXISTS usage_activities_settled_at_idx ON usage_activities (settled_at);
+
+        CREATE TABLE IF NOT EXISTS usage_observations (
+          id TEXT PRIMARY KEY,
+          activity_id TEXT NOT NULL,
+          observed_at INTEGER NOT NULL,
+          source TEXT NOT NULL,
+          source_version TEXT NOT NULL,
+          completeness TEXT NOT NULL,
+          input_tokens INTEGER,
+          uncached_input_tokens INTEGER,
+          cached_input_tokens INTEGER,
+          cache_write_input_tokens INTEGER,
+          output_tokens INTEGER,
+          reasoning_output_tokens INTEGER,
+          total_tokens INTEGER,
+          wall_duration_ms INTEGER NOT NULL,
+          engine_turn_duration_ms INTEGER,
+          billed_cost_status TEXT NOT NULL,
+          billed_usd_micros INTEGER,
+          billed_reason TEXT,
+          cost_estimate_status TEXT NOT NULL,
+          cost_estimate_usd_micros INTEGER,
+          valuation_provenance TEXT,
+          price_source TEXT,
+          price_source_version TEXT,
+          price_dimensions TEXT,
+          valued_at INTEGER,
+          cost_estimate_reason TEXT,
+          billing_basis TEXT NOT NULL,
+          supersedes_observation_id TEXT,
+          superseded_at INTEGER,
+          supersession_reason TEXT,
+          is_effective INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE INDEX IF NOT EXISTS usage_observations_activity_idx ON usage_observations (activity_id);
+        CREATE INDEX IF NOT EXISTS usage_observations_effective_idx ON usage_observations (activity_id, is_effective);
+      `);
+    },
+  },
+  {
+    fromVersion: 25,
+    toVersion: 26,
+    name: 'usage_activity_attribution_constraints',
+    migrate: (db) => {
+      // Reject rather than silently rewrite durable attribution or append-only
+      // monetary history. A reviewed repair must preserve correction provenance.
+      const invalidActivity = db.prepare(`SELECT 1 FROM usage_activities WHERE NOT (
+        (kind = 'agent_run' AND typeof(run_id) = 'text' AND length(run_id) > 0
+          AND typeof(agent_id) = 'text' AND length(agent_id) > 0 AND attempt_id IS NULL AND batch_id IS NULL)
+        OR
+        (kind = 'routing_attempt' AND run_id IS NULL AND typeof(attempt_id) = 'text' AND length(attempt_id) > 0
+          AND typeof(batch_id) = 'text' AND length(batch_id) > 0
+          AND typeof(project_id) = 'text' AND length(project_id) > 0
+          AND task_id IS NULL AND agent_id IS NULL AND environment_instance_id IS NULL)
+      ) LIMIT 1`).get();
+      if (invalidActivity !== undefined) {
+        throw new UsageMigrationValidationError('Invalid legacy usage activity attribution. Arrange a reviewed data repair of usage_activities before retrying; do not discard durable history.');
+      }
+      const invalidCost = db.prepare(`SELECT 1 FROM usage_observations WHERE
+        (cost_estimate_status = 'available' AND (
+          cost_estimate_usd_micros IS NULL OR typeof(cost_estimate_usd_micros) != 'integer'
+          OR cost_estimate_usd_micros < 0 OR cost_estimate_usd_micros > 9007199254740991
+          OR valuation_provenance IS NULL
+          OR valuation_provenance NOT IN ('provider_estimated', 'harness_calculated', 'locally_estimated')
+        )) OR (billed_cost_status = 'available' AND (
+          billed_usd_micros IS NULL OR typeof(billed_usd_micros) != 'integer'
+          OR billed_usd_micros < 0 OR billed_usd_micros > 9007199254740991
+        )) LIMIT 1`).get();
+      if (invalidCost !== undefined) {
+        throw new UsageMigrationValidationError('Invalid legacy usage observation cost facts. Arrange a reviewed data repair of usage_observations preserving source and correction history before retrying.');
+      }
+      db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS usage_activities_run_id_unique
+        ON usage_activities (run_id) WHERE run_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS usage_activities_attempt_id_unique
+        ON usage_activities (attempt_id) WHERE attempt_id IS NOT NULL;
+
+      CREATE TRIGGER IF NOT EXISTS usage_activity_attribution_insert
+      BEFORE INSERT ON usage_activities
+      WHEN NOT (
+        (NEW.kind = 'agent_run' AND typeof(NEW.run_id) = 'text' AND length(NEW.run_id) > 0
+          AND typeof(NEW.agent_id) = 'text' AND length(NEW.agent_id) > 0
+          AND NEW.attempt_id IS NULL AND NEW.batch_id IS NULL)
+        OR
+        (NEW.kind = 'routing_attempt' AND NEW.run_id IS NULL
+          AND typeof(NEW.attempt_id) = 'text' AND length(NEW.attempt_id) > 0
+          AND typeof(NEW.batch_id) = 'text' AND length(NEW.batch_id) > 0
+          AND typeof(NEW.project_id) = 'text' AND length(NEW.project_id) > 0
+          AND NEW.task_id IS NULL AND NEW.agent_id IS NULL AND NEW.environment_instance_id IS NULL)
+      )
+      BEGIN SELECT RAISE(ABORT, 'invalid usage activity attribution'); END;
+
+      CREATE TRIGGER IF NOT EXISTS usage_activity_attribution_update
+      BEFORE UPDATE ON usage_activities
+      WHEN NOT (
+        (NEW.kind = 'agent_run' AND typeof(NEW.run_id) = 'text' AND length(NEW.run_id) > 0
+          AND typeof(NEW.agent_id) = 'text' AND length(NEW.agent_id) > 0
+          AND NEW.attempt_id IS NULL AND NEW.batch_id IS NULL)
+        OR
+        (NEW.kind = 'routing_attempt' AND NEW.run_id IS NULL
+          AND typeof(NEW.attempt_id) = 'text' AND length(NEW.attempt_id) > 0
+          AND typeof(NEW.batch_id) = 'text' AND length(NEW.batch_id) > 0
+          AND typeof(NEW.project_id) = 'text' AND length(NEW.project_id) > 0
+          AND NEW.task_id IS NULL AND NEW.agent_id IS NULL AND NEW.environment_instance_id IS NULL)
+      )
+      BEGIN SELECT RAISE(ABORT, 'invalid usage activity attribution'); END;
+
+      CREATE TRIGGER IF NOT EXISTS usage_activity_identity_immutable
+      BEFORE UPDATE ON usage_activities
+      WHEN OLD.id IS NOT NEW.id OR OLD.kind IS NOT NEW.kind OR OLD.run_id IS NOT NEW.run_id
+        OR OLD.attempt_id IS NOT NEW.attempt_id OR OLD.batch_id IS NOT NEW.batch_id
+        OR OLD.project_id IS NOT NEW.project_id OR OLD.task_id IS NOT NEW.task_id
+        OR OLD.agent_id IS NOT NEW.agent_id OR OLD.environment_instance_id IS NOT NEW.environment_instance_id
+        OR OLD.engine IS NOT NEW.engine OR OLD.model IS NOT NEW.model OR OLD.created_at IS NOT NEW.created_at
+      BEGIN SELECT RAISE(ABORT, 'usage activity identity is immutable'); END;
+
+      CREATE TRIGGER IF NOT EXISTS usage_observation_cost_insert
+      BEFORE INSERT ON usage_observations
+      WHEN (NEW.cost_estimate_status = 'available' AND (
+        NEW.cost_estimate_usd_micros IS NULL OR typeof(NEW.cost_estimate_usd_micros) != 'integer' OR
+        NEW.cost_estimate_usd_micros < 0 OR NEW.cost_estimate_usd_micros > 9007199254740991 OR
+        NEW.valuation_provenance IS NULL OR
+        NEW.valuation_provenance NOT IN ('provider_estimated', 'harness_calculated', 'locally_estimated')
+      )) OR (NEW.billed_cost_status = 'available' AND (
+        NEW.billed_usd_micros IS NULL OR typeof(NEW.billed_usd_micros) != 'integer' OR
+        NEW.billed_usd_micros < 0 OR NEW.billed_usd_micros > 9007199254740991
+      ))
+      BEGIN SELECT RAISE(ABORT, 'invalid usage observation cost facts'); END;
+
+      CREATE TRIGGER IF NOT EXISTS usage_observation_cost_update
+      BEFORE UPDATE ON usage_observations
+      WHEN (NEW.cost_estimate_status = 'available' AND (
+        NEW.cost_estimate_usd_micros IS NULL OR typeof(NEW.cost_estimate_usd_micros) != 'integer' OR
+        NEW.cost_estimate_usd_micros < 0 OR NEW.cost_estimate_usd_micros > 9007199254740991 OR
+        NEW.valuation_provenance IS NULL OR
+        NEW.valuation_provenance NOT IN ('provider_estimated', 'harness_calculated', 'locally_estimated')
+      )) OR (NEW.billed_cost_status = 'available' AND (
+        NEW.billed_usd_micros IS NULL OR typeof(NEW.billed_usd_micros) != 'integer' OR
+        NEW.billed_usd_micros < 0 OR NEW.billed_usd_micros > 9007199254740991
+      ))
+      BEGIN SELECT RAISE(ABORT, 'invalid usage observation cost facts'); END;
+      `);
+    },
+  },
+  {
+    fromVersion: 26,
+    toVersion: 27,
+    name: 'collaboration_attention_resolutions',
+    migrate(db) {
+      db.exec(`CREATE TABLE IF NOT EXISTS collaboration_attention_resolutions (
+        source_kind TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        human_id TEXT NOT NULL,
+        resolved_at INTEGER NOT NULL,
+        source_version INTEGER NOT NULL,
+        PRIMARY KEY (source_kind, source_id)
+      );`);
+    },
+  },
+  {
+    fromVersion: 27,
+    toVersion: 28,
+    name: 'collaboration_read_markers',
+    migrate(db) {
+      db.exec(`CREATE TABLE IF NOT EXISTS collaboration_read_markers (
+        scope_id TEXT NOT NULL,
+        human_id TEXT NOT NULL,
+        message_id TEXT NOT NULL CHECK (length(message_id) > 0),
+        PRIMARY KEY (scope_id, human_id)
+      );`);
+    },
+  },
+  {
+    fromVersion: 28,
+    toVersion: 29,
+    name: 'task_group_message_intent',
+    migrate(db) {
+      const exists = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'collaboration_messages'").get();
+      if (exists === undefined) return;
+      const columns = db.prepare('PRAGMA table_info(collaboration_messages)').all() as unknown as readonly { name: string }[];
+      if (!columns.some((column) => column.name === 'message_kind')) {
+        db.exec("ALTER TABLE collaboration_messages ADD COLUMN message_kind TEXT NOT NULL DEFAULT 'status';");
+      }
+    },
+  },
+  {
+    fromVersion: 29,
+    toVersion: 30,
+    name: 'project_event_conversation_origins',
+    migrate(db) {
+      const table = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'project_events'").get();
+      if (table === undefined) return;
+      const columns = db.prepare('PRAGMA table_info(project_events)').all() as unknown as readonly { name: string }[];
+      if (!columns.some((column) => column.name === 'origin_scope_ids')) {
+        db.exec("ALTER TABLE project_events ADD COLUMN origin_scope_ids TEXT NOT NULL DEFAULT '[]';");
+      }
+      if (!columns.some((column) => column.name === 'origin_message_id')) {
+        db.exec('ALTER TABLE project_events ADD COLUMN origin_message_id TEXT;');
+      }
+    },
+  },
 ];
 
 /** Resolve even an adversarial candidate collision without exposing legacy keys. */
@@ -870,6 +1343,13 @@ function collisionSafeCatalogId(
   }
 }
 
+/** A completed schema transition that must be recorded with the schema commit. */
+export interface SchemaTransition {
+  readonly kind: 'initialized' | 'migrated';
+  readonly fromVersion: number;
+  readonly toVersion: number;
+}
+
 /** Options for database migration and initialization. */
 export interface MigrateDatabaseOptions {
   readonly filename: string;
@@ -880,6 +1360,8 @@ export interface MigrateDatabaseOptions {
     | ((sourceDb: DatabaseSync, sourceFilename: string, safetyCopyPath: string) => void)
     | undefined;
   readonly migrations?: readonly MigrationStep[] | undefined;
+  /** Synchronous durable fact writer, invoked inside the schema transaction. */
+  readonly recordSchemaTransition?: ((db: DatabaseSync, transition: SchemaTransition) => void) | undefined;
 }
 
 /**
@@ -936,9 +1418,22 @@ export function migrateOrInitializeDatabase(
   const currentVersion = getSchemaVersion(db);
   const empty = isDatabaseEmpty(db);
 
-  // 2. If empty, initialize directly at target version (no safety copy needed)
+  // 2. Initialize empty stores transactionally so schema version and its
+  // transition fact cannot be separated by a restart.
   if (empty) {
-    setSchemaVersion(db, targetVersion);
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      setSchemaVersion(db, targetVersion);
+      options.recordSchemaTransition?.(db, { kind: 'initialized', fromVersion: currentVersion, toVersion: targetVersion });
+      db.exec('COMMIT');
+    } catch (error) {
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        // preserve original error
+      }
+      throw error;
+    }
     return;
   }
 
@@ -996,8 +1491,9 @@ export function migrateOrInitializeDatabase(
       step.migrate(db);
       setSchemaVersion(db, step.toVersion);
     }
+    options.recordSchemaTransition?.(db, { kind: 'migrated', fromVersion: currentVersion, toVersion: targetVersion });
     db.exec('COMMIT');
-  } catch {
+  } catch (error) {
     try {
       db.exec('ROLLBACK');
     } catch {
@@ -1008,6 +1504,7 @@ export function migrateOrInitializeDatabase(
       safetyCopyPath: options.filename !== ':memory:' ? safetyCopyPath : undefined,
       fromVersion: currentVersion,
       toVersion: targetVersion,
+      validationGuidance: error instanceof UsageMigrationValidationError ? error.message : undefined,
     });
   }
 }

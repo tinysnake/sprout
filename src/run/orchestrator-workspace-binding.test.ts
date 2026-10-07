@@ -16,6 +16,8 @@ import type { Project } from '../project/model.ts';
 import { InMemoryRunStore } from './store.ts';
 
 import { RunOrchestrator } from './orchestrator.ts';
+import { TaskEnvironmentLifecycle } from '../task/environment-lifecycle.ts';
+import { InMemoryTaskStore } from '../task/store.ts';
 
 
 const definition: EnvironmentDefinition = {
@@ -229,6 +231,61 @@ test('an agent whose project offers no usable environment is refused explicitly'
   assert.match(run.failure ?? '', /no available environment/i);
 });
 
+
+test('an admission failure still records its Project scope for the run-lifecycle event (#180)', async () => {
+  const { orchestrator } = build({
+    turns: [],
+    projects: [project({ availableEnvironmentInstanceIds: ['some-other-machine'] })],
+  });
+
+  const { id } = await orchestrator.submit({
+    agentId: 'agent-scout',
+    prompt: 'hello',
+    projectId: 'project-sprout',
+  });
+  const run = await orchestrator.waitFor(id);
+
+  assert.equal(run.status, 'failed');
+  assert.match(run.failure ?? '', /no available environment/i);
+  assert.equal(run.failureClass, 'environment');
+  assert.equal(
+    run.projectId,
+    'project-sprout',
+    'the caller\'s Project scope survives a pre-resolution failure, so its failure event is attributable',
+  );
+});
+
+
+test('Message admission revalidates an overdue blocked Task and preserves its recovery conflict after catalog exclusion', async () => {
+  const { orchestrator, pool, registry } = build({ turns: [] });
+  const tasks = new InMemoryTaskStore();
+  const lifecycle = new TaskEnvironmentLifecycle({
+    store: tasks, pool, agents: registry, projects: new ProjectRegistry([project()]), runs: orchestrator, leaseTtlMs: 0,
+    onRecovery: async () => {
+      pool.synchronize({ definitions: [definition], instances: [instance], eligibleInstanceIds: [] });
+    },
+  });
+  await tasks.create({ id: 'task-example', projectId: 'project-sprout', title: 'Held work', goal: 'Goal', constraints: [],
+    status: 'todo', assignedAgentId: 'agent-scout', createdAt: 1, updatedAt: 1 });
+  const begun = await lifecycle.begin('task-example');
+  await tasks.save({ ...begun, status: 'blocked', environmentLifecycleState: 'blocked' });
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'hello', projectId: 'project-sprout' });
+  const failed = await orchestrator.waitFor(id);
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.failureClass, 'environment');
+  assert.ok(failed.result?.status === 'failed');
+  assert.match(failed.result.message ?? '', /is in recovery \(held by task-example\)/);
+  assert.equal((await tasks.get('task-example'))?.recoveryState, 'blocked');
+  assert.equal(pool.getLease(begun.environmentLeaseId!)?.state, 'recovering');
+});
+
+test('unknown Agent refusal records admission independently of its failure text', async () => {
+  const { orchestrator } = build({ turns: [] });
+  const { id } = await orchestrator.submit({ agentId: 'missing-agent', prompt: 'hello', projectId: 'project-sprout' });
+  const run = await orchestrator.waitFor(id);
+  assert.equal(run.status, 'failed');
+  assert.equal(run.failureClass, 'admission');
+});
 
 test('a run records the durable workspace binding it was admitted under and uses it for the Worker start', async () => {
   const store = new InMemoryRunStore();

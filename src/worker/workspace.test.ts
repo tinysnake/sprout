@@ -25,11 +25,14 @@ test('a Worker persists Project workspaces, refreshes Task context, and safely r
   const first = await worker(root);
   t.after(() => first.close());
 
-  const prepared = await first.contexts.prepare(materialization());
+  const prepared = await first.contexts.prepare(materialization({ taskContentVersion: 4, taskValidationCriteria: ['The approved result is verified.'] }));
   assert.match(prepared.bootstrapInstructions, /^Sprout Task bootstrap:/);
   assert.doesNotMatch(prepared.bootstrapInstructions, /\/Users\/|\\Users\\/);
   const workspace = onlyWorkspace(root);
   const context = onlyContext(workspace);
+  const approvedTask = readFileSync(join(context, 'TASK.md'), 'utf8');
+  assert.match(approvedTask, /Content version: 4/);
+  assert.match(approvedTask, /The approved result is verified\./);
   assert.equal(await new WorkerWorkspace(root).inspectTaskContext(recycle()), true);
   assert.equal(await new WorkerWorkspace(root).inspectTaskContext({ ...recycle(), environmentLeaseId: 'wrong-lease' }), false);
   writeFileSync(join(workspace, 'AGENTS.md'), '# repository-owned rules\n');
@@ -86,6 +89,20 @@ test('cleanup can retry through a replacement Worker after a transient failure',
   await replacement.contexts.recycle(recycle());
   assert.equal(existsSync(context), false);
   assert.equal(existsSync(join(workspace, '.sprout', 'workspace-sentinel.json')), true);
+});
+
+test('cleanup retries after a lost acknowledgement prove absence without deleting Project work', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'sprout-worker-cleanup-ack-'));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const first = new WorkerWorkspace(root);
+  await first.prepare(materialization());
+  const workspace = onlyWorkspace(root);
+  writeFileSync(join(workspace, 'work.txt'), 'durable work');
+  await first.recycle(recycle()); // The core may crash before recording release.
+  await new WorkerWorkspace(root).recycle(recycle());
+  assert.equal(readFileSync(join(workspace, 'work.txt'), 'utf8'), 'durable work');
+  rmSync(join(workspace, '.sprout', 'workspace-sentinel.json'));
+  await assert.rejects(new WorkerWorkspace(root).recycle(recycle()), /sentinel|ENOENT/i);
 });
 
 test('a planted Project symlink cannot escape the Worker root during prepare, cwd resolution, or recycle', async (t) => {
@@ -173,8 +190,10 @@ test('a durable cleanup failure retains the Task lease until restart retries thr
   const reopened = new SqliteStore({ filename });
   const retry = lifecycle(reopened, replacement, false);
   assert.equal(retry.pool.getLease(begun.environmentLeaseId!)?.state, 'recovering');
-  const discarded = await retry.lifecycle.recover('task-1', 'discard');
-  assert.equal(discarded.environmentLifecycleState, 'discarded');
+  const completed = await retry.lifecycle.recover('task-1', 'discard');
+  assert.equal(completed.status, 'done', 'the accepted end intent survives recovery even when the retry says discard');
+  assert.equal(completed.environmentLifecycleState, 'ended');
+  assert.equal(completed.endDisposition, 'completed');
   assert.equal(retry.pool.getLease(begun.environmentLeaseId!)?.state, 'released');
   reopened.close();
 });
@@ -252,7 +271,7 @@ function lifecycle(store: SqliteStore, connection: Awaited<ReturnType<typeof wor
         await connection.contexts.recycle(input);
       },
     },
-    ids: { task: () => 'task', message: () => 'message', lease: () => 'lease-1', run: () => 'run-1' },
+    ids: { task: () => 'task', message: () => 'message', projectEvent: () => 'project-event', lease: () => 'lease-1', run: () => 'run-1' },
     clock: { now: () => 2 },
   });
   return { pool, lifecycle };

@@ -9,6 +9,18 @@
  * granularity is a declared capability (ADR-0001), never an assumed guarantee.
  */
 
+import type {
+  DetailedTokenDimensions,
+  ApiEquivalentCostEstimate,
+  BillingBasis,
+} from '../usage/model.ts';
+
+export type {
+  DetailedTokenDimensions,
+  ApiEquivalentCostEstimate,
+  BillingBasis,
+} from '../usage/model.ts';
+
 /**
  * How an adapter attempted to deliver standing instructions, and what happened.
  *
@@ -116,7 +128,42 @@ export interface TokenUsage {
   readonly totalTokens: number;
 }
 
+export interface AgentTaskGroupMessageInput {
+  readonly body: string;
+  readonly deliveryKey: string;
+  readonly kind?: 'handoff' | 'assignment' | 'question' | 'status';
+  /** The earlier Message this explicit send answers, when it belongs to this Task group. */
+  readonly inReplyTo?: string;
+  readonly awaitReply?: boolean;
+}
+
+export interface AgentTaskGroupMessageEnvelope {
+  readonly kind: 'handoff' | 'assignment' | 'question' | 'status' | 'escalation';
+  readonly sender: { readonly id: string; readonly kind: 'human' | 'agent' };
+  readonly taskId: string;
+  readonly runId?: string;
+  readonly workItemId: string;
+  readonly groupId: string;
+  readonly to: readonly string[];
+}
+
+export interface AgentTaskGroupMessageResult {
+  readonly messageId: string;
+  readonly scopeId: string;
+  readonly authorId: string;
+  readonly inReplyTo?: string;
+  readonly envelope?: AgentTaskGroupMessageEnvelope;
+  readonly duplicate: boolean;
+  readonly admittedRunIds: readonly string[];
+  readonly runs: readonly { readonly id: string; readonly status: string; readonly failure?: string }[];
+  readonly wakes: readonly { readonly agentId: string; readonly reason: string; readonly status: string; readonly detail?: string }[];
+}
+
 export interface StartSessionRequest {
+  /** Worker-local process environment overlay. Never serialize into instructions or files. */
+  readonly sessionEnvironment?: Readonly<Record<string, string>>;
+  /** Session-bound capability for the current Task group; identity and scope are Core-resolved. */
+  readonly postTaskGroupMessage?: (input: AgentTaskGroupMessageInput) => Promise<AgentTaskGroupMessageResult>;
   /** Sprout-owned agent identity. Never derived from the engine installation. */
   readonly agentId: string;
   /** Core-owned run identity, for durable Worker delivery correlation only. */
@@ -212,13 +259,42 @@ export interface EngineTurn {
   readonly completion: Promise<EngineTurnResult>;
 }
 
-export type EngineTurnResult =
-  | { readonly status: 'completed'; readonly text: string; readonly tokenUsage?: TokenUsage }
-  | { readonly status: 'interrupted'; readonly tokenUsage?: TokenUsage }
+export type EngineTurnResult = { readonly pricingContext?: import('../usage/valuation.ts').LocalPricingContext } & (
+  | {
+      readonly status: 'completed';
+      readonly text: string;
+      readonly tokenUsage?: TokenUsage;
+      readonly detailedTokens?: DetailedTokenDimensions;
+      readonly engineTurnDurationMs?: number;
+      readonly costEstimate?: ApiEquivalentCostEstimate;
+      readonly billingBasis?: BillingBasis;
+      readonly source?: string;
+      readonly sourceVersion?: string;
+    }
+  | {
+      readonly status: 'interrupted';
+      readonly tokenUsage?: TokenUsage;
+      readonly detailedTokens?: DetailedTokenDimensions;
+      readonly engineTurnDurationMs?: number;
+      readonly costEstimate?: ApiEquivalentCostEstimate;
+      readonly billingBasis?: BillingBasis;
+      readonly source?: string;
+      readonly sourceVersion?: string;
+    }
   | {
       readonly status: 'failed';
       readonly message: string;
+      /** Set only when the engine boundary classified an infra-class failure. */
+      readonly retryable?: true;
+      /** Structured error stop evidence, when exposed by the engine. */
+      readonly stopReason?: 'error';
       readonly tokenUsage?: TokenUsage;
+      readonly detailedTokens?: DetailedTokenDimensions;
+      readonly engineTurnDurationMs?: number;
+      readonly costEstimate?: ApiEquivalentCostEstimate;
+      readonly billingBasis?: BillingBasis;
+      readonly source?: string;
+      readonly sourceVersion?: string;
       /**
        * The engine refused the supplied `resumeSessionKey` and did no work.
        *
@@ -230,7 +306,8 @@ export type EngineTurnResult =
        * never mistaken for a stale key and never discards a usable key.
        */
       readonly resumeRefused?: boolean;
-    };
+    }
+);
 
 export interface EngineAdapter {
   readonly id: string;

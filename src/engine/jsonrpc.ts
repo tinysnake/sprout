@@ -36,11 +36,14 @@ export class JsonRpcError extends Error {
   override readonly name: string = 'JsonRpcError';
   readonly code: number;
   readonly method: string;
+  /** Engine-owned structured error data; classify locally, never forward it. */
+  readonly data?: unknown;
 
-  constructor(method: string, code: number, message: string) {
+  constructor(method: string, code: number, message: string, data?: unknown) {
     super(`${method}: ${message}`);
     this.code = code;
     this.method = method;
+    this.data = data;
   }
 }
 
@@ -195,9 +198,9 @@ export class LineJsonRpcTransport implements JsonRpcTransport {
       const pending = this.#pending.get(id);
       if (!pending) return;
       this.#pending.delete(id);
-      const error = message.error as { code?: number; message?: string } | undefined;
+      const error = message.error as { code?: number; message?: string; data?: unknown } | undefined;
       if (error) {
-        pending.reject(new JsonRpcError(pending.method, error.code ?? -32_603, error.message ?? 'unknown error'));
+        pending.reject(new JsonRpcError(pending.method, error.code ?? -32_603, error.message ?? 'unknown error', error.data));
         return;
       }
       pending.resolve(message.result);

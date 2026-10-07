@@ -1,4 +1,5 @@
 import type { ContractDelivery, EngineTurnResult } from '../engine/port.ts';
+import { classifyEngineTurnFailure, isRetryableEngineTurnFailure, sanitizedTurnFailure, trustedTurnFailureCause, trustedTurnFailureMessage } from '../engine/turn-failure.ts';
 import { PROTOCOL_INCOMPATIBLE_DETAIL } from '../environment/readiness.ts';
 import { WORKER_TRANSPORT_REFUSAL_REASON } from '../environment/worker-transport.ts';
 
@@ -32,6 +33,7 @@ export const WORKER_DIAGNOSTICS = {
   resumeRefused: 'the engine refused the saved session',
   turnFailed: 'the engine turn failed',
   channelClosed: 'the Environment Worker channel closed',
+  coreGoingAway: 'the Sprout instance is going away; the Worker connection closed',
   contractAgentsMd: 'project contract delivery: engine instruction file',
   contractSproutFile: 'project contract delivery: Sprout-owned instruction file',
   contractEngineHook: 'project contract delivery: engine configuration hook',
@@ -75,13 +77,29 @@ export function staticRefusalReason(reason: string): string | undefined {
 }
 
 /** Replace an engine-owned failure message before it crosses Worker JSON-RPC. */
-export function sanitizeEngineTurnResult(result: EngineTurnResult): EngineTurnResult {
+export function sanitizeEngineTurnResult(result: EngineTurnResult, engine?: string): EngineTurnResult {
   if (result.status !== 'failed') return result;
+  const cause = classifyEngineTurnFailure(result) ?? trustedTurnFailureCause(result.message);
+  const message = result.resumeRefused === true
+    ? WORKER_DIAGNOSTICS.resumeRefused
+    : cause !== undefined && engine !== undefined
+      ? trustedTurnFailureMessage(sanitizedTurnFailure(engine, cause)) ?? WORKER_DIAGNOSTICS.turnFailed
+      : trustedTurnFailureMessage(result.message) ?? WORKER_DIAGNOSTICS.turnFailed;
+  // Select the neutral result fields explicitly. Never spread a decoded engine
+  // error, response body, code or diagnostic into Worker JSON-RPC/journal data.
   return {
-    ...result,
-    message: result.resumeRefused === true
-      ? WORKER_DIAGNOSTICS.resumeRefused
-      : WORKER_DIAGNOSTICS.turnFailed,
+    status: 'failed', message,
+    ...(cause !== undefined && isRetryableEngineTurnFailure(cause) ? { retryable: true as const } : {}),
+    ...(result.stopReason === 'error' ? { stopReason: result.stopReason } : {}),
+    ...(result.resumeRefused === true ? { resumeRefused: true } : {}),
+    ...(result.tokenUsage !== undefined ? { tokenUsage: result.tokenUsage } : {}),
+    ...(result.detailedTokens !== undefined ? { detailedTokens: result.detailedTokens } : {}),
+    ...(result.engineTurnDurationMs !== undefined ? { engineTurnDurationMs: result.engineTurnDurationMs } : {}),
+    ...(result.costEstimate !== undefined ? { costEstimate: result.costEstimate } : {}),
+    ...(result.billingBasis !== undefined ? { billingBasis: result.billingBasis } : {}),
+    ...(result.source !== undefined ? { source: result.source } : {}),
+    ...(result.sourceVersion !== undefined ? { sourceVersion: result.sourceVersion } : {}),
+    ...(result.pricingContext !== undefined ? { pricingContext: result.pricingContext } : {}),
   };
 }
 

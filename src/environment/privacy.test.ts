@@ -32,6 +32,26 @@ test('absolute paths are removed across macOS, Linux, Windows, and UNC forms', (
   }
 });
 
+test('attached POSIX and slash-style drive paths cannot bypass path redaction', () => {
+  for (const [text, marker] of [
+    ['location:/home/example/PRIVATE_PATH_ALPHA', 'PRIVATE_PATH_ALPHA'],
+    ['location:C:/Users/Example/PRIVATE_PATH_BETA', 'PRIVATE_PATH_BETA'],
+  ] as const) {
+    const redacted = redactSensitiveText(text);
+    assert.ok(!redacted.includes(marker), 'host path reached the sanitized text');
+    assert.match(redacted, /<redacted-path>/);
+  }
+});
+
+test('authorization schemes redact their entire credential payload', () => {
+  for (const value of ['Basic SYNTHETIC_BASIC_SECRET', 'Bearer SYNTHETIC_BEARER_SECRET']) {
+    const redacted = redactSensitiveText(`request Authorization: ${value} rejected`);
+    assert.ok(!redacted.includes(value.split(' ')[1]!), 'authorization credential survived');
+    assert.match(redacted, /<redacted-credential>/);
+    assert.match(redacted, /rejected/);
+  }
+});
+
 test('credentials and tokens are removed', () => {
   for (const secret of [
     'sk-live-abcdefghijklmnopqrst',

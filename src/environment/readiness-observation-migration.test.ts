@@ -15,6 +15,7 @@ import { SqliteStore } from '../store/db.ts';
 import { workerReadinessProbeFixture } from '../worker/readiness-fixture.ts';
 
 import { createReadinessAuthorityTestSeam } from './readiness-authority.test-support.ts';
+import { CURRENT_SCHEMA_VERSION } from '../store/schema.ts';
 
 
 const readinessAuthorityTestSeam = createReadinessAuthorityTestSeam();
@@ -89,7 +90,7 @@ test('sqlite additive migration preserves legacy history and reopen requires fre
 
   // 2. Open via SqliteStore (applies the pending forward migrations)
   const store = new SqliteStore({ filename: dbPath });
-  assert.equal(store.schemaVersion, 18);
+  assert.equal(store.schemaVersion, CURRENT_SCHEMA_VERSION);
 
   // Legacy rows are preserved as historical; getCurrentObservation returns undefined
   // because unscoped legacy rows cannot establish a current observation
@@ -139,7 +140,7 @@ test('sqlite additive migration preserves legacy history and reopen requires fre
   store.close();
   const reopened = new SqliteStore({ filename: dbPath });
   try {
-    assert.equal(reopened.schemaVersion, 18);
+    assert.equal(reopened.schemaVersion, CURRENT_SCHEMA_VERSION);
     const retrievedReceipt = await reopened.environmentReadiness.getReceipt('env-leg', receipt.observationId);
     assert.ok(retrievedReceipt);
     assert.equal(retrievedReceipt.observationId, receipt.observationId);

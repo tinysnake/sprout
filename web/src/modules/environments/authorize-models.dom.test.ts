@@ -80,6 +80,7 @@ test('EnvironmentDetail: records the Human model-authorization selection in plac
   });
   try {
     const { createApp, h } = await import('vue');
+    const { createMemoryHistory, createRouter } = await import('vue-router');
     const detail = (await vite.ssrLoadModule(
       '/src/modules/environments/components/EnvironmentDetail.vue',
     )) as { default: unknown };
@@ -98,12 +99,17 @@ test('EnvironmentDetail: records the Human model-authorization selection in plac
     let captured: unknown;
     const container = initialDom.window.document.createElement('div');
     initialDom.window.document.body.appendChild(container);
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/project/tasks/:taskId', name: 'project-task-detail', component: { render: () => null } }],
+    });
     const app = createApp({
       setup: () => () => h(detail.default as any, {
         env,
         onAuthorizeModels: (payload: unknown) => { captured = payload; },
       }),
     });
+    app.use(router);
     app.mount(container);
     await new Promise((resolve) => setTimeout(resolve, 60));
     const doc = initialDom.window.document;

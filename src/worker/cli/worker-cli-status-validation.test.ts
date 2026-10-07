@@ -105,6 +105,22 @@ function seedEnrolledHost(
 }
 
 
+test('host-local diagnostic export is typed JSON without paths, identity or raw detail', async () => {
+  const h = harness();
+  try {
+    seedEnrolledHost(h.paths);
+    writeRuntimeState(h.paths, { pid: 424_242, process: processIdentity(424_242), state: 'revoked', at: 1, detail: 'UNTRUSTED_PRIVATE_PAYLOAD' });
+    assert.equal(await h.run(['status', '--diagnostics']), WORKER_EXIT.ok);
+    const output = h.out.join('');
+    const exported = JSON.parse(output);
+    assert.equal(exported.scope, 'host-local');
+    assert.equal(exported.worker, 'revoked');
+    assert.equal(exported.schema, null, 'host does not open Sprout durable data');
+    assert.equal(exported.versions.sprout, '0.0.0');
+    for (const excluded of [h.paths.configPath, 'UNTRUSTED_PRIVATE_PAYLOAD', 'enroll-synthetic', 'endpoint', 'identity.pem', 'pid', 'detail']) assert.equal(output.includes(excluded), false);
+  } finally { h.cleanup(); }
+});
+
 test('status preserves the recorded terminal refusal after the refused process exits', async () => {
   const h = harness();
   try {

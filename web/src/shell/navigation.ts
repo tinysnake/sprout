@@ -18,12 +18,13 @@ export type DestinationKey = 'feed' | 'project' | 'manage';
 export type ProjectTabKey = 'overview' | 'tasks' | 'chat';
 export type ManageTabKey = 'environments' | 'agents' | 'usage' | 'settings';
 export type DestinationTabKey = ProjectTabKey | ManageTabKey;
-export type IndicatorKind = 'attention' | 'active-work' | 'degraded';
+export type IndicatorKind = 'attention' | 'active-work' | 'degraded' | 'unread';
 export type IndicatorStatus = 'yellow' | 'blue' | 'red';
 
 /** Bounded shell facts. Absent backend support reports zero, never a guessed value. */
 export interface NavigationIndicators {
   readonly attention: number;
+  readonly chatUnread?: number;
   readonly activeWork: number;
   readonly degradedEnvironments: number;
 }
@@ -71,6 +72,7 @@ const INDICATOR_STATUS: Readonly<Record<IndicatorKind, IndicatorStatus>> = {
   attention: 'yellow',
   'active-work': 'blue',
   degraded: 'red',
+  unread: 'red',
 };
 
 export const FEED_ITEM: NavigationItem = {
@@ -103,7 +105,7 @@ export const MANAGE_ITEM: NavigationItem = {
 export const PROJECT_ITEMS: readonly NavigationItem[] = [
   { key: 'overview', label: 'Overview & Contract', shortLabel: 'Overview', icon: 'overview', to: { name: 'project-overview' } },
   { key: 'tasks', label: 'Tasks & Leases', shortLabel: 'Tasks', icon: 'tasks', to: { name: 'project-tasks' }, indicator: 'active-work' },
-  { key: 'chat', label: 'Project Chat', shortLabel: 'Chat', icon: 'chat', to: { name: 'project-chat' } },
+  { key: 'chat', label: 'Project Chat', shortLabel: 'Chat', icon: 'chat', to: { name: 'project-chat' }, indicator: 'unread' },
 ];
 
 export const MANAGE_ITEMS: readonly NavigationItem[] = [
@@ -114,7 +116,7 @@ export const MANAGE_ITEMS: readonly NavigationItem[] = [
 ];
 
 /** Route params that mean "the operator opened one record", not "the destination root". */
-const DETAIL_PARAMS: readonly string[] = ['id', 'taskId'];
+const DETAIL_PARAMS: readonly string[] = ['id', 'taskId', 'proposalId'];
 
 export function destinationOf(route: RouteLocationNormalizedLoaded): DestinationKey {
   for (const record of route.matched) {
@@ -140,6 +142,7 @@ export function isDrillDown(route: RouteLocationNormalizedLoaded): boolean {
 }
 
 export function indicatorCount(indicators: NavigationIndicators, kind: IndicatorKind | undefined): number {
+  if (kind === 'unread') return indicators.chatUnread ?? 0;
   if (kind === 'attention') return indicators.attention;
   if (kind === 'active-work') return indicators.activeWork;
   if (kind === 'degraded') return indicators.degradedEnvironments;
@@ -190,11 +193,15 @@ export function buildNavigation(
 ): NavigationModel {
   const destination = destinationOf(route);
   const tab = tabOf(route);
+  const projectQuery = typeof route.query?.['project'] === 'string' ? { project: route.query['project'] } : {};
+  const withProject = (item: NavigationItemView): NavigationItemView =>
+    Object.keys(projectQuery).length && (item.key === 'overview' || item.key === 'tasks' || item.key === 'chat')
+      ? { ...item, to: { name: (item.to as { name: string }).name, query: projectQuery } } : item;
   const on = (key: DestinationKey): boolean => destination === key;
 
   const sections: NavigationSection[] = [
     { label: 'Operations', items: [toView(FEED_ITEM, { current: on('feed'), indicators })] },
-    { label: 'Project', items: projectItems(tab, indicators) },
+    { label: 'Project', items: projectItems(tab, indicators).map(withProject) },
     { label: 'Manage', items: manageItems(tab, indicators) },
   ];
 
@@ -205,7 +212,7 @@ export function buildNavigation(
   ];
 
   const nestedSource = on('project') ? PROJECT_ITEMS : on('manage') ? MANAGE_ITEMS : [];
-  const nested = nestedSource.map((item) => toView(item, { current: tab === item.key, indicators }));
+  const nested = nestedSource.map((item) => withProject(toView(item, { current: tab === item.key, indicators })));
 
   return {
     destination,

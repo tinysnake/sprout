@@ -59,10 +59,19 @@ export class WorkerWorkspace {
   async recycle(input: RecycleTaskContextParams): Promise<void> {
     const root = await this.#rootPath();
     const workspace = await this.#workspace(root, input.projectId, false, input.projectWorkspacePath);
-    const context = await this.#directory(root, join(workspace, '.sprout', 'tasks', token(input.taskId)), false);
-    // This is deliberately before all destructive cleanup.  A missing or
-    // replaced Project sentinel must leave the Task context retryable.
+    // Authenticate the persistent Project before accepting either deletion or
+    // fresh absence as cleanup proof. A lost reply after rm must be retryable.
     await assertProjectSentinel(root, workspace, input.projectId);
+    const tasks = await this.#directory(root, join(workspace, '.sprout', 'tasks'), false);
+    const contextPath = join(tasks, token(input.taskId));
+    try {
+      const entry = await lstat(contextPath);
+      if (!entry.isDirectory() || entry.isSymbolicLink()) throw new Error('unsafe Task context; refusing cleanup');
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
+      return; // Fresh filesystem proof: no Task context remains under the owned Project.
+    }
+    const context = await this.#directory(root, contextPath, false);
     const manifestPath = join(context, 'manifest.json');
     let manifest: Record<string, unknown>;
     try {
@@ -334,7 +343,9 @@ function renderProject(input: TaskContextMaterialization): string {
 }
 
 function renderTask(input: TaskContextMaterialization): string {
-  return ['# Sprout Task', '', `Title: ${input.taskTitle}`, `Status: ${input.taskStatus}`, '', `Goal: ${input.taskGoal}`, '', 'Constraints:', ...(input.taskConstraints.length ? input.taskConstraints.map((constraint) => `- ${constraint}`) : ['- (none declared)']), '', 'Prior bounded run summaries:', input.priorRunSummaries || '(none)', ''].join('\n');
+  return ['# Sprout Task', '', `Title: ${input.taskTitle}`, `Status: ${input.taskStatus}`, '', `Goal: ${input.taskGoal}`, '', 'Constraints:', ...(input.taskConstraints.length ? input.taskConstraints.map((constraint) => `- ${constraint}`) : ['- (none declared)']),
+    ...(input.taskContentVersion !== undefined ? ['', `Content version: ${input.taskContentVersion}`, '', 'Validation criteria:', ...(input.taskValidationCriteria?.length ? input.taskValidationCriteria.map((criterion) => `- ${criterion}`) : ['- (none declared)'])] : []),
+    '', 'Prior bounded run summaries:', input.priorRunSummaries || '(none)', ''].join('\n');
 }
 
 function renderAgent(input: TaskContextMaterialization): string {

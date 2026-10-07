@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
+import { createFeedTestAdapter, pendingEnrollmentSnapshot, EMPTY_FEED_SNAPSHOT, recoveryAttentionSnapshot } from './feed-test-fixture.ts';
 import { JSDOM } from 'jsdom';
 
 // 1. Initialize JSDOM and globals BEFORE importing any Vue or Vite modules
@@ -112,6 +113,7 @@ async function deterministicAppOptions(vite: { ssrLoadModule: (id: string) => Pr
     environmentService,
     agentService,
     projectService: new projectsModule.FixtureProjectService(agentService, environmentService),
+    feedService: createFeedTestAdapter(),
   };
 }
 
@@ -228,88 +230,92 @@ test('Production Web: pending enrollment offers only the review ceremony, not di
   }
 });
 
-test('Feed builds pending enrollment cards from live Environment facts and navigates to the production detail URL', async () => {
+test('Feed renders projection-provided enrollment attention and links to its Environment authority', async () => {
   const { dom, vite, cleanup } = await setupProductionDom();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
-    const { FixtureEnvironmentService } = (await vite.ssrLoadModule(
-      '/src/modules/environments/adapters/fixture-adapter.ts'
-    )) as typeof import('../modules/environments/adapters/fixture-adapter.ts');
-    const fixtureService = new FixtureEnvironmentService();
-    const template = (await fixtureService.listEnvironments()).find((environment) => environment.enrollmentStatus === 'pending')!;
-    const liveEnvironment = (id: string, displayName: string) => ({
-      ...template,
-      id,
-      displayName,
-      trafficLightReason: `Enrollment is pending Human approval for ${displayName}.`,
-    });
-    class PendingEnvironmentService extends FixtureEnvironmentService {
-      override async listEnvironments() {
-        return [liveEnvironment('enroll-abc123', 'tester1')];
-      }
-    }
-
     const options = await deterministicAppOptions(vite);
-    const { app, router } = createSproutApp({ ...options, environmentService: new PendingEnvironmentService() });
-    await router.push('/feed?scope=infra&urgency=attention&activity=envs');
+    options.feedService = createFeedTestAdapter(pendingEnrollmentSnapshot([
+      { id: 'enroll-test-1', displayName: 'Pending test environment' },
+    ]));
+    const { app, router } = createSproutApp(options);
+    await router.push('/feed?scope=feed:infra&urgency=attention');
     await router.isReady();
     app.mount(dom.window.document.getElementById('app')!);
     await new Promise((resolve) => setTimeout(resolve, 80));
 
-    const doc = dom.window.document;
-    const pendingCards = [...doc.querySelectorAll<HTMLButtonElement>('.feed-attention-card')]
-      .filter((card) => card.textContent?.includes('Pending Host Enrollment:'));
-    assert.equal(pendingCards.length, 1);
-    assert.match(pendingCards[0]!.textContent ?? '', /Pending Host Enrollment: tester1/);
-    assert.match(pendingCards[0]!.textContent ?? '', /Enrollment is pending Human approval for tester1\./);
-    pendingCards[0]!.click();
+    const card = dom.window.document.querySelector('[data-attention-id="enrollment:enroll-test-1"]') as HTMLButtonElement | null;
+    assert.ok(card, 'the projection-provided pending enrollment appears in Attention');
+    assert.match(card.textContent ?? '', /Pending test environment/);
+    card.click();
     await new Promise((resolve) => setTimeout(resolve, 80));
-    assert.equal(dom.window.location.pathname, '/app/manage/environments/enroll-abc123');
-    assert.match(doc.querySelector('.return-context-banner')?.textContent ?? '', /Back to Feed/);
+    assert.equal(router.currentRoute.value.path, '/manage/environments/enroll-test-1');
+    assert.match(dom.window.document.querySelector('.return-context-banner')?.textContent ?? '', /Back to Feed/);
     app.unmount();
   } finally {
     await cleanup();
   }
 });
 
-test('Feed renders one live pending card per environment, and fails closed for empty or failed reads', async () => {
+test('Feed counts projection-provided enrollment cards and distinguishes empty and failed reads', async () => {
   const { dom, vite, cleanup } = await setupProductionDom();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
-    const { FixtureEnvironmentService } = (await vite.ssrLoadModule(
-      '/src/modules/environments/adapters/fixture-adapter.ts'
-    )) as typeof import('../modules/environments/adapters/fixture-adapter.ts');
-    const fixtureService = new FixtureEnvironmentService();
-    const template = (await fixtureService.listEnvironments()).find((environment) => environment.enrollmentStatus === 'pending')!;
-    const liveEnvironments = [
-      { ...template, id: 'enroll-abc123', displayName: 'tester1' },
-      { ...template, id: 'enroll-def456', displayName: 'tester2' },
-    ];
 
-    async function renderCount(listEnvironments: () => Promise<unknown>) {
-      class StubEnvironmentService extends FixtureEnvironmentService {
-        override async listEnvironments() {
-          return await listEnvironments() as any;
-        }
-      }
+    async function renderCount(snapshot: typeof EMPTY_FEED_SNAPSHOT | undefined) {
       const options = await deterministicAppOptions(vite);
-      const { app, router } = createSproutApp({ ...options, environmentService: new StubEnvironmentService() });
-      await router.push('/feed?scope=infra&urgency=attention');
+      if (snapshot === undefined) {
+        options.feedService = {
+          state: () => ({ status: 'offline', connection: 'offline', loading: false }),
+          subscribeState: (listener) => { listener({ status: 'offline', connection: 'offline', loading: false }); return () => undefined; },
+          async load() { throw Object.assign(new Error('private diagnostic'), { kind: 'unavailable' }); },
+        };
+      } else {
+        options.feedService = createFeedTestAdapter(snapshot);
+      }
+      const { app, router } = createSproutApp(options);
+      await router.push('/feed?scope=feed:infra&urgency=attention');
       await router.isReady();
+      dom.window.document.body.innerHTML = '<div id="app"></div>';
       app.mount(dom.window.document.getElementById('app')!);
       await new Promise((resolve) => setTimeout(resolve, 70));
-      const cards = [...dom.window.document.querySelectorAll('.feed-attention-card')]
-        .filter((card) => card.textContent?.includes('Pending Host Enrollment:'));
+      const cards = [...dom.window.document.querySelectorAll('[data-attention-id]')]
+        .filter((card) => card.getAttribute('data-attention-id')?.startsWith('enrollment:'));
+      const state = dom.window.document.querySelector('.feed-view')?.getAttribute('data-state');
       app.unmount();
-      return cards.length;
+      return { count: cards.length, state };
     }
 
-    assert.equal(await renderCount(async () => liveEnvironments), 2);
-    assert.equal(await renderCount(async () => []), 0);
-    assert.equal(await renderCount(async () => { throw new Error('service unavailable'); }), 0);
+    const pending = pendingEnrollmentSnapshot([
+      { id: 'enroll-test-1', displayName: 'Pending environment one' },
+      { id: 'enroll-test-2', displayName: 'Pending environment two' },
+    ]);
+    assert.deepEqual(await renderCount(pending), { count: 2, state: 'ready' });
+    assert.deepEqual(await renderCount(EMPTY_FEED_SNAPSHOT), { count: 0, state: 'empty' });
+    assert.deepEqual(await renderCount(undefined), { count: 0, state: 'offline' });
   } finally {
     await cleanup();
   }
+});
+
+test('Production Web: an active Task lease links to its Human controls without offering premature Force Release', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    await router.push('/manage/environments/env-ready');
+    await router.isReady();
+    app.mount(dom.window.document.getElementById('app')!);
+    await new Promise(resolve => setTimeout(resolve, 80));
+    const box = dom.window.document.querySelector('.active-lease-box');
+    assert.ok(box);
+    const controlLink = box.querySelector('a.task-controls-link');
+    assert.ok(controlLink, 'held work has a route to the authoritative Human controls');
+    assert.match(controlLink.getAttribute('href') ?? '', /\/project\/tasks\/101$/);
+    assert.match(box.textContent ?? '', /enter a reason.*Discard Task/);
+    assert.equal(box.querySelector('.force-release-btn'), null);
+    app.unmount();
+  } finally { await cleanup(); }
 });
 
 test('Production Web: capability permission toggling and unbind workspace', async () => {
@@ -362,7 +368,9 @@ test('Production Web: deep-link return context banner preserves navigation histo
     const appMount = dom.window.document.getElementById('app');
     assert.ok(appMount);
 
-    const { app, router } = createSproutApp(await deterministicAppOptions(vite));
+    const options = await deterministicAppOptions(vite);
+    options.feedService = createFeedTestAdapter(recoveryAttentionSnapshot('env-recovery'));
+    const { app, router } = createSproutApp(options);
     await router.push('/feed');
     await router.isReady();
     app.mount(appMount);
@@ -371,7 +379,7 @@ test('Production Web: deep-link return context banner preserves navigation histo
     const doc = dom.window.document;
 
     // On Feed view, click the attention card directly (clean clickable card with no redundant inspect button)
-    const attentionCard = doc.querySelector('.feed-attention-card') as HTMLButtonElement;
+    const attentionCard = doc.querySelector('[data-attention-id="lease-recovery:env-recovery"]') as HTMLButtonElement | null;
     assert.ok(attentionCard, 'Attention card found on Feed view');
     attentionCard.click();
 

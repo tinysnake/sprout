@@ -32,20 +32,28 @@ _Avoid_: Project, group
 A temporary collaboration scope within one Project, containing a subset of current Project members together with an optional goal and rules, its own channel, and durable membership history. It may provide context and provenance for work but does not own Tasks, Environment access, Project workspaces, or leases.
 _Avoid_: Project, Task, default group
 
+**Task group**:
+A temporary conversation scope within one Project, bound to exactly one Task and shared by every current Project member. It carries the Task's title, goal, and constraints, and preserves its conversation history when the scope is frozen after an ended status or Force Release. A Force Released `stopped` Task remains active intent; its group stays read-only until direct Resume.
+_Avoid_: Working group, Task thread, direct message
+
+**Task-group escalation**:
+A durable Project event that exposes an unanswered Task-group Message for Human Attention after bounded wake orchestration cannot obtain Agent work. Acknowledging it does not retry work or grant Task authority.
+_Avoid_: Agent reply, Task blocker, automatic retry
+
 **Working group channel**:
 The shared conversation whose participants are the current members of one Working group.
 _Avoid_: Project channel, direct message
 
 **Conversation scope**:
-The durable identity and governance of one Project-owned communication context: the one Project channel, one Project-scoped direct conversation, or one Working group channel. It binds its Messages to explicit membership, versioned goal and rules facts, and read-only rules; disbanding or an ended membership renders it read-only without deleting its record or history.
+The durable identity and governance of one Project-owned communication context: the one Project channel, one Project-scoped direct conversation, one Working group channel, or one Task group. It binds its Messages to membership, versioned governing facts, and read-only rules; ended Task groups and Force Released stopped Task groups preserve their records and history while frozen. A stopped Task remains active intent and its group returns to writable state on Resume.
 _Avoid_: Chat room, DM thread, channel list
 
 **Project-scoped direct message**:
-A private conversation between two current members of one Project, governed and recorded within that Project. The same pair communicating in another Project has a separate conversation and context.
+A private conversation between one Human and one current Agent member of a Project. The Human's messages can wake the Agent and the Agent's completed replies appear in the same conversation; Agents do not initiate direct messages. It is governed and recorded within that Project, so the same pair communicating in another Project has a separate conversation and context.
 _Avoid_: Global direct message, cross-Project direct message
 
 **Message**:
-One durable piece of Human- or Agent-authored conversation in a Project-scoped direct message, Project channel, or Working group channel. A Message may cause routing, but it is not a Task, Agent run, run event, or system-generated Project event.
+One durable piece of Human- or Agent-authored conversation in a Project channel, Working group channel, or Task group, or a Human-authored input or projected Agent reply in a Project-scoped direct message. A Message may cause routing, but it is not a Task, Agent run, run event, or system-generated Project event.
 _Avoid_: Task, prompt, run event
 
 **Project event**:
@@ -57,7 +65,7 @@ The declared treatment of a Project event: addressed, wake-eligible, information
 _Avoid_: Notification severity, inferred intent
 
 **Wake policy**:
-The Project-level choice between explicit-only routing, where unaddressed Project-channel and Working-group-channel Messages and events remain durable without model evaluation, and wake-model-assisted routing, where eligible unaddressed inputs are collected for model judgement. Project-scoped direct messages, explicit Agent mentions, broadcasts, and addressed Project events bypass this policy and wake their recipients.
+The Project-level choice between explicit-only routing, where unaddressed Project-channel and Working-group-channel Messages and events remain durable without model evaluation, and wake-model-assisted routing, where eligible unaddressed inputs are collected for model judgement. Human-authored direct messages, explicit Agent mentions, broadcasts, and addressed Project events bypass this policy and wake their recipients.
 _Avoid_: Notification setting, workflow
 
 **Routing batch**:
@@ -77,7 +85,7 @@ The final assistant text from a completed Message-triggered Agent run, persisted
 _Avoid_: Raw run output, Agent-initiated Message
 
 **Project contract**:
-The available Project facts, optional goal and rules, responsibilities, permissions, environment access, and completion guidance presented to Agents collaborating in a Project. A Working group interaction adds that group's current goal and rules without Sprout interpreting conflicts between written rules.
+The available Project facts, optional goal and rules, responsibilities, permissions, environment access, and completion guidance presented to Agents collaborating in a Project. A Working group interaction adds that group's current goal and rules, and a Task group interaction adds its Task's goal and constraints, without Sprout interpreting conflicts between written rules.
 _Avoid_: Prompt, chat agreement
 
 **Project template**:
@@ -105,8 +113,12 @@ One bounded activation of an agent in response to a message, task, or system eve
 _Avoid_: Agent, task
 
 **Agent run stop**:
-An intentional request by a Human, or by the Task lead for a run it initiated, to settle one active agent run without ending its Task or releasing the Task lease. The Human's operator action is named Interrupt, but its intentional run outcome is stopped, distinct from an unexpected run interruption.
-_Avoid_: Task pause, Task end, interruption
+An intentional request by a Human or Task lead to settle one active Task-linked run without ending its Task. Its outcome is stopped, and the Task lease remains held.
+_Avoid_: Chat run interruption, Task pause, Task end
+
+**Chat run interruption**:
+A Human-authorized request from Chat to settle an active run outside a Task. Its outcome is interrupted with a Human-stop reason, and its run-held Environment lease is released before the conversation is reused.
+_Avoid_: Agent run stop, Task interruption, Task end
 
 **Usage activity**:
 One model-consuming activity observed by Sprout: either an Agent run using its work model or a Routing attempt using a wake model. A Routing attempt belongs to its Project but never to an Agent or Task.
@@ -141,7 +153,7 @@ The complete, partial, pending, or unavailable composition accompanying a usage 
 _Avoid_: Confidence score, success rate
 
 **Interrupt**:
-The Human escalation available while a Task pause request still has an active agent run. It requests an intentional Agent run stop whose outcome is stopped, not interrupted.
+The Human escalation available while a Task pause request still has an active agent run. It requests an intentional Task-linked Agent run stop whose outcome is stopped.
 _Avoid_: Interruption, Task pause, Task end
 
 **Session key**:
@@ -153,7 +165,7 @@ The model an agent uses for its primary reasoning and work.
 _Avoid_: Brain, main model
 
 **Wake model**:
-The lower-cost model that decides whether a project-channel message should start an agent run.
+The lower-cost model that selects Agent recipients for ambiguous shared conversation inputs, after deterministic addressing and any applicable Task-group assignment rules.
 _Avoid_: Cerebellum, small model
 
 **Task**:
@@ -173,7 +185,7 @@ One durable version of a Task's goal, constraints, and validation criteria. A Hu
 _Avoid_: Prompt, Agent memory
 
 **Task lead**:
-A Human or Agent Project member entrusted by a Human at Task begin to coordinate work within the Task's current content, Project permissions, and selected Environment instance. An Agent Task lead may initiate sequential agent runs, stop runs it initiated, report blockers, and make a Task completion claim, but cannot approve, pause, validate, end, or recover the Task.
+A Human or Agent Project member entrusted by a Human at Task begin to coordinate work within the Task's current content, Project permissions, and selected Environment instance. An Agent Task lead may initiate sequential agent runs, stop runs it initiated, report blockers, and make a Task completion claim, but cannot approve, pause, validate, end, or recover the Task. For an Agent-led Task, the authorized Human may submit a marked substitute claim if the lead has not filed one.
 _Avoid_: Task owner, scheduler
 
 **Task begin**:
@@ -181,7 +193,7 @@ The Human-authorized act that selects one environment instance for a Task, acqui
 _Avoid_: Start, first agent run
 
 **Task pause request**:
-The admission hold created by a Human's first Pause action while an agent run remains active: no new run may begin, but the current run may settle. The next Human control is Interrupt, which requests an Agent run stop.
+The admission hold created by a Human's Pause action: no new run may begin, while a current run may settle naturally. If the request cannot be recorded after repeated state conflicts, queued admissions remain gated until the Human retries Pause or explicitly cancels the request; when a run is still active, the next control is Interrupt.
 _Avoid_: Agent run stop, blocked, Task end
 
 **Task pause**:
@@ -193,7 +205,7 @@ A routable reason that prevents Task advancement and names the required next act
 _Avoid_: Prose-only wait, Task pause
 
 **Task completion claim**:
-The Task lead's fact-form request for human validation, containing an outcome summary, validation evidence, durable changes, known limitations, and a proposed disposition. It does not complete the Task or release its Task lease.
+A fact-form request for Human validation from the Task lead, or a marked Human substitute on an Agent-led Task whose lead has not filed a claim. It contains an outcome summary, validation evidence, durable changes, known limitations, and a proposed disposition, and it does not complete the Task or release its Task lease.
 _Avoid_: Task completion, Agent final answer
 
 **Task validation**:
@@ -201,11 +213,23 @@ The Human decision to accept a Task completion claim or require correction. Acce
 _Avoid_: Agent self-approval, Agent run completion
 
 **Task end**:
-The Human-authorized act that normally has the environment worker recycle the Task context directory and then releases the Task lease. Accepted work becomes completed and abandoned work becomes cancelled only after this succeeds. Only Task end ends a Task's hold on its Environment instance; a failed, stopped, or interrupted agent run does not. Force Release is the explicit emergency Task-end exception when the Human accepts that proof or cleanup cannot be completed.
+The Human-authorized act that normally has the environment worker recycle the Task context directory and then releases the Task lease. Accepted work becomes completed and abandoned work becomes cancelled only after this succeeds. Only Task end ends a Task's hold on its Environment instance; a failed, stopped, or interrupted agent run does not. Force Release is the explicit emergency exception: it releases the lease while preserving active work intent in Task status `stopped`. The stopped Task needs a later direct Resume before it can admit another run.
 _Avoid_: Stop, cancel
 
+**Task stop**:
+The active-intent Task status recorded by emergency Force Release: execution and the Environment lease are stopped because the Human accepts unresolved proof or cleanup, while intent to do the work remains alive. The permanent forced-release facts preserve the actor, reason, time, and unresolved cleanup facts. The Task group stays frozen while the Environment is released, but the Task remains in the active-intent family and appears outside the Closed tasks fold. A Human may directly Resume the Task if its original Environment can be safely leased again. Resume preserves those permanent facts and history, prepares fresh Task context, thaws the same Task group, and does not start a run. This differs from an ended `cancelled` Task, from Reopen, and from an Agent run's `stopped` status.
+_Avoid_: Agent run stop, cancellation, normal Task discard
+
+**Task reopen**:
+The Human-authorized return of a Task in the ended family (`done`, `failed`, or `cancelled`) to deliberate work on its previously bound Environment, preserving its history and Project workspace. Reopen reacquires a Task lease and prepares fresh Task context but does not start an Agent run until a later explicit advance. A Force Released `stopped` Task remains active intent and uses direct Resume instead.
+_Avoid_: Retry an old run, revise a rejected Task proposal
+
+**Task resume**:
+The Human-authorized continuation of a paused or Force Released Task. Resuming a paused Task removes its admission hold while retaining its current lease and context. Resuming a Force Released stopped Task reacquires a fresh lease on the same Environment, prepares fresh Task context, preserves prior control and run history plus permanent Force Release facts, and starts no run.
+_Avoid_: Reopen a stopped Task, retry an old run
+
 **Task discard**:
-The Human decision to abandon a begun Task, including during recovery, and authorize normal Task end toward cancellation. The Task becomes cancelled only after Task end recycles its Task context and releases its lease; the Project workspace and its work remain preserved. Force Release is a separate emergency decision rather than a successful normal discard.
+The Human decision to abandon a begun Task, including during recovery, and authorize normal Task end toward cancellation. The Task becomes cancelled only after Task end recycles its Task context and releases its lease; the Project workspace and its work remain preserved. Force Release is a separate emergency action that records active-intent status `stopped` while releasing the Environment lease.
 _Avoid_: Delete Project workspace, automatic cleanup
 
 **Task lease**:
@@ -261,7 +285,7 @@ The state an environment instance's lease enters after a timeout, holder loss, o
 _Avoid_: Cleanup, lock timeout
 
 **Force Release**:
-The Human-only emergency recovery decision that makes an Environment instance reassignable despite unresolved proof or cleanup after ordinary recovery has been attempted. It permanently records the acknowledged risks and unresolved facts; for a Task-held lease it abandons and cancels the Task through an emergency Task end without deleting the Project workspace.
+The Human-only emergency recovery decision that makes an Environment instance reassignable despite unresolved proof or cleanup after ordinary recovery has been attempted. It permanently records the acknowledged risks and unresolved facts; for a Task-held lease it releases the lease and records active-intent status `stopped` while preserving work intent and the Project workspace.
 _Avoid_: Automatic expiry, normal release, lease steal
 
 **Operational event**:

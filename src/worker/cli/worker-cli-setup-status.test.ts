@@ -181,7 +181,11 @@ test('install-service renders and installs a LaunchAgent; uninstall-service remo
         return '';
       },
     });
-    assert.equal(await cli.run(['install-service']), WORKER_EXIT.ok);
+    const workspaceRoot = join(h.paths.stateDirectory, 'project-workspaces');
+    assert.equal(await cli.run(['install-service'], {
+      SPROUT_WORKER_HOME: h.paths.stateDirectory,
+      SPROUT_WORKSPACE_ROOT: workspaceRoot,
+    }), WORKER_EXIT.ok);
     assert.ok(calls.some((call) => call.startsWith('launchctl bootstrap gui/501 ')));
     const plistPath = join(
       h.paths.launchAgentsDirectory,
@@ -190,7 +194,9 @@ test('install-service renders and installs a LaunchAgent; uninstall-service remo
     // The plist is written with owner-only permissions and runs the
     // foreground attempt, so launchd supervises the reconnect loop itself.
     assert.equal(statSync(plistPath).mode & 0o777, 0o600);
-    assert.match(readFileSync(plistPath, 'utf8'), /worker<\/string>\s*<string>start<\/string>\s*<string>--foreground<\/string>/);
+    const plist = readFileSync(plistPath, 'utf8');
+    assert.match(plist, /worker<\/string>\s*<string>start<\/string>\s*<string>--foreground<\/string>/);
+    assert.ok(plist.includes(`<key>SPROUT_WORKSPACE_ROOT</key>\n    <string>${workspaceRoot}</string>`));
     assert.equal(await cli.run(['uninstall-service']), WORKER_EXIT.ok);
     assert.equal(existsSync(plistPath), false);
     assert.ok(calls.some((call) => call.startsWith('launchctl bootout')));

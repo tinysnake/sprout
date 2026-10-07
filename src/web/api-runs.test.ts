@@ -24,6 +24,9 @@ test('a user can submit a request from the Web client and inspect the result', a
     assert.ok(id);
 
     const run = await waitForTerminal(base, id);
+    const statusResponse = await fetch(`${base}/api/runs/${id}/status`);
+    assert.equal(statusResponse.status, 200);
+    assert.deepEqual(await statusResponse.json(), { id, status: 'completed' }, 'Chat never receives prompt, tool output, or raw events');
     assert.equal(run.status, 'completed');
     assert.deepEqual(run.result, { status: 'completed', text: 'done' });
     assert.deepEqual(
@@ -117,7 +120,7 @@ test('the user can stop a run through the API', async () => {
       const stop = await fetch(`${base}/api/runs/${id}/stop`, { method: 'POST' });
       assert.equal(stop.status, 200);
       const stopped = (await stop.json()) as Record<string, unknown>;
-      assert.equal(stopped.status, 'interrupted');
+      assert.equal(stopped.status, 'stopped');
     },
     { settleAfterMs: 5_000 },
   );
@@ -169,7 +172,24 @@ test('an unknown run is a 404 rather than an empty success', async () => {
   await withServer(async (base) => {
     const response = await fetch(`${base}/api/runs/nope`);
     assert.equal(response.status, 404);
+    assert.equal((await fetch(`${base}/api/runs/nope/status`)).status, 404);
   });
+});
+
+test('a quiet SSE stream emits a real empty heartbeat without a cursor or chat data', async () => {
+  await withServer(async (base) => {
+    const response = await fetch(`${base}/api/events`);
+    const reader = response.body!.getReader();
+    try {
+      const chunk = await reader.read();
+      assert.equal(chunk.done, false);
+      const frame = new TextDecoder().decode(chunk.value);
+      assert.match(frame, /event: heartbeat\ndata: ?\n\n/);
+      assert.doesNotMatch(frame, /\nid:|\nevent: (?:message|run)/);
+    } finally {
+      await reader.cancel();
+    }
+  }, { keepAliveMs: 10 });
 });
 
 test('progress is pushed to the client before the run settles', async () => {
@@ -281,11 +301,12 @@ test('an Agent or Worker request cannot manufacture Human message authority', as
   const base = `http://127.0.0.1:${port}`;
   try {
     const browser = await signIn(base, credential);
+    const scopeId = await context.scopes.openDirect('project-sprout', ['operator', 'agent-scout']);
     const request = (authorKind: string) => fetch(`${base}/api/messages`, {
       method: 'POST',
       headers: { cookie: browser.cookie, 'x-sprout-csrf': browser.csrf, 'content-type': 'application/json' },
       body: JSON.stringify({
-        projectId: 'project-sprout', channel: 'direct', authorId: 'forged', authorKind,
+        scopeId, authorId: 'forged', authorKind,
         body: 'request', recipients: ['agent-scout'], deliveryKey: `forged-${authorKind}`,
       }),
     });

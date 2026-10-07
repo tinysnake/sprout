@@ -17,7 +17,15 @@ import { TaskEnvironmentLifecycle } from '../task/environment-lifecycle.ts';
 
 import type { Task } from '../task/model.ts';
 
-import { EnvironmentRecoveryService } from './recovery-service.ts';
+import { ADMISSION_CAPABILITY, projectCatalogEntry } from './catalog.ts';
+
+import { createPendingEnrollment } from './enrollment.ts';
+
+import { SUPPORTED_WORKER_PROTOCOL } from './enrollment-service.ts';
+
+import type { ObservedReadiness } from './readiness-store.ts';
+
+import { EnvironmentRecoveryError, EnvironmentRecoveryService } from './recovery-service.ts';
 
 import { InMemoryRecoveryStore } from './recovery-store.ts';
 
@@ -104,13 +112,13 @@ function build(options: {
     projects,
     ids: {
       task: () => 'task',
-      message: () => 'message',
+      message: () => 'message', projectEvent: () => 'project-event',
       lease: () => 'lease',
       run: () => 'run-1',
     },
     runs: { submit: async (request) => ({ id: request.runId }) },
-    onRecovery: async ({ leaseId, hadActiveRun }) => {
-      await recovery.open({ leaseId, cause: 'worker-channel-lost', hadActiveRun });
+    onRecovery: async ({ leaseId, hadActiveRun, cause }) => {
+      await recovery.open({ leaseId, cause: cause ?? 'worker-channel-lost', hadActiveRun });
     },
     forceReleaseLease: (leaseId) => pool.releaseTaskLease(leaseId) !== undefined,
     ...(options.now !== undefined ? { clock: { now: () => options.now! } } : {}),
@@ -128,6 +136,29 @@ function build(options: {
     ...(options.now !== undefined ? { clock: () => options.now! } : {}),
   });
   return { pool, store, lifecycle, recovery, recoveryStore };
+}
+
+
+function denyLatestEvidence(store: InMemoryRecoveryStore): void {
+  const forLease = store.forLease.bind(store);
+  let reads = 0;
+  store.forLease = async (leaseId) => {
+    const record = await forLease(leaseId);
+    reads += 1;
+    if (reads === 2 && record?.evidence !== undefined) {
+      return { ...record, evidence: { ...record.evidence, engineSessionStopped: false } };
+    }
+    return record;
+  };
+}
+
+
+function failResolvedSave(store: InMemoryRecoveryStore): void {
+  const save = store.save.bind(store);
+  store.save = async (record) => {
+    if (record.phase === 'resolved') throw new Error('database is locked');
+    await save(record);
+  };
 }
 
 
@@ -154,6 +185,39 @@ async function interruptedTask(built: Built): Promise<{ readonly leaseId: string
   return { leaseId: begun.environmentLeaseId! };
 }
 
+
+test('overdue blocked lease exposes durable recovery and Human Force Release without freeing work automatically', async () => {
+  let now = 1;
+  const pool = new EnvironmentPool({ definitions: [definition], instances: [instance], clock: { now: () => now }, idFactory: () => 'lease-1' });
+  const built = build({ pool });
+  await built.store.create(task());
+  const begun = await built.lifecycle.begin('task-1');
+  const leaseId = begun.environmentLeaseId!;
+  await built.store.save({ ...begun, status: 'blocked', environmentLifecycleState: 'blocked' });
+  assert.equal(await built.recovery.forLease(leaseId), undefined);
+  now = pool.getLease(leaseId)!.expiresAt;
+  assert.equal((await pool.acquireLeaseRevalidated({ instanceId: 'mac-1', capability: 'agent-run', holderId: 'other', ttlMs: 1000 })).ok, false);
+  const record = await built.recovery.forLease(leaseId);
+  assert.equal(record?.phase, 'recovery');
+  assert.equal(record?.cause, 'lease-overdue');
+  assert.equal(workSafetyFromRecovery([record!], pool.leases(), 'mac-1'), 'recovery');
+  assert.ok(record!.unresolvedFacts.length > 0);
+  assert.equal(pool.getLease(leaseId)?.state, 'recovering');
+  await built.recovery.forceRelease(leaseId, {
+    acknowledgedRisks: true, typedConfirmation: FORCE_RELEASE_CONFIRMATION, reason: 'Human releases overdue blocked work',
+  });
+  assert.equal(pool.getLease(leaseId)?.state, 'released');
+  const stoppedTask = await built.store.get('task-1');
+  assert.equal(stoppedTask?.status, 'stopped');
+  assert.equal(stoppedTask?.endDisposition, undefined);
+  assert.equal(stoppedTask?.blockerReason, 'Task stopped by the Human operator using Force Release; unresolved facts recorded.');
+  assert.equal(stoppedTask?.forcedRelease?.actor, 'operator');
+  assert.equal(stoppedTask?.forcedRelease?.reason, 'Human releases overdue blocked work');
+  assert.ok(stoppedTask?.forcedRelease?.unresolvedFacts.length);
+  assert.ok(stoppedTask?.forcedRelease?.at);
+  assert.equal((await built.recovery.forceReleaseHistory('mac-1')).length, 1);
+  assert.equal((await pool.acquireLeaseRevalidated({ instanceId: 'mac-1', capability: 'agent-run', holderId: 'other', ttlMs: 1000 })).ok, true);
+});
 
 test('an interrupted nested run opens one durable recovery record and retains the Task lease', async () => {
   const built = build();
@@ -343,6 +407,251 @@ test('another channel loss or Sprout restart invalidates prior epoch proof befor
 });
 
 
+test('ordinary recovery decisions refuse a stale evidence gate before mutating their holders', async () => {
+  for (const action of ['resume', 'discard'] as const) {
+    const built = build();
+    const { leaseId } = await interruptedTask(built);
+    await built.recovery.observeReconnect(leaseId, {
+      enrollmentId: 'enroll-1', environmentInstanceId: 'mac-1', identityVerified: true,
+      protocolCompatible: true, permissionsAllowed: true, hadActiveRun: true,
+    });
+    await built.recovery.synchronizeEvidence(leaseId, { hadActiveRun: true, evidence: {
+      retainedEventCount: 1, turnSettlementObserved: true, engineSessionStopped: true,
+      terminalStatus: 'interrupted', taskContextRecycled: false, taskContextPrepared: true,
+    } });
+    const taskBefore = await built.store.get('task-1');
+    const leaseBefore = built.pool.getLease(leaseId);
+    const recordBefore = await built.recovery.forLease(leaseId);
+    denyLatestEvidence(built.recoveryStore);
+
+    let failure: unknown;
+    try {
+      await built.recovery[action](leaseId);
+    } catch (error) {
+      failure = error;
+    }
+
+    assert.deepEqual(await built.store.get('task-1'), taskBefore, `${action} must not persist a Task change`);
+    assert.deepEqual(built.pool.getLease(leaseId), leaseBefore, `${action} must not persist a lease change`);
+    assert.deepEqual(await built.recovery.forLease(leaseId), recordBefore, `${action} must leave recovery open`);
+    assert.ok(failure instanceof EnvironmentRecoveryError, `${action} must refuse the newer evidence state`);
+    assert.equal(failure.code, 'evidence-not-synchronized');
+  }
+});
+
+
+test('ordinary decision record-write failures happen before holder mutation', async () => {
+  for (const action of ['resume', 'discard'] as const) {
+    const built = build();
+    const { leaseId } = await interruptedTask(built);
+    await built.recovery.observeReconnect(leaseId, {
+      enrollmentId: 'enroll-1', environmentInstanceId: 'mac-1', identityVerified: true,
+      protocolCompatible: true, permissionsAllowed: true, hadActiveRun: true,
+    });
+    await built.recovery.synchronizeEvidence(leaseId, { hadActiveRun: true, evidence: {
+      retainedEventCount: 1, turnSettlementObserved: true, engineSessionStopped: true,
+      terminalStatus: 'interrupted', taskContextRecycled: false, taskContextPrepared: true,
+    } });
+    const taskBefore = await built.store.get('task-1');
+    const leaseBefore = built.pool.getLease(leaseId);
+    const recordBefore = await built.recovery.forLease(leaseId);
+    failResolvedSave(built.recoveryStore);
+
+    await assert.rejects(built.recovery[action](leaseId), /database is locked/);
+    assert.deepEqual(await built.store.get('task-1'), taskBefore, `${action} must not persist a Task change`);
+    assert.deepEqual(built.pool.getLease(leaseId), leaseBefore, `${action} must not persist a lease change`);
+    assert.deepEqual(await built.recovery.forLease(leaseId), recordBefore, `${action} must leave recovery open`);
+  }
+
+  const pool = new EnvironmentPool({
+    definitions: [definition], instances: [instance], idFactory: () => 'run-lease-1',
+  });
+  const acquired = pool.acquireLease({
+    instanceId: 'mac-1', capability: 'agent-run', holderId: 'run-1', runId: 'run-1', ttlMs: 60_000,
+  });
+  assert.equal(acquired.ok, true);
+  if (!acquired.ok) return;
+  pool.markRecovering(acquired.lease.id);
+  const recoveryStore = new InMemoryRecoveryStore();
+  const recovery = new EnvironmentRecoveryService({ store: recoveryStore, leases: pool });
+  await recovery.open({ leaseId: acquired.lease.id, cause: 'worker-channel-lost', hadActiveRun: true, runId: 'run-1' });
+  await recovery.observeReconnect(acquired.lease.id, {
+    enrollmentId: 'enroll-1', environmentInstanceId: 'mac-1', identityVerified: true,
+    protocolCompatible: true, permissionsAllowed: true, hadActiveRun: true,
+  });
+  await recovery.synchronizeEvidence(acquired.lease.id, { hadActiveRun: true, evidence: {
+    retainedEventCount: 1, turnSettlementObserved: true, engineSessionStopped: true,
+    terminalStatus: 'interrupted', taskContextRecycled: false,
+  } });
+  const leaseBefore = pool.getLease(acquired.lease.id);
+  const recordBefore = await recovery.forLease(acquired.lease.id);
+  failResolvedSave(recoveryStore);
+
+  await assert.rejects(recovery.release(acquired.lease.id), /database is locked/);
+  assert.deepEqual(pool.getLease(acquired.lease.id), leaseBefore, 'Release must not change the lease');
+  assert.deepEqual(await recovery.forLease(acquired.lease.id), recordBefore, 'Release must leave recovery open');
+});
+
+
+test('holder refusal restores recovery after Task resume cannot persist', async () => {
+  const built = build();
+  const { leaseId } = await interruptedTask(built);
+  await built.recovery.observeReconnect(leaseId, {
+    enrollmentId: 'enroll-1', environmentInstanceId: 'mac-1', identityVerified: true,
+    protocolCompatible: true, permissionsAllowed: true, hadActiveRun: true,
+  });
+  await built.recovery.synchronizeEvidence(leaseId, { hadActiveRun: true, evidence: {
+    retainedEventCount: 1, turnSettlementObserved: true, engineSessionStopped: true,
+    terminalStatus: 'interrupted', taskContextRecycled: false, taskContextPrepared: true,
+  } });
+  const taskBefore = await built.store.get('task-1');
+  const leaseBefore = built.pool.getLease(leaseId);
+  const recordBefore = await built.recovery.forLease(leaseId);
+  built.store.save = async () => { throw new Error('task store is locked'); };
+
+  await assert.rejects(built.recovery.resume(leaseId), /task store is locked/);
+
+  assert.deepEqual(await built.store.get('task-1'), taskBefore, 'a refused resume must preserve the Task');
+  assert.deepEqual(built.pool.getLease(leaseId), leaseBefore, 'a refused resume must preserve its recovering lease');
+  assert.deepEqual(await built.recovery.forLease(leaseId), recordBefore, 'a refused resume must restore open recovery');
+});
+
+
+test('holder refusals restore open recovery for Resume, Discard, and Release', async () => {
+  for (const action of ['resume', 'discard'] as const) {
+    const built = build();
+    const { leaseId } = await interruptedTask(built);
+    await built.recovery.observeReconnect(leaseId, {
+      enrollmentId: 'enroll-1', environmentInstanceId: 'mac-1', identityVerified: true,
+      protocolCompatible: true, permissionsAllowed: true, hadActiveRun: true,
+    });
+    await built.recovery.synchronizeEvidence(leaseId, { hadActiveRun: true, evidence: {
+      retainedEventCount: 1, turnSettlementObserved: true, engineSessionStopped: true,
+      terminalStatus: 'interrupted', taskContextRecycled: false, taskContextPrepared: true,
+    } });
+    const taskBefore = await built.store.get('task-1');
+    const leaseBefore = built.pool.getLease(leaseId);
+    const recordBefore = await built.recovery.forLease(leaseId);
+    const holderAction = action === 'resume' ? 'resumeTask' : 'discardTask';
+    const recovery = new EnvironmentRecoveryService({
+      store: built.recoveryStore,
+      leases: built.pool,
+      holders: { [holderAction]: async () => { throw new Error('holder refused'); } },
+    });
+
+    await assert.rejects(recovery[action](leaseId), /holder refused/);
+    assert.deepEqual(await built.store.get('task-1'), taskBefore, `${action} refusal must preserve the Task`);
+    assert.deepEqual(built.pool.getLease(leaseId), leaseBefore, `${action} refusal must preserve the lease`);
+    assert.deepEqual(await recovery.forLease(leaseId), recordBefore, `${action} refusal must restore open recovery`);
+  }
+
+  const pool = new EnvironmentPool({
+    definitions: [definition], instances: [instance], idFactory: () => 'run-lease-1',
+  });
+  const acquired = pool.acquireLease({
+    instanceId: 'mac-1', capability: 'agent-run', holderId: 'run-1', runId: 'run-1', ttlMs: 60_000,
+  });
+  assert.equal(acquired.ok, true);
+  if (!acquired.ok) return;
+  pool.markRecovering(acquired.lease.id);
+  const recoveryStore = new InMemoryRecoveryStore();
+  const recovery = new EnvironmentRecoveryService({ store: recoveryStore, leases: pool });
+  await recovery.open({ leaseId: acquired.lease.id, cause: 'worker-channel-lost', hadActiveRun: true, runId: 'run-1' });
+  await recovery.observeReconnect(acquired.lease.id, {
+    enrollmentId: 'enroll-1', environmentInstanceId: 'mac-1', identityVerified: true,
+    protocolCompatible: true, permissionsAllowed: true, hadActiveRun: true,
+  });
+  await recovery.synchronizeEvidence(acquired.lease.id, { hadActiveRun: true, evidence: {
+    retainedEventCount: 1, turnSettlementObserved: true, engineSessionStopped: true,
+    terminalStatus: 'interrupted', taskContextRecycled: false,
+  } });
+  const leaseBefore = pool.getLease(acquired.lease.id);
+  const recordBefore = await recovery.forLease(acquired.lease.id);
+  pool.releaseLease = () => undefined;
+
+  await assert.rejects(recovery.release(acquired.lease.id), (error: unknown) => {
+    assert.ok(error instanceof EnvironmentRecoveryError);
+    assert.equal(error.code, 'unknown-lease');
+    return true;
+  });
+  assert.deepEqual(pool.getLease(acquired.lease.id), leaseBefore, 'Release refusal must preserve the lease');
+  assert.deepEqual(await recovery.forLease(acquired.lease.id), recordBefore, 'Release refusal must restore open recovery');
+});
+
+
+test('discard refuses the observed terminal Task shape while the engine stop remains unproven', async () => {
+  const built = build();
+  const { leaseId } = await interruptedTask(built);
+  await built.recovery.observeReconnect(leaseId, {
+    enrollmentId: 'enroll-1', environmentInstanceId: 'mac-1', identityVerified: true,
+    protocolCompatible: true, permissionsAllowed: true, hadActiveRun: true,
+  });
+  await built.recovery.synchronizeEvidence(leaseId, { hadActiveRun: true, evidence: {
+    retainedEventCount: 1, turnSettlementObserved: true, engineSessionStopped: false,
+    terminalStatus: 'interrupted', taskContextRecycled: true, taskContextPrepared: true,
+  } });
+
+  // Reconstruct the already-partially-applied production shape: terminal Task,
+  // released lease, and an open recovery record whose engine fence is unproven.
+  const taskBefore = await built.store.get('task-1');
+  assert.ok(taskBefore);
+  await built.store.save({ ...taskBefore, status: 'cancelled', environmentLifecycleState: 'discarded' });
+  built.pool.releaseTaskLease(leaseId);
+  const wedgedTask = await built.store.get('task-1');
+  const releasedLease = built.pool.getLease(leaseId);
+  const recoveryRecord = await built.recovery.forLease(leaseId);
+
+  await assert.rejects(built.recovery.discard(leaseId), (error: unknown) => {
+    assert.ok(error instanceof EnvironmentRecoveryError);
+    assert.equal(error.code, 'evidence-not-synchronized');
+    assert.match(error.message, /engine fence/i);
+    return true;
+  });
+  assert.deepEqual(await built.store.get('task-1'), wedgedTask);
+  assert.deepEqual(built.pool.getLease(leaseId), releasedLease);
+  assert.deepEqual(await built.recovery.forLease(leaseId), recoveryRecord);
+});
+
+
+test('ordinary run Release refuses a stale evidence gate before releasing its lease', async () => {
+  const pool = new EnvironmentPool({
+    definitions: [definition], instances: [instance], idFactory: () => 'run-lease-1',
+  });
+  const acquired = pool.acquireLease({
+    instanceId: 'mac-1', capability: 'agent-run', holderId: 'run-1', runId: 'run-1', ttlMs: 60_000,
+  });
+  assert.equal(acquired.ok, true);
+  if (!acquired.ok) return;
+  pool.markRecovering(acquired.lease.id);
+  const recoveryStore = new InMemoryRecoveryStore();
+  const recovery = new EnvironmentRecoveryService({ store: recoveryStore, leases: pool });
+  await recovery.open({ leaseId: acquired.lease.id, cause: 'worker-channel-lost', hadActiveRun: true, runId: 'run-1' });
+  await recovery.observeReconnect(acquired.lease.id, {
+    enrollmentId: 'enroll-1', environmentInstanceId: 'mac-1', identityVerified: true,
+    protocolCompatible: true, permissionsAllowed: true, hadActiveRun: true,
+  });
+  await recovery.synchronizeEvidence(acquired.lease.id, { hadActiveRun: true, evidence: {
+    retainedEventCount: 1, turnSettlementObserved: true, engineSessionStopped: true,
+    terminalStatus: 'interrupted', taskContextRecycled: false,
+  } });
+  const leaseBefore = pool.getLease(acquired.lease.id);
+  const recordBefore = await recovery.forLease(acquired.lease.id);
+  denyLatestEvidence(recoveryStore);
+
+  let failure: unknown;
+  try {
+    await recovery.release(acquired.lease.id);
+  } catch (error) {
+    failure = error;
+  }
+
+  assert.deepEqual(pool.getLease(acquired.lease.id), leaseBefore, 'Release must not change the lease');
+  assert.deepEqual(await recovery.forLease(acquired.lease.id), recordBefore, 'Release must leave recovery open');
+  assert.ok(failure instanceof EnvironmentRecoveryError, 'Release must refuse the newer evidence state');
+  assert.equal(failure.code, 'evidence-not-synchronized');
+});
+
+
 test('ordinary Discard performs safe Task end: context recycled then lease released', async () => {
   const calls: string[] = [];
   const store = new InMemoryTaskStore();
@@ -358,7 +667,7 @@ test('ordinary Discard performs safe Task end: context recycled then lease relea
     pool,
     agents,
     projects,
-    ids: { task: () => 'task', message: () => 'message', lease: () => 'lease', run: () => 'run-1' },
+    ids: { task: () => 'task', message: () => 'message', projectEvent: () => 'project-event', lease: () => 'lease', run: () => 'run-1' },
     runs: { submit: async (request) => ({ id: request.runId }) },
     worker: {
       prepare: async () => ({ bootstrapInstructions: '' }),
@@ -418,8 +727,45 @@ test('ordinary Discard performs safe Task end: context recycled then lease relea
   // Task context was recycled *before* the Task became cancelled and the lease
   // was released; the Project workspace was never touched.
   assert.deepEqual(calls, ['discard', 'recycle', 'task:cancelled']);
-  assert.equal((await store.get('task-1'))?.environmentLifecycleState, 'discarded');
+  const discardedTask = await store.get('task-1');
+  assert.equal(discardedTask?.status, 'cancelled');
+  assert.equal(discardedTask?.environmentLifecycleState, 'discarded');
   assert.equal(pool.getLease(leaseId)?.state, 'released');
+  const records = await recovery.listForEnvironment('mac-1');
+  assert.equal(records[0]?.phase, 'resolved');
+  const workSafety = workSafetyFromRecovery(
+    records,
+    pool.leases().map((lease) => ({ instanceId: lease.instanceId, state: lease.state })),
+    'mac-1',
+  );
+  assert.equal(workSafety, 'clear');
+  const requestedEnrollment = createPendingEnrollment({
+    id: 'enroll-1', environmentInstanceId: 'mac-1', displayName: 'Test Environment',
+    identityDigest: 'identity-digest', platform: 'macos', capabilityRequests: [ADMISSION_CAPABILITY],
+    engineFacts: [], at: 10,
+  });
+  const catalogEntry = projectCatalogEntry({
+    enrollment: {
+      ...requestedEnrollment, status: 'approved', everApproved: true,
+      capabilityPermissions: { [ADMISSION_CAPABILITY]: true }, updatedAt: 10,
+    },
+    observed: {
+      enrollmentId: 'enroll-1', connectionEpoch: 1,
+      connection: { state: 'online', lastConfirmedAt: 10 },
+      compatibility: { state: 'compatible', workerProtocolVersion: '2' },
+      engines: [{ engine: 'codex', installed: true, readiness: 'ready', required: false,
+        models: { state: 'available', models: ['codex-model'] } }],
+    } satisfies ObservedReadiness,
+    workSafety,
+    currentEpoch: 1,
+    requiredEngines: ['codex'],
+    supportedProtocol: SUPPORTED_WORKER_PROTOCOL,
+    now: 10,
+  });
+  assert.equal(catalogEntry.eligible, true, 'a cleared recovery record restores catalog eligibility');
+  assert.equal(pool.acquireLease({
+    instanceId: 'mac-1', capability: 'agent-run', holderId: 'next-task', taskId: 'next-task', ttlMs: 60_000,
+  }).ok, true, 'the released instance admits new work');
 });
 
 

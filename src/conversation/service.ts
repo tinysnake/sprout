@@ -1,10 +1,12 @@
 /**
  * The caller-facing conversation scope and Working group capability (ADR-0008, #95).
  *
- * This Module owns the one rule set for the three routine communication
- * scopes: the invariant Project channel, Project-scoped direct conversations,
- * and temporary Working groups with explicit membership and history. It
- * deliberately owns no Message, no wake, no run, and no Task:
+ * This Module owns the one rule set for four routine communication scopes:
+ * the invariant Project channel, Project-scoped direct conversations,
+ * temporary Working groups with explicit membership, and Task groups bound to
+ * one Task. It owns no Message, wake, run, or Task lifecycle. Task title,
+ * content, and status arrive through narrow read-only Task ports; Task
+ * admission and lifecycle remain owned by the Task authority:
  *
  * - conversation history stays in the collaboration store, so creating or
  *   disbanding a scope can never create, wake, or delete work by itself; and
@@ -19,25 +21,26 @@
  * is the authenticated Human by construction — the service itself stays
  * transport-free and validates every actor against the Project anyway.
  *
- * Lifecycle: disbanding makes the channel read-only without deleting
- * configuration, membership changes, or messages; restore rechecks member
- * eligibility; an ended Project membership ends that member's current
- * participation in every Working group without erasing history. Read-only is
- * always derived (archived Project, disbanded group, ended membership), never
- * destructive. Every disband and restore appends an attributed lifecycle
- * event (actor, time, reason) instead of overwriting scalar fields, so prior
- * transitions stay auditable (ADR-0008: every effective edit records its
- * actor, time, and changed facts). Every rewrite of a recorded group — a
- * lifecycle transition, a content version, a membership change — commits
- * through the store's serialized conditional update, so an accepted change
- * can never be overwritten by an interleaved command and a command computed
- * against a stale snapshot is refused instead of succeeding (ADR-0008 audit
- * clause).
+ * Lifecycle: disbanding makes a Working group's channel read-only without
+ * deleting configuration, membership changes, or messages; restore rechecks
+ * member eligibility; an ended Project membership ends that member's current
+ * participation in every Working group without erasing history. A Task group
+ * follows its Task content and freezes when product status data requires it or
+ * Force Release freezes a stopped Task; its snapshots and messages remain
+ * readable. Read-only scopes are never destructive. Every disband and restore
+ * appends an attributed lifecycle event (actor, time, reason) instead of
+ * overwriting scalar fields, so prior transitions stay auditable (ADR-0008:
+ * every effective edit records its actor, time, and changed facts). Every rewrite
+ * of a recorded group — a lifecycle transition, a content version, a membership
+ * change — commits through the store's serialized conditional update, so an
+ * accepted change can never be overwritten by an interleaved command and a
+ * command computed against a stale snapshot is refused instead of succeeding
+ * (ADR-0008 audit clause).
  *
- * Context: `scopeContext` returns the governing Project and Working group
- * goal/rules versions verbatim, side by side. Sprout does not merge them,
+ * Context: `scopeContext` returns the governing Project, Working group, or
+ * Task group versions verbatim, side by side. Sprout does not merge them,
  * order them, or interpret conflicts between them (ADR-0008); later routing
- * and run context (#96) receives both versions as facts.
+ * and run context (#96) receives the versions as facts.
  */
 
 import {
@@ -48,9 +51,12 @@ import {
   activeWorkingGroupMembers,
   canonicalDirectParticipants,
   currentWorkingGroupContent,
+  currentTaskGroupContent,
   directConversationScopeId,
   isWorkingGroup,
   projectChannelScopeId,
+  taskGroupScopeId,
+  taskGroupStatus,
   workingGroupStatus,
   sanitizeWorkingGroupDisplayName,
   sanitizeWorkingGroupGoal,
@@ -62,11 +68,18 @@ import {
   type ProjectChannelScope,
   type ScopeContext,
   type ScopeState,
+  type TaskGroupScope,
   type WorkingGroupMembership,
   type WorkingGroupScope,
 } from './model.ts';
+import { TASK_STATUSES, TASK_STATUS_DATA, isEndedTaskStatus, type TaskStatus } from '../task/model.ts';
 import type { ConversationScopeStore } from './store.ts';
-import { redactSensitiveText } from '../environment/privacy.ts';
+import { redactSensitiveText, sanitizeOperatorText } from '../environment/privacy.ts';
+import {
+  sanitizeRoutingIntervalMs,
+  sanitizeWakePolicy,
+  type WakePolicy,
+} from '../project/authority-model.ts';
 
 /** One current or ended member of a Project, as a scope validates against. */
 export interface ConversationProjectMemberFacts {
@@ -74,6 +87,13 @@ export interface ConversationProjectMemberFacts {
   readonly memberKind: 'human' | 'agent';
   readonly endedAt?: number;
   readonly endedReason?: string;
+  /**
+   * The member's Project-declared facts (#97): routing context presents them
+   * to the wake model as Project-shared responsibility evidence. Absent for a
+   * host-configured M1 Project that declares none.
+   */
+  readonly responsibilities?: readonly string[];
+  readonly collaborationInstructions?: string;
 }
 
 /**
@@ -91,6 +111,16 @@ export interface ConversationProjectFacts {
   readonly goal: string;
   readonly rules: readonly string[];
   readonly members: readonly ConversationProjectMemberFacts[];
+  /**
+   * The Project's wake policy and fixed routing interval (#97).
+   *
+   * Optional on the port so an existing fixture that predates assisted routing
+   * keeps compiling; readers apply the ADR-0007 defaults (`explicit-only`,
+   * 30 seconds) — the migration and template defaults — when a Project fact
+   * source does not declare them.
+   */
+  readonly wakePolicy?: WakePolicy;
+  readonly routingIntervalMs?: number;
 }
 
 /**
@@ -121,9 +151,21 @@ export interface PreparedProjectChannel {
   readonly rollback: () => Promise<void>;
 }
 
+export interface ConversationTaskFacts {
+  readonly projectId: string;
+  readonly status: string;
+}
+
+/** The Task authority facts needed to fail closed after an ended Task status. */
+export interface ConversationTaskPort {
+  taskFacts(taskId: string): Promise<ConversationTaskFacts | undefined>;
+}
+
 export interface ConversationScopeServiceOptions {
   readonly store: ConversationScopeStore;
   readonly projects: ConversationProjectPort;
+  /** Optional in small fixtures; production uses it to close crash windows. */
+  readonly tasks?: ConversationTaskPort;
   readonly clock?: () => number;
   /** Stable Working group id generator, injectable so tests control identity. */
   readonly createId?: () => string;
@@ -139,6 +181,21 @@ export interface CreateWorkingGroupInput {
   readonly goal?: string;
   readonly rules?: readonly string[];
   /** The sanitized operator reason recorded on the first content version. */
+  readonly reason?: string;
+}
+
+export interface TaskGroupSyncInput {
+  readonly taskId: string;
+  readonly projectId: string;
+  readonly title: string;
+  readonly goal: string;
+  readonly constraints: readonly string[];
+  readonly lead: ConversationActor;
+  readonly contentVersion: number;
+  readonly status: TaskStatus;
+  /** A durable Human Reopen or stopped-Task Resume event permits thaw. */
+  readonly allowThaw?: boolean;
+  readonly versionActor?: ConversationActor;
   readonly reason?: string;
 }
 
@@ -166,6 +223,7 @@ export interface ScopeInspection {
 export class ConversationScopeService {
   readonly #store: ConversationScopeStore;
   readonly #projects: ConversationProjectPort;
+  readonly #tasks: ConversationTaskPort | undefined;
   readonly #clock: () => number;
   readonly #createId: () => string;
   /**
@@ -182,12 +240,35 @@ export class ConversationScopeService {
   readonly #preparing = new Set<string>();
   /** Hold a scope's preparation turn until its Project persistence settles. */
   readonly #preparationTurns = new Map<string, Promise<void>>();
+  /** Serialize Task group posts with ended-state or Force Release transitions. */
+  readonly #taskGroupTurns = new Map<string, Promise<void>>();
 
   constructor(options: ConversationScopeServiceOptions) {
     this.#store = options.store;
     this.#projects = options.projects;
+    this.#tasks = options.tasks;
     this.#clock = options.clock ?? Date.now;
     this.#createId = options.createId ?? (() => Math.random().toString(36).slice(2, 10));
+  }
+
+  /**
+   * Serialize one Task group's post admission and Task ended-state or Force
+   * Release transition. Both the collaboration write path and Task lifecycle hold
+   * this turn from checking Task status through durable Message or Task persistence,
+   * so a post cannot slip between the Task transition and scope freeze.
+   */
+  async withTaskGroupLock<T>(taskId: string, action: () => Promise<T>): Promise<T> {
+    const previous = this.#taskGroupTurns.get(taskId);
+    let unlock!: () => void;
+    const turn = new Promise<void>((resolve) => { unlock = resolve; });
+    this.#taskGroupTurns.set(taskId, turn);
+    if (previous !== undefined) await previous;
+    try {
+      return await action();
+    } finally {
+      if (this.#taskGroupTurns.get(taskId) === turn) this.#taskGroupTurns.delete(taskId);
+      unlock();
+    }
   }
 
   /**
@@ -321,6 +402,50 @@ export class ConversationScopeService {
     return this.#store.get(scopeId);
   }
 
+  /**
+   * The Project's member facts (current and ended), for routing consumers (#96).
+   *
+   * A read-only projection of the same Project facts this service validates
+   * against: deterministic Message and Project-event routing resolves its
+   * recipients from here, so "current Project Agents" is decided by one
+   * authority rather than by a second membership copy. Returns `undefined` for
+   * an unknown Project, so a caller can distinguish "no such Project" from
+   * "a Project with no members".
+   */
+  async projectMembers(
+    projectId: string,
+  ): Promise<readonly ConversationProjectMemberFacts[] | undefined> {
+    return (await this.#projects.projectFacts(projectId))?.members;
+  }
+
+  /**
+   * The Project's wake policy and fixed routing interval (#97), with the
+   * ADR-0007 defaults applied when the fact source declares neither
+   * (`explicit-only`, 30 seconds — the migration, template, and new-Project
+   * defaults). Returns `undefined` for an unknown Project so a caller can
+   * distinguish "no such Project" from "defaults".
+   */
+  async routingPolicy(
+    projectId: string,
+  ): Promise<{ readonly wakePolicy: WakePolicy; readonly intervalMs: number } | undefined> {
+    const facts = await this.#projects.projectFacts(projectId);
+    if (facts === undefined) return undefined;
+    return {
+      wakePolicy: sanitizeWakePolicy(facts.wakePolicy),
+      intervalMs: sanitizeRoutingIntervalMs(facts.routingIntervalMs),
+    };
+  }
+
+  /**
+   * The Project-shared contract facts a routing attempt freezes (#97): the
+   * Project goal and rules plus every member's declared responsibilities and
+   * collaboration instructions. Read-only; the Project authority stays the
+   * one owner of these facts.
+   */
+  async projectContract(projectId: string): Promise<ConversationProjectFacts | undefined> {
+    return this.#projects.projectFacts(projectId);
+  }
+
   /** One Working group by identity, after materializing participation ends. */
   async getWorkingGroup(groupId: string): Promise<WorkingGroupScope | undefined> {
     const scope = await this.#store.get(groupId);
@@ -408,6 +533,123 @@ export class ConversationScopeService {
     };
     await this.#store.save(group);
     return group;
+  }
+
+  /**
+   * Create or refresh the one scope permanently bound to a Task.
+   *
+   * Membership is deliberately not copied: scope-state reads the current
+   * Project membership facts, so every current Project member is included and
+   * later joiners take part without a membership write. Task content versions
+   * are snapshotted append-only, and product status data determines whether the
+   * group remains writable or freezes pending ended-state handling or Force Release.
+   */
+  async syncTaskGroup(input: TaskGroupSyncInput): Promise<TaskGroupScope> {
+    const facts = await this.#facts(input.projectId);
+    const taskStatus = input.status as TaskStatus;
+    if (typeof input.taskId !== 'string' || input.taskId.trim() === ''
+      || !Number.isSafeInteger(input.contentVersion) || input.contentVersion < 1
+      || !TASK_STATUSES.includes(taskStatus)) {
+      throw new ConversationScopeError('task-group-content-conflict', 'Task group requires a valid Task binding and content version');
+    }
+    const id = taskGroupScopeId(input.taskId);
+    const taskTitle = sanitizeOperatorText(input.title, { fallback: 'Task group', maxLength: 120 });
+    const goal = sanitizeWorkingGroupGoal(input.goal);
+    const rules = sanitizeWorkingGroupRules(input.constraints);
+    const frozenTaskStatus = TASK_STATUS_DATA[taskStatus].freezeTaskGroup ? taskStatus : undefined;
+    const actor = input.versionActor ?? input.lead;
+    const reason = sanitizeWorkingGroupReason(
+      input.reason ?? `Task content version ${input.contentVersion} was bound to this Task group.`,
+      'Task content was bound to this Task group; prior versions are preserved.',
+    );
+    let saved: TaskGroupScope | undefined;
+    await this.#store.update(id, (current) => {
+      const now = this.#clock();
+      if (current !== undefined && (current.kind !== 'task-group' || current.taskId !== input.taskId
+        || current.projectId !== facts.projectId)) {
+        throw new ConversationScopeError(
+          'task-group-binding-conflict',
+          `Task group ${id} is already bound to a different Task or Project and cannot be rebound`,
+        );
+      }
+      if (current === undefined) {
+        const group: TaskGroupScope = {
+          id,
+          kind: 'task-group',
+          projectId: facts.projectId,
+          taskId: input.taskId,
+          content: {
+            currentVersion: 1,
+            versions: [{
+              version: 1,
+              taskContentVersion: input.contentVersion,
+              at: now,
+              actorMemberId: actor.memberId,
+              reason,
+              taskTitle,
+              goal,
+              rules,
+            }],
+          },
+          ...(frozenTaskStatus !== undefined ? { frozenAt: now, terminalTaskStatus: frozenTaskStatus } : {}),
+          createdAt: now,
+          updatedAt: now,
+        };
+        saved = group;
+        return group;
+      }
+      const group = current as TaskGroupScope;
+      const latest = currentTaskGroupContent(group);
+      let next = group;
+      if (group.frozenAt !== undefined) {
+        if (frozenTaskStatus !== undefined) {
+          if (group.terminalTaskStatus !== frozenTaskStatus || latest.taskContentVersion !== input.contentVersion
+            || latest.taskTitle !== taskTitle || latest.goal !== goal || JSON.stringify(latest.rules) !== JSON.stringify(rules)) {
+            throw new ConversationScopeError('task-group-binding-conflict', `frozen Task group ${group.id} cannot be rebound or revised`);
+          }
+          saved = group;
+          return group;
+        }
+        if (input.allowThaw !== true) {
+          throw new ConversationScopeError('task-group-frozen', `Task group ${group.id} is frozen and its content cannot change`);
+        }
+        const { frozenAt: _frozenAt, terminalTaskStatus: _terminalTaskStatus, ...unfrozen } = group;
+        next = { ...unfrozen, updatedAt: now };
+      }
+      if (input.contentVersion < latest.taskContentVersion) {
+        throw new ConversationScopeError('task-group-content-conflict', `Task group ${group.id} cannot move to an older Task content version`);
+      }
+      if (input.contentVersion === latest.taskContentVersion) {
+        if (latest.taskTitle !== taskTitle || latest.goal !== goal || JSON.stringify(latest.rules) !== JSON.stringify(rules)) {
+          throw new ConversationScopeError('task-group-content-conflict', `Task content version ${input.contentVersion} changed after it was bound`);
+        }
+      } else {
+        next = {
+          ...next,
+          content: {
+            currentVersion: group.content.currentVersion + 1,
+            versions: [...group.content.versions, {
+              version: group.content.currentVersion + 1,
+              taskContentVersion: input.contentVersion,
+              at: now,
+              actorMemberId: actor.memberId,
+              reason,
+              taskTitle,
+              goal,
+              rules,
+            }],
+          },
+          updatedAt: now,
+        };
+      }
+      if (frozenTaskStatus !== undefined) {
+        next = { ...next, frozenAt: now, terminalTaskStatus: frozenTaskStatus, updatedAt: now };
+      }
+      saved = next;
+      return next;
+    });
+    if (saved === undefined) throw new ConversationScopeError('unknown-scope', `Task group for Task ${input.taskId} could not be stored`);
+    return saved;
   }
 
   /**
@@ -747,9 +989,9 @@ export class ConversationScopeService {
    * The admission state of one scope for one acting member.
    *
    * `writable: false` is the read-only contract later consumers enforce before
-   * recording a Message: archived Project, disbanded Working group, ended
-   * membership, or a non-participant each block new messages while history
-   * stays readable.
+   * recording a Message: archived Project, disbanded Working group, terminal
+   * Task group, ended membership, or a non-participant each blocks new messages
+   * while history stays readable.
    */
   async scopeState(scopeId: string, actorId: string): Promise<ScopeState> {
     const scope = await this.#store.get(scopeId);
@@ -790,6 +1032,25 @@ export class ConversationScopeService {
       return { scopeId, writable: true };
     }
 
+    if (scope.kind === 'task-group') {
+      if (taskGroupStatus(scope) === 'frozen') {
+        return { scopeId, writable: false, reason: 'task-group-frozen' };
+      }
+      if (this.#tasks !== undefined) {
+        const task = await this.#tasks.taskFacts(scope.taskId);
+        if (task === undefined || task.projectId !== scope.projectId) {
+          return { scopeId, writable: false, reason: 'task-group-task-unavailable' };
+        }
+        const status = task.status as TaskStatus;
+        if (!TASK_STATUSES.includes(status) || isEndedTaskStatus(status)) {
+          return { scopeId, writable: false, reason: 'task-group-frozen' };
+        }
+      }
+      if (actor === undefined) return { scopeId, writable: false, reason: 'not-a-member' };
+      if (actor.endedAt !== undefined) return { scopeId, writable: false, reason: 'membership-ended' };
+      return { scopeId, writable: true };
+    }
+
     await this.syncProjectMembershipEnds(facts.projectId);
     const group = (await this.#store.get(scopeId)) as WorkingGroupScope;
     if (workingGroupStatus(group) === 'disbanded') {
@@ -806,9 +1067,10 @@ export class ConversationScopeService {
   /**
    * The governing goal/rules facts for one scope.
    *
-   * Project and Working group versions are returned side by side, verbatim:
-   * this Module never merges them or decides precedence (ADR-0008), it only
-   * makes both attributable for later routing and run context.
+   * Project and Working group versions, plus a Task group's bound Task
+   * snapshot, are returned verbatim. This Module never merges them or decides
+   * precedence (ADR-0008); it only makes each context attributable for later
+   * routing and run context.
    */
   async scopeContext(scopeId: string): Promise<ScopeContext> {
     const scope = await this.#store.get(scopeId);
@@ -821,6 +1083,23 @@ export class ConversationScopeService {
       goal: redactSensitiveText(facts.goal),
       rules: facts.rules.map((rule) => redactSensitiveText(rule)),
     };
+    if (scope.kind === 'task-group') {
+      const content = currentTaskGroupContent(scope);
+      return {
+        scopeId,
+        projectId: facts.projectId,
+        kind: scope.kind,
+        project,
+        taskGroup: {
+          taskId: scope.taskId,
+          taskTitle: content.taskTitle,
+          contentVersion: scope.content.currentVersion,
+          taskContentVersion: content.taskContentVersion,
+          goal: redactSensitiveText(content.goal),
+          rules: content.rules.map((rule) => redactSensitiveText(rule)),
+        },
+      };
+    }
     if (scope.kind !== 'working-group') {
       return { scopeId, projectId: facts.projectId, kind: scope.kind, project };
     }

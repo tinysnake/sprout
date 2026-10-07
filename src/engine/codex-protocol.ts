@@ -1,5 +1,6 @@
 import type { AgentRunEvent, EngineTurnResult } from './port.ts';
 import type { JsonRpcNotification } from './jsonrpc.ts';
+import { classifyEngineTurnFailure, isRetryableEngineTurnFailure, sanitizedTurnFailure, type EngineTurnFailureCause } from './turn-failure.ts';
 
 /**
  * Translation from Codex `app-server` notifications into the engine-neutral run
@@ -17,6 +18,12 @@ import type { JsonRpcNotification } from './jsonrpc.ts';
  * - `item/completed` for `agentMessage` carries the turn's full text.
  * - `turn/completed` reports `turn.status` of `completed` or `interrupted`, and
  *   an `error` object when the turn failed. It carries no token usage.
+ *
+ * Error terminations are classified as **failed** with a sanitized reason and
+ * never as completed empty turns (#182): a `failed`/`error` status, an error
+ * object, a non-retrying `error` notification, or a settlement status Sprout
+ * does not recognize all fail the turn. The engine's own error text (an
+ * upstream body) is deliberately never read.
  */
 
 export interface CodexTurnState {
@@ -93,16 +100,29 @@ export function mapCodexNotification(
     case 'turn/completed': {
       const params = notification.params as { turn?: CodexTurn } | undefined;
       const turn = params?.turn;
-      if (turn?.error?.message) {
-        return { events: [], finish: { status: 'failed', message: turn.error.message } };
+      const status = turn?.status;
+      // An error object is the engine's own report that the turn failed; its
+      // message is an upstream body and is never read (#182).
+      if (turn?.error !== undefined && turn.error !== null) {
+        return failTurn(classifyEngineTurnFailure(turn.error) ?? 'turn-error');
       }
-      if (turn?.status === 'interrupted') {
+      if (status === 'interrupted') {
         return { events: [], finish: { status: 'interrupted' } };
       }
-      return {
-        events: [],
-        finish: { status: 'completed', text: state.finalText || state.text },
-      };
+      if (status === 'failed' || status === 'error') {
+        // A failed status without an error message is still a failed turn —
+        // completing it here would record the silent empty success #182 forbids.
+        return failTurn('turn-error');
+      }
+      if (status === 'completed') {
+        return {
+          events: [],
+          finish: { status: 'completed', text: state.finalText || state.text },
+        };
+      }
+      // The settlement names no recognized outcome, so success is unknown:
+      // fail closed rather than fabricate a completed empty turn (#182).
+      return failTurn('unexpected-termination');
     }
 
     case 'error': {
@@ -120,16 +140,26 @@ export function mapCodexNotification(
       if (params?.error?.willRetry === true) {
         return { events: [] };
       }
-      const message = params?.error?.message ?? params?.message ?? 'codex reported an error';
-      return {
-        events: [],
-        finish: { status: 'failed', message },
-      };
+      // The notification's message is engine/provider text (potentially a raw
+      // upstream body); only the stable failure class is reported (#182).
+      return failTurn(classifyEngineTurnFailure(params?.error ?? params) ?? 'engine-error');
     }
 
     default:
       return { events: [] };
   }
+}
+
+/** Classify an error termination with stable, content-free failure text (#182). */
+function failTurn(cause: EngineTurnFailureCause): CodexNotificationOutcome {
+  return {
+    events: [],
+    finish: {
+      status: 'failed',
+      message: sanitizedTurnFailure('codex', cause),
+      ...(isRetryableEngineTurnFailure(cause) ? { retryable: true as const } : {}),
+    },
+  };
 }
 
 function firstCommandAction(item: CodexItem): string | undefined {

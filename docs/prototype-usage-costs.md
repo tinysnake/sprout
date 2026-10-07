@@ -46,7 +46,7 @@ Codex and Pi telemetry research:
 | --- | --- |
 | Activity identity | `agent_run` or `routing_attempt`, with Project ownership and optional Task or Agent ownership |
 | Model identity | Every activity records the observed source, provider, and version; Model grouping includes all three dimensions in addition to activity kind, engine, and model name. |
-| Token dimensions | Total input, uncached input, cached reads, cache write, output, reasoning output, and provider or engine total. Missing dimensions are absent, not zero. |
+| Token dimensions | Total input, uncached input, cached reads, cache write, output, reasoning output, and provider or engine total. Missing dimensions are absent, not zero; if an activity has other token facts, the UI labels an absent dimension “Not reported by engine.” |
 | Token measurement | `complete`, `partial`, or `unavailable`, with the source event named |
 | Duration | Sprout wall duration is separate from optional engine duration. Ongoing duration is labelled observed so far. |
 | Run outcome | Completed, ongoing, failed, stopped, or interrupted |
@@ -97,7 +97,7 @@ billing basis, measurement coverage, source, and observation history.
 | Interrupted | `act-209` retains partial usage and shows unavailable cost after a worker interruption. |
 | Delayed | `act-207` and `act-210` show pending provider observations rather than invented values. |
 | Corrected | `act-204` retains a superseded local estimate and a later provider estimate in history. |
-| Incomplete | Partial and unavailable dimensions are displayed as unavailable, not zero-filled. A known duration subtotal remains visible with an incomplete/unavailable label when any constituent duration is unavailable. |
+| Incomplete | Missing whole token observations are unavailable; absent details on an observed token report read “Not reported by engine.” No missing fact is zero-filled. A known duration subtotal remains visible with an incomplete/unavailable label when any constituent duration is unavailable. |
 | Mixed provenance | The aggregate may sum available USD API-equivalent values but exposes provenance subtotals and a mixed-provenance label in its coverage evidence. |
 | Routing gap | `act-wake-003` is a failed Routing attempt with unavailable token and cost telemetry, visible as a coverage gap. |
 

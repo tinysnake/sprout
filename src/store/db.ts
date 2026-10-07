@@ -1,10 +1,14 @@
 import { DatabaseSync } from 'node:sqlite';
+import { randomUUID } from 'node:crypto';
+import { SqliteOperationalStore } from '../operations/sqlite-store.ts';
+import { diagnosticSubject } from '../operations/service.ts';
 
-import { SqliteRunStore, SqliteSessionKeyStore } from '../run/sqlite-store.ts';
+import { SqliteRunStore, SqliteSessionKeyStore, SqliteRunReconnectRetryStore } from '../run/sqlite-store.ts';
 import { SqliteLeaseStore } from '../environment/sqlite-store.ts';
 import { SqliteProjectStore } from '../project/sqlite-store.ts';
 import { SqliteProjectAuthorityStore } from '../project/sqlite-authority-store.ts';
 import { SqliteCollaborationStore } from '../collaboration/sqlite-store.ts';
+import { SqliteTaskProposalStore } from '../task/sqlite-proposal-store.ts';
 import { SqliteTaskStore } from '../task/sqlite-store.ts';
 import { SqliteOperatorSessionStore } from '../auth/sqlite-store.ts';
 import { SqliteAgentStore } from '../agent/sqlite-store.ts';
@@ -16,9 +20,12 @@ import { SqliteWorkerConnectionEpochStore } from '../environment/worker-epoch-st
 import { SqliteProjectAccessStore } from '../project/sqlite-access-store.ts';
 import { SqliteConversationScopeStore } from '../conversation/sqlite-store.ts';
 import { SqliteProjectCreationStore } from '../project/creation-store.ts';
+import { SqliteUsageStore } from '../usage/sqlite-store.ts';
 import { createTransactionCoordinator, type TransactionCoordinator } from './transaction.ts';
+import { configureProductSqliteConnection } from './sqlite-connection.ts';
 import {
   getSchemaVersion,
+  isDatabaseEmpty,
   migrateOrInitializeDatabase,
   type MigrationStep,
   type SchemaVersionRange,
@@ -61,7 +68,9 @@ export {
  *
  * Domain stores own the SQL for their respective tables:
  * - run domain: `agent_runs` (including recovered turn attribution),
- *   `agent_session_keys` (`run/sqlite-store.ts`)
+ *   `agent_session_keys`, and the bounded reconnect-retry state
+ *   (`run_reconnect_gates`, `run_reconnect_triggers`,
+ *   `run_reconnect_retries`) (`run/sqlite-store.ts`)
  * - environment domain: `environment_leases` (`environment/sqlite-store.ts`)
  * - project domain: `projects` (`project/sqlite-store.ts`)
  * - project authority domain: `project_authorities`
@@ -89,7 +98,15 @@ export {
  * - recovery domain: `environment_recovery`, `environment_force_releases`,
  *   `worker_recovery_receipts`, `worker_recovery_events`, `worker_recovery_contexts`
  *   (`environment/sqlite-recovery-store.ts`)
+ * - usage domain: `usage_activities`, `usage_observations` (`usage/sqlite-store.ts`)
  */
+
+function recordMigrationFact(db: DatabaseSync, state: 'initialized' | 'migrated' | 'unchanged'): void {
+  new SqliteOperationalStore(db);
+  db.prepare('INSERT INTO operational_events(subject, kind, state, at) VALUES (?, ?, ?, ?)').run(
+    diagnosticSubject(randomUUID()), 'migration', state, Date.now(),
+  );
+}
 
 export interface SqliteStoreOptions {
   /** A file path, or `:memory:` for tests. */
@@ -119,8 +136,10 @@ export class SqliteStore {
   readonly conversationScopes: SqliteConversationScopeStore;
   readonly projectCreation: SqliteProjectCreationStore;
   readonly sessionKeys: SqliteSessionKeyStore;
+  readonly runReconnectRetries: SqliteRunReconnectRetryStore;
   readonly collaboration: SqliteCollaborationStore;
   readonly tasks: SqliteTaskStore;
+  readonly taskProposals: SqliteTaskProposalStore;
   readonly operatorSessions: SqliteOperatorSessionStore;
   readonly agents: SqliteAgentStore;
   readonly agentIdentities: SqliteAgentStore;
@@ -129,10 +148,20 @@ export class SqliteStore {
   readonly environmentReadiness: SqliteEnvironmentReadinessStore;
   readonly workerConnectionEpochs: SqliteWorkerConnectionEpochStore;
   readonly recovery: SqliteRecoveryStore;
+  readonly usage: SqliteUsageStore;
   readonly schemaVersion: number;
+  readonly operations: SqliteOperationalStore;
 
   constructor(options: SqliteStoreOptions) {
     this.db = new DatabaseSync(options.filename);
+    try {
+      configureProductSqliteConnection(this.db);
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
+    const previousVersion = getSchemaVersion(this.db);
+    const previouslyEmpty = isDatabaseEmpty(this.db);
     try {
       migrateOrInitializeDatabase(this.db, {
         filename: options.filename,
@@ -141,12 +170,19 @@ export class SqliteStore {
         supportedRange: options.supportedSchemaRange,
         createSafetyCopy: options.createSafetyCopy,
         migrations: options.migrations,
+        recordSchemaTransition: (db, transition) => {
+          if (transition.toVersion >= 22) recordMigrationFact(db, transition.kind);
+        },
       });
     } catch (error) {
       this.db.close();
       throw error;
     }
     this.schemaVersion = getSchemaVersion(this.db);
+    this.operations = new SqliteOperationalStore(this.db);
+    if (this.schemaVersion >= 22 && !previouslyEmpty && previousVersion === this.schemaVersion) {
+      recordMigrationFact(this.db, 'unchanged');
+    }
     // The one connection's transaction lifecycle: a cross-domain boundary (the
     // Task begin/end lease binding) runs through this, so neither the Task nor
     // the environment adapter owns `BEGIN`/`COMMIT` on the other's table.
@@ -159,6 +195,7 @@ export class SqliteStore {
     this.conversationScopes = new SqliteConversationScopeStore({ db: this.db });
     this.projectCreation = new SqliteProjectCreationStore({ db: this.db, transactions: this.transactions });
     this.sessionKeys = new SqliteSessionKeyStore({ db: this.db });
+    this.runReconnectRetries = new SqliteRunReconnectRetryStore({ db: this.db });
     this.collaboration = new SqliteCollaborationStore({ db: this.db });
     this.operatorSessions = new SqliteOperatorSessionStore({ db: this.db, transactions: this.transactions });
     this.agents = new SqliteAgentStore({ db: this.db });
@@ -171,7 +208,9 @@ export class SqliteStore {
     // The Task adapter is given the environment domain's lease-binding port, so
     // its begin/end boundaries call lease SQL the environment owns rather than
     // issuing `environment_leases` statements itself.
+    this.taskProposals = new SqliteTaskProposalStore(this.db);
     this.tasks = new SqliteTaskStore({ db: this.db, leases: this.leases, transactions: this.transactions });
+    this.usage = new SqliteUsageStore({ db: this.db });
   }
 
   close(): void {

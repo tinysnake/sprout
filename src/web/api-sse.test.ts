@@ -315,7 +315,7 @@ test('a live cursor replays a later same-time run after restart even when stable
     ids: {
       run: () => runIds.shift()!,
       lease: () => `lease-${++leaseId}`,
-      message: () => 'unused-message',
+      message: () => 'unused-message', projectEvent: () => 'unused-project-event',
       task: () => 'unused-task',
     },
   });
@@ -362,7 +362,7 @@ test('a live cursor replays a later same-time run after restart even when stable
       ids: {
         run: () => 'run-future',
         lease: () => `restart-lease-${++leaseId}`,
-        message: () => 'unused-message',
+        message: () => 'unused-message', projectEvent: () => 'unused-project-event',
         task: () => 'unused-task',
       },
     });

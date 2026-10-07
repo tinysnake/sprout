@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { mapCodexNotification, type CodexTurnState } from './codex-protocol.ts';
+import { sanitizedTurnFailure } from './turn-failure.ts';
 
 function state(): CodexTurnState {
   return { text: '', finalText: '', failure: undefined };
@@ -101,23 +102,76 @@ test('an interrupted turn finishes as interrupted', () => {
   assert.deepEqual(outcome.finish, { status: 'interrupted' });
 });
 
-test('a turn error finishes as failed with its message', () => {
+test('a turn settled as failed finishes as failed with a sanitized reason', () => {
+  const s = state();
+  const raw = 'sandbox denied raw-upstream-body';
+  const outcome = mapCodexNotification(
+    {
+      method: 'turn/completed',
+      params: { turn: { id: 't1', status: 'failed', error: { message: raw } } },
+    },
+    s,
+  );
+  assert.deepEqual(outcome.finish, {
+    status: 'failed',
+    message: sanitizedTurnFailure('codex', 'turn-error'),
+  });
+  assert.ok(!JSON.stringify(outcome).includes(raw), 'no upstream body in the turn result');
+});
+
+test('a failed turn status without an error message still fails the turn', () => {
+  // An errored termination must never fall through to `completed` with empty
+  // text — that is the silent failure #182 forbids.
   const s = state();
   const outcome = mapCodexNotification(
     {
       method: 'turn/completed',
-      params: { turn: { id: 't1', status: 'failed', error: { message: 'sandbox denied' } } },
+      params: { turn: { id: 't1', status: 'failed', error: null } },
     },
     s,
   );
-
-  assert.deepEqual(outcome.finish, { status: 'failed', message: 'sandbox denied' });
+  assert.deepEqual(outcome.finish, {
+    status: 'failed',
+    message: sanitizedTurnFailure('codex', 'turn-error'),
+  });
 });
 
-test('a protocol error notification finishes the turn as failed', () => {
+test('a settlement status Sprout does not recognize fails instead of completing silently', () => {
   const s = state();
-  const outcome = mapCodexNotification({ method: 'error', params: { message: 'bad request' } }, s);
-  assert.deepEqual(outcome.finish, { status: 'failed', message: 'bad request' });
+  const outcome = mapCodexNotification(
+    {
+      method: 'turn/completed',
+      params: { turn: { id: 't1', status: 'inProgress' } },
+    },
+    s,
+  );
+  assert.deepEqual(outcome.finish, {
+    status: 'failed',
+    message: sanitizedTurnFailure('codex', 'unexpected-termination'),
+  });
+});
+
+test('a successful turn with no message completes with empty text', () => {
+  const s = state();
+  const outcome = mapCodexNotification(
+    {
+      method: 'turn/completed',
+      params: { turn: { id: 't1', status: 'completed', error: null } },
+    },
+    s,
+  );
+  assert.deepEqual(outcome.finish, { status: 'completed', text: '' });
+});
+
+test('a protocol error notification finishes the turn as failed with a sanitized reason', () => {
+  const s = state();
+  const raw = 'bad request raw-upstream-body';
+  const outcome = mapCodexNotification({ method: 'error', params: { message: raw } }, s);
+  assert.deepEqual(outcome.finish, {
+    status: 'failed',
+    message: sanitizedTurnFailure('codex', 'engine-error'),
+  });
+  assert.ok(!JSON.stringify(outcome).includes(raw));
 });
 
 test('unrelated notifications are ignored rather than guessed at', () => {

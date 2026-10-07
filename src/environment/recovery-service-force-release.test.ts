@@ -114,7 +114,7 @@ function build(options: {
     projects,
     ids: {
       task: () => 'task',
-      message: () => 'message',
+      message: () => 'message', projectEvent: () => 'project-event',
       lease: () => 'lease',
       run: () => 'run-1',
     },
@@ -164,7 +164,7 @@ async function interruptedTask(built: Built): Promise<{ readonly leaseId: string
 }
 
 
-test('Force Release cancels the Task, releases the lease, preserves the workspace, and records the exceptional outcome', async () => {
+test('Force Release stops the Task, releases the lease, preserves the workspace, and records the exceptional outcome', async () => {
   const built = build();
   const { leaseId } = await interruptedTask(built);
   await built.recovery.observeReconnect(leaseId, {
@@ -179,6 +179,9 @@ test('Force Release cancels the Task, releases the lease, preserves the workspac
     hadActiveRun: true,
     evidence: { retainedEventCount: 4, turnSettlementObserved: true, engineSessionStopped: false, taskContextRecycled: false },
   });
+  const recovery = await built.recovery.forLease(leaseId);
+  assert.equal(recovery?.phase, 'recovery');
+  assert.equal(recovery?.evidence?.engineSessionStopped, false);
 
   const outcome = await built.recovery.forceRelease(leaseId, {
     acknowledgedRisks: true,
@@ -196,8 +199,15 @@ test('Force Release cancels the Task, releases the lease, preserves the workspac
   assert.ok(outcome.unresolvedFacts.length > 0);
 
   const task = await built.store.get('task-1');
-  assert.equal(task?.status, 'cancelled');
+  assert.equal(task?.status, 'stopped');
+  assert.equal(task?.endDisposition, undefined);
   assert.equal(task?.environmentLifecycleState, 'discarded');
+  assert.deepEqual(task?.forcedRelease, {
+    actor: 'operator',
+    reason: 'Host machine hard rebooted without a clean worker exit',
+    unresolvedFacts: outcome.unresolvedFacts,
+    at: outcome.at,
+  });
   assert.equal(built.pool.getLease(leaseId)?.state, 'released');
   assert.equal((await built.recovery.forLease(leaseId)), undefined);
 
@@ -223,7 +233,7 @@ test('a restart reopens protection for a leftover recovering lease and never res
     pool,
     agents,
     projects,
-    ids: { task: () => 'task', message: () => 'message', lease: () => 'lease', run: () => 'run-1' },
+    ids: { task: () => 'task', message: () => 'message', projectEvent: () => 'project-event', lease: () => 'lease', run: () => 'run-1' },
     runs: { submit: async (request) => ({ id: request.runId }) },
     onRecovery: async ({ leaseId, hadActiveRun }) => {
       await recovery.open({ leaseId, cause: 'worker-channel-lost', hadActiveRun });

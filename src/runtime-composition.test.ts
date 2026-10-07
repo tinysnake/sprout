@@ -4,14 +4,17 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { SqliteUsageStore } from './usage/sqlite-store.ts';
+import { InMemoryUsageStore, type UsageStore } from './usage/store.ts';
 import { ScriptedEngineAdapter } from './engine/scripted.ts';
-import { SchemaTooNewError } from './store/schema.ts';
+import { SchemaTooNewError, CURRENT_SCHEMA_VERSION } from './store/schema.ts';
 import {
   MissingEnvironmentEngineError,
   type RuntimeEnvironment,
   type RuntimeStores,
 } from './runtime.ts';
 import { InMemoryRunStore } from './run/store.ts';
+import { InMemoryRunReconnectRetryStore } from './run/reconnect-retry-store.ts';
 import { InMemoryLeaseStore } from './environment/pool.ts';
 import { InMemorySessionKeyStore } from './run/session-key-store.ts';
 import { InMemoryCollaborationStore } from './collaboration/store.ts';
@@ -25,6 +28,7 @@ import { InMemoryRecoveryStore } from './environment/recovery-store.ts';
 import { InMemoryAgentStore } from './agent/store.ts';
 import { InMemoryProjectAuthorityStore } from './project/authority-store.ts';
 import { InMemoryProjectAccessStore } from './project/access-store.ts';
+import { InMemoryTaskProposalStore } from './task/proposal-store.ts';
 import { InMemoryConversationScopeStore } from './conversation/store.ts';
 import {
   build,
@@ -36,6 +40,86 @@ import {
   scriptedEnvironment,
   scriptedTurn,
 } from './runtime-test-harness.ts';
+
+test('run settles and core writes stay loud when usage telemetry fails', async () => {
+  const stores = inMemoryStores();
+  const usage = new Proxy(new InMemoryUsageStore(), {
+    get(target, property) {
+      if (property === 'recordActivity') {
+        return async () => {
+          throw Object.assign(new Error('injected database contention'), { code: 'SQLITE_BUSY' });
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as UsageStore;
+  const coreTasks = new Proxy(stores.tasks, {
+    get(target, property) {
+      if (property === 'create') return async () => { throw new Error('core task write failed'); };
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  const environment = scriptedEnvironment({
+    adapters: new Map([['scripted', new ScriptedEngineAdapter({ turns: [scriptedTurn('settled despite telemetry')] })]]),
+  });
+  const runtime = await createRuntime({
+    configuration: hostConfiguration(),
+    projectRoot: '/synthetic/project-root',
+    environment,
+    stores: { ...stores, tasks: coreTasks, usage },
+  });
+  const originalWrite = process.stderr.write;
+  let logged = '';
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    logged += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    const { id } = await runtime.orchestrator.submit({ agentId: 'scout', prompt: 'complete the run' });
+    const settled = await runtime.orchestrator.waitFor(id);
+    assert.equal(settled.status, 'completed');
+    assert.equal((await runtime.orchestrator.load(id))?.status, 'completed');
+    await new Promise((resolve) => setImmediate(resolve));
+    const logLines = logged.trim().split('\n');
+    assert.ok(logLines.length >= 1);
+    assert.ok(logLines.every((line) => line === 'Usage telemetry write failed; record dropped.'));
+    assert.doesNotMatch(logged, /injected|SQLITE_BUSY|run-|host|synthetic/);
+
+    await assert.rejects(
+      runtime.stores.tasks.create({} as never),
+      /core task write failed/,
+      'core task persistence errors must remain observable',
+    );
+  } finally {
+    process.stderr.write = originalWrite;
+    await runtime.close();
+  }
+});
+
+test('runtime composition opens its configured database through the WAL-enabled SqliteStore path', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-wal-'));
+  const filename = join(directory, 'runtime.sqlite');
+  const runtime = await createRuntime({
+    configuration: hostConfiguration({ databasePath: filename }),
+    projectRoot: '/synthetic/project-root',
+    environment: scriptedEnvironment({
+      adapters: new Map([['scripted', new ScriptedEngineAdapter({ turns: [] })]]),
+    }),
+  });
+  try {
+    const probe = new DatabaseSync(filename);
+    try {
+      assert.equal((probe.prepare('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode, 'wal');
+    } finally {
+      probe.close();
+    }
+  } finally {
+    await runtime.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test('the complete runtime graph is constructible over in-memory collaborators and scripted engines', async () => {
   const { runtime, stores, environment } = await build({ listen: false });
@@ -67,6 +151,65 @@ test('the complete runtime graph is constructible over in-memory collaborators a
   await runtime.close();
   assert.equal(environment.closes(), 1);
   assert.equal(stores.closes(), 1);
+});
+
+test('runtime coordinator persists every real routing attempt with exact correlation and unavailable telemetry', async () => {
+  for (const configured of [false, true]) {
+    const model = { id: 'composition-wake-model', telemetryForAttempt: () => ({ tokens: { inputTokens: 10, outputTokens: 2 } }),
+      async judge(request: { attempt: number; context: string }) {
+        if (request.attempt === 1) return 'invalid output';
+        const ids = [...request.context.matchAll(/\[input \d+ \| id=([^ |]+) \|/g)].map((match) => match[1]!);
+        return JSON.stringify({ selections: [], suppressions: ids.map((inputId) => ({ inputId, rationale: 'No wake needed' })) });
+      } };
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-usage-composition-'));
+    const filename = join(directory, 'usage.db');
+    const db = new DatabaseSync(filename);
+    const usage = new SqliteUsageStore({ db });
+    const runtime = await createRuntime({ configuration: hostConfiguration(), projectRoot: '/synthetic/project-root',
+      environment: scriptedEnvironment({ adapters: new Map([['scripted', new ScriptedEngineAdapter({ turns: [] })]]) }),
+      stores: { ...inMemoryStores(), usage },
+      ...(configured ? { routingModel: model } : {}),
+    });
+    try {
+      const project = await runtime.projectService.create({ id: 'usage-routing-project', displayName: 'Usage routing',
+        agentMemberships: [{ agentId: 'scout' }], wakePolicy: 'wake-model-assisted', routingIntervalMs: 1000 });
+      const scope = await runtime.conversationScopes.ensureProjectChannel(project.id);
+      await runtime.collaboration.deliver({ scopeId: scope.id, author: { id: 'operator', kind: 'human' },
+        body: 'unaddressed work', deliveryKey: 'usage-routing-composition' });
+      await new Promise((resolve) => setTimeout(resolve, 1050));
+      await runtime.collaboration.sweepRouting();
+      const batches = await runtime.stores.collaboration.listRoutingBatches(project.id);
+      assert.equal(batches.length, 1);
+      const attempts = await runtime.stores.collaboration.listRoutingAttempts(batches[0]!.id);
+      assert.equal(attempts.length, 2);
+      const activities = await runtime.usage.listActivities({ kind: 'routing_attempt' });
+      assert.equal(activities.length, attempts.length);
+      for (const attempt of attempts) {
+        const detail = await runtime.usage.getActivityByAttemptId(attempt.id);
+        assert.equal(detail?.activity.correlation.batchId, attempt.batchId);
+        assert.equal(detail?.activity.correlation.projectId, project.id);
+        assert.equal(detail?.activity.correlation.agentId, undefined);
+        assert.equal(detail?.activity.correlation.taskId, undefined);
+        assert.equal(detail?.activity.status, configured && attempt.attemptNumber === 2 ? 'completed' : 'failed');
+        assert.equal(detail?.effectiveObservation?.completeness, configured ? (attempt.attemptNumber === 2 ? 'complete' : 'partial') : 'unavailable');
+        assert.equal(detail?.effectiveObservation?.tokens?.inputTokens, configured ? 10 : undefined);
+      }
+      await runtime.collaboration.reconcile();
+      assert.equal((await runtime.usage.listActivities({ kind: 'routing_attempt' })).length, 2);
+      // Simulate a crash after attempt persistence but before usage persistence.
+      db.exec('DELETE FROM usage_observations; DELETE FROM usage_activities');
+      await runtime.collaboration.reconcile();
+      assert.equal((await runtime.usage.listActivities({ kind: 'routing_attempt' })).length, 2);
+      for (const attempt of attempts) {
+        assert.equal((await runtime.usage.getActivityByAttemptId(attempt.id))?.effectiveObservation?.completeness, 'unavailable');
+      }
+      // Independent SQLite connection sees the durable rows, not an in-memory view.
+      const reopened = new DatabaseSync(filename);
+      try {
+        assert.equal((await new SqliteUsageStore({ db: reopened }).listActivities()).length, 2);
+      } finally { reopened.close(); }
+    } finally { await runtime.close(); db.close(); rmSync(directory, { recursive: true, force: true }); }
+  }
 });
 
 test('the configured bind host is honored by the Web listener', async () => {
@@ -281,6 +424,7 @@ test('runtime construction failure closes environment and worker resources witho
   let storesClosed = 0;
   const failingStores: RuntimeStores = {
     runs: new InMemoryRunStore(),
+    runReconnectRetries: new InMemoryRunReconnectRetryStore(),
     leases: new InMemoryLeaseStore(),
     projects: {
       async save() {},
@@ -304,6 +448,7 @@ test('runtime construction failure closes environment and worker resources witho
     projectAuthorities: new InMemoryProjectAuthorityStore(),
     projectAccess: new InMemoryProjectAccessStore(),
     conversationScopes: new InMemoryConversationScopeStore(),
+    taskProposals: new InMemoryTaskProposalStore(),
     close() {
       storesClosed++;
     },
@@ -328,7 +473,7 @@ test('a schema refusal after environment acquisition closes the worker before pr
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const databasePath = join(directory, 'future-schema.db');
   const database = new DatabaseSync(databasePath);
-  database.exec('PRAGMA user_version = 19; CREATE TABLE retained_data (id TEXT PRIMARY KEY);');
+  database.exec(`PRAGMA user_version = ${CURRENT_SCHEMA_VERSION + 1}; CREATE TABLE retained_data (id TEXT PRIMARY KEY);`);
   database.close();
 
   let environmentClosed = 0;

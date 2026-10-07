@@ -17,11 +17,13 @@
  *    check first, so a retried advancement cannot double-count a run.
  */
 
+import { serializeTaskControlDocument } from './model.ts';
 import type {
   Task,
   TaskRunLink,
   TaskRunSummary,
   TaskStatus,
+  TaskActor,
   TaskWithRuns,
 } from './model.ts';
 import type { EnvironmentLease } from '../environment/pool.ts';
@@ -58,8 +60,13 @@ export interface TaskStore {
     expected: {
       readonly environmentLifecycleState: Task['environmentLifecycleState'];
       readonly activeRunId: Task['activeRunId'];
+      readonly updatedAt?: number;
+      readonly controlDocument: string | null;
     },
   ): Promise<boolean>;
+
+  /** Persist Pause retry-required intent without replacing concurrently settled Task fields. */
+  recordPauseRetryRequired(taskId: string, actor: TaskActor, at: number, reason: string): Promise<Task | undefined>;
 
   /**
    * Commit a Task's beginning intent and its Task lease together.
@@ -70,8 +77,26 @@ export interface TaskStore {
    */
   saveBeginningWithLease(task: Task, lease: EnvironmentLease): Promise<void>;
 
-  /** Commit a terminal Task state and release its Task lease together. */
-  saveTerminalWithLease(task: Task, leaseId: string): Promise<void>;
+  /** Insert an approved Task, consume its proposal revision, and bind its lease atomically. */
+  createBeginningWithLease(task: Task, lease: EnvironmentLease, consumeProposal: () => void): Promise<void>;
+
+  /** Atomically admit one attributed run and persist its audit link with the active-run fence. */
+  admitRun(task: Task, input: {
+    readonly runId: string;
+    readonly agentId: string;
+    readonly actor: TaskActor;
+    readonly reason?: string;
+    readonly contentVersion: number;
+    readonly now: number;
+  }, expected: {
+    readonly environmentLifecycleState: Task['environmentLifecycleState'];
+    readonly activeRunId: Task['activeRunId'];
+    readonly updatedAt?: number;
+    readonly controlDocument: string | null;
+  }): Promise<boolean>;
+
+  /** Commit a Task state and release its Task lease together. */
+  saveTaskAndReleaseLease(task: Task, leaseId: string): Promise<void>;
 
   /**
    * Link a run to a Task, assigning the next sequence number.
@@ -139,18 +164,70 @@ export class InMemoryTaskStore implements TaskStore {
   async saveIfUnchanged(task: Task, expected: {
     readonly environmentLifecycleState: Task['environmentLifecycleState'];
     readonly activeRunId: Task['activeRunId'];
+    readonly updatedAt?: number;
+    readonly controlDocument: string | null;
   }): Promise<boolean> {
     const current = this.#tasks.get(task.id);
-    if (!current || current.environmentLifecycleState !== expected.environmentLifecycleState || current.activeRunId !== expected.activeRunId) return false;
+    if (!current || current.environmentLifecycleState !== expected.environmentLifecycleState || current.activeRunId !== expected.activeRunId
+      || (expected.updatedAt !== undefined && current.updatedAt !== expected.updatedAt)
+      || serializeTaskControlDocument(current) !== expected.controlDocument) return false;
     this.#tasks.set(task.id, task);
     return true;
   }
 
-  async saveBeginningWithLease(task: Task, _lease: EnvironmentLease): Promise<void> {
-    this.#tasks.set(task.id, task);
+  async recordPauseRetryRequired(taskId: string, actor: TaskActor, at: number, reason: string): Promise<Task | undefined> {
+    const current = this.#tasks.get(taskId);
+    if (!current || current.pauseState !== undefined) return current;
+    const retryRequired: Task = {
+      ...current,
+      pauseState: 'retry-required',
+      controlHistory: [...(current.controlHistory ?? []), { action: 'pause-retry-required', actor, at, reason }],
+    };
+    this.#tasks.set(taskId, retryRequired);
+    return retryRequired;
   }
 
-  async saveTerminalWithLease(task: Task, _leaseId: string): Promise<void> {
+  async saveBeginningWithLease(task: Task, _lease: EnvironmentLease): Promise<void> {
+    this.#tasks.set(task.id, structuredClone(task));
+  }
+
+  async createBeginningWithLease(task: Task, _lease: EnvironmentLease, consumeProposal: () => void): Promise<void> {
+    if (this.#tasks.has(task.id)) throw new Error(`task ${task.id} already exists`);
+    consumeProposal();
+    this.#tasks.set(task.id, structuredClone(task));
+    this.#links.set(task.id, []);
+  }
+
+  async admitRun(task: Task, input: {
+    readonly runId: string;
+    readonly agentId: string;
+    readonly actor: TaskActor;
+    readonly reason?: string;
+    readonly contentVersion: number;
+    readonly now: number;
+  }, expected: {
+    readonly environmentLifecycleState: Task['environmentLifecycleState'];
+    readonly activeRunId: Task['activeRunId'];
+    readonly updatedAt?: number;
+    readonly controlDocument: string | null;
+  }): Promise<boolean> {
+    const current = this.#tasks.get(task.id);
+    if (!current || current.environmentLifecycleState !== expected.environmentLifecycleState || current.activeRunId !== expected.activeRunId
+      || (expected.updatedAt !== undefined && current.updatedAt !== expected.updatedAt)
+      || serializeTaskControlDocument(current) !== expected.controlDocument) return false;
+    const links = this.#links.get(task.id) ?? [];
+    if (links.some(link => link.runId === input.runId)) return false;
+    const link: TaskRunLink = {
+      taskId: task.id, runId: input.runId, agentId: input.agentId,
+      actor: structuredClone(input.actor), ...(input.reason !== undefined ? { reason: input.reason } : {}), contentVersion: input.contentVersion,
+      requestedAt: input.now, sequence: links.length + 1, linkedAt: input.now,
+    };
+    this.#tasks.set(task.id, structuredClone(task));
+    this.#links.set(task.id, [...links, link]);
+    return true;
+  }
+
+  async saveTaskAndReleaseLease(task: Task, _leaseId: string): Promise<void> {
     this.#tasks.set(task.id, task);
   }
 

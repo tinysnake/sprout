@@ -75,8 +75,9 @@ export interface RecoveryHolderActions {
    */
   discardTask?(taskId: string): Promise<void>;
   /**
-   * Emergency Task end for Force Release: abandon the Task, record the permanent
-   * forced-release disposition, and preserve the Project workspace.
+   * Emergency Task end for Force Release: stop Task execution while preserving
+   * work intent, record the permanent forced-release facts, and preserve the
+   * Project workspace.
    */
   forceReleaseTask?(input: {
     readonly taskId: string;
@@ -431,20 +432,27 @@ export class EnvironmentRecoveryService {
    */
   async resume(leaseId: string, decision: RecoveryDecisionInput = {}): Promise<EnvironmentRecoveryRecord> {
     const record = await this.#requireDecidable(leaseId);
-    if (record.holderKind !== 'task' || record.taskId === undefined) {
+    const taskId = record.taskId;
+    if (record.holderKind !== 'task' || taskId === undefined) {
       throw new EnvironmentRecoveryError(
         'holder-action-unavailable',
         'Only a Task-held lease can be resumed; a one-round run is released instead.',
       );
     }
-    if (this.#holders.resumeTask === undefined) {
+    const resumeTask = this.#holders.resumeTask?.bind(this.#holders);
+    if (resumeTask === undefined) {
       throw new EnvironmentRecoveryError(
         'holder-action-unavailable',
         'Task resume is not configured on this build.',
       );
     }
-    await this.#holders.resumeTask(record.taskId);
-    return this.#resolve(record, 'resumed', decision, 'Human resumed the interrupted Task on its retained lease.');
+    return this.#resolveOrdinary(
+      record,
+      'resumed',
+      decision,
+      'Human resumed the interrupted Task on its retained lease.',
+      () => resumeTask(taskId),
+    );
   }
 
   /**
@@ -454,20 +462,27 @@ export class EnvironmentRecoveryService {
    */
   async discard(leaseId: string, decision: RecoveryDecisionInput = {}): Promise<EnvironmentRecoveryRecord> {
     const record = await this.#requireDecidable(leaseId);
-    if (record.holderKind !== 'task' || record.taskId === undefined) {
+    const taskId = record.taskId;
+    if (record.holderKind !== 'task' || taskId === undefined) {
       throw new EnvironmentRecoveryError(
         'holder-action-unavailable',
         'Only a Task-held lease can be discarded; a one-round run is released instead.',
       );
     }
-    if (this.#holders.discardTask === undefined) {
+    const discardTask = this.#holders.discardTask?.bind(this.#holders);
+    if (discardTask === undefined) {
       throw new EnvironmentRecoveryError(
         'holder-action-unavailable',
         'Task discard is not configured on this build.',
       );
     }
-    await this.#holders.discardTask(record.taskId);
-    return this.#resolve(record, 'discarded', decision, 'Human discarded the interrupted Task; context was recycled before release.');
+    return this.#resolveOrdinary(
+      record,
+      'discarded',
+      decision,
+      'Human discarded the interrupted Task; context was recycled before release.',
+      () => discardTask(taskId),
+    );
   }
 
   /**
@@ -485,11 +500,18 @@ export class EnvironmentRecoveryService {
         'A Task-held lease is resumed or discarded, not released.',
       );
     }
-    const released = this.#leases.releaseLease(leaseId);
-    if (released === undefined) {
-      throw new EnvironmentRecoveryError('unknown-lease', `Lease ${leaseId} is not a releasable run lease.`);
-    }
-    return this.#resolve(record, 'released', decision, 'Human released the interrupted one-round run after evidence was synchronized.');
+    return this.#resolveOrdinary(
+      record,
+      'released',
+      decision,
+      'Human released the interrupted one-round run after evidence was synchronized.',
+      async () => {
+        const released = this.#leases.releaseLease(leaseId);
+        if (released === undefined) {
+          throw new EnvironmentRecoveryError('unknown-lease', `Lease ${leaseId} is not a releasable run lease.`);
+        }
+      },
+    );
   }
 
   /**
@@ -526,9 +548,9 @@ export class EnvironmentRecoveryService {
     const reason = sanitizeRecoveryReason(input.reason, DEFAULT_FORCE_RELEASE_REASON);
 
     // Ordinary interruption, reconciliation, and cleanup are attempted before the
-    // override. A Task release performs the emergency Task end (recording the
-    // permanent disposition); a run lease is released directly. Only when that
-    // cannot finish does the override become the recorded outcome.
+    // override. A Task release records active-intent `stopped` with permanent
+    // Force Release facts; a run lease is released directly. Only when that cannot
+    // finish does the override become the recorded outcome.
     let affectedRunIds: readonly string[] = record.runId !== undefined ? [record.runId] : [];
     let unrecycledTaskContext = record.evidence?.taskContextRecycled !== true;
     if (record.holderKind === 'task' && record.taskId !== undefined) {
@@ -543,9 +565,10 @@ export class EnvironmentRecoveryService {
       } else if (this.#taskRuns !== undefined) {
         affectedRunIds = await this.#taskRuns(record.taskId);
       }
-      // The Task lifecycle's emergency end commits the Task's cancelled status
-      // with its lease release in one transaction; if it is configured the lease
-      // is already released. Otherwise the lease registry is the last resort.
+      // The Task lifecycle commits the Task's `stopped` status and permanent
+      // Force Release facts with its lease release in one transaction. When it is
+      // configured the lease is already released; otherwise the lease registry is
+      // the last resort.
       if (this.#leases.getLease(leaseId)?.state !== 'released') {
         this.#leases.releaseTaskLease(leaseId);
       }
@@ -612,12 +635,58 @@ export class EnvironmentRecoveryService {
     return record;
   }
 
+  /**
+   * Revalidate the ADR-0009 evidence gate, then use resolve-first ordering.
+   * The recovery write must finish before an independent Task/lease owner can
+   * commit holder changes, so a failed recovery write cannot leave partial
+   * holder state. If the holder action refuses, restore the original open
+   * record; if the process stops between the two writes, the recovering lease
+   * still blocks admission and restart reconciliation can reopen recovery.
+   */
+  async #resolveOrdinary(
+    record: EnvironmentRecoveryRecord,
+    kind: ReconciliationDecision['kind'],
+    decision: RecoveryDecisionInput,
+    defaultReason: string,
+    mutateHolder: () => Promise<void>,
+  ): Promise<EnvironmentRecoveryRecord> {
+    const current = await this.#requireDecidable(record.leaseId);
+    if (current.id !== record.id) {
+      throw new EnvironmentRecoveryError(
+        'evidence-not-synchronized',
+        'The recovery record changed while the ordinary decision was being prepared; synchronize evidence and retry.',
+      );
+    }
+    const resolved = await this.#resolve(current, kind, decision, defaultReason, false);
+    try {
+      await mutateHolder();
+    } catch (error) {
+      // Keep the protective recovery record open when its holder action refuses.
+      // If restoration itself fails, surface both errors: the lease remains
+      // protected by its existing recovering state, and startup reconciliation
+      // can rebuild an open record from that lease.
+      try {
+        await this.#store.save(record);
+        this.#announce();
+      } catch (restoreError) {
+        throw new AggregateError(
+          [error, restoreError],
+          'The recovery decision failed and its protective record could not be restored.',
+        );
+      }
+      throw error;
+    }
+    this.#announce();
+    return resolved;
+  }
+
   /** Mark a record resolved and append the permanent decision. */
   async #resolve(
     record: EnvironmentRecoveryRecord,
     kind: ReconciliationDecision['kind'],
     decision: RecoveryDecisionInput,
     defaultReason: string,
+    announce = true,
   ): Promise<EnvironmentRecoveryRecord> {
     const at = this.#clock();
     const resolved: EnvironmentRecoveryRecord = {
@@ -638,7 +707,7 @@ export class EnvironmentRecoveryService {
       ],
     };
     await this.#store.save(resolved);
-    this.#announce();
+    if (announce) this.#announce();
     return resolved;
   }
 

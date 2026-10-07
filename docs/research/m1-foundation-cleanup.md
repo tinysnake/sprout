@@ -116,12 +116,11 @@ Reading the file linearly shows five unrelated kinds of work in one Module:
 
 Evidence that this Module is untested as a unit: no test file imports
 `src/main.ts`; `npm test` globs `src/**/*.test.ts` and `web/src/**/*.test.ts`, and
-the live scripts only *spawn* it as a process
-(`scripts/live-macos-pi-codex-task.ts` and
-`scripts/live-o7-minesweeper-collaboration.ts` spawn `src/main.ts`;
-`scripts/live-smoke.ts` spawns `src/worker/main.ts` and re-wires the graph
-in-process instead). The composition therefore has no seam a test can cross
-except a live process.
+the current durable-Task runner (`scripts/live-macos-pi-codex-task.ts`)
+spawns `src/main.ts`; the pre-#214 O7 runner was retired because it coordinated
+Agents through direct messages. `scripts/live-smoke.ts` spawns
+`src/worker/main.ts` and re-wires the graph in-process instead. The composition
+therefore has no seam a test can cross except a live process.
 
 ### 3.2 `src/web/api.ts` responsibilities (mixed)
 

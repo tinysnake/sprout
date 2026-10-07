@@ -1,17 +1,20 @@
 <script setup lang="ts">
 /**
  * The application Shell: desktop sidebar, phone header, the main content region,
- * the phone bottom navigation, and the one polite live region.
+ * the phone bottom navigation, and the shared polite live region.
  *
  * It is the only component that owns the page frame and the only one that owns
- * an `aria-live` region. Destinations render inside the main region and announce
- * context changes through the shared channel, so streamed state stays readable
- * instead of being interleaved across several live regions.
+ * the shared `aria-live` region for connection and navigation changes. Chat's
+ * admission check has its own raw-state status so its brief checks cannot be
+ * overwritten by an unrelated shell announcement.
  */
-import { computed, onMounted, onScopeDispose, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, watch } from 'vue';
+import { useUnreadState } from '../modules/chat/unread-state.ts';
 import { useRoute } from 'vue-router';
 import { useAppStore } from '../stores/app.js';
 import { useShellConnection } from './use-shell-connection.js';
+import { useConnectionNotice } from './use-connection-notice.js';
+import { useVisualViewport } from './use-visual-viewport.ts';
 import { buildNavigation, type NavigationIndicators } from './navigation.js';
 import { useAnnouncer, useAnnouncerMessage } from '../primitives/announcer.js';
 import DesktopSidebar from './DesktopSidebar.vue';
@@ -28,41 +31,24 @@ const props = withDefaults(
   { indicators: undefined }
 );
 
+const unread = useUnreadState();
+const liveIndicators = computed(() => ({ attention: 0, activeWork: 0, degradedEnvironments: 0, ...props.indicators,
+  chatUnread: unread ? (typeof route.query['project'] === 'string' ? unread.projectCount(route.query['project']) : unread.total.value) : props.indicators?.chatUnread ?? 0 }));
+let unreadTimer: ReturnType<typeof setInterval> | undefined;
+function refreshUnread() { if (document.visibilityState !== 'hidden') void unread?.refresh(); }
+onMounted(() => { refreshUnread(); if (unread) unreadTimer = setInterval(refreshUnread, 15000); document.addEventListener('visibilitychange', refreshUnread); });
+onUnmounted(() => { if (unreadTimer) clearInterval(unreadTimer); document.removeEventListener('visibilitychange', refreshUnread); });
 const appStore = useAppStore();
+const { root: shellRoot, viewportStyle } = useVisualViewport();
 const route = useRoute();
 const connection = useShellConnection();
 
 const { announcer, message } = { announcer: useAnnouncer(), message: useAnnouncerMessage() };
 
 const presentation = computed(() => connection.presentation.value);
-const navigation = computed(() => buildNavigation(route, props.indicators));
+const navigation = computed(() => buildNavigation(route, liveIndicators.value));
 
-// Background connection checks briefly mark control unavailable. Avoid adding
-// a new row to the shell for those transient checks, but keep genuine stalls
-// visible to the operator.
-const CONNECTION_WARNING_GRACE_MS = 700;
-const showConnectionWarning = ref(false);
-let connectionWarningTimer: ReturnType<typeof setTimeout> | undefined;
-watch(
-  () => presentation.value.controlAvailable,
-  (available) => {
-    if (connectionWarningTimer !== undefined) clearTimeout(connectionWarningTimer);
-    connectionWarningTimer = undefined;
-    if (available) {
-      showConnectionWarning.value = false;
-      return;
-    }
-    showConnectionWarning.value = false;
-    connectionWarningTimer = setTimeout(() => {
-      showConnectionWarning.value = true;
-      connectionWarningTimer = undefined;
-    }, CONNECTION_WARNING_GRACE_MS);
-  },
-  { immediate: true }
-);
-onScopeDispose(() => {
-  if (connectionWarningTimer !== undefined) clearTimeout(connectionWarningTimer);
-});
+const showConnectionWarning = useConnectionNotice(computed(() => presentation.value.controlAvailable));
 
 // Connection changes are the one shell fact the operator must not be able to
 // miss, so they are announced through the shared region rather than a second
@@ -71,14 +57,23 @@ watch(presentation, (next, previous) => {
   if (previous === undefined || next.label !== previous.label) announcer.announce(next.announce);
 });
 
+// A route change can remove the focused link before the destination's async
+// facts arrive. Keep keyboard focus in the main region; page-owned detail
+// focus may then move it to the loaded record heading.
+watch(() => route.fullPath, async () => {
+  await nextTick();
+  const main = document.getElementById('sprout-main-content');
+  if (document.activeElement === document.body) main?.focus();
+});
+
 onMounted(() => {
   appStore.initTheme();
 });
 </script>
 
 <template>
-  <div class="sprout-app-shell flex h-screen w-full bg-[var(--bg-app)] text-[var(--text-primary)] overflow-hidden font-sans">
-    <!-- The single live region for the whole product. -->
+  <div ref="shellRoot" :style="viewportStyle" class="sprout-app-shell flex h-screen w-full bg-[var(--bg-app)] text-[var(--text-primary)] overflow-hidden font-sans">
+    <!-- Shared shell and navigation announcement region. -->
     <div
       class="shell-announcer sr-only"
       role="status"
@@ -91,9 +86,9 @@ onMounted(() => {
 
     <SkipToContent />
 
-    <DesktopSidebar :indicators="indicators" />
+    <DesktopSidebar :indicators="liveIndicators" />
 
-    <div class="flex-1 flex flex-col min-w-0 h-screen overflow-hidden">
+    <div class="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
       <ReturnContextBanner />
 
       <!-- Phone brand and connection state (visible only below md) -->
@@ -124,29 +119,53 @@ onMounted(() => {
         </div>
       </header>
 
-      <!-- Warn before acting on facts that may no longer be live. -->
-      <div
-        v-if="showConnectionWarning"
-        class="shell-connection-banner flex items-center gap-2 px-4 py-1.5 border-b text-[11px] font-semibold"
-        :class="
-          presentation.status === 'red'
-            ? 'bg-[var(--red-action-bg)] border-[var(--red-action-border)] text-[var(--red-action)]'
-            : 'bg-[var(--yellow-attention-bg)] border-[var(--yellow-attention-border)] text-[var(--yellow-attention)]'
-        "
-      >
-        <Icon name="warning" :size="13" />
-        <span data-testid="shell-connection-notice">{{ presentation.announce }}</span>
+      <div class="relative flex min-h-0 flex-1 flex-col">
+        <!-- A notice overlays the page only while visible; the page reserves no space. -->
+        <div v-if="showConnectionWarning" role="status"
+          class="shell-connection-banner pointer-events-none absolute right-3 top-2 z-30 flex max-w-[min(20rem,calc(100%-1.5rem))] items-start gap-2 rounded border border-[var(--yellow-attention-border)] bg-[var(--bg-surface)] px-3 py-2 text-xs font-semibold text-[var(--text-primary)] shadow-lg">
+          <Icon name="warning" :size="13" class="shrink-0" />
+          <span data-testid="shell-connection-notice">{{ presentation.announce }}</span>
+        </div>
+        <main id="sprout-main-content" tabindex="-1"
+          class="shell-main min-h-0 flex-1 overflow-y-auto focus-visible:outline-none">
+          <slot />
+        </main>
       </div>
-
-      <main
-        id="sprout-main-content"
-        tabindex="-1"
-        class="flex-1 overflow-y-auto pb-16 md:pb-0 focus-visible:outline-none"
-      >
-        <slot />
-      </main>
     </div>
 
-    <MobileBottomNav :indicators="indicators" />
+    <MobileBottomNav :indicators="liveIndicators" />
   </div>
 </template>
+
+<style>
+/* A deterministic border-box: 64px includes the border, ordinary padding and
+   the 44px navigation targets. The safe area enlarges both nav and clearance.
+   Full-height pages resolve against main's content box, so their nested
+   scrollers, Chat composer/run actions and Task rows share this inset once. */
+.sprout-app-shell {
+  --mobile-nav-height: 64px;
+  --shell-bottom-inset: calc(var(--mobile-nav-height) + env(safe-area-inset-bottom, 0px));
+}
+
+.shell-main {
+  box-sizing: border-box;
+  padding-bottom: var(--shell-bottom-inset);
+  scroll-padding-bottom: var(--shell-bottom-inset);
+}
+
+.mobile-bottom-nav {
+  box-sizing: border-box;
+  height: var(--shell-bottom-inset);
+  padding-bottom: calc(4px + env(safe-area-inset-bottom, 0px));
+}
+
+.mobile-bottom-nav .bottom-nav-item {
+  white-space: nowrap;
+}
+
+@media (min-width: 768px) {
+  .sprout-app-shell {
+    --shell-bottom-inset: 0px;
+  }
+}
+</style>

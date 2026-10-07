@@ -145,6 +145,64 @@ test('the Shell composes a desktop sidebar and a phone bottom navigation from on
 });
 
 
+test('the Shell reserves the same safe-area inset as the fixed phone navigation', async () => {
+  const { vite, doc, dom, mountInto, cleanup } = await setupHarness();
+  try {
+    const source = await readFile(`${repoRoot}/web/src/shell/AppShell.vue`, 'utf8');
+    const style = doc.createElement('style');
+    // JSDOM does not load SFC styles through Vite's SSR module loader.
+    style.textContent = source.match(/<style>([\s\S]*?)<\/style>/)?.[1] ?? '';
+    doc.head.append(style);
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
+    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    await router.push('/project/tasks');
+    await router.isReady();
+    mountInto(app);
+    try {
+      await settle();
+      const main = doc.querySelector<HTMLElement>('#sprout-main-content')!;
+      const nav = doc.querySelector<HTMLElement>('.mobile-bottom-nav')!;
+      const shell = doc.querySelector<HTMLElement>('.sprout-app-shell')!;
+      assert.equal(dom.window.getComputedStyle(main).paddingBottom, 'var(--shell-bottom-inset)',
+        'every slotted page receives the navigation inset at its scroll boundary');
+      assert.equal(dom.window.getComputedStyle(main).scrollPaddingBottom, 'var(--shell-bottom-inset)',
+        'focus and scrollIntoView keep page actions above the fixed navigation');
+      assert.equal(dom.window.getComputedStyle(nav).height, 'var(--shell-bottom-inset)',
+        'navigation border-box height and main padding have one source of truth');
+      assert.match(dom.window.getComputedStyle(shell).getPropertyValue('--shell-bottom-inset'),
+        /calc\(var\(--mobile-nav-height\) \+ env\(safe-area-inset-bottom,\s*0px\)\)/);
+      assert.equal(main.classList.contains('min-h-0'), true, 'the scroll region can shrink above the nav');
+      assert.match(style.textContent!, /@media\s*\(min-width:\s*768px\)[\s\S]*--shell-bottom-inset:\s*0px/,
+        'the hidden desktop nav reserves no space');
+    } finally { app.unmount(); }
+  } finally { await cleanup(); }
+});
+
+
+test('the Settings session tail uses shell clearance without a second mobile navigation gap', async () => {
+  const { vite, doc, mountInto, cleanup } = await setupHarness();
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
+    const { FixtureSettingsService } = (await vite.ssrLoadModule('/src/modules/settings/adapters/fixture-adapter.ts')) as typeof import('../modules/settings/adapters/fixture-adapter.ts');
+    const { app, router } = createSproutApp({ routerBase: '/app/', settingsService: new FixtureSettingsService() });
+    await router.push('/manage/settings');
+    await router.isReady();
+    mountInto(app);
+    try {
+      await settle();
+      const page = doc.querySelector('.settings-view')!;
+      const tailAction = page.querySelector('.session-revoke-btn');
+      assert.ok(tailAction, 'a real session-tail action is mounted inside the shell main');
+      assert.equal(tailAction.closest('#sprout-main-content'), doc.getElementById('sprout-main-content'));
+      assert.equal(page.firstElementChild?.classList.contains('pb-28'), false,
+        'the page does not add its own mobile navigation compensation');
+      assert.equal(page.firstElementChild?.classList.contains('pb-16'), true,
+        'ordinary page spacing is the same on phone and desktop');
+    } finally { app.unmount(); }
+  } finally { await cleanup(); }
+});
+
+
 test('the phone header states connection status in text and offers the theme control', async () => {
   const { vite, doc, mountInto, cleanup } = await setupHarness();
   try {
@@ -174,7 +232,7 @@ test('the phone header states connection status in text and offers the theme con
 });
 
 
-test('the Shell reports loading, offline, and reconnecting distinctly, and refuses control while unsettled', async () => {
+test('the Shell ignores read loading and reports offline and reconnecting truthfully', async () => {
   const { vite, doc, mountInto, cleanup } = await setupHarness();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
@@ -188,17 +246,21 @@ test('the Shell reports loading, offline, and reconnecting distinctly, and refus
     await settle();
 
     const notice = () => doc.querySelector('[data-testid="shell-connection-notice"]');
+    const announcementBeforeRead = doc.querySelector('.shell-announcer')?.textContent?.trim() ?? '';
     assert.equal(notice(), null, 'a connected shell does not warn');
 
     controller.set({ status: 'loading', connection: 'online', loading: true });
     await settle(60);
     assert.equal(notice(), null, 'a brief connection check does not insert a shell row');
-    await settle(700);
-    assert.match(notice()?.textContent ?? '', /Checking connection/i, 'loading is announced as a pending check');
+    await settle(5050);
+    assert.equal(notice(), null, 'even a long read is not a connection warning');
+    assert.equal(doc.querySelector('.shell-announcer')?.textContent?.trim(), announcementBeforeRead, 'a read causes no announcement');
 
     controller.set({ status: 'reconnecting', connection: 'reconnecting', loading: false });
     await settle(60);
+    await settle(5050);
     assert.match(notice()?.textContent ?? '', /Reconnecting/i, 'reconnecting says so');
+    assert.equal(notice()?.closest('[role="status"]')?.classList.contains('absolute'), true);
     assert.match(notice()?.textContent ?? '', /unavailable/i, 'reconnecting explains that control is unavailable');
 
     controller.set({ status: 'offline', connection: 'offline', loading: false });
@@ -238,22 +300,35 @@ test('transient connection refreshes preserve shell geometry and prolonged stall
       return [rect.x, rect.y, rect.width, rect.height];
     });
     const before = geometry();
+    const mainClasses = main.className;
+    const announcementBeforeRead = doc.querySelector('.shell-announcer')?.textContent?.trim() ?? '';
+    assert.equal(main.classList.contains('pt-24'), false, 'the hidden notice reserves no top lane');
 
     controller.set({ status: 'loading', connection: 'online', loading: true });
     await settle(100);
+    assert.equal(doc.querySelector('.shell-announcer')?.textContent?.trim(), announcementBeforeRead,
+      'a read does not change the shared announcement');
     assert.equal(doc.querySelector('[data-testid="shell-connection-notice"]'), null,
       'the short-lived refresh banner is not laid out');
     assert.deepEqual(geometry(), before, 'main/header positions and app-shell dimensions stay constant');
 
     controller.set({ status: 'online', connection: 'online', loading: false });
-    await settle(750);
+    await settle(100);
     assert.equal(doc.querySelector('[data-testid="shell-connection-notice"]'), null,
       'the transient warning timer is cancelled when the connection returns');
 
     controller.set({ status: 'reconnecting', connection: 'reconnecting', loading: false });
-    await settle(750);
+    await settle(5050);
     assert.match(doc.querySelector('[data-testid="shell-connection-notice"]')?.textContent ?? '', /Reconnecting/i,
       'a prolonged connection stall still surfaces the warning');
+    assert.equal(doc.querySelector('.shell-connection-banner')?.classList.contains('absolute'), true,
+      'the floating status is out of flow at both breakpoints');
+    assert.ok(doc.querySelector('.shell-connection-banner')?.classList.contains('z-30'));
+    assert.equal(main.classList.contains('pt-24'), false, 'the visible notice reserves no top lane either');
+    assert.equal(main.className, mainClasses, 'notice visibility never changes main padding or layout classes');
+    assert.ok(doc.querySelector('.shell-connection-banner')?.classList.contains('pointer-events-none'));
+    assert.ok(doc.querySelector('.shell-connection-banner')?.classList.contains('bg-[var(--bg-surface)]'), 'the overlay has a solid surface over content');
+    assert.deepEqual(geometry(), before, 'revealing the overlay leaves shell and content box geometry unchanged');
     app.unmount();
   } finally {
     await cleanup();
