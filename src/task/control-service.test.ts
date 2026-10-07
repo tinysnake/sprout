@@ -467,6 +467,9 @@ test('Force Release stops the Task and freezes its group without claiming normal
   assert.equal(forced?.environmentLifecycleState, 'discarded');
   assert.equal(forced?.endDisposition, undefined, 'Force Release retains active intent instead of the prior ended disposition');
   assert.equal(forced?.controlHistory?.at(-1)?.action, 'end-requested', 'the append-only control history retains the prior end request');
+  assert.deepEqual(forced?.controlHistory?.at(-1), {
+    action: 'end-requested', actor: human, at: 45, disposition: 'cancelled', reason: 'Discard requested before Force Release.',
+  }, 'the deliberate-cancel history remains readable after Force Release clears only the current disposition');
   assert.equal(forced?.blockerReason, 'Task stopped by the Human operator using Force Release; unresolved facts recorded.');
   assert.equal(taskGroupSnapshots.at(-1)?.status, 'stopped');
   assert.equal(toTaskView(forced!).taskContextState, 'cleanup-unproved-force-release');
@@ -521,6 +524,44 @@ test('Human Resume restores a Force Released Task with a fresh lease and context
   assert.deepEqual(preparedTaskIds, [s.taskId, s.taskId], 'the stopped Task receives fresh context');
   assert.deepEqual(preparedEnvironmentIds, ['local-1', 'local-1'], 'the existing Environment binding is reused');
   assert.equal(s.submittedRuns.length, 0, 'Resume never starts a run automatically');
+});
+
+test('stopped Resume rejects Agent authority and refuses a busy original Environment without changing history', async () => {
+  const s = await scenario();
+  await s.lifecycle.workerChannelLost(s.taskId);
+  await s.lifecycle.forceRelease(s.taskId, {
+    actor: 'operator', reason: 'Release an unresolved Environment lease', unresolvedFacts: ['engine stop not proved'], at: 40,
+  });
+  const stopped = (await s.tasks.get(s.taskId))!;
+  const oldLeaseId = stopped.environmentLeaseId!;
+  const historyBefore = stopped.controlHistory;
+
+  await assert.rejects(
+    s.lifecycle.resumeStopped(s.taskId, { memberId: 'pi', memberKind: 'agent' }, 'Agent must not resume'),
+    /Human authority is required/,
+  );
+  const afterAgentRefusal = (await s.tasks.get(s.taskId))!;
+  assert.equal(afterAgentRefusal.status, 'stopped');
+  assert.deepEqual(afterAgentRefusal.controlHistory, historyBefore);
+  assert.equal(s.pool.getLease(oldLeaseId)?.state, 'released');
+
+  const competing = s.pool.reserveTaskLease({
+    instanceId: stopped.environmentInstanceId!, capability: 'agent-run', holderId: 'other-task',
+    taskId: 'other-task', ttlMs: 60_000,
+  });
+  assert.ok(competing.ok);
+  s.pool.adoptLease(competing.lease);
+  await assert.rejects(
+    s.controls.resumeForHuman(s.taskId, { reason: 'Try Resume while the original Environment is occupied.' }),
+    /environment local-1 is unavailable/,
+  );
+  const afterEnvironmentRefusal = (await s.tasks.get(s.taskId))!;
+  assert.equal(afterEnvironmentRefusal.status, 'stopped');
+  assert.equal(afterEnvironmentRefusal.environmentLifecycleState, 'discarded');
+  assert.deepEqual(afterEnvironmentRefusal.controlHistory, historyBefore);
+  assert.equal(afterEnvironmentRefusal.environmentLeaseId, oldLeaseId);
+  assert.equal(s.pool.getLease(oldLeaseId)?.state, 'released');
+  assert.equal(s.pool.getLease(competing.lease.id)?.state, 'active');
 });
 
 test('completion claims accept only the fact-form schema and reject empty or hostile payloads', async () => {

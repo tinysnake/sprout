@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { build, INSTANCE_ID, PROJECT_ID, scriptedEnvironment } from '../runtime-test-harness.ts';
+import { taskGroupScopeId, taskGroupStatus } from '../conversation/model.ts';
 import { ScriptedEngineAdapter } from '../engine/scripted.ts';
 import type { TaskView } from './views.ts';
 
@@ -103,29 +104,67 @@ test('authenticated Task Resume directly restores a Force Released Task through 
     });
     assert.equal(begunResponse.status, 201);
     const { task } = await begunResponse.json() as { task: TaskView };
+    const genericSetStopped = await fetch(new URL(`/api/tasks/${task.id}`, base), {
+      method: 'PATCH', headers: { 'content-type': 'application/json', cookie, 'x-sprout-csrf': csrfToken }, body: JSON.stringify({ status: 'stopped' }),
+    });
+    assert.equal(genericSetStopped.status, 409, 'generic Task updates cannot create the Force Release outcome');
+    assert.equal((await runtime.tasks.get(task.id))?.status, 'in-progress');
     const before = (await runtime.tasks.get(task.id))!;
     const oldLeaseId = before.environmentLeaseId!;
+    const groupId = taskGroupScopeId(task.id);
+    const groupBefore = await runtime.conversationScopes.getScope(groupId);
+    assert.ok(groupBefore?.kind === 'task-group');
     await runtime.stores.tasks.save({
       ...before, status: 'stopped', completedAt: 500, environmentLifecycleState: 'discarded',
       blockerReason: 'Task stopped by the Human operator using Force Release; unresolved facts recorded.',
       forcedRelease: { actor: 'operator', reason: 'Emergency release', unresolvedFacts: ['engine stop not proved'], at: 500 },
     });
     assert.ok(runtime.pool.releaseTaskLease(oldLeaseId));
+    await runtime.conversationScopes.syncTaskGroup({
+      taskId: task.id, projectId: before.projectId, title: before.title, goal: before.goal,
+      constraints: before.constraints,
+      lead: { memberId: before.admission!.lead.memberId, kind: before.admission!.lead.memberKind },
+      contentVersion: before.admission!.contentVersion, status: 'stopped',
+    });
+    const stoppedGroup = await runtime.conversationScopes.getScope(groupId);
+    assert.ok(stoppedGroup?.kind === 'task-group');
+    assert.equal(stoppedGroup.id, groupBefore.id);
+    assert.equal(taskGroupStatus(stoppedGroup), 'frozen');
+    const stoppedBeforeResume = (await runtime.tasks.get(task.id))!;
+    const historyBeforeResume = stoppedBeforeResume.controlHistory;
+    const genericClearStopped = await fetch(new URL(`/api/tasks/${task.id}`, base), {
+      method: 'PATCH', headers: { 'content-type': 'application/json', cookie, 'x-sprout-csrf': csrfToken }, body: JSON.stringify({ status: 'in-progress' }),
+    });
+    assert.equal(genericClearStopped.status, 409, 'generic Task updates cannot clear Force Released stopped intent');
+    assert.equal((await runtime.tasks.get(task.id))?.status, 'stopped');
 
     const path = `/api/tasks/${task.id}/resume`;
     assert.equal((await post(path, { reason: 'Continue the original work.' }, false)).status, 401);
     assert.equal((await post(path, { reason: 'Continue the original work.' }, true, false)).status, 403);
     assert.equal((await post(path, { reason: 'Continue the original work.', actor: { memberId: 'scout', memberKind: 'agent' } })).status, 400);
+    const unchangedAfterRefusals = (await runtime.tasks.get(task.id))!;
+    assert.equal(unchangedAfterRefusals.status, 'stopped');
+    assert.equal(unchangedAfterRefusals.environmentLeaseId, oldLeaseId);
+    assert.deepEqual(unchangedAfterRefusals.controlHistory, historyBeforeResume);
+    assert.equal(unchangedAfterRefusals.controlHistory?.some((event) => event.action === 'resumed' || event.action === 'reopened') ?? false, false);
 
     const resumedResponse = await post(path, { reason: 'Continue the original work.' });
     assert.equal(resumedResponse.status, 200);
     const resumed = (await resumedResponse.json() as { task: TaskView }).task;
     assert.equal(resumed.status, 'in-progress');
     assert.equal(resumed.environmentLifecycleState, 'idle');
+    assert.equal(resumed.environmentInstanceId, before.environmentInstanceId);
     assert.notEqual(resumed.environmentLeaseId, oldLeaseId);
+    const resumedGroup = await runtime.conversationScopes.getScope(groupId);
+    assert.ok(resumedGroup?.kind === 'task-group');
+    assert.equal(resumedGroup.id, groupBefore.id, 'Resume thaws the original Task group identity');
+    assert.equal(taskGroupStatus(resumedGroup), 'active');
+    assert.equal(resumedGroup.frozenAt, undefined);
+    assert.equal(resumedGroup.terminalTaskStatus, undefined);
     assert.equal(resumed.completedAt, undefined);
     assert.equal(resumed.forcedRelease?.unresolvedFacts[0], 'engine stop not proved');
     assert.equal(resumed.controlHistory?.at(-1)?.action, 'resumed');
+    assert.deepEqual(resumed.controlHistory?.at(-1)?.actor, { memberId: 'operator', memberKind: 'human' });
     assert.equal(resumed.controlHistory?.some((event) => event.action === 'reopened'), false);
   } finally { await runtime.close(); }
 });

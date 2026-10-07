@@ -542,7 +542,7 @@ export class ConversationScopeService {
    * Project membership facts, so every current Project member is included and
    * later joiners take part without a membership write. Task content versions
    * are snapshotted append-only, and product status data determines whether the
- * group remains writable or freezes pending ended-state handling or Force Release.
+   * group remains writable or freezes pending ended-state handling or Force Release.
    */
   async syncTaskGroup(input: TaskGroupSyncInput): Promise<TaskGroupScope> {
     const facts = await this.#facts(input.projectId);
