@@ -11,7 +11,15 @@ document; all quoted values are synthetic fixtures, regex patterns, or placehold
 
 ## 1. The problem this research addresses
 
-ADR-0007 imposes a two-sided constraint on the bounded routing context sent to the wake model
+**Reconciliation note (2026-10-07):** The ADR wording quoted below is the
+historical contract consulted for this research. The owner chose #220 Option A
+after full M2 acceptance reached #179’s revisit trigger.
+[ADR-0007 now records the accepted limited guarantee](../adr/0007-message-and-wake-routing-semantics.md#wake-model-privacy-guarantee-amended-2026-10-07):
+private sources remain excluded and recognized patterns are redacted, while
+unlabelled opaque values in free text may reach the wake model. The original
+research evidence and alternatives below remain historical findings.
+
+At the consulted revision, ADR-0007 imposed a two-sided constraint on the bounded routing context sent to the wake model
 (`docs/adr/0007-message-and-wake-routing-semantics.md`, consulted at `278f73cc`):
 
 - **Include** (lines 138–144): each batch input's identifier, kind, author, time, **content**,

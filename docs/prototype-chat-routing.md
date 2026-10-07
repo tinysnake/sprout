@@ -201,7 +201,7 @@ In accordance with ADR-0007:
 3. **Fixed 30s Collection Window**: Fixed window avoids debounce starvation and batches burst inputs.
 4. **Non-Routing Projected Replies**: Projected output cannot become automatic input, preventing recursive loops.
 5. **Automatic Retry & Fail-Closed Fallback**: 2 attempts maximum; fails closed with durable error.
-6. **Strict Privacy Boundaries**: DMs, private memory, sessions, transcripts, credentials, host paths, and transient capacity excluded from routing context.
+6. **Routing Privacy Boundaries** (reconciled 2026-10-07 by #220 Option A): DMs, private memory, sessions, transcripts, credential/host records, and transient capacity are excluded as sources. Recognized sensitive patterns in admitted prose are redacted; unlabelled opaque values may reach the wake model. See [ADR-0007’s limited guarantee](adr/0007-message-and-wake-routing-semantics.md#wake-model-privacy-guarantee-amended-2026-10-07).
 7. **Observational Evidence Only**: No manual route-now or retry buttons in MVP.
 8. **Non-Destructive Lifecycles**: Disbanding WGs and ending memberships preserve full history and attribution.
 
