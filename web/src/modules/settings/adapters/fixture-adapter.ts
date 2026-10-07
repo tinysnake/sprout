@@ -36,6 +36,7 @@ export class FixtureSettingsService implements SettingsService {
         worker: '0.2.0-m2',
         workerProtocol: { minMajor: 2, maxMajor: 2 },
       },
+      executionMode: 'environment-hosted',
       session: { authenticated: true, activeCount: 2 },
       access: {
         boundary: 'private-network-and-authentication',

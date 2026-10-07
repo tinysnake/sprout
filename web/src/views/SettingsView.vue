@@ -9,7 +9,7 @@ import { SETTINGS_SERVICE, type SettingsService, type SettingsCategoryTab } from
 import { RouterLink, useRouter } from 'vue-router';
 import { EVENT_STATES, isDiagnosticTarget, projectDiagnosticCorrelation, type OperatorSettings, type WebDiagnostic } from '../../../src/operations/contract.ts';
 import type { BrowserSessionView } from '../adapters/operator-session-api.js';
-import type { BrowserTransportState } from '../transport/browser-transport.js';
+import type { BrowserTransportState, BrowserConnectionState } from '../transport/browser-transport.js';
 
 const props = defineProps<{
   service?: SettingsService;
@@ -60,9 +60,13 @@ const diagnosticEvents = computed(() => (diagnosticsData.value?.events ?? []).fi
 }));
 
 let unsubscribeTransport: (() => void) | null = null;
+let lastConnection: BrowserConnectionState | undefined;
 
 function syncTransportState(state: BrowserTransportState) {
+  const reconnected = lastConnection !== undefined && lastConnection !== 'online' && state.connection === 'online';
   isStale.value = state.connection !== 'online';
+  lastConnection = state.connection;
+  if (reconnected && settingsData.value) void loadData();
   if (state.connection === 'offline' && !settingsData.value) {
     isLoading.value = false;
   }
@@ -114,6 +118,7 @@ watch(activeService, (newService) => {
     unsubscribeTransport = null;
   }
   if (newService) {
+    lastConnection = undefined;
     unsubscribeTransport = newService.subscribeState(syncTransportState);
     loadData();
   } else {
@@ -606,8 +611,30 @@ function handleStatusKey(e: KeyboardEvent, tab: SettingsCategoryTab) {
 
         <!-- Category 2: Instance & System -->
         <div v-else-if="activeSubTab === 'system'" class="grid grid-cols-1 lg:grid-cols-2 gap-5" data-settings-tab-panel="system">
-          <!-- Card 1: Sprout instance and compatibility -->
-          <section class="card settings-card p-4 sm:p-5 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-4 shadow-xs" data-settings-section="compatibility">
+          <section class="card settings-card p-4 sm:p-5 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-4 shadow-xs lg:col-span-2" data-settings-section="execution-mode" :data-execution-mode="settingsData.executionMode" :data-execution-mode-stale="isStale">
+            <div class="flex items-center justify-between gap-2 flex-wrap">
+              <h3 class="text-xs uppercase tracking-wider font-bold text-[var(--text-muted)] flex items-center gap-1.5">
+                <Icon name="server" :size="14" />
+                <span>Execution mode</span>
+              </h3>
+              <Badge :variant="isStale ? 'warning' : 'info'">{{ isStale ? 'Last confirmed · stale' : 'Effective now' }}</Badge>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+              <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
+                <span class="text-[10px] uppercase font-bold text-[var(--text-muted)] block">{{ isStale ? 'Last confirmed mode' : 'Effective mode' }}</span>
+                <strong class="text-[var(--text-primary)] font-mono">{{ settingsData.executionMode }}</strong>
+              </div>
+              <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
+                <span class="text-[10px] uppercase font-bold text-[var(--text-muted)] block">Change placement</span>
+                <strong class="text-[var(--text-primary)]">Restart Sprout</strong>
+                <span class="block text-[10px] text-[var(--text-muted)]">Set <code>--execution-mode {{ settingsData.executionMode }}</code> in the service launch command. If omitted, each startup uses <code>environment-hosted</code>.</span>
+              </div>
+            </div>
+            <p class="text-[11px] text-[var(--text-muted)]">Settings cannot change execution mode. A restart applies the selected startup argument to the whole Sprout process.</p>
+          </section>
+
+            <!-- Card 1: Sprout instance and compatibility -->
+            <section class="card settings-card p-4 sm:p-5 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-4 shadow-xs" data-settings-section="compatibility">
             <div class="flex items-center justify-between gap-2">
               <h3 class="text-xs uppercase tracking-wider font-bold text-[var(--text-muted)] flex items-center gap-1.5">
                 <Icon name="server" :size="14" />

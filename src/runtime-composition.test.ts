@@ -370,6 +370,7 @@ test('the startup report preserves the operator log contract, including conditio
   assert.equal(
     report,
     'Sprout listening on http://127.0.0.1:41030\n' +
+      '  execution:  environment-hosted\n' +
       '  agent:      scout, scribe\n' +
       '  engine:     scripted (via environment worker)\n' +
       '  environment: composition-instance (macos, cwd /synthetic/work)\n' +

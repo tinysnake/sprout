@@ -9,7 +9,7 @@ import type { WebDiagnostic, OperatorSettings } from './operations/contract.ts';
 
 test('production operator API requires a session and preserves diagnostic journal across restart', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'operator-api-'));
-  const configuration = hostConfiguration({ databasePath: join(directory, 'state.db'), environmentSource: 'enrollment', operatorCredential: 'synthetic-operator-credential' });
+  const configuration = hostConfiguration({ databasePath: join(directory, 'state.db'), environmentSource: 'enrollment', executionMode: 'host-run', operatorCredential: 'synthetic-operator-credential' });
   let runtime = await createRuntime({ configuration, projectRoot: '/synthetic/project' });
   try {
     await enrollEligibleInstance(runtime, 'synthetic-environment', join(directory, 'worker-key.pem'));
@@ -37,7 +37,10 @@ test('production operator API requires a session and preserves diagnostic journa
       priorEvents = diagnostics.events.length;
       const settings = await (await fetch(`${base}/api/operator/settings`, { headers: { cookie } })).json() as OperatorSettings;
       assert.equal(settings.session.authenticated, true);
+      assert.equal(settings.executionMode, 'host-run');
+      assert.equal(runtime.executionStrategy.mode, 'host-run');
       assert.deepEqual(settings.responsibilities.web, ['sessions', 'enrollment', 'recovery', 'diagnostics']);
+      assert.deepEqual(await runtime.orchestrator.list(), [], 'configuration and readiness reads do not admit model work');
       assert.equal(JSON.stringify(diagnostics).includes('synthetic-operator-credential'), false);
       await runtime.close();
       if (iteration === 0) runtime = await createRuntime({ configuration, projectRoot: '/synthetic/project' });

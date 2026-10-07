@@ -157,6 +157,7 @@ export async function connectRuntimeWorker(
 /** A complete typed host configuration for one synthetic local environment. */
 export function hostConfiguration(overrides: Partial<HostConfiguration> = {}): HostConfiguration {
   const configuration: HostConfiguration = {
+    executionMode: 'environment-hosted',
     databasePath: ':memory:',
     workingDirectory: '/synthetic/work',
     port: 0,

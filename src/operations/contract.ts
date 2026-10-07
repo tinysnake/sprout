@@ -1,4 +1,5 @@
 import { isFeedDeepLink, type FeedTarget } from '../web/feed.ts';
+import type { ExecutionMode } from '../execution-mode.ts';
 
 /** Diagnostics select finite facts and validated routing identities; never content. */
 export const EVENT_STATES = {
@@ -68,6 +69,8 @@ export interface WebDiagnostic {
  * limits, or migration safety-copy existence/retention. Those must not be inferred. */
 export interface OperatorSettings {
   readonly versions: DiagnosticVersions;
+  /** Authoritative execution mode selected when this Sprout process started. */
+  readonly executionMode: ExecutionMode;
   readonly session: { readonly authenticated: true; readonly activeCount: number };
   readonly access: { readonly boundary: 'private-network-and-authentication'; readonly publicInternetSupported: false };
   readonly responsibilities: { readonly web: readonly ['sessions', 'enrollment', 'recovery', 'diagnostics']; readonly hostLocal: readonly ['credentials', 'engine-login', 'service', 'network', 'backup', 'upgrade'] };

@@ -12,13 +12,23 @@ without completing that page.
   enrollment, current Worker authority, recovery history, and an operational
   journal. It never starts an engine probe, runs inference, admits work, or
   releases a lease.
-- `GET /api/operator/settings`: product versions, authenticated session state,
-  active-session count, private-access boundary, and Web/host responsibilities.
+- `GET /api/operator/settings`: product versions, the immutable process
+  `executionMode`, authenticated session state, active-session count,
+  private-access boundary, and Web/host responsibilities. The execution mode is
+  the one selected at service startup; omission means `environment-hosted` for
+  every boot. This read does not probe readiness or perform inference. Settings
+  has no mode write route; changing placement requires a service restart.
   The existing session API lists current browser sessions and permits revocation.
   Version ranges are supported protocol majors, not negotiated compatibility.
   Settings does not report schema support limits or safety-copy retention; Web must
   not infer those assurances from a successful read or migration event. The
   production page labels safety-copy status as requiring host verification.
+
+Settings displays the effective mode on desktop and mobile and marks cached
+mode facts stale when the browser transport is offline or reconnecting. Once the
+transport reconnects, it refreshes the authoritative settings snapshot. It never
+stores a browser mode preference or queues a mode mutation.
+
 - `GET /api/operator/diagnostics`: versioned Web JSON export with schema version,
   service and durable-data access facts, independent Environment enrollment,
   accepted Worker connection/reachability, protocol compatibility, engine

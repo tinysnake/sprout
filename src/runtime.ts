@@ -38,6 +38,7 @@ import {
   type EnvironmentEnrollmentServiceOptions,
 } from './environment/enrollment-service.ts';
 import type { EnvironmentSource, HostConfiguration } from './host-config.ts';
+import { createExecutionStrategy, type ExecutionStrategy } from './execution-mode.ts';
 import type { Project } from './project/model.ts';
 import { ProjectRegistry } from './project/registry.ts';
 import { workspaceFor } from './project/resolve.ts';
@@ -337,12 +338,10 @@ export interface SproutRuntime {
   readonly conversationScopes: ConversationScopeService;
   /** The truthful Usage and cost observation capability (#105). */
   readonly usage: UsageService;
-  /**
-   * How this Sprout instance reaches its production Worker (ADR-0012 / E2).
-   * `configured` is the M1 carrier path retained only for an injected
-   * test/development carrier; `enrollment` is the production catalog path.
-   */
+  /** How this Sprout instance reaches its production Worker (ADR-0012 / E2). */
   readonly environmentSource: EnvironmentSource;
+  /** Immutable execution strategy selected once for this process. */
+  readonly executionStrategy: ExecutionStrategy;
   /**
    * The enrollment-backed outbound Worker gateway and its connection epochs
    * (#115). Present so Web-created pending enrollments have a machine channel.
@@ -494,6 +493,8 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     leaseTtlMs,
   } = configuration;
 
+  const executionStrategy = createExecutionStrategy(configuration.executionMode);
+
   /**
    * The host facts carrier and platform selection both depend on.
    *
@@ -546,11 +547,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     // running; durable state has not been opened yet. Under the enrollment source
     // (ADR-0012) no Worker is connected at construction, so there is no engine to
     // validate: the accepted connection carries its engines when it arrives.
-    const engines =
-      environment === undefined
-        ? new Map<string, EngineAdapter>()
-        : await environment.adapters(instanceId);
-    if (environment !== undefined && !engines.has(engineId)) {
+    const engines = executionStrategy.mode === 'environment-hosted' && environment !== undefined
+      ? await environment.adapters(instanceId)
+      : new Map<string, EngineAdapter>();
+    if (executionStrategy.mode === 'environment-hosted' && environment !== undefined && !engines.has(engineId)) {
       throw new MissingEnvironmentEngineError({
         engineId,
         hostedEngineIds: [...engines.keys()],
@@ -1071,6 +1071,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       // replaced before the next run instead of failing it against a dead channel
       // (ADR-0003), and so execution follows the leased instance (F1, #18).
       engines: (requestedInstanceId) => runtimeEnvironment.adapters(requestedInstanceId),
+      executionStrategy,
       agents,
       resolveAgent,
       // Observed engine facts (#87) per instance, so run admission can take the
@@ -1181,9 +1182,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       lifecycle: taskLifecycle,
       projects,
       agentAuthority: projectAgentAuthority,
+      executionStrategy,
     });
     const taskControls = new TaskControlService({
-      tasks, lifecycle: taskLifecycle, proposals: taskProposals, runs: orchestrator,
+      tasks, lifecycle: taskLifecycle, proposals: taskProposals, runs: orchestrator, executionStrategy,
     });
 
     recovery = new EnvironmentRecoveryService({
@@ -1778,6 +1780,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     const requestWorkerProbe = (enrollmentId: string) => readinessWorkflow.request(enrollmentId);
 
     operations = new OperatorDiagnostics({ store: stores.operations ?? new MemoryOperationalStore(), schema: stores.schemaVersion ?? null, auth: operatorSessions, enrollments, recovery,
+      executionStrategy,
       connected: (instanceId) => workerGateway.liveFor(instanceId) !== undefined,
       run: async (id) => {
         const run = orchestrator.get(id) ?? await durableStores.runs.get(id);
@@ -1951,6 +1954,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
             return taskControls.endForHuman(taskId, input);
           },
           recover: async (taskId, input) => {
+            if (input.action === 'resume') taskControls.assertExecutionModeAvailable();
             const task = await tasks.get(taskId);
             if (environmentSource !== 'enrollment' || task?.environmentLeaseId === undefined ||
                 task.environmentLifecycleState !== 'recovery') {
@@ -2078,6 +2082,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       workerGateway: gatewayView,
       enrollmentEnvironment,
       environmentSource,
+      executionStrategy,
       engines,
       refreshEnvironmentCatalog,
 
@@ -2129,6 +2134,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       startupReport(boundPort: number): string {
         return renderStartupReport({
           boundPort,
+          executionMode: executionStrategy.mode,
           agents,
           engines,
           instanceId,
@@ -2192,6 +2198,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
  */
 function renderStartupReport(input: {
   readonly boundPort: number;
+  readonly executionMode: ExecutionStrategy['mode'];
   readonly agents: AgentRegistry;
   readonly engines: ReadonlyMap<string, EngineAdapter>;
   readonly instanceId: string;
@@ -2216,6 +2223,7 @@ function renderStartupReport(input: {
         `${input.environmentKind === 'container' ? `, container ${input.containerName}` : `, cwd ${input.workingDirectory}`})\n`;
   let report =
     `Sprout listening on http://127.0.0.1:${input.boundPort}\n` +
+    `  execution:  ${input.executionMode}\n` +
     `  agent:      ${input.agents.list().map((agent) => agent.id).join(', ')}\n` +
     `  engine:     ${[...input.engines.keys()].join(', ') || '(none)'} (via environment worker)\n` +
     environmentLine +

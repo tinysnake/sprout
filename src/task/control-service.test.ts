@@ -13,6 +13,7 @@ import { TaskService } from './service.ts';
 import { TaskControlService } from './control-service.ts';
 import { isEndedTaskStatus, TASK_STATUSES, type Task, type TaskActor } from './model.ts';
 import { toTaskView } from '../web/views.ts';
+import { createExecutionStrategy, type ExecutionStrategy } from '../execution-mode.ts';
 
 const definition: EnvironmentDefinition = { id: 'local', platform: 'macos', capabilities: [{ name: 'agent-run', requiresLease: true }] };
 const instance: EnvironmentInstance = { id: 'local-1', definitionId: 'local' };
@@ -25,7 +26,7 @@ function run(id: string, status: AgentRun['status']): AgentRun {
     ...(status !== 'queued' && status !== 'running' ? { completedAt: 2 } : {}) };
 }
 
-async function scenario(options: { readonly worker?: TaskContextWorker; readonly forceRelease?: boolean; readonly taskLead?: TaskActor; readonly taskGroupSnapshots?: Task[]; readonly taskGroupEvents?: string[]; readonly taskId?: string } = {}) {
+async function scenario(options: { readonly worker?: TaskContextWorker; readonly forceRelease?: boolean; readonly taskLead?: TaskActor; readonly taskGroupSnapshots?: Task[]; readonly taskGroupEvents?: string[]; readonly taskId?: string; readonly executionStrategy?: ExecutionStrategy } = {}) {
   const taskId = options.taskId ?? 'task-1';
   const store = new InMemoryTaskStore();
   let nextLease = 0;
@@ -69,12 +70,30 @@ async function scenario(options: { readonly worker?: TaskContextWorker; readonly
   const controls = new TaskControlService({
     tasks, lifecycle, proposals,
     runs: { stop: async runId => { const stopped = run(runId, 'stopped'); await tasks.onRunSettled({ taskId, run: { ...stopped, taskId } }); return stopped; } },
+    ...(options.executionStrategy !== undefined ? { executionStrategy: options.executionStrategy } : {}),
     now: () => 50, id: () => 'claim-1',
   });
   await store.create(task());
   const begun = await lifecycle.begin(taskId);
   return { store, pool, lifecycle, tasks, controls, begun, taskId, submittedRuns };
 }
+
+test('Host-run refuses Task resume and recovery resume without releasing its Environment lease', async () => {
+  const s = await scenario({ executionStrategy: createExecutionStrategy('host-run') });
+  const before = s.pool.leases();
+  assert.equal(before.length, 1);
+  assert.equal(before[0]?.state, 'active');
+
+  for (const command of [
+    () => s.controls.resumeForHuman(s.taskId, { reason: 'continue' }),
+    () => s.controls.recoverForHuman(s.taskId, { action: 'resume', reason: 'recover' }),
+  ]) {
+    await assert.rejects(command, error =>
+      error instanceof Error && 'code' in error && error.code === 'execution-mode-unavailable');
+  }
+  assert.deepEqual(s.pool.leases(), before, 'refusal preserves protected lease state');
+  assert.equal((await s.tasks.get(s.taskId))?.status, 'in-progress');
+});
 
 test('admitted Task groups synchronize at start and freeze after terminal persistence', async () => {
   const taskGroupEvents: string[] = [];

@@ -39,6 +39,20 @@ npm run web:build    # build the client into web/dist
 npm start            # start the Sprout runtime
 ```
 
+For the existing Environment-hosted execution path, run:
+
+```bash
+npm start -- --execution-mode environment-hosted
+```
+
+`--execution-mode` accepts `environment-hosted` or `host-run`. If omitted, each
+Sprout startup selects `environment-hosted`; no browser or saved preference can
+change it. The standard `npm start` launcher forwards arguments after `--` to the
+Sprout process. Settings reports the effective mode and explains that changing it
+requires editing the service launch command and restarting Sprout. Host-run
+admission currently reports unavailable until its engine and remote operation
+capabilities are implemented.
+
 Sprout starts an environment worker and reaches it over the worker protocol; the
 core itself spawns no engine process (ADR-0003). Engine CLIs must be installed
 where the worker runs, which for the local macOS environment is this host.

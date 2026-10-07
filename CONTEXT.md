@@ -108,6 +108,14 @@ _Avoid_: Process, bot instance, environment agent
 One entry in an Agent's ordered execution preferences, naming an engine, work model, and effort. At run admission Sprout chooses the first option available on the selected Environment instance, and it never changes options automatically after an engine accepts the run.
 _Avoid_: Environment binding, model fallback retry
 
+**Execution mode**:
+The immutable, process-wide choice made when a Sprout instance starts: `environment-hosted` places engine execution in the selected Environment worker, while `host-run` places engine execution on the Sprout host. Omission selects `environment-hosted` on every startup. Settings reports the effective mode; changing it requires restarting Sprout with a different startup argument.
+_Avoid_: Browser preference, runtime switch
+
+**Engine host**:
+The host that runs an engine process, owns its engine session storage, and holds its engine login. It is the Environment host in `environment-hosted` mode and the Sprout host in `host-run` mode, independently of the work Environment that owns files and remote operations.
+_Avoid_: Work Environment, Project workspace
+
 **Agent run**:
 One bounded activation of an agent in response to a message, task, or system event. A run executing inside a Task is a nested activation: it neither acquires nor releases that Task's environment lease.
 _Avoid_: Agent, task

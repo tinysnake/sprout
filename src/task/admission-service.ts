@@ -7,11 +7,12 @@ import type { TaskService } from './service.ts';
 import { TaskEnvironmentLeaseRefusal, type TaskEnvironmentLifecycle } from './environment-lifecycle.ts';
 import type { TaskProposalService } from './proposal-service.ts';
 import type { TaskProposalStore } from './proposal-store.ts';
+import { createExecutionStrategy, executionModeAdmissionRefusal, type ExecutionStrategy } from '../execution-mode.ts';
 import { TaskProposalError, type TaskProposalBeginInput } from './proposal-model.ts';
 
 export type TaskAdmissionErrorCode = 'invalid-command' | 'lead-ineligible' | 'environment-ineligible'
   | 'no-compatible-agent' | 'task-not-admitted' | 'advance-forbidden' | 'target-ineligible'
-  | 'environment-recovering' | 'environment-unavailable';
+  | 'environment-recovering' | 'environment-unavailable' | 'execution-mode-unavailable';
 
 export class TaskAdmissionError extends Error {
   readonly code: TaskAdmissionErrorCode;
@@ -42,6 +43,7 @@ export class TaskAdmissionService {
   readonly #agentAuthority: ProjectAgentAuthorityPort;
   readonly #ids: IdFactory;
   readonly #now: () => number;
+  readonly #executionStrategy: ExecutionStrategy;
 
   constructor(options: {
     readonly proposals: TaskProposalService;
@@ -52,6 +54,7 @@ export class TaskAdmissionService {
     readonly agentAuthority: ProjectAgentAuthorityPort;
     readonly ids?: IdFactory;
     readonly now?: () => number;
+    readonly executionStrategy?: ExecutionStrategy;
   }) {
     this.#proposals = options.proposals;
     this.#proposalStore = options.proposalStore;
@@ -61,6 +64,7 @@ export class TaskAdmissionService {
     this.#agentAuthority = options.agentAuthority;
     this.#ids = options.ids ?? createIdFactory();
     this.#now = options.now ?? Date.now;
+    this.#executionStrategy = options.executionStrategy ?? createExecutionStrategy('environment-hosted');
   }
 
   async beginForHuman(proposalId: string, input: BeginTaskProposalInput): Promise<BeginTaskProposalResult> {
@@ -75,6 +79,7 @@ export class TaskAdmissionService {
   }
 
   async beginProposal(proposalId: string, actor: TaskActor, input: BeginTaskProposalInput): Promise<BeginTaskProposalResult> {
+    this.#requireExecutionMode();
     actor = actorSnapshot(actor);
     const initial = await this.#proposals.get(proposalId);
     await this.#proposals.authorizeActor(initial.projectId, actor);
@@ -205,6 +210,7 @@ export class TaskAdmissionService {
     readonly reason?: string;
     readonly prompt?: string;
   }): Promise<{ readonly task: Task; readonly runId: string; readonly audit: TaskRunLink }> {
+    this.#requireExecutionMode();
     actor = actorSnapshot(actor);
     const task = await this.#tasks.get(taskId);
     if (!task) throw new TaskAdmissionError('task-not-admitted', `unknown task: ${taskId}`);
@@ -228,6 +234,11 @@ export class TaskAdmissionService {
     const audit = links.find(link => link.runId === advanced.runId);
     if (!audit) throw new TaskAdmissionError('task-not-admitted', 'the advance audit record is unavailable');
     return { ...advanced, audit };
+  }
+
+  #requireExecutionMode(): void {
+    const refusal = executionModeAdmissionRefusal(this.#executionStrategy);
+    if (refusal !== undefined) throw new TaskAdmissionError('execution-mode-unavailable', refusal);
   }
 
   async #eligibleAgents(projectId: string, environmentInstanceId: string): Promise<readonly string[]> {
