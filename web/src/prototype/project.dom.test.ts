@@ -404,18 +404,23 @@ test('Task Operating Loop: filter dropdown, grid view, page drill-down, and back
     assert.ok(tasksGrid, 'Tasks responsive grid view rendered');
 
     const cards = document.querySelectorAll('.task-grid-card');
-    assert.ok(cards.length >= 5, 'Grid contains task cards');
+    assert.equal(cards.length, 6, 'Grid includes the four begun Tasks and two proposals');
 
-    // 3. Test Filter Dropdown Change
+    // 3. The shared taxonomy treats awaiting validation, active, blocked, and recovery as active intent.
+    const activeOption = filterSelect.querySelector('option[value="active"]');
+    assert.match(activeOption?.textContent ?? '', /\(4\)/, 'Active count includes all four active-intent Tasks');
     filterSelect.value = 'active';
     filterSelect.dispatchEvent(new dom.window.Event('change'));
 
-    const filteredCards = document.querySelectorAll('.task-grid-card');
-    assert.equal(filteredCards.length, 1, 'Filtered to active task only');
-    assert.match(filteredCards[0].textContent ?? '', /#102/);
+    const filteredCards = [...document.querySelectorAll<HTMLElement>('.task-grid-card')];
+    assert.equal(filteredCards.length, 4, 'Active filter includes all four active-intent Tasks');
+    assert.deepEqual(filteredCards.map((card) => card.dataset.task), [
+      'task-101', 'task-102', 'task-103', 'task-104',
+    ]);
 
-    // 4. Test Page Drill-down by clicking card
-    (filteredCards[0] as HTMLElement).click();
+    // 4. Drill down into the running Task within the four active-intent results.
+    const runningTaskCard = document.querySelector('[data-task="task-102"]') as HTMLElement;
+    runningTaskCard.click();
 
     // Verify we switched to Task Detail Page
     const backBtn = document.querySelector('.back-to-tasks-btn') as HTMLButtonElement;
@@ -427,6 +432,12 @@ test('Task Operating Loop: filter dropdown, grid view, page drill-down, and back
     // 5. Test Back Button navigation back to List Page
     backBtn.click();
     assert.ok(document.querySelector('.tasks-grid'), 'Returned to Tasks Grid view');
+    const restoredFilter = document.querySelector('#task-filter-select') as HTMLSelectElement;
+    assert.equal(restoredFilter.value, 'active', 'Back navigation restores the Active filter');
+    const restoredTaskIds = [...document.querySelectorAll<HTMLElement>('.task-grid-card')]
+      .map((card) => card.dataset.task);
+    assert.deepEqual(restoredTaskIds, ['task-101', 'task-102', 'task-103', 'task-104'],
+      'Back navigation restores all four active-intent Tasks');
   } finally {
     await cleanup();
   }
