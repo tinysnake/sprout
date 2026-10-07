@@ -408,7 +408,7 @@ test('infrastructure recovery that blocks a Project transcolates into that scope
   assert.equal(infraOption?.attentionCount, infra.attention.length);
 });
 
-test('terminal Tasks retain blocker history without permanent blocker Attention', async () => {
+test('ended and Force Released Tasks retain blocker history without permanent blocker Attention', async () => {
   const original = mixedWorld().tasks.find(task => task.id === 'task-blk')!;
   const stopEvidenceTask = {
     ...original,
@@ -425,7 +425,7 @@ test('terminal Tasks retain blocker history without permanent blocker Attention'
   ]) {
     const task = { ...original, ...terminal };
     const snapshot = await projectFeed(sources({ tasks: [task] }));
-    assert.equal(snapshot.attention.length, 0, 'terminal Task state clears the work condition even while blocker history remains');
+    assert.equal(snapshot.attention.length, 0, 'ended or Force Released Task state clears the work condition even while blocker history remains');
     assert.ok(task.blocker);
   }
 });
@@ -699,6 +699,23 @@ test('Task reopen control-history events produce separate task-centric Feed beat
   assert.deepEqual(beats[0]?.scopes, ['proj-reopen']);
   assert.equal(beats[0]?.target?.surface, 'project-task-detail');
   assert.equal(beats[0]?.target?.taskId, 'task-reopen');
+});
+
+test('Task Resume control-history events produce distinct task-resumed Feed beats', async () => {
+  const history: TaskControlEvent[] = [
+    { action: 'resumed', actor: { memberId: 'operator', memberKind: 'human' }, at: 1_000, reason: 'The original Environment is available again.', fromStatus: 'stopped' },
+  ];
+  const snapshot = await projectFeed(sources({
+    projects: [{ id: 'proj-resume', displayName: 'Resume Project' }],
+    tasks: [makeTask({ id: 'task-resume', projectId: 'proj-resume', status: 'in-progress', controlHistory: history })],
+  }));
+  const beat = snapshot.activity.find((item) => item.kind === 'task-resumed');
+  assert.ok(beat);
+  assert.equal(beat.id, 'task-resumed:task-resume:1000:0');
+  assert.equal(beat.summary, 'Task resumed by Human operator: The original Environment is available again.');
+  assert.deepEqual(beat.scopes, ['proj-resume']);
+  assert.equal(beat.target?.surface, 'project-task-detail');
+  assert.doesNotMatch(beat.summary, /reopened/i);
 });
 
 test('isFeedDeepLink accepts canonical targets and rejects malformed identities', () => {

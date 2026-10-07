@@ -40,9 +40,9 @@
  * channel, one Project-scoped direct conversation, one Working group channel
  * (#95), or one Task group (#210). Before anything is persisted, the acting
  * author's admission state for that scope is checked: an archived Project, a
- * disbanded Working group, a terminal Task group, or an ended membership
- * refuses delivery with a typed error while the durable history stays
- * readable. The scope is the single source of the Message's `projectId`,
+ * disbanded Working group, a frozen Task group, or an ended membership refuses
+ * delivery with a typed error while durable history stays readable. The scope
+ * is the single source of the Message's `projectId`,
  * `channel`, and current participants: the pair for a direct conversation,
  * active participations for a Working group, and current Project members for
  * a Project channel or Task group, so routing can never disagree with scope
@@ -223,7 +223,7 @@ export interface RunAdmitter {
 export interface CollaborationScopePort {
   getScope(scopeId: string): Promise<ConversationScope | undefined>;
   scopeState(scopeId: string, actorId: string): Promise<ScopeState>;
-  /** Serialize Task-group admission and persistence with terminal Task transitions. */
+  /** Serialize Task-group admission and persistence with ended-state/Force Release transitions. */
   withTaskGroupLock?<T>(taskId: string, action: () => Promise<T>): Promise<T>;
   /**
    * The Project's member facts (current and ended), or `undefined` when the
@@ -1824,7 +1824,7 @@ export class CollaborationCoordinator {
     if (!state.writable) {
       const reason = state.reason ?? 'not-a-member';
       const message = reason === 'task-group-frozen'
-        ? `Task group ${scopeId} is frozen because its Task is terminal; posting is rejected and history remains readable`
+        ? `Task group ${scopeId} is frozen after its Task ended or was Force Released; posting is rejected and history remains readable`
         : `conversation scope ${scopeId} is read-only for ${actorId}${state.reason !== undefined ? ` (${state.reason})` : ''}`;
       throw new MessageDeliveryError(reason, message);
     }

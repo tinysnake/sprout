@@ -5,7 +5,7 @@ import { JSDOM } from 'jsdom';
 import type { MessageView, ProjectEventView } from '../../../../../src/web/views.ts';
 import type { ActiveChatRun, ChatService } from '../types.ts';
 import type { ConversationScopeView, TaskGroupScopeView } from '../../../adapters/conversation-api.ts';
-import { TASK_STATUSES, isTerminalTaskStatus } from '../../../../../src/task/model.ts';
+import { TASK_STATUSES, isEndedTaskStatus } from '../../../../../src/task/model.ts';
 
 // Vue renders the real ChatView. JSDOM supplies events; only layout measurements,
 // animation frames and ResizeObserver deliveries are simulated (JSDOM has no layout).
@@ -103,7 +103,7 @@ function event(id: string, createdAt: number, originScopeIds?: readonly string[]
   return { id, projectId: 'project', kind: 'agent-run-failure', summary: id, producerId: 'agent', producerKind: 'agent', disposition: 'recorded', responsibleAgentIds: [], ...(originScopeIds !== undefined ? { originScopeIds } : {}), createdAt };
 }
 const terminalTaskStatuses = TASK_STATUSES.filter(
-  (status): status is NonNullable<TaskGroupScopeView['terminalTaskStatus']> => isTerminalTaskStatus(status),
+  (status): status is NonNullable<TaskGroupScopeView['terminalTaskStatus']> => isEndedTaskStatus(status),
 );
 function taskGroup(id: string, taskTitle: string, terminalTaskStatus?: TaskGroupScopeView['terminalTaskStatus']): TaskGroupScopeView {
   return {
@@ -441,8 +441,9 @@ test('landscape touch devices above the desktop breakpoint still follow keyboard
 
 test('terminal task groups fold by default while active tasks and other scope kinds stay in the main list', async () => {
   const active = taskGroup('active-task', 'Keep the release moving');
+  const stopped = taskGroup('stopped-task', 'Resume the interrupted intent', 'stopped');
   const closed = terminalTaskStatuses.map((status) => taskGroup(`closed-${status}`, `Closed ${status}`, status));
-  const p = await page('', { taskGroups: [active, ...closed], workingGroup: true });
+  const p = await page('', { taskGroups: [active, stopped, ...closed], workingGroup: true });
   const doc = dom.window.document;
   try {
     const closedToggle = doc.querySelector<HTMLButtonElement>('.chat-closed-tasks-toggle');
@@ -451,13 +452,17 @@ test('terminal task groups fold by default while active tasks and other scope ki
     const closedSection = closedToggle?.closest('.chat-section');
     assert.ok(closedSection, 'closed tasks have one scope-list section');
     assert.equal(closedSection.querySelectorAll('.chat-scope-card').length, 0, 'closed rows are hidden while collapsed');
+    const stoppedCard = doc.querySelector<HTMLElement>('[data-scope-id="stopped-task"]');
+    assert.ok(stoppedCard, 'the stopped task group remains in the main list with active intent');
+    assert.match(stoppedCard.textContent ?? '', /Resume the interrupted intent/);
+    assert.match(stoppedCard.textContent ?? '', /Frozen/, 'the stopped group stays read-only until Resume restores its lease and context');
     assert.equal(doc.querySelectorAll('.chat-scope-card[data-scope-id^="closed-"]').length, 0);
     const activeCard = doc.querySelector<HTMLElement>('[data-scope-id="active-task"]');
     assert.ok(activeCard, 'the active task group remains visible');
     assert.equal(activeCard.dataset['scopeKind'], 'task-group');
     assert.match(activeCard.textContent ?? '', /Keep the release moving/);
     assert.doesNotMatch(activeCard.textContent ?? '', /Frozen/);
-    assert.ok([...doc.querySelectorAll('.chat-section h2')].some((heading) => heading.textContent === 'Task Groups (1)'), 'the main task section counts only active groups');
+    assert.ok([...doc.querySelectorAll('.chat-section h2')].some((heading) => heading.textContent === 'Task Groups (2)'), 'the main task section includes stopped active-intent groups');
     assert.match(doc.querySelector('.chat-section')?.textContent ?? '', /Project Channels/);
     assert.ok(doc.querySelector('[data-scope-id="channel"]'), 'the Project channel remains visible');
     assert.ok(doc.querySelector('[data-scope-id="working-group"]'), 'the Working group remains visible');

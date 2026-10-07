@@ -94,7 +94,7 @@ import { createTaskControlRouter } from './web/task-control-router.ts';
 import { createFeedRouter } from './web/feed-router.ts';
 import { createCollaborationAttentionRouter } from './web/collaboration-attention-router.ts';
 import { createFeedProjection, type FeedChatActivityOrigin, type FeedTaskGroup } from './web/feed.ts';
-import { isTerminalTaskStatus } from './task/model.ts';
+import { isActiveIntentTaskStatus } from './task/model.ts';
 import type { Task } from './task/model.ts';
 import type { TaskStore } from './task/store.ts';
 import type { WorkerInfo, WorkerReadinessProbeResult } from './worker/protocol.ts';
@@ -431,6 +431,7 @@ function taskGroupSyncInput(task: Task): TaskGroupSyncInput | undefined {
   const contentRevision = [...(task.controlHistory ?? [])].reverse().find(
     (event) => event.action === 'content-revised',
   );
+  const lastControlEvent = task.controlHistory?.at(-1);
   return {
     taskId: task.id,
     projectId: task.projectId,
@@ -442,7 +443,8 @@ function taskGroupSyncInput(task: Task): TaskGroupSyncInput | undefined {
       ? contentRevision.contentVersion
       : admission.contentVersion,
     status: task.status,
-    allowThaw: task.controlHistory?.at(-1)?.action === 'reopened',
+    allowThaw: lastControlEvent?.action === 'reopened'
+      || (lastControlEvent?.action === 'resumed' && lastControlEvent.fromStatus === 'stopped'),
     ...(contentRevision?.action === 'content-revised' ? {
       versionActor: { memberId: contentRevision.actor.memberId, kind: contentRevision.actor.memberKind },
       reason: contentRevision.reason,
@@ -642,7 +644,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       },
       hasUnfinishedTask: async (projectId) => {
         const projectTasks = await openedStores.tasks.list({ projectId });
-        return projectTasks.some((task) => !isTerminalTaskStatus(task.status));
+        return projectTasks.some((task) => isActiveIntentTaskStatus(task.status));
       },
       // A lease — active or recovering, run-held or Task-held — whose run or
       // Task belongs to this Project means recovery still owns the Environment
@@ -708,7 +710,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       memberHasUnfinishedTask: async (projectId, memberId) => {
         const projectTasks = await openedStores.tasks.list({ projectId });
         return projectTasks.some(
-          (task) => !isTerminalTaskStatus(task.status) && task.assignedAgentId === memberId,
+          (task) => isActiveIntentTaskStatus(task.status) && task.assignedAgentId === memberId,
         );
       },
     };
@@ -894,7 +896,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         if (
           projectTasks.some(
             (task) =>
-              !isTerminalTaskStatus(task.status) && task.environmentInstanceId === environmentInstanceId,
+              isActiveIntentTaskStatus(task.status) && task.environmentInstanceId === environmentInstanceId,
           )
         ) {
           return true;
@@ -2089,8 +2091,8 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         await recovery.reconcileAfterRestart();
         // A process may stop after Task persistence but before its separate
         // conversation-scope write. Rebuild every admitted Task group from the
-        // durable Task record before serving; terminal Tasks therefore freeze
-        // their scopes during the same restart pass.
+        // durable Task record before serving; ended and Force Released Tasks
+        // therefore freeze their scopes during the same restart pass.
         await reconcileTaskGroups();
         // Recovery may have moved a lease into (or out of) recovery, so the
         // catalog's work-safety projection is re-derived before serving.

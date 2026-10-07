@@ -30,7 +30,7 @@ import { createIdFactory, type IdFactory } from '../ids.ts';
 import type { AgentRun } from '../run/model.ts';
 import { buildTaskContext, renderTaskPrompt } from './context.ts';
 import {
-  isTerminalTaskStatus,
+  isEndedTaskStatus,
   type Task,
   type TaskRunSummary,
   type TaskStatus,
@@ -127,7 +127,7 @@ export class TaskService {
         : {}),
       createdAt: now,
       updatedAt: now,
-      ...(isTerminalTaskStatus(status) ? { completedAt: now } : {}),
+      ...(isEndedTaskStatus(status) ? { completedAt: now } : {}),
     };
     return this.#store.create(task);
   }
@@ -163,14 +163,17 @@ export class TaskService {
   /**
    * Apply a partial update to a Task.
    *
-   * Moving into a terminal status stamps `completedAt`; moving back out of one
+   * Moving into an ended status stamps `completedAt`; moving back out of one
    * clears it, so a Task that is reopened does not claim a completion time it no
    * longer has.
    */
   async update(taskId: string, patch: UpdateTaskInput): Promise<Task> {
     const task = await this.#require(taskId);
-    if (task.environmentLifecycleState !== undefined && patch.status !== undefined && isTerminalTaskStatus(patch.status)) {
-      throw new Error(`task ${taskId} must end through the Task environment lifecycle`);
+    if (task.status === 'stopped' || patch.status === 'stopped') {
+      throw new Error(`Task ${taskId} status stopped is controlled by Force Release and Human Resume`);
+    }
+    if (task.environmentLifecycleState !== undefined && patch.status !== undefined && isEndedTaskStatus(patch.status)) {
+      throw new Error(`task ${taskId} must change status through the Task environment lifecycle`);
     }
     if (task.admission !== undefined && (patch.title !== undefined || patch.goal !== undefined || patch.constraints !== undefined)) {
       throw new Error(`task ${taskId} content is bound to proposal version ${task.admission.contentVersion}`);
@@ -192,7 +195,7 @@ export class TaskService {
     const withAgent = clearOrSet(next, 'assignedAgentId', patch.assignedAgentId);
     const withPreference = clearOrSet(withAgent, 'environmentPreference', patch.environmentPreference);
     const withBlocker = clearOrSet(withPreference, 'blockerReason', patch.blockerReason);
-    const withCompletion = isTerminalTaskStatus(status)
+    const withCompletion = isEndedTaskStatus(status)
       ? { ...withBlocker, completedAt: task.completedAt ?? now }
       : omit(withBlocker, 'completedAt');
     await this.#store.save(withCompletion);
@@ -261,7 +264,7 @@ export class TaskService {
   /**
    * Emergency Task end for a Human Force Release (#88, ADR-0009).
    *
-   * Delegates to the Task environment lifecycle, which owns the terminal Task
+   * Delegates to the Task environment lifecycle, which owns the stopped Task
    * state and lease release. Returns the affected run ids so the permanent
    * override outcome can name every run it abandoned.
    */

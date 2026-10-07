@@ -136,7 +136,7 @@ function appServices(conflictCodes: readonly string[] = [], snapshot = overview)
     task('recovery-ending', 'recovery', { recoveryState: 'ending', endDisposition: 'completed' }),
     task('recovery-cancelled-ending', 'recovery', { recoveryState: 'ending', endDisposition: 'cancelled' }),
     task('completed', 'ended', { status: 'done', endDisposition: 'completed' }),
-    task('stopped', 'discarded', { status: 'stopped', forcedRelease: { actor: 'operator', reason: 'Emergency environment recovery', unresolvedFacts: ['Engine stop was not proved.'], at: time } }),
+    task('stopped', 'discarded', { status: 'stopped', endDisposition: 'completed', forcedRelease: { actor: 'operator', reason: 'Emergency environment recovery', unresolvedFacts: ['Engine stop was not proved.'], at: time } }),
     task('cancelled', 'discarded', { status: 'cancelled', endDisposition: 'cancelled', pauseState: 'paused', blocker: { reason: 'The approval was pending when the Task ended.', requiredAction: 'Record approval.', responsible: { kind: 'external-condition', condition: 'Approval arrives.' }, nextAdvancer: { memberId: 'agent-a', memberKind: 'agent' }, createdBy: { memberId: 'operator', memberKind: 'human' }, createdAt: time } }),
   ];
   const details = new Map(allTasks.map((entry) => [entry.id, taskDetail(entry,
@@ -196,7 +196,7 @@ function appServices(conflictCodes: readonly string[] = [], snapshot = overview)
         : run)));
       return updatedTask;
     },
-    async resume(id: string) { calls.push(`resume:${id}`); return allTasks[0]!; },
+    async resume(id: string, reason: string) { calls.push(`resume:${id}${reason ? `:${reason}` : ''}`); return allTasks[0]!; },
     async raiseBlocker(id: string, input: TaskBlockerInput) {
       calls.push('raise-blocker');
       blockerCalls.push(input);
@@ -278,7 +278,7 @@ test('Project Tasks renders distinct production lifecycle states and keeps activ
   try {
     const { app, router, calls } = await mountTasks(vite, doc);
     const text = doc.body.textContent ?? '';
-    for (const state of ['Proposed', 'Active · run running', 'Active · run idle', 'Task pause requested', 'Paused', 'Blocked', 'Awaiting validation', 'Ending', 'Recovery', 'Completed', 'Cancelled']) {
+    for (const state of ['Proposed', 'Active · run running', 'Active · run idle', 'Task pause requested', 'Paused', 'Blocked', 'Awaiting validation', 'Ending', 'Recovery', 'Completed', 'Stopped', 'Cancelled']) {
       assert.ok(text.includes(state), `renders ${state}`);
     }
     assert.match(text, /No Environment lease/);
@@ -1203,7 +1203,7 @@ test('Project Tasks exposes authorized proposal, intervention, validation, disca
     await enterField(doc, dom, 'Reason for this action', 'Resume after review.');
     clickButton(doc, 'Resume Task');
     await settle(180);
-    assert.ok(calls.includes('resume:paused'));
+    assert.ok(calls.includes('resume:paused:Resume after review.'));
 
     await openTaskRecord(router, 'awaiting-validation');
     await enterField(doc, dom, 'Validation reason', 'Request one correction.');
@@ -1333,25 +1333,33 @@ test('Project Tasks exposes authorized proposal, intervention, validation, disca
   }
 });
 
-test('Project Tasks exposes a confirmed Reopen action with explicit reset and preservation copy', async () => {
+test('Project Tasks exposes a confirmed Reopen action only for ended Tasks', async () => {
   const { dom, doc, vite, cleanup } = await setupHarness();
   try {
     const { app, router, calls } = await mountTasks(vite, doc);
     await openTaskRecord(router, 'stopped');
-    clickButton(doc, 'Reopen Task');
+    assert.equal([...doc.querySelectorAll<HTMLButtonElement>('button')].some((button) => button.textContent?.trim() === 'Reopen Task'), false,
+      'stopped active-intent Tasks do not expose Reopen');
+    const resume = [...doc.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent?.trim() === 'Resume');
+    assert.ok(resume, 'stopped Tasks expose direct Resume');
+    resume.click();
     await settle();
-    const confirmation = doc.querySelector<HTMLElement>('[aria-label="Confirm Task reopen"]');
-    assert.ok(confirmation, 'an ended Task requires explicit confirmation');
-    assert.match(confirmation.textContent ?? '', /same Environment/i);
-    assert.match(confirmation.textContent ?? '', /fresh Task context/i);
-    assert.match(confirmation.textContent ?? '', /does not start a run/i);
-    assert.match(confirmation.textContent ?? '', /run history.*control history.*Force Release facts.*Project workspace/i);
-    assert.equal(calls.some((call) => call.startsWith('reopen:')), false, 'opening confirmation does not send the command');
-
-    await enterField(doc, dom, 'Reason for this action', 'Continue the unfinished work after review.');
-    clickButton(doc, 'Confirm Reopen Task');
+    const resumeConfirmation = doc.querySelector<HTMLElement>('[aria-label="Confirm stopped Task resume"]');
+    assert.ok(resumeConfirmation);
+    assert.match(resumeConfirmation.textContent ?? '', /fresh lease.*same Environment/i);
+    assert.match(resumeConfirmation.textContent ?? '', /fresh Task context/i);
+    assert.match(resumeConfirmation.textContent ?? '', /Force Release facts.*preserved/i);
+    assert.match(resumeConfirmation.textContent ?? '', /does not start a run/i);
+    assert.match(resumeConfirmation.textContent ?? '', /Force Release blocker.*cleared/i);
+    assert.equal(calls.some((call) => call.startsWith('resume:stopped')), false);
+    await enterField(doc, dom, 'Reason for this action', 'Continue the preserved work.');
+    clickButton(doc, 'Confirm Resume Task');
     await settle(180);
-    assert.ok(calls.includes('reopen:stopped:Continue the unfinished work after review.'));
+    assert.ok(calls.includes('resume:stopped:Continue the preserved work.'));
+
+    await openTaskRecord(router, 'completed');
+    const reopen = [...doc.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent?.trim() === 'Reopen Task');
+    assert.ok(reopen && !reopen.disabled, 'ended Tasks expose the deliberate Reopen command');
     app.unmount();
   } finally {
     await cleanup();

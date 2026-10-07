@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, nextTick, onMounted, ref, watch } from 'vue';
 import { RouterLink, useRoute, useRouter } from 'vue-router';
-import { isTerminalTaskStatus, type TaskActor, type TaskBlockerResponsibility, type TaskContent, type TaskControlEvent } from '../../../../../src/task/model.ts';
+import { isActiveIntentTaskStatus, isEndedTaskStatus, type TaskActor, type TaskBlockerResponsibility, type TaskContent, type TaskControlEvent } from '../../../../../src/task/model.ts';
 import type { TaskProposal, TaskProposalContent, TaskContentVersion } from '../../../../../src/task/proposal-model.ts';
 import type { TaskView, TaskWithRunsView, TaskRunLinkView } from '../../../../../src/web/views.ts';
 import { useAnnouncer } from '../../../primitives/announcer.ts';
@@ -54,6 +54,7 @@ const beginOpen = ref(false);
 const taskEditOpen = ref(false);
 const blockerOpen = ref(false);
 const reopenConfirm = ref(false);
+const resumeStoppedConfirm = ref(false);
 const proposalTitle = ref('');
 const proposalGoal = ref('');
 const proposalConstraints = ref('');
@@ -111,13 +112,16 @@ const filteredEntries = computed(() => {
     if (filter.value === 'all') return true;
     const stage = entry.kind === 'proposal' ? proposalStage(entry.proposal) : taskStage(entry.task);
     if (filter.value === 'proposed') return stage === 'Proposed' || stage === 'Rejected' || stage === 'Withdrawn';
-    if (filter.value === 'active') return stage.startsWith('Active') || stage === 'Task pause requested' || stage === 'Paused';
+    if (filter.value === 'active') return entry.kind === 'task'
+      ? isActiveIntentTaskStatus(entry.task.status)
+      : stage.startsWith('Active') || stage === 'Task pause requested' || stage === 'Paused';
     if (filter.value === 'validation') return stage === 'Awaiting validation';
     if (filter.value === 'blocked') return stage === 'Blocked';
     if (filter.value === 'recovery') return stage === 'Recovery';
     if (filter.value === 'stopped') return entry.kind === 'task' && entry.task.status === 'stopped';
     if (filter.value === 'cancelled') return entry.kind === 'task' && entry.task.status === 'cancelled';
-    return stage === 'Completed' || stage === 'Stopped' || stage === 'Cancelled' || stage === 'Rejected' || stage === 'Withdrawn';
+    return entry.kind === 'task' ? isEndedTaskStatus(entry.task.status)
+      : stage === 'Completed' || stage === 'Rejected' || stage === 'Withdrawn';
   });
 });
 const environmentOptions = computed(() => {
@@ -241,7 +245,11 @@ const taskCanAdvance = computed(() => {
     && task.pauseState === undefined && task.blocker === undefined && !task.pendingCompletionClaimId);
 });
 const terminalTask = computed(() => selectedTask.value ? isTerminal(selectedTask.value.task) : false);
-const canReopenTask = computed(() => selectedTask.value !== undefined && isTerminalTaskStatus(selectedTask.value.task.status));
+const canReopenTask = computed(() => selectedTask.value !== undefined && isEndedTaskStatus(selectedTask.value.task.status));
+const canResumeStoppedTask = computed(() => {
+  const task = selectedTask.value?.task;
+  return task?.status === 'stopped' && task.forcedRelease !== undefined && task.environmentLifecycleState === 'discarded';
+});
 const selectedProposalIsHumanProposed = computed(() => {
   const proposal = selectedProposal.value;
   return Boolean(proposal && currentHuman.value && proposal.proposer.memberKind === 'human' && proposal.proposer.memberId === currentHuman.value.memberId);
@@ -291,18 +299,17 @@ function proposalStage(proposal: TaskProposal): string {
   return 'Begun';
 }
 function taskStage(task: TaskView): string {
+  if (task.status === 'stopped') return 'Stopped';
   if (task.environmentLifecycleState === 'recovery') return 'Recovery';
   if (task.environmentLifecycleState === 'ending') return 'Ending';
   if (task.environmentLifecycleState === 'beginning') return 'Beginning';
   if (task.environmentLifecycleState === 'ended' || task.environmentLifecycleState === 'discarded') {
     if (task.status === 'done' || task.endDisposition === 'completed') return 'Completed';
-    if (task.status === 'stopped') return 'Stopped';
     if (task.status === 'cancelled') return 'Cancelled';
     if (task.status === 'failed') return 'Failed';
     return 'Cancelled';
   }
   if (task.status === 'done') return 'Completed';
-  if (task.status === 'stopped') return 'Stopped';
   if (task.status === 'cancelled') return 'Cancelled';
   if (task.pauseState === 'requested') return 'Task pause requested';
   if (task.pauseState === 'paused') return 'Paused';
@@ -333,7 +340,7 @@ function lifecycleSentence(task: TaskView): string {
   return `Task ${stage.toLowerCase()} · ${run} · Lease ${lease}`;
 }
 function isTerminal(task: TaskView): boolean {
-  return isTerminalTaskStatus(task.status)
+  return isEndedTaskStatus(task.status)
     || task.environmentLifecycleState === 'ended' || task.environmentLifecycleState === 'discarded';
 }
 function badgeVariant(stage: string): 'success' | 'warning' | 'danger' | 'secondary' | 'purple' {
@@ -672,7 +679,7 @@ async function taskControl(action: 'pause' | 'interrupt' | 'resume' | 'clear-blo
 async function reopenTask(): Promise<void> {
   const currentApi = api.value;
   const task = selectedTask.value?.task;
-  if (!currentApi || !task || !isTerminalTaskStatus(task.status) || actionReasonRequired.value) return;
+  if (!currentApi || !task || !isEndedTaskStatus(task.status) || actionReasonRequired.value) return;
   const saved = await perform('Task reopened on its original Environment. Prior history and the Project workspace remain intact.', async () => {
     await currentApi.reopen(task.id, controlReason.value.trim());
   });
@@ -681,6 +688,19 @@ async function reopenTask(): Promise<void> {
     controlReason.value = '';
   }
 }
+async function resumeStoppedTask(): Promise<void> {
+  const currentApi = api.value;
+  const task = selectedTask.value?.task;
+  if (!currentApi || !task || task.status !== 'stopped' || !task.forcedRelease || actionReasonRequired.value) return;
+  const saved = await perform('Task resumed on its original Environment. Prior history and permanent Force Release facts remain; no run started.', async () => {
+    await currentApi.resume(task.id, controlReason.value.trim());
+  });
+  if (saved) {
+    resumeStoppedConfirm.value = false;
+    controlReason.value = '';
+  }
+}
+
 async function stopActiveRun(): Promise<void> {
   const currentApi = api.value;
   const task = selectedTask.value?.task;
@@ -812,6 +832,7 @@ watch(() => [openTaskId.value, openProposalId.value] as const, async ([taskId, p
   stopRunId.value = '';
   stopActiveRunId.value = '';
   reopenConfirm.value = false;
+  resumeStoppedConfirm.value = false;
   if (!taskId && !proposalId) return;
   focusSelectedRecord = true;
   await nextTick();
@@ -1012,6 +1033,7 @@ onMounted(() => { void loadIndex(); });
                 </template>
                 <Button v-if="selectedTask.task.environmentLifecycleState === 'running' && selectedTask.task.activeRunId && selectedTask.task.pauseState !== 'requested'" variant="secondary" size="sm" class="min-h-[44px]" :disabled="!canControl || actionReasonRequired" @click="taskControl('pause')">Pause Task</Button>
                 <Button v-if="selectedTask.task.environmentLifecycleState === 'running' && selectedTask.task.pauseState === 'requested' && selectedTask.task.activeRunId" variant="secondary" size="sm" class="min-h-[44px]" :disabled="!canControl || actionReasonRequired" @click="taskControl('interrupt')">Interrupt active run</Button>
+                <Button v-if="canResumeStoppedTask" data-action="resume-stopped-task" variant="primary" size="sm" class="min-h-[44px]" :disabled="!canControl" @click="resumeStoppedConfirm = true">Resume</Button>
                 <Button v-if="!terminalTask && selectedTask.task.environmentLifecycleState !== 'recovery' && selectedTask.task.pauseState === 'paused' && !selectedTask.task.activeRunId" variant="primary" size="sm" class="min-h-[44px]" :disabled="!canControl || actionReasonRequired" @click="taskControl('resume')">Resume Task</Button>
                 <label v-if="taskCanAdvance" class="flex flex-col gap-1 text-xs">Next Agent<select id="advance-target-agent" v-model="advanceTargetId" aria-label="Next Agent" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3"><option value="" disabled>Select a Project Agent</option><option v-for="agent in advanceAgents" :key="agent.memberId" :value="agent.memberId">{{ agentName(agent.memberId) }}</option></select></label>
                 <Button v-if="taskCanAdvance" variant="primary" size="sm" class="min-h-[44px]" :disabled="!canControl || actionReasonRequired || !advanceTargetId || !advanceAgents.length" @click="advanceTask">Advance Task lead work</Button>
@@ -1020,6 +1042,10 @@ onMounted(() => { void loadIndex(); });
                 <Button v-if="!terminalTask && selectedTask.task.environmentLifecycleState !== 'ending' && selectedTask.task.environmentLifecycleState !== 'recovery' && !selectedTask.task.activeRunId" variant="ghost" size="sm" class="min-h-[44px] text-[var(--red-action)]" :disabled="!canControl || actionReasonRequired" @click="taskControl('discard')">Discard Task</Button>
                 <Button v-if="selectedTask.task.environmentLifecycleState === 'ending'" variant="primary" size="sm" class="min-h-[44px]" :disabled="!canControl || actionReasonRequired" @click="taskControl('end')">Retry safe Task end</Button>
                 <Button v-if="canReopenTask" data-action="reopen-task" variant="secondary" size="sm" class="min-h-[44px]" :disabled="!canControl" @click="reopenConfirm = true">Reopen Task</Button>
+              </div>
+              <div v-if="resumeStoppedConfirm && canResumeStoppedTask" class="border-t border-[var(--border-subtle)] pt-3 flex flex-col gap-3" role="group" aria-label="Confirm stopped Task resume">
+                <p class="text-sm">Resume acquires a fresh lease on the same Environment and prepares a fresh Task context. The Task group keeps its identity, messages, and history; prior run and control history, permanent Force Release facts, and the Project workspace are preserved. The Force Release blocker notice is cleared. This does not start a run; advance deliberately after Resume succeeds.</p>
+                <div class="flex flex-wrap gap-2"><Button variant="primary" size="sm" class="min-h-[44px]" :disabled="!canControl || actionReasonRequired" @click="resumeStoppedTask">Confirm Resume Task</Button><Button variant="ghost" size="sm" class="min-h-[44px]" @click="resumeStoppedConfirm = false">Cancel Resume</Button></div>
               </div>
               <div v-if="reopenConfirm && canReopenTask" class="border-t border-[var(--border-subtle)] pt-3 flex flex-col gap-3" role="group" aria-label="Confirm Task reopen">
                 <p class="text-sm">Reopening clears the current terminal status, completion timestamp, and end disposition. Sprout acquires a fresh lease on the same Environment and prepares a fresh Task context. This does not start a run; advance the Task when you decide to continue. Run history, control history, completion claims, Force Release facts, and the Project workspace are preserved.</p>

@@ -21,15 +21,17 @@
  * here stores a Message: conversation history stays in the collaboration
  * store, and a read-only scope never deletes it.
  *
- * An archived Project, a disbanded Working group, an ended membership, or a
- * terminal Task makes its affected scope read-only while its recorded facts
- * and attribution remain durable.
+ * An archived Project, a disbanded Working group, an ended membership, or an
+ * ended Task status makes its affected scope read-only. Force Release also
+ * freezes a stopped Task group while preserving the stopped Task's active intent;
+ * its recorded facts and attribution remain durable.
  *
  * Privacy: no field here may carry a credential, provider/account identity,
  * hostname, address, absolute path, or raw command. Free text passes the
  * shared privacy boundary before it becomes durable.
  */
 
+import type { TaskStatus } from '../task/model.ts';
 import { createHash } from 'node:crypto';
 import { redactSensitiveText, sanitizeOperatorText } from '../environment/privacy.ts';
 
@@ -183,8 +185,8 @@ export interface TaskGroupContentVersion {
 /**
  * A temporary conversation scope bound permanently to one Task. Participation
  * is projected from current Project membership at read time. Content versions
- * preserve the exact Task goal and constraints presented to the group; a
- * terminal Task freezes the scope without deleting its history.
+ * preserve the exact Task goal and constraints presented to the group; an ended
+ * status or Force Release freezes the scope without deleting its history.
  */
 export interface TaskGroupScope extends ConversationScopeBase {
   readonly kind: 'task-group';
@@ -194,7 +196,8 @@ export interface TaskGroupScope extends ConversationScopeBase {
     readonly versions: readonly TaskGroupContentVersion[];
   };
   readonly frozenAt?: number;
-  readonly terminalTaskStatus?: 'done' | 'failed' | 'stopped' | 'cancelled';
+  /** The status retained when this scope was frozen; `stopped` is active intent. */
+  readonly terminalTaskStatus?: TaskStatus;
 }
 
 /** One durable conversation scope. */

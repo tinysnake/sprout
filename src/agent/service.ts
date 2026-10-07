@@ -39,8 +39,8 @@ export interface AgentWorkSafetyPort {
   /** Whether the Agent currently has a run that is queued or running. */
   hasActiveRun(agentId: string): Promise<boolean> | boolean;
   /**
-   * Whether the Agent is the assigned lead of a Task that has not reached a
-   * terminal status, or holds a Task's lease through the run seam.
+   * Whether the Agent is the assigned lead of a Task in the active-intent family,
+   * or holds a Task's lease through the run seam.
    */
   hasOpenTaskAssignment(agentId: string): Promise<boolean> | boolean;
 }

@@ -41,7 +41,7 @@ import type { RoutingBatch } from '../collaboration/routing.ts';
 import type { EnvironmentEnrollment } from '../environment/enrollment.ts';
 import type { EnvironmentRecoveryRecord } from '../environment/recovery.ts';
 import type { AgentRun } from '../run/model.ts';
-import { isTerminalTaskStatus, type Task } from '../task/model.ts';
+import { isEndedTaskStatus, type Task } from '../task/model.ts';
 import type { TaskProposal } from '../task/proposal-model.ts';
 
 /** Synthetic scopes contain a colon, which sanitizeProjectId cannot preserve. */
@@ -595,7 +595,7 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
 
     // 3. Routable blockers with owner, action, and next advancer (ADR-0006).
     if (task.blocker !== undefined && !['ended', 'discarded'].includes(task.environmentLifecycleState ?? '')
-      && !isTerminalTaskStatus(task.status)) {
+      && !isEndedTaskStatus(task.status)) {
       attention.push({
         id: `blocker:${task.id}`,
         severity: 'action_required',
@@ -838,8 +838,21 @@ export async function projectFeed(sources: FeedSources): Promise<FeedSnapshot> {
     if (!knownProject(task.projectId)) continue;
     const target = feedTarget({ surface: 'project-task-detail', projectId: task.projectId, taskId: task.id });
     for (const [index, event] of (task.controlHistory ?? []).entries()) {
-      if (event.action !== 'reopened') continue;
       const actor = `${event.actor.memberKind === 'human' ? 'Human' : 'Agent'} ${event.actor.memberId}`;
+      if (event.action === 'resumed') {
+        if (event.fromStatus !== 'stopped') continue;
+        activityDrafts.push({
+          id: `task-resumed:${task.id}:${event.at}:${index}`,
+          kind: 'task-resumed',
+          summary: boundText(`Task resumed by ${actor}: ${event.reason}`, 300),
+          scopes: [task.projectId],
+          target,
+          projectId: task.projectId,
+          at: event.at,
+        });
+        continue;
+      }
+      if (event.action !== 'reopened') continue;
       activityDrafts.push({
         id: `task-reopened:${task.id}:${event.at}:${index}`,
         kind: 'task-reopened',

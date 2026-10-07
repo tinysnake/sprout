@@ -371,7 +371,7 @@ test('Task-group post admission serializes with terminal commit and rejects late
   });
   await assert.rejects(rejected, (error: unknown) => {
     assert.equal((error as { reason?: string }).reason, 'task-group-frozen');
-    assert.match((error as Error).message, /Task is terminal.*history remains readable/i);
+    assert.match((error as Error).message, /frozen after its Task ended or was Force Released.*history remains readable/i);
     return true;
   });
   const history = (await harness.sqlite.collaboration.listMessages()).filter((message) => message.scopeId === group.id);

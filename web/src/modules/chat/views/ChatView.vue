@@ -3,7 +3,7 @@ import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from '
 import { useRoute, useRouter } from 'vue-router';
 import type { MessageView, ProjectEventView } from '../../../../../src/web/views.ts';
 import type { ConversationScopeView, ScopeInspectionView, TaskGroupScopeView } from '../../../adapters/conversation-api.ts';
-import { isTerminalTaskStatus } from '../../../../../src/task/model.ts';
+import { isEndedTaskStatus } from '../../../../../src/task/model.ts';
 import type { RoutingBatchSummaryView, RoutingEvidenceView } from '../../../adapters/routing-api.ts';
 import type { ProjectAuthorityView } from '../../../adapters/project-api.ts';
 import { AGENT_SERVICE, type AgentInstance } from '../../agents/types.ts';
@@ -213,7 +213,7 @@ function scopeKind(scope: ConversationScopeView) { return scope.kind === 'projec
 function isClosedTaskGroup(scope: ConversationScopeView): scope is TaskGroupScopeView {
   return scope.kind === 'task-group'
     && scope.terminalTaskStatus !== undefined
-    && isTerminalTaskStatus(scope.terminalTaskStatus);
+    && isEndedTaskStatus(scope.terminalTaskStatus);
 }
 function isTargetEntry(entry: ChatTimelineItem) {
   return entry.kind === 'message'

@@ -97,7 +97,7 @@ test('a Task begin/end boundary calls the bound environment lease adapter, not l
     holderKind: 'task' as const, taskId: 'task-1', acquiredAt: 1, expiresAt: 2, state: 'active' as const,
   };
   await store.saveBeginningWithLease(sampleTask({ environmentLeaseId: 'lease-1' }), lease);
-  await store.saveTerminalWithLease(sampleTask({ environmentLeaseId: 'lease-1' }), 'lease-1');
+  await store.saveTaskAndReleaseLease(sampleTask({ environmentLeaseId: 'lease-1' }), 'lease-1');
   assert.deepEqual(calls, ['insert:lease-1', 'release:lease-1'], 'lease SQL is delegated to the environment port');
 
   // A store constructed without the environment port refuses a lease boundary

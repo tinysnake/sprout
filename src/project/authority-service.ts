@@ -52,7 +52,7 @@ import type { ProjectTemplateSnapshot } from './authority-model.ts';
 export interface ProjectWorkSafetyPort {
   /** Whether any queued or running run is executing inside this Project. */
   hasActiveRun(projectId: string): Promise<boolean> | boolean;
-  /** Whether the Project owns a Task that has not reached a terminal status. */
+  /** Whether the Project owns a Task in the active-intent family. */
   hasUnfinishedTask(projectId: string): Promise<boolean> | boolean;
   /**
    * Whether any Environment this Project's work may use still holds a lease —
@@ -66,8 +66,8 @@ export interface ProjectWorkSafetyPort {
   /** Whether the member has a run that is queued or running in this Project. */
   memberHasActiveRun(projectId: string, memberId: string): Promise<boolean> | boolean;
   /**
-   * Whether the member leads, or is the assigned agent of, a Task in this
-   * Project that has not reached a terminal status.
+   * Whether the member leads, or is the assigned agent of, an active-intent
+   * Task in this Project.
    */
   memberHasUnfinishedTask(projectId: string, memberId: string): Promise<boolean> | boolean;
 }

@@ -145,7 +145,7 @@ export class SqliteLeaseStore implements LeaseStore, TaskLeaseBinding {
    *
    * An already-released or foreign lease is refused rather than silently
    * treated as cleanup. Called inside the shared transaction so the release and
-   * the terminal Task row commit together.
+   * the Task state row commit together.
    */
   markTaskLeaseReleased(leaseId: string, taskId: string): void {
     const lease = this.#db.prepare(

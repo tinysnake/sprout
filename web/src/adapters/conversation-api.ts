@@ -1,4 +1,5 @@
 import type { BrowserTransport, BrowserTransportState } from '../transport/browser-transport.js';
+import type { TaskStatus } from '../../../src/task/model.ts';
 
 /**
  * Typed browser port for conversation scopes and Working groups (#95).
@@ -93,7 +94,7 @@ export interface TaskGroupScopeView extends ConversationScopeBaseView {
   readonly taskTitle: string;
   readonly status: 'active' | 'frozen';
   readonly frozenAt?: number;
-  readonly terminalTaskStatus?: 'done' | 'failed' | 'stopped' | 'cancelled';
+  readonly terminalTaskStatus?: TaskStatus;
   readonly content: {
     readonly currentVersion: number;
     readonly versions: readonly TaskGroupContentVersionView[];

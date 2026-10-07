@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { sanitizeOperatorText } from '../environment/privacy.ts';
 import type { AgentRun } from '../run/model.ts';
-import { isTerminalTaskStatus, type Task, type TaskActor, type TaskBlocker, type TaskBlockerResponsibility, type TaskCompletionClaim, type TaskContent } from './model.ts';
+import { isEndedTaskStatus, type Task, type TaskActor, type TaskBlocker, type TaskBlockerResponsibility, type TaskCompletionClaim, type TaskContent } from './model.ts';
 import type { TaskService } from './service.ts';
 import { TaskTerminalMutationError, type TaskEnvironmentLifecycle, type TaskRecoveryAction } from './environment-lifecycle.ts';
 import type { TaskProposalService } from './proposal-service.ts';
@@ -84,7 +84,10 @@ export class TaskControlService {
 
   async resumeForHuman(taskId: string, input: { readonly reason: string }): Promise<Task> {
     const actor = await this.#humanForTask(taskId);
-    return this.#lifecycle.resumePause(taskId, actor, commandReason(input?.reason));
+    const task = await this.#task(taskId);
+    const reason = commandReason(input?.reason);
+    if (task.status === 'stopped') return this.#lifecycle.resumeStopped(taskId, actor, reason);
+    return this.#lifecycle.resumePause(taskId, actor, reason);
   }
 
   async cancelPauseForHuman(taskId: string, input: { readonly reason: string }): Promise<Task> {
@@ -95,7 +98,7 @@ export class TaskControlService {
   async raiseBlocker(taskId: string, actorInput: TaskActor, input: unknown): Promise<Task> {
     const task = await this.#task(taskId);
     const actor = await this.#authorizeLeadOrHuman(task, actorInput);
-    if (isTerminalTaskStatus(task.status)) throw new TaskTerminalMutationError(task.status, 'record');
+    if (isEndedTaskStatus(task.status)) throw new TaskTerminalMutationError(task.status, 'record');
     const blockerInput = validateBlocker(input);
     const responsible = await this.#validateResponsibility(task, blockerInput.responsible);
     const nextAdvancer = await this.#proposals.authorizeActor(task.projectId, actorSnapshot(blockerInput.nextAdvancer));
@@ -117,7 +120,7 @@ export class TaskControlService {
   async clearBlockerForHuman(taskId: string, input: { readonly reason: string }): Promise<Task> {
     const actor = await this.#humanForTask(taskId);
     const task = await this.#task(taskId);
-    if (isTerminalTaskStatus(task.status)) throw new TaskTerminalMutationError(task.status, 'clear');
+    if (isEndedTaskStatus(task.status)) throw new TaskTerminalMutationError(task.status, 'clear');
     return this.#lifecycle.clearBlocker(taskId, actor, commandReason(input?.reason));
   }
 

@@ -548,9 +548,9 @@ export class EnvironmentRecoveryService {
     const reason = sanitizeRecoveryReason(input.reason, DEFAULT_FORCE_RELEASE_REASON);
 
     // Ordinary interruption, reconciliation, and cleanup are attempted before the
-    // override. A Task release performs the emergency Task end (recording the
-    // permanent disposition); a run lease is released directly. Only when that
-    // cannot finish does the override become the recorded outcome.
+    // override. A Task release records active-intent `stopped` with permanent
+    // Force Release facts; a run lease is released directly. Only when that cannot
+    // finish does the override become the recorded outcome.
     let affectedRunIds: readonly string[] = record.runId !== undefined ? [record.runId] : [];
     let unrecycledTaskContext = record.evidence?.taskContextRecycled !== true;
     if (record.holderKind === 'task' && record.taskId !== undefined) {
@@ -565,9 +565,10 @@ export class EnvironmentRecoveryService {
       } else if (this.#taskRuns !== undefined) {
         affectedRunIds = await this.#taskRuns(record.taskId);
       }
-      // The Task lifecycle's emergency end commits the Task's cancelled status
-      // with its lease release in one transaction; if it is configured the lease
-      // is already released. Otherwise the lease registry is the last resort.
+      // The Task lifecycle commits the Task's `stopped` status and permanent
+      // Force Release facts with its lease release in one transaction. When it is
+      // configured the lease is already released; otherwise the lease registry is
+      // the last resort.
       if (this.#leases.getLease(leaseId)?.state !== 'released') {
         this.#leases.releaseTaskLease(leaseId);
       }

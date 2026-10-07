@@ -181,30 +181,33 @@ release before applying the override. If they cannot finish:
 - a one-round run remains `interrupted`, carries an explicit warning that its
   events or result may be incomplete, and releases its run-held lease; and
 - a Task Force Release is the Human's emergency decision to terminate execution
-  while the intent to do the work remains alive. It performs an emergency Task
-  end, releases the Task lease, and records the Task as `stopped` with permanent
+  while the intent to do the work remains alive. It releases the Task lease and
+  records the Task as active-intent status `stopped`, with permanent
   forced-release facts, unresolved facts, and any unverified context cleanup.
-  It does not record cancellation intent. While terminal, the Task cannot advance
-  or move to another Environment through ordinary lifecycle controls. Under
-  ADR-0006's #216 amendment, a Human may later reopen it only on its original
-  Environment, after acquiring a fresh lease and preparing a fresh Task context;
-  the permanent forced-release facts remain intact. ADR-0006 defines Task-level
+  It does not record cancellation intent. The stopped Task cannot admit a run
+  while its Environment is released, and its Task group remains frozen until a
+  Human resumes it. Under ADR-0006's #218 amendment, Resume is offered directly
+  on the stopped Task. It acquires a fresh lease on the same original
+  Environment and prepares a fresh Task context; the permanent forced-release
+  facts remain intact. Resume does not start a run. ADR-0006 defines Task-level
   `stopped` separately from the existing stopped outcome of one Agent run.
 
 The Task status does not imply the Environment Worker proved the engine stopped.
 After Force Release the Environment may be assigned again without Worker proof
 or fresh enrollment because the Human has explicitly accepted that risk. A
-reopened Task can reacquire its original Environment only when it is available;
-reopen never takes a lease from another holder. The Environment, Task, lease,
+resumed Task can reacquire its original Environment only when it is available;
+Resume never takes a lease from another holder. The Environment, Task, lease,
 and run histories continue to show the override even after the Environment
 becomes Green.
 
 This is a narrow exception to ADR-0005 and ADR-0006's normal Task-end safety
-rule. ADR-0006 records the owner's ruling that emergency Force Release yields
-Task `stopped` while deliberate discard remains `cancelled`. It changes neither
-the default recovery path nor the rule that unfinished work must never become
-*silently* reassignable: the exceptional release exists only because the Human
-knowingly and durably authorizes it.
+rule. ADR-0006 records the owner's ruling that emergency Force Release records
+Task status `stopped` in the active-intent family, while deliberate discard
+remains `cancelled` in the ended family. Resume continues the stopped Task on
+its original Environment after fresh lease and context preparation. It changes
+neither the default recovery path nor the rule that unfinished work must never
+be *silently* reassignable: the exceptional release exists only because the
+Human knowingly and durably authorizes it.
 
 ## Restart durability, schema migration, and backup boundary
 

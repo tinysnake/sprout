@@ -432,6 +432,28 @@ test('advancing a terminal Task is refused', async () => {
 });
 
 
+
+
+test('generic Task updates cannot create or clear Force Released stopped status', async () => {
+  const scenario = build();
+  const task = await scenario.service.create({
+    projectId: 'project-sprout',
+    title: 'Force Released work',
+    goal: 'Keep active intent behind Human Resume.',
+    assignedAgentId: 'agent-scout',
+  });
+
+  await assert.rejects(scenario.service.update(task.id, { status: 'stopped' }), /status stopped is controlled by Force Release and Human Resume/);
+  await scenario.taskStore.save({
+    ...task,
+    status: 'stopped',
+    environmentLifecycleState: 'discarded',
+    forcedRelease: { actor: 'operator', reason: 'Recovery override', unresolvedFacts: ['cleanup unproved'], at: 2 },
+  });
+  await assert.rejects(scenario.service.update(task.id, { status: 'in-progress' }), /status stopped is controlled by Force Release and Human Resume/);
+});
+
+
 test('a Task with no assigned agent is refused until one is named', async () => {
   const scenario = build();
   const task = await scenario.service.create({

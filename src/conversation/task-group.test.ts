@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { isEndedTaskStatus, type TaskStatus } from '../task/model.ts';
 import { ConversationScopeService, type ConversationProjectFacts } from './service.ts';
 import { InMemoryConversationScopeStore } from './store.ts';
 
@@ -11,7 +12,7 @@ interface TaskGroupSyncInput {
   readonly constraints: readonly string[];
   readonly lead: { readonly memberId: string; readonly kind: 'human' | 'agent' };
   readonly contentVersion: number;
-  readonly status: 'in-progress' | 'done' | 'failed' | 'stopped' | 'cancelled';
+  readonly status: TaskStatus;
   readonly allowThaw?: boolean;
 }
 
@@ -45,7 +46,7 @@ async function sync(scopes: ConversationScopeService, input: TaskGroupSyncInput)
       readonly kind: string;
       readonly taskId: string;
       readonly frozenAt?: number;
-      readonly terminalTaskStatus?: 'done' | 'failed' | 'stopped' | 'cancelled';
+      readonly terminalTaskStatus?: TaskStatus;
       readonly content: { readonly currentVersion: number; readonly versions: readonly {
         readonly taskContentVersion: number;
         readonly taskTitle: string;
@@ -143,12 +144,13 @@ test('terminal task freezes the task-group while preserving its readable scope r
   })), /frozen/i);
 });
 
-test('Force Release stops a terminal Task group while preserving its readable scope record', async () => {
+test('Force Release stops a Task group but leaves it out of the ended family', async () => {
   const f = fixture();
   const scope = await sync(f.scopes, task('task-stop-group'));
   const stopped = await sync(f.scopes, task('task-stop-group', { status: 'stopped' }));
   assert.equal(stopped.terminalTaskStatus, 'stopped');
   assert.equal(stopped.frozenAt, 100);
+  assert.equal(isEndedTaskStatus('stopped'), false);
   assert.deepEqual(await f.scopes.scopeState(scope.id, 'operator'), {
     scopeId: scope.id, writable: false, reason: 'task-group-frozen',
   });
@@ -157,10 +159,10 @@ test('Force Release stops a terminal Task group while preserving its readable sc
   })), /frozen/i);
 });
 
-test('reopening a Task group lifts the freeze on the same scope and appends changed content', async () => {
+test('Reopen of an ended Task group lifts the freeze on the same scope and appends changed content', async () => {
   const f = fixture();
   const original = await sync(f.scopes, task('task-reopen'));
-  await sync(f.scopes, task('task-reopen', { status: 'stopped' }));
+  await sync(f.scopes, task('task-reopen', { status: 'done' }));
   assert.deepEqual(await f.scopes.scopeState(original.id, 'operator'), {
     scopeId: original.id, writable: false, reason: 'task-group-frozen',
   });
@@ -179,6 +181,26 @@ test('reopening a Task group lifts the freeze on the same scope and appends chan
   assert.deepEqual(await f.scopes.scopeState(original.id, 'operator'), {
     scopeId: original.id, writable: true,
   });
+});
+
+test('Resume after Force Release thaws the same Task group identity and preserves append-only content', async () => {
+  const f = fixture();
+  const original = await sync(f.scopes, task('task-resume-stopped'));
+  await sync(f.scopes, task('task-resume-stopped', { status: 'stopped' }));
+  const frozen = await f.store.get(original.id);
+  assert.equal(frozen?.kind === 'task-group' ? frozen.frozenAt : undefined, 100);
+
+  const resumed = await sync(f.scopes, task('task-resume-stopped', {
+    title: 'Resumed title', goal: 'Continued goal', constraints: ['Preserved rule'],
+    contentVersion: 2, status: 'in-progress', allowThaw: true,
+  }));
+  assert.equal(resumed.id, original.id, 'resume keeps the Task-bound scope identity');
+  assert.equal(resumed.content.currentVersion, 2);
+  assert.equal(resumed.content.versions.length, 2);
+  assert.equal(resumed.content.versions[0]?.goal, 'Goal task-resume-stopped');
+  assert.equal(resumed.content.versions[1]?.goal, 'Continued goal');
+  assert.equal(resumed.frozenAt, undefined);
+  assert.deepEqual(await f.scopes.scopeState(original.id, 'operator'), { scopeId: original.id, writable: true });
 });
 
 test('two task-groups have distinct immutable scope identities', async () => {

@@ -15,7 +15,7 @@ import { createIdFactory, type IdFactory } from '../ids.ts';
 import { resolveEnvironmentInstance, workspaceFor } from '../project/resolve.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
 import type { AgentRun } from '../run/model.ts';
-import { serializeTaskControlDocument, isTerminalTaskStatus, type Task, type TaskActor, type TaskBlocker, type TaskCompletionClaim, type TaskContent } from './model.ts';
+import { serializeTaskControlDocument, isEndedTaskStatus, type Task, type TaskActor, type TaskBlocker, type TaskCompletionClaim, type TaskContent } from './model.ts';
 import type { TaskStore } from './store.ts';
 import { buildTaskContext } from './context.ts';
 import type { TaskContextMaterialization } from '../worker/protocol.ts';
@@ -206,7 +206,7 @@ export class TaskEnvironmentLifecycle {
     this.#faults = options.faults;
     this.#pool.setTaskLeaseRevalidator(async (lease) => {
       const task = await this.#require(lease.taskId ?? lease.holderId);
-      if (task.environmentLeaseId !== lease.id || isTerminalTaskStatus(task.status)) {
+      if (task.environmentLeaseId !== lease.id || isEndedTaskStatus(task.status) || task.environmentLifecycleState === 'discarded' || task.environmentLifecycleState === 'ended') {
         throw new Error('Overdue Task lease requires reconciliation of its durable holder');
       }
       if (task.environmentLifecycleState === 'recovery') return;
@@ -281,7 +281,7 @@ export class TaskEnvironmentLifecycle {
 
   async begin(taskId: string, options: { readonly agentId?: string; readonly selection?: EnvironmentPreference } = {}): Promise<Task> {
     let task = await this.#require(taskId);
-    if (isTerminalTaskStatus(task.status)) throw new Error(`task ${taskId} is ${task.status} and cannot begin`);
+    if (isEndedTaskStatus(task.status)) throw new Error(`task ${taskId} is ${task.status} and cannot begin`);
     if (task.environmentLifecycleState === 'ended' || task.environmentLifecycleState === 'discarded') return task;
     if (task.environmentLifecycleState === 'idle' || task.environmentLifecycleState === 'blocked' || task.environmentLifecycleState === 'awaiting-validation') return task;
     if (task.environmentLifecycleState !== undefined && task.environmentLifecycleState !== 'beginning') {
@@ -359,7 +359,7 @@ export class TaskEnvironmentLifecycle {
     readonly contentVersion: number;
   }): Promise<{ readonly task: Task; readonly runId: string }> {
     const task = await this.#require(taskId);
-    if (isTerminalTaskStatus(task.status)) throw new Error(`task ${taskId} is ${task.status} and cannot be advanced`);
+    if (isEndedTaskStatus(task.status)) throw new Error(`task ${taskId} is ${task.status} and cannot be advanced`);
     if (task.environmentLifecycleState === 'running') throw new TaskAdvanceConflictError(`task ${taskId} already has an active run`);
     if (task.pauseState !== undefined) throw new Error(`task ${taskId} is paused and cannot admit a run`);
     if (task.blocker !== undefined) throw new Error(`task ${taskId} has an unresolved blocker`);
@@ -471,15 +471,33 @@ export class TaskEnvironmentLifecycle {
     return this.#recycleThenRelease(ending);
   }
 
-  /** Reopen a terminal Task on its original Environment without starting a run. */
+  /** Reopen an ended Task on its original Environment without starting a run. */
   async reopen(taskId: string, actor: TaskActor, reason: string): Promise<Task> {
     const task = await this.#require(taskId);
     this.#assertHuman(task, actor);
-    if (!isTerminalTaskStatus(task.status)) throw new Error(`Task ${taskId} is not terminal and cannot be reopened`);
-    if (task.activeRunId !== undefined || task.environmentLifecycleState === 'recovery') {
-      throw new Error(`Task ${taskId} has active or unresolved Environment work and cannot be reopened`);
+    if (!isEndedTaskStatus(task.status)) throw new Error(`Task ${taskId} has active intent and cannot be reopened`);
+    return this.#restoreTaskContext(task, actor, reason, 'reopened');
+  }
+
+  /** Resume a Force Released Task directly while preserving its live intent. */
+  async resumeStopped(taskId: string, actor: TaskActor, reason: string): Promise<Task> {
+    const task = await this.#require(taskId);
+    this.#assertHuman(task, actor);
+    if (task.status !== 'stopped' || task.forcedRelease === undefined) {
+      throw new Error(`Task ${taskId} is not a Force Released stopped Task`);
     }
-    if (!['ended', 'discarded'].includes(task.environmentLifecycleState ?? '') || !task.environmentInstanceId) {
+    return this.#restoreTaskContext(task, actor, reason, 'resumed');
+  }
+
+  async #restoreTaskContext(task: Task, actor: TaskActor, reason: string, action: 'reopened' | 'resumed'): Promise<Task> {
+    const taskId = task.id;
+    if (task.activeRunId !== undefined || task.environmentLifecycleState === 'recovery') {
+      throw new Error(`Task ${taskId} has active or unresolved Environment work and cannot be restored`);
+    }
+    const reusableState = action === 'reopened'
+      ? ['ended', 'discarded'].includes(task.environmentLifecycleState ?? '')
+      : task.environmentLifecycleState === 'discarded';
+    if (!reusableState || !task.environmentInstanceId) {
       throw new Error(`Task ${taskId} has no safely reusable Environment binding`);
     }
     const contextAgentId = task.admission?.contextAgentId ?? task.assignedAgentId
@@ -500,18 +518,21 @@ export class TaskEnvironmentLifecycle {
     if (!acquired.ok) throw new TaskEnvironmentLeaseRefusal(task.environmentInstanceId, acquired, true);
 
     const at = this.#clock.now();
-    const { completedAt, endDisposition, recoveryState, activeRunId, pendingCompletionClaimId, blockerReason, ...rest } = task;
+    const { completedAt, endDisposition, recoveryState, activeRunId, pendingCompletionClaimId, blockerReason: _oldBlockerReason, ...rest } = task;
+    const controlEvent = action === 'reopened'
+      ? {
+        action: 'reopened' as const, actor, at, reason, fromStatus: task.status,
+        ...(completedAt !== undefined ? { previousCompletedAt: completedAt } : {}),
+        ...(endDisposition !== undefined ? { previousEndDisposition: endDisposition } : {}),
+      }
+      : { action: 'resumed' as const, actor, at, reason, fromStatus: 'stopped' as const };
     const beginning: Task = {
       ...rest,
       status: task.blocker !== undefined ? 'blocked' : 'in-progress',
       ...(task.blocker !== undefined ? { blockerReason: task.blocker.reason } : {}),
       environmentLeaseId: acquired.lease.id,
       environmentLifecycleState: 'beginning',
-      controlHistory: [...(task.controlHistory ?? []), {
-        action: 'reopened', actor, at, reason, fromStatus: task.status,
-        ...(completedAt !== undefined ? { previousCompletedAt: completedAt } : {}),
-        ...(endDisposition !== undefined ? { previousEndDisposition: endDisposition } : {}),
-      }],
+      controlHistory: [...(task.controlHistory ?? []), controlEvent],
       updatedAt: at,
     };
     let committed = false;
@@ -658,7 +679,7 @@ export class TaskEnvironmentLifecycle {
     this.#assertHuman(task, actor);
     if (!task.admission || !Number.isSafeInteger(input.expectedContentVersion)
       || task.admission.contentVersion !== input.expectedContentVersion) throw new Error('stale Task content version');
-    if (isTerminalTaskStatus(task.status) || ['ending', 'ended', 'discarded'].includes(task.environmentLifecycleState ?? '')
+    if (isEndedTaskStatus(task.status) || ['ending', 'ended', 'discarded'].includes(task.environmentLifecycleState ?? '')
       || task.recoveryState === 'ending') throw new Error('Task end intent cannot be revised');
     const at = this.#clock.now();
     const contentVersion = task.admission.contentVersion + 1;
@@ -779,7 +800,7 @@ export class TaskEnvironmentLifecycle {
   async raiseBlocker(taskId: string, actor: TaskActor, blocker: TaskBlocker): Promise<Task> {
     const task = await this.#require(taskId);
     this.#assertLeadOrHuman(task, actor);
-    if (isTerminalTaskStatus(task.status)) throw new TaskTerminalMutationError(task.status, 'record');
+    if (isEndedTaskStatus(task.status)) throw new TaskTerminalMutationError(task.status, 'record');
     if (task.activeRunId !== undefined || !['idle', 'blocked'].includes(task.environmentLifecycleState ?? '')
       || task.pendingCompletionClaimId !== undefined) throw new Error(`task ${taskId} cannot be blocked in its current lifecycle`);
     this.#assertActiveTaskLease(task);
@@ -796,7 +817,7 @@ export class TaskEnvironmentLifecycle {
   async clearBlocker(taskId: string, actor: TaskActor, reason: string): Promise<Task> {
     const task = await this.#require(taskId);
     this.#assertHuman(task, actor);
-    if (isTerminalTaskStatus(task.status)) throw new TaskTerminalMutationError(task.status, 'clear');
+    if (isEndedTaskStatus(task.status)) throw new TaskTerminalMutationError(task.status, 'clear');
     if (task.blocker === undefined || task.activeRunId !== undefined || task.environmentLifecycleState !== 'blocked') {
       throw new Error(`task ${taskId} has no clearable blocker`);
     }
@@ -977,13 +998,12 @@ export class TaskEnvironmentLifecycle {
   }
 
   /**
-   * Emergency Task end for a Human Force Release (#88, ADR-0009).
+   * Human Force Release (#88, ADR-0009).
    *
    * Records `stopped` with permanent forced-release facts, keeps the
    * interrupted run as history, and releases the Task-held lease. It never
-   * deletes the Project workspace and records unrecycled Task context as leftover
-   * data rather than pretending cleanup finished. This is the only path that ends
-   * a Task whose context cleanup could not be proved.
+   * deletes the Project workspace; unrecycled Task context remains recorded as
+   * leftover data rather than pretending cleanup finished.
    */
   async forceRelease(
     taskId: string,
@@ -998,16 +1018,15 @@ export class TaskEnvironmentLifecycle {
     if (task.admission !== undefined) this.#assertHuman(task, { memberId: input.actor, memberKind: 'human' });
     const affectedRunIds = (await this.#store.listRuns(taskId)).map((link) => link.runId);
     if (task.activeRunId !== undefined) affectedRunIds.push(task.activeRunId);
-    if (isTerminalTaskStatus(task.status) && task.environmentLifecycleState !== 'recovery') {
-      // #162: the Task already ended through its own lifecycle (for example an
-      // operator discarded it from the Task plane while its Environment
-      // recovery record stayed open). A terminal Task must keep its own
-      // history — never be rewritten into another terminal state — and the
-      // emergency end must not throw past the recovery resolution the Force
-      // Release is performing. Releasing the retained lease binding is
-      // idempotent, so only the Task mutation is skipped; the permanent
-      // outcome record and the record resolution stay with the Environment
-      // domain.
+    if ((isEndedTaskStatus(task.status) || task.environmentLifecycleState === 'discarded' || task.environmentLifecycleState === 'ended')
+      && task.environmentLifecycleState !== 'recovery') {
+      // #162: the Task already ended through its own lifecycle or was already
+      // Force Released (for example a deliberate discard while its Environment
+      // recovery record stayed open). Preserve that Task's lifecycle and history;
+      // never rewrite it as another ended or Force Released outcome, and do not
+      // Releasing the retained lease binding is idempotent, so only the Task
+      // mutation is skipped; the permanent outcome record and resolution stay
+      // with the Environment domain.
       if (task.environmentLeaseId !== undefined && this.#forceReleaseLease !== undefined) {
         this.#forceReleaseLease(task.environmentLeaseId);
       }
@@ -1017,13 +1036,13 @@ export class TaskEnvironmentLifecycle {
     if (!task.environmentLeaseId || releaseTaskLease === undefined) {
       throw new Error('Force Release lease-release capability is unavailable');
     }
+    const { endDisposition: _endDisposition, ...taskWithoutEndDisposition } = task;
     const forced: Task = omit(
       omit(
         omit(
           {
-            ...task,
+            ...taskWithoutEndDisposition,
             status: 'stopped' as const,
-            completedAt: input.at,
             environmentLifecycleState: 'discarded' as const,
             forcedRelease: { actor: input.actor, reason: sanitizeOperatorText(input.reason, { maxLength: 2000, fallback: 'Human Force Release' }),
               unresolvedFacts: input.unresolvedFacts.map(fact => sanitizeOperatorText(fact, { maxLength: 2000, fallback: 'unresolved cleanup proof' })), at: input.at },
@@ -1038,10 +1057,10 @@ export class TaskEnvironmentLifecycle {
     );
     const leaseId = task.environmentLeaseId;
     return this.#withTaskGroupLock(task.id, async () => {
-      // One transaction commits the terminal Task row and the Task-held lease
+      // One transaction commits the Force Released Task row and the Task-held lease
       // release together. Without the explicit release capability above, unfinished
-      // work remains in recovery rather than claiming a terminal outcome.
-      await this.#store.saveTerminalWithLease(forced, leaseId);
+      // work remains in recovery rather than claiming a Force Release outcome.
+      await this.#store.saveTaskAndReleaseLease(forced, leaseId);
       this.#resolvePauseRetryGate(taskId);
       releaseTaskLease(leaseId);
       await this.ensureTaskGroup(forced);
@@ -1070,7 +1089,7 @@ export class TaskEnvironmentLifecycle {
         // One transaction makes release and terminal persistence inseparable. A
         // crash before it leaves `ending` recoverable; a crash after it is already
         // terminal with a released lease, so retry/discard never gets stuck.
-        await this.#store.saveTerminalWithLease(ended, task.environmentLeaseId!);
+        await this.#store.saveTaskAndReleaseLease(ended, task.environmentLeaseId!);
         this.#resolvePauseRetryGate(task.id);
         this.#faults?.afterTerminalCommit?.();
         this.#pool.releaseTaskLease(task.environmentLeaseId!);
@@ -1098,7 +1117,8 @@ export class TaskEnvironmentLifecycle {
     });
     if (!saved) {
       const current = await this.#require(task.id);
-      if (isTerminalTaskStatus(current.status) || current.environmentLifecycleState === 'recovery') return;
+      if (isEndedTaskStatus(current.status) || current.environmentLifecycleState === 'discarded'
+          || current.environmentLifecycleState === 'ended' || current.environmentLifecycleState === 'recovery') return;
       if (retry) throw new Error('Task changed repeatedly during recovery protection; reconciliation is required');
       return this.#toRecovery(current, current.environmentLifecycleState ?? prior, current.activeRunId !== undefined, true, cause);
     }
