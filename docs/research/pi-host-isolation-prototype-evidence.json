@@ -1,0 +1,48 @@
+{
+  "accepted": false,
+  "piVersion": "1.0.4",
+  "platform": "macOS",
+  "isolation": "sandbox-exec-file-data",
+  "scripted": {
+    "originRead": true,
+    "remoteWrite": true,
+    "absoluteDenied": true,
+    "absoluteWriteDenied": true,
+    "traversalDenied": true,
+    "symlinkDenied": true,
+    "symlinkWriteDenied": true,
+    "unsupportedImage": true,
+    "unsupportedSearch": true,
+    "unsupportedShell": true,
+    "unsupportedNested": true,
+    "originOsReadDenied": true,
+    "originOsWriteDenied": true,
+    "originCredentialReadDenied": true,
+    "engineOs": {
+      "readDenied": true,
+      "writeDenied": true
+    }
+  },
+  "live": {
+    "evidence": "protocol-level",
+    "modelTurnAttempted": false,
+    "accepted": false,
+    "engineReadDenied": true,
+    "engineWriteDenied": true,
+    "credentialSiblingDenied": true,
+    "modelPresent": false,
+    "authConfigured": false,
+    "engineOriginReachable": true,
+    "catalogExact": true,
+    "discoveryEmpty": true,
+    "ambientExtensionNotLoaded": true,
+    "originRootReadDenied": true,
+    "blocker": "existing-model-or-auth-unavailable"
+  },
+  "final": {
+    "hostOriginUnchanged": true,
+    "hostEffectUnchanged": true,
+    "hostSentinelUnchanged": true,
+    "remoteModelEffect": false
+  }
+}
