@@ -712,12 +712,11 @@ test('the frozen routing context contains only bounded Project-shared facts and 
   assert.ok(!context.includes('Triage incoming reports'), 'unrelated Tasks never enter model context');
   assert.deepEqual(batches[0]!.manifest.tasks, []);
   assert.ok(
-    context.includes('direct Messages and their replies') &&
-      context.includes('credentials, tokens, and secrets') &&
-      context.includes('raw reasoning and thinking traces') &&
-      context.includes('tool output') &&
-      context.includes('host identity and private network facts'),
-    'the frozen manifest and context carry the exclusion list as evidence',
+    context.includes('source selection provides no routing-context source for') &&
+      context.includes('structured credential records, host and private-network records') &&
+      context.includes('recognized sensitive patterns in admitted text are redacted') &&
+      context.includes('unlabelled opaque values in admitted prose may still be present'),
+    'the model context describes source exclusions and the recognized-pattern limit',
   );
   assert.deepEqual(batches[0]!.manifest.exclusions, [
     'direct Messages and their replies',
