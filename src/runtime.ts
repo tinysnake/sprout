@@ -2091,8 +2091,8 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         await recovery.reconcileAfterRestart();
         // A process may stop after Task persistence but before its separate
         // conversation-scope write. Rebuild every admitted Task group from the
-        // durable Task record before serving; terminal Tasks therefore freeze
-        // their scopes during the same restart pass.
+        // durable Task record before serving; ended and Force Released Tasks
+        // therefore freeze their scopes during the same restart pass.
         await reconcileTaskGroups();
         // Recovery may have moved a lease into (or out of) recovery, so the
         // catalog's work-safety projection is re-derived before serving.

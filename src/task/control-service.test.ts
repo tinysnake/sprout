@@ -85,13 +85,13 @@ test('admitted Task groups synchronize at start and freeze after terminal persis
   assert.deepEqual(taskGroupSnapshots[0]?.admission?.lead, lead);
 
   taskGroupEvents.length = 0;
-  const saveTerminalWithLease = s.store.saveTerminalWithLease.bind(s.store);
-  s.store.saveTerminalWithLease = async (task, leaseId) => {
-    taskGroupEvents.push('terminal-save');
-    await saveTerminalWithLease(task, leaseId);
+  const saveTaskAndReleaseLease = s.store.saveTaskAndReleaseLease.bind(s.store);
+  s.store.saveTaskAndReleaseLease = async (task, leaseId) => {
+    taskGroupEvents.push('task-release-save');
+    await saveTaskAndReleaseLease(task, leaseId);
   };
   const cancelled = await s.controls.discardForHuman('task-1', { reason: 'Task work is cancelled.' });
-  assert.deepEqual(taskGroupEvents, ['lock-enter', 'terminal-save', 'group-sync', 'lock-exit']);
+  assert.deepEqual(taskGroupEvents, ['lock-enter', 'task-release-save', 'group-sync', 'lock-exit']);
   assert.equal(cancelled.status, 'cancelled');
   assert.equal(taskGroupSnapshots.length, 2);
   assert.equal(taskGroupSnapshots[1]?.status, 'cancelled');
@@ -451,10 +451,10 @@ test('Force Release stops the Task and freezes its group without claiming normal
     }],
   });
   taskGroupEvents.length = 0;
-  const saveTerminalWithLease = s.store.saveTerminalWithLease.bind(s.store);
-  s.store.saveTerminalWithLease = async (task, leaseId) => {
-    taskGroupEvents.push('terminal-save');
-    await saveTerminalWithLease(task, leaseId);
+  const saveTaskAndReleaseLease = s.store.saveTaskAndReleaseLease.bind(s.store);
+  s.store.saveTaskAndReleaseLease = async (task, leaseId) => {
+    taskGroupEvents.push('task-release-save');
+    await saveTaskAndReleaseLease(task, leaseId);
   };
   const leaseId = s.begun.environmentLeaseId!;
   const affected = await s.lifecycle.forceRelease('task-1', {
@@ -462,7 +462,7 @@ test('Force Release stops the Task and freezes its group without claiming normal
   });
   const forced = await s.tasks.get('task-1');
   assert.deepEqual(affected, []);
-  assert.deepEqual(taskGroupEvents, ['lock-enter', 'terminal-save', 'group-sync', 'lock-exit']);
+  assert.deepEqual(taskGroupEvents, ['lock-enter', 'task-release-save', 'group-sync', 'lock-exit']);
   assert.equal(forced?.status, 'stopped');
   assert.equal(forced?.environmentLifecycleState, 'discarded');
   assert.equal(forced?.endDisposition, undefined, 'Force Release retains active intent instead of the prior ended disposition');

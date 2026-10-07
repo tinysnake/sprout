@@ -25,17 +25,17 @@
  * deleting configuration, membership changes, or messages; restore rechecks
  * member eligibility; an ended Project membership ends that member's current
  * participation in every Working group without erasing history. A Task group
- * follows its Task content and becomes read-only at terminal status while
- * preserving its snapshots and messages. Read-only scopes are never
- * destructive. Every disband and restore appends an attributed lifecycle
- * event (actor, time, reason) instead of overwriting scalar fields, so prior
- * transitions stay auditable (ADR-0008: every effective edit records its
- * actor, time, and changed facts). Every rewrite of a recorded group — a
- * lifecycle transition, a content version, a membership change — commits
- * through the store's serialized conditional update, so an accepted change
- * can never be overwritten by an interleaved command and a command computed
- * against a stale snapshot is refused instead of succeeding (ADR-0008 audit
- * clause).
+ * follows its Task content and freezes when product status data requires it or
+ * Force Release freezes a stopped Task; its snapshots and messages remain
+ * readable. Read-only scopes are never destructive. Every disband and restore
+ * appends an attributed lifecycle event (actor, time, reason) instead of
+ * overwriting scalar fields, so prior transitions stay auditable (ADR-0008:
+ * every effective edit records its actor, time, and changed facts). Every rewrite
+ * of a recorded group — a lifecycle transition, a content version, a membership
+ * change — commits through the store's serialized conditional update, so an
+ * accepted change can never be overwritten by an interleaved command and a
+ * command computed against a stale snapshot is refused instead of succeeding
+ * (ADR-0008 audit clause).
  *
  * Context: `scopeContext` returns the governing Project, Working group, or
  * Task group versions verbatim, side by side. Sprout does not merge them,
@@ -240,7 +240,7 @@ export class ConversationScopeService {
   readonly #preparing = new Set<string>();
   /** Hold a scope's preparation turn until its Project persistence settles. */
   readonly #preparationTurns = new Map<string, Promise<void>>();
-  /** Serialize Task group posts with terminal Task commits for the same Task. */
+  /** Serialize Task group posts with ended-state or Force Release transitions. */
   readonly #taskGroupTurns = new Map<string, Promise<void>>();
 
   constructor(options: ConversationScopeServiceOptions) {
@@ -252,10 +252,10 @@ export class ConversationScopeService {
   }
 
   /**
-   * Serialize one Task group's post admission and Task terminal transition.
-   * Both the collaboration write path and Task lifecycle hold this turn from
-   * checking Task status through durable Message or terminal persistence, so a
-   * post cannot slip between terminal status commit and the scope freeze.
+   * Serialize one Task group's post admission and Task ended-state or Force
+   * Release transition. Both the collaboration write path and Task lifecycle hold
+   * this turn from checking Task status through durable Message or Task persistence,
+   * so a post cannot slip between the Task transition and scope freeze.
    */
   async withTaskGroupLock<T>(taskId: string, action: () => Promise<T>): Promise<T> {
     const previous = this.#taskGroupTurns.get(taskId);

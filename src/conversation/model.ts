@@ -185,8 +185,8 @@ export interface TaskGroupContentVersion {
 /**
  * A temporary conversation scope bound permanently to one Task. Participation
  * is projected from current Project membership at read time. Content versions
- * preserve the exact Task goal and constraints presented to the group; a
- * terminal Task freezes the scope without deleting its history.
+ * preserve the exact Task goal and constraints presented to the group; an ended
+ * status or Force Release freezes the scope without deleting its history.
  */
 export interface TaskGroupScope extends ConversationScopeBase {
   readonly kind: 'task-group';

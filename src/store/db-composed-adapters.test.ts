@@ -69,7 +69,7 @@ test('a Task begin then end commits and releases its Task-held lease in one boun
     );
     assert.equal(store.leases.get('lease-task')?.state, 'active');
 
-    await store.tasks.saveTerminalWithLease(
+    await store.tasks.saveTaskAndReleaseLease(
       sampleTask({ status: 'done', environmentLeaseId: 'lease-task', environmentLifecycleState: 'ended', completedAt: 5 }),
       'lease-task',
     );

@@ -97,7 +97,7 @@ Message failures link to Project Chat; event failures link to Project Overview.
 | --- | --- | --- |
 | Proposal | Begin, reject, or withdraw changes `proposed` | No |
 | Validation claim | Human accept/correct removes pending claim | No |
-| Task blocker | Authorized clear removes blocker, or terminal Task state ends the condition while retaining history | No |
+| Task blocker | Authorized clear removes blocker, or an ended status/Force Release ends the work condition while retaining history | No |
 | Task recovery | Human recovery/end changes recovery lifecycle | No |
 | Lease recovery | Recovery decision/evidence marks record `resolved` | No |
 | Enrollment | Human approve/reject/revoke changes `pending` | No |

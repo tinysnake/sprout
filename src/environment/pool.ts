@@ -366,7 +366,7 @@ export class EnvironmentPool {
     return this.releaseLease(leaseId);
   }
 
-  /** Complete a Task lifecycle release already committed with its terminal Task. */
+  /** Complete a Task lease release after its durable Task transition commits. */
   releaseTaskLease(leaseId: string): EnvironmentLease | undefined {
     const lease = this.#leases.get(leaseId);
     if (!lease || lease.holderKind !== 'task') return undefined;

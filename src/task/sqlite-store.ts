@@ -270,7 +270,7 @@ export class SqliteTaskStore implements TaskStore {
     });
   }
 
-  async saveTerminalWithLease(task: Task, leaseId: string): Promise<void> {
+  async saveTaskAndReleaseLease(task: Task, leaseId: string): Promise<void> {
     const leases = this.#requireLeases();
     this.#transactions.immediate(() => {
       leases.markTaskLeaseReleased(leaseId, task.id);

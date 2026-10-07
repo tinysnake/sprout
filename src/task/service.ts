@@ -163,15 +163,12 @@ export class TaskService {
   /**
    * Apply a partial update to a Task.
    *
-   * Moving into a terminal status stamps `completedAt`; moving back out of one
+   * Moving into an ended status stamps `completedAt`; moving back out of one
    * clears it, so a Task that is reopened does not claim a completion time it no
    * longer has.
    */
   async update(taskId: string, patch: UpdateTaskInput): Promise<Task> {
     const task = await this.#require(taskId);
-    if (task.forcedRelease !== undefined) {
-      throw new Error('a Force Released Task can continue only through Human Resume');
-    }
     if (task.status === 'stopped' || patch.status === 'stopped') {
       throw new Error(`Task ${taskId} status stopped is controlled by Force Release and Human Resume`);
     }
@@ -267,7 +264,7 @@ export class TaskService {
   /**
    * Emergency Task end for a Human Force Release (#88, ADR-0009).
    *
-   * Delegates to the Task environment lifecycle, which owns the terminal Task
+   * Delegates to the Task environment lifecycle, which owns the stopped Task
    * state and lease release. Returns the affected run ids so the permanent
    * override outcome can name every run it abandoned.
    */

@@ -95,8 +95,8 @@ export interface TaskStore {
     readonly controlDocument: string | null;
   }): Promise<boolean>;
 
-  /** Commit a terminal Task state and release its Task lease together. */
-  saveTerminalWithLease(task: Task, leaseId: string): Promise<void>;
+  /** Commit a Task state and release its Task lease together. */
+  saveTaskAndReleaseLease(task: Task, leaseId: string): Promise<void>;
 
   /**
    * Link a run to a Task, assigning the next sequence number.
@@ -227,7 +227,7 @@ export class InMemoryTaskStore implements TaskStore {
     return true;
   }
 
-  async saveTerminalWithLease(task: Task, _leaseId: string): Promise<void> {
+  async saveTaskAndReleaseLease(task: Task, _leaseId: string): Promise<void> {
     this.#tasks.set(task.id, task);
   }
 

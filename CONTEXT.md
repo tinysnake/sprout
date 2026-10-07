@@ -33,7 +33,7 @@ A temporary collaboration scope within one Project, containing a subset of curre
 _Avoid_: Project, Task, default group
 
 **Task group**:
-A temporary conversation scope within one Project, bound to exactly one Task and shared by every current Project member. It carries the Task's title, goal, and constraints, and becomes read-only when the Task is terminal while preserving its conversation history.
+A temporary conversation scope within one Project, bound to exactly one Task and shared by every current Project member. It carries the Task's title, goal, and constraints, and preserves its conversation history when the scope is frozen after an ended status or Force Release. A Force Released `stopped` Task remains active intent; its group stays read-only until direct Resume.
 _Avoid_: Working group, Task thread, direct message
 
 **Task-group escalation**:
@@ -45,7 +45,7 @@ The shared conversation whose participants are the current members of one Workin
 _Avoid_: Project channel, direct message
 
 **Conversation scope**:
-The durable identity and governance of one Project-owned communication context: the one Project channel, one Project-scoped direct conversation, one Working group channel, or one Task group. It binds its Messages to membership, versioned governing facts, and read-only rules; a terminal Task group preserves its record and history while becoming read-only.
+The durable identity and governance of one Project-owned communication context: the one Project channel, one Project-scoped direct conversation, one Working group channel, or one Task group. It binds its Messages to membership, versioned governing facts, and read-only rules; ended Task groups and Force Released stopped Task groups preserve their records and history while frozen. A stopped Task remains active intent and its group returns to writable state on Resume.
 _Avoid_: Chat room, DM thread, channel list
 
 **Project-scoped direct message**:
@@ -213,19 +213,23 @@ The Human decision to accept a Task completion claim or require correction. Acce
 _Avoid_: Agent self-approval, Agent run completion
 
 **Task end**:
-The Human-authorized act that normally has the environment worker recycle the Task context directory and then releases the Task lease. Accepted work becomes completed and abandoned work becomes cancelled only after this succeeds. Only Task end ends a Task's hold on its Environment instance; a failed, stopped, or interrupted agent run does not. Force Release is the explicit emergency Task-end exception when the Human accepts that proof or cleanup cannot be completed, and it records a stopped Task while preserving the live intent to do the work.
+The Human-authorized act that normally has the environment worker recycle the Task context directory and then releases the Task lease. Accepted work becomes completed and abandoned work becomes cancelled only after this succeeds. Only Task end ends a Task's hold on its Environment instance; a failed, stopped, or interrupted agent run does not. Force Release is the explicit emergency exception: it releases the lease while preserving active work intent in Task status `stopped`. The stopped Task needs a later direct Resume before it can admit another run.
 _Avoid_: Stop, cancel
 
 **Task stop**:
-The Task-level terminal outcome recorded by emergency Force Release: execution is terminated because the Environment must be released while intent to do the work remains alive. The permanent forced-release facts preserve the actor, reason, time, and unresolved cleanup facts. A Human may later reopen the Task if its original Environment can be safely leased again; reopening does not remove those permanent facts. This is distinct from an Agent run's `stopped` status and from deliberate Task cancellation.
+The active-intent Task status recorded by emergency Force Release: execution and the Environment lease are stopped because the Human accepts unresolved proof or cleanup, while intent to do the work remains alive. The permanent forced-release facts preserve the actor, reason, time, and unresolved cleanup facts. The Task group stays frozen while the Environment is released, but the Task remains in the active-intent family and appears outside the Closed tasks fold. A Human may directly Resume the Task if its original Environment can be safely leased again. Resume preserves those permanent facts and history, prepares fresh Task context, thaws the same Task group, and does not start a run. This differs from an ended `cancelled` Task, from Reopen, and from an Agent run's `stopped` status.
 _Avoid_: Agent run stop, cancellation, normal Task discard
 
 **Task reopen**:
-The Human-authorized return of a terminal Task to deliberate work on its previously bound Environment, preserving its history and Project workspace. It reacquires a Task lease and prepares a fresh Task context but does not start an Agent run until a later explicit advance.
+The Human-authorized return of a Task in the ended family (`done`, `failed`, or `cancelled`) to deliberate work on its previously bound Environment, preserving its history and Project workspace. Reopen reacquires a Task lease and prepares fresh Task context but does not start an Agent run until a later explicit advance. A Force Released `stopped` Task remains active intent and uses direct Resume instead.
 _Avoid_: Retry an old run, revise a rejected Task proposal
 
+**Task resume**:
+The Human-authorized continuation of a paused or Force Released Task. Resuming a paused Task removes its admission hold while retaining its current lease and context. Resuming a Force Released stopped Task reacquires a fresh lease on the same Environment, prepares fresh Task context, preserves prior control and run history plus permanent Force Release facts, and starts no run.
+_Avoid_: Reopen a stopped Task, retry an old run
+
 **Task discard**:
-The Human decision to abandon a begun Task, including during recovery, and authorize normal Task end toward cancellation. The Task becomes cancelled only after Task end recycles its Task context and releases its lease; the Project workspace and its work remain preserved. Force Release is a separate emergency decision and ends the Task as stopped while intent remains alive.
+The Human decision to abandon a begun Task, including during recovery, and authorize normal Task end toward cancellation. The Task becomes cancelled only after Task end recycles its Task context and releases its lease; the Project workspace and its work remain preserved. Force Release is a separate emergency action that records active-intent status `stopped` while releasing the Environment lease.
 _Avoid_: Delete Project workspace, automatic cleanup
 
 **Task lease**:
@@ -281,7 +285,7 @@ The state an environment instance's lease enters after a timeout, holder loss, o
 _Avoid_: Cleanup, lock timeout
 
 **Force Release**:
-The Human-only emergency recovery decision that makes an Environment instance reassignable despite unresolved proof or cleanup after ordinary recovery has been attempted. It permanently records the acknowledged risks and unresolved facts; for a Task-held lease it ends the Task as stopped while preserving work intent and without deleting the Project workspace.
+The Human-only emergency recovery decision that makes an Environment instance reassignable despite unresolved proof or cleanup after ordinary recovery has been attempted. It permanently records the acknowledged risks and unresolved facts; for a Task-held lease it releases the lease and records active-intent status `stopped` while preserving work intent and the Project workspace.
 _Avoid_: Automatic expiry, normal release, lease steal
 
 **Operational event**:

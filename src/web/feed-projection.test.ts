@@ -408,7 +408,7 @@ test('infrastructure recovery that blocks a Project transcolates into that scope
   assert.equal(infraOption?.attentionCount, infra.attention.length);
 });
 
-test('terminal Tasks retain blocker history without permanent blocker Attention', async () => {
+test('ended and Force Released Tasks retain blocker history without permanent blocker Attention', async () => {
   const original = mixedWorld().tasks.find(task => task.id === 'task-blk')!;
   const stopEvidenceTask = {
     ...original,
@@ -425,7 +425,7 @@ test('terminal Tasks retain blocker history without permanent blocker Attention'
   ]) {
     const task = { ...original, ...terminal };
     const snapshot = await projectFeed(sources({ tasks: [task] }));
-    assert.equal(snapshot.attention.length, 0, 'terminal Task state clears the work condition even while blocker history remains');
+    assert.equal(snapshot.attention.length, 0, 'ended or Force Released Task state clears the work condition even while blocker history remains');
     assert.ok(task.blocker);
   }
 });

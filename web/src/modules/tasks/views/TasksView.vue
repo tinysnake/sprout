@@ -305,13 +305,11 @@ function taskStage(task: TaskView): string {
   if (task.environmentLifecycleState === 'beginning') return 'Beginning';
   if (task.environmentLifecycleState === 'ended' || task.environmentLifecycleState === 'discarded') {
     if (task.status === 'done' || task.endDisposition === 'completed') return 'Completed';
-    if (task.status === 'stopped') return 'Stopped';
     if (task.status === 'cancelled') return 'Cancelled';
     if (task.status === 'failed') return 'Failed';
     return 'Cancelled';
   }
   if (task.status === 'done') return 'Completed';
-  if (task.status === 'stopped') return 'Stopped';
   if (task.status === 'cancelled') return 'Cancelled';
   if (task.pauseState === 'requested') return 'Task pause requested';
   if (task.pauseState === 'paused') return 'Paused';

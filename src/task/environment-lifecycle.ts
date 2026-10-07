@@ -998,13 +998,12 @@ export class TaskEnvironmentLifecycle {
   }
 
   /**
-   * Emergency Task end for a Human Force Release (#88, ADR-0009).
+   * Human Force Release (#88, ADR-0009).
    *
    * Records `stopped` with permanent forced-release facts, keeps the
    * interrupted run as history, and releases the Task-held lease. It never
-   * deletes the Project workspace and records unrecycled Task context as leftover
-   * data rather than pretending cleanup finished. This is the only path that ends
-   * a Task whose context cleanup could not be proved.
+   * deletes the Project workspace; unrecycled Task context remains recorded as
+   * leftover data rather than pretending cleanup finished.
    */
   async forceRelease(
     taskId: string,
@@ -1021,15 +1020,13 @@ export class TaskEnvironmentLifecycle {
     if (task.activeRunId !== undefined) affectedRunIds.push(task.activeRunId);
     if ((isEndedTaskStatus(task.status) || task.environmentLifecycleState === 'discarded' || task.environmentLifecycleState === 'ended')
       && task.environmentLifecycleState !== 'recovery') {
-      // #162: the Task already ended through its own lifecycle (for example an
-      // operator discarded it from the Task plane while its Environment
-      // recovery record stayed open). A terminal Task must keep its own
-      // history — never be rewritten into another terminal state — and the
-      // emergency end must not throw past the recovery resolution the Force
-      // Release is performing. Releasing the retained lease binding is
-      // idempotent, so only the Task mutation is skipped; the permanent
-      // outcome record and the record resolution stay with the Environment
-      // domain.
+      // #162: the Task already ended through its own lifecycle or was already
+      // Force Released (for example a deliberate discard while its Environment
+      // recovery record stayed open). Preserve that Task's lifecycle and history;
+      // never rewrite it as another ended or Force Released outcome, and do not
+      // Releasing the retained lease binding is idempotent, so only the Task
+      // mutation is skipped; the permanent outcome record and resolution stay
+      // with the Environment domain.
       if (task.environmentLeaseId !== undefined && this.#forceReleaseLease !== undefined) {
         this.#forceReleaseLease(task.environmentLeaseId);
       }
@@ -1063,7 +1060,7 @@ export class TaskEnvironmentLifecycle {
       // One transaction commits the Force Released Task row and the Task-held lease
       // release together. Without the explicit release capability above, unfinished
       // work remains in recovery rather than claiming a Force Release outcome.
-      await this.#store.saveTerminalWithLease(forced, leaseId);
+      await this.#store.saveTaskAndReleaseLease(forced, leaseId);
       this.#resolvePauseRetryGate(taskId);
       releaseTaskLease(leaseId);
       await this.ensureTaskGroup(forced);
@@ -1092,7 +1089,7 @@ export class TaskEnvironmentLifecycle {
         // One transaction makes release and terminal persistence inseparable. A
         // crash before it leaves `ending` recoverable; a crash after it is already
         // terminal with a released lease, so retry/discard never gets stuck.
-        await this.#store.saveTerminalWithLease(ended, task.environmentLeaseId!);
+        await this.#store.saveTaskAndReleaseLease(ended, task.environmentLeaseId!);
         this.#resolvePauseRetryGate(task.id);
         this.#faults?.afterTerminalCommit?.();
         this.#pool.releaseTaskLease(task.environmentLeaseId!);
