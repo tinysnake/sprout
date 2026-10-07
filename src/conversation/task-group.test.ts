@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isEndedTaskStatus, TASK_STATUSES, type TaskStatus } from '../task/model.ts';
+import { isEndedTaskStatus, type TaskStatus } from '../task/model.ts';
 import { ConversationScopeService, type ConversationProjectFacts } from './service.ts';
 import { InMemoryConversationScopeStore } from './store.ts';
 
@@ -205,6 +205,7 @@ test('Resume after Force Release thaws the same Task group identity and preserve
 
 test('two task-groups have distinct immutable scope identities', async () => {
   const f = fixture();
+  const first = await sync(f.scopes, task('task-parallel-a'));
   const second = await sync(f.scopes, task('task-parallel-b'));
   assert.notEqual(first.id, second.id);
   assert.notEqual(first.taskId, second.taskId);

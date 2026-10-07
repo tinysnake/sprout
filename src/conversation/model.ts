@@ -21,9 +21,10 @@
  * here stores a Message: conversation history stays in the collaboration
  * store, and a read-only scope never deletes it.
  *
- * An archived Project, a disbanded Working group, an ended membership, or a
- * terminal Task makes its affected scope read-only while its recorded facts
- * and attribution remain durable.
+ * An archived Project, a disbanded Working group, an ended membership, or an
+ * ended Task status makes its affected scope read-only. Force Release also
+ * freezes a stopped Task group while preserving the stopped Task's active intent;
+ * its recorded facts and attribution remain durable.
  *
  * Privacy: no field here may carry a credential, provider/account identity,
  * hostname, address, absolute path, or raw command. Free text passes the
@@ -195,6 +196,7 @@ export interface TaskGroupScope extends ConversationScopeBase {
     readonly versions: readonly TaskGroupContentVersion[];
   };
   readonly frozenAt?: number;
+  /** The status retained when this scope was frozen; `stopped` is active intent. */
   readonly terminalTaskStatus?: TaskStatus;
 }
 

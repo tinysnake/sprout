@@ -121,6 +121,7 @@ export type TaskControlEvent =
   | { readonly action: 'content-revised'; readonly actor: TaskActor; readonly at: number; readonly reason: string; readonly contentVersion: number; readonly previous: TaskContent; readonly content: TaskContent }
   | { readonly action: 'pause-requested'; readonly actor: TaskActor; readonly at: number; readonly reason: string }
   | { readonly action: 'pause-retry-required' | 'pause-request-cancelled'; readonly actor: TaskActor; readonly at: number; readonly reason: string }
+  | { readonly action: 'paused' | 'interrupt-requested'; readonly actor: TaskActor; readonly at: number; readonly reason: string }
   | { readonly action: 'resumed'; readonly actor: TaskActor; readonly at: number; readonly reason: string; readonly fromStatus?: 'stopped' }
   | { readonly action: 'subordinate-run-stop-requested'; readonly actor: TaskActor; readonly at: number; readonly runId: string; readonly reason: string }
   | { readonly action: 'blocker-raised'; readonly actor: TaskActor; readonly at: number; readonly blocker: TaskBlocker }

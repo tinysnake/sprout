@@ -153,10 +153,10 @@ export interface PreparedProjectChannel {
 
 export interface ConversationTaskFacts {
   readonly projectId: string;
-  readonly status: TaskStatus;
+  readonly status: string;
 }
 
-/** The Task authority facts needed to fail closed after Task termination. */
+/** The Task authority facts needed to fail closed after an ended Task status. */
 export interface ConversationTaskPort {
   taskFacts(taskId: string): Promise<ConversationTaskFacts | undefined>;
 }
@@ -541,7 +541,8 @@ export class ConversationScopeService {
    * Membership is deliberately not copied: scope-state reads the current
    * Project membership facts, so every current Project member is included and
    * later joiners take part without a membership write. Task content versions
-   * are snapshotted append-only, and terminal status freezes the document.
+   * are snapshotted append-only, and product status data determines whether the
+ * group remains writable or freezes pending ended-state handling or Force Release.
    */
   async syncTaskGroup(input: TaskGroupSyncInput): Promise<TaskGroupScope> {
     const facts = await this.#facts(input.projectId);
@@ -601,7 +602,7 @@ export class ConversationScopeService {
       const latest = currentTaskGroupContent(group);
       let next = group;
       if (group.frozenAt !== undefined) {
-        if (terminalStatus !== undefined) {
+        if (frozenTaskStatus !== undefined) {
           if (group.terminalTaskStatus !== frozenTaskStatus || latest.taskContentVersion !== input.contentVersion
             || latest.taskTitle !== taskTitle || latest.goal !== goal || JSON.stringify(latest.rules) !== JSON.stringify(rules)) {
             throw new ConversationScopeError('task-group-binding-conflict', `frozen Task group ${group.id} cannot be rebound or revised`);
@@ -1040,7 +1041,8 @@ export class ConversationScopeService {
         if (task === undefined || task.projectId !== scope.projectId) {
           return { scopeId, writable: false, reason: 'task-group-task-unavailable' };
         }
-        if (isEndedTaskStatus(task.status)) {
+        const status = task.status as TaskStatus;
+        if (!TASK_STATUSES.includes(status) || isEndedTaskStatus(status)) {
           return { scopeId, writable: false, reason: 'task-group-frozen' };
         }
       }

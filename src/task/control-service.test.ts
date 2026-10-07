@@ -503,7 +503,7 @@ test('Human Resume restores a Force Released Task with a fresh lease and context
   assert.equal(resumed.endDisposition, undefined);
   assert.equal(resumed.blockerReason, undefined, 'the Force Release blocker copy is cleared');
   assert.deepEqual(resumed.forcedRelease, forcedRelease, 'permanent Force Release facts remain unchanged');
-  assert.deepEqual(resumed.controlHistory?.slice(0, historyBefore?.length), historyBefore);
+  assert.deepEqual(resumed.controlHistory?.slice(0, historyBefore?.length ?? 0), historyBefore ?? []);
   const event = resumed.controlHistory?.at(-1);
   assert.equal(event?.action, 'resumed');
   assert.equal(event?.action === 'resumed' ? event.fromStatus : undefined, 'stopped');
@@ -557,7 +557,6 @@ for (const status of TASK_STATUSES.filter(isEndedTaskStatus)) {
       completionClaims: priorClaims,
       ...(status === 'done' ? { endDisposition: 'completed' as const } : {}),
       ...(status === 'cancelled' ? { endDisposition: 'cancelled' as const } : {}),
-      ...(status === 'stopped' ? { forcedRelease: { actor: 'operator', reason: 'Emergency release', unresolvedFacts: ['engineSessionStopped=false'], at: 41 } } : {}),
     };
     await s.store.save(terminal);
     const oldLeaseId = terminal.environmentLeaseId!;
@@ -595,7 +594,7 @@ for (const status of TASK_STATUSES.filter(isEndedTaskStatus)) {
   });
 }
 
-test('the stopped incident fixture reopens while retaining recovery, run, and Force Release history', async () => {
+test('the stopped incident fixture resumes directly while retaining recovery, run, and Force Release history', async () => {
   const taskId = 'task-muwtqk0e-aff3220b';
   const taskGroupSnapshots: Task[] = [];
   const taskGroupEvents: string[] = [];
@@ -633,23 +632,23 @@ test('the stopped incident fixture reopens while retaining recovery, run, and Fo
     taskGroupEvents.push('beginning-save');
     await saveBeginningWithLease(task, lease);
   };
-  const reopened = await s.controls.reopenForHuman(taskId, { reason: 'Recovery evidence is understood; resume the unfinished intent.' });
+  const resumed = await s.controls.resumeForHuman(taskId, { reason: 'Recovery evidence is understood; resume the unfinished intent.' });
 
   assert.deepEqual(taskGroupEvents, ['lock-enter', 'beginning-save', 'group-sync', 'lock-exit']);
-  assert.equal(reopened.status, 'in-progress');
-  assert.equal(reopened.environmentLifecycleState, 'idle');
-  assert.equal(reopened.environmentInstanceId, stopped.environmentInstanceId);
-  assert.notEqual(reopened.environmentLeaseId, oldLeaseId);
+  assert.equal(resumed.status, 'in-progress');
+  assert.equal(resumed.environmentLifecycleState, 'idle');
+  assert.equal(resumed.environmentInstanceId, stopped.environmentInstanceId);
+  assert.notEqual(resumed.environmentLeaseId, oldLeaseId);
   assert.equal(s.pool.getLease(oldLeaseId)?.state, 'released');
-  assert.equal(s.pool.getLease(reopened.environmentLeaseId!)?.state, 'active');
-  assert.deepEqual(reopened.controlHistory?.slice(0, historyBefore?.length), historyBefore);
-  assert.deepEqual(reopened.forcedRelease, releaseFacts);
-  assert.equal(reopened.controlHistory?.at(-1)?.action, 'reopened');
+  assert.equal(s.pool.getLease(resumed.environmentLeaseId!)?.state, 'active');
+  assert.deepEqual(resumed.controlHistory?.slice(0, historyBefore?.length ?? 0), historyBefore ?? []);
+  assert.deepEqual(resumed.forcedRelease, releaseFacts);
+  assert.equal(resumed.controlHistory?.at(-1)?.action, 'resumed');
   assert.deepEqual((await s.tasks.getWithRuns(taskId))?.runs.map((link) => link.runId), ['incident-run']);
-  assert.deepEqual(preparedTaskIds, [taskId, taskId], 'reopen creates a fresh Task context for the same Task');
+  assert.deepEqual(preparedTaskIds, [taskId, taskId], 'Resume prepares fresh Task context for the same Task');
   assert.deepEqual(preparedEnvironmentIds, ['local-1', 'local-1'], 'both contexts use the same original Environment instance');
-  assert.equal(recycled, 0, 'reopen leaves the Project workspace and prior Task history intact');
-  assert.equal(s.submittedRuns.length, 0, 'reopen waits for a later deliberate advance');
+  assert.equal(recycled, 0, 'Resume leaves the Project workspace and prior Task history intact');
+  assert.equal(s.submittedRuns.length, 0, 'Resume waits for a later deliberate advance');
 
   const advance = await s.tasks.advanceWithAttribution(taskId, {
     agentId: 'pi', actor: human, reason: 'Continue the incident Task after review.', contentVersion: 1,
@@ -731,7 +730,7 @@ test('reopen refuses nonterminal, recovering, unbound, and ineligible Tasks with
     {
       name: 'nonterminal Task',
       update: task => ({ ...task, status: 'in-progress', environmentLifecycleState: 'idle' }),
-      reason: /is not terminal/,
+      reason: /active intent/,
     },
     {
       name: 'unresolved recovery',

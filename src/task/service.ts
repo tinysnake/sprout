@@ -30,7 +30,7 @@ import { createIdFactory, type IdFactory } from '../ids.ts';
 import type { AgentRun } from '../run/model.ts';
 import { buildTaskContext, renderTaskPrompt } from './context.ts';
 import {
-  isTerminalTaskStatus,
+  isEndedTaskStatus,
   type Task,
   type TaskRunSummary,
   type TaskStatus,
@@ -127,7 +127,7 @@ export class TaskService {
         : {}),
       createdAt: now,
       updatedAt: now,
-      ...(isTerminalTaskStatus(status) ? { completedAt: now } : {}),
+      ...(isEndedTaskStatus(status) ? { completedAt: now } : {}),
     };
     return this.#store.create(task);
   }
@@ -169,8 +169,14 @@ export class TaskService {
    */
   async update(taskId: string, patch: UpdateTaskInput): Promise<Task> {
     const task = await this.#require(taskId);
-    if (task.environmentLifecycleState !== undefined && patch.status !== undefined && isTerminalTaskStatus(patch.status)) {
-      throw new Error(`task ${taskId} must end through the Task environment lifecycle`);
+    if (task.forcedRelease !== undefined) {
+      throw new Error('a Force Released Task can continue only through Human Resume');
+    }
+    if (task.status === 'stopped' || patch.status === 'stopped') {
+      throw new Error(`Task ${taskId} status stopped is controlled by Force Release and Human Resume`);
+    }
+    if (task.environmentLifecycleState !== undefined && patch.status !== undefined && isEndedTaskStatus(patch.status)) {
+      throw new Error(`task ${taskId} must change status through the Task environment lifecycle`);
     }
     if (task.admission !== undefined && (patch.title !== undefined || patch.goal !== undefined || patch.constraints !== undefined)) {
       throw new Error(`task ${taskId} content is bound to proposal version ${task.admission.contentVersion}`);
@@ -192,7 +198,7 @@ export class TaskService {
     const withAgent = clearOrSet(next, 'assignedAgentId', patch.assignedAgentId);
     const withPreference = clearOrSet(withAgent, 'environmentPreference', patch.environmentPreference);
     const withBlocker = clearOrSet(withPreference, 'blockerReason', patch.blockerReason);
-    const withCompletion = isTerminalTaskStatus(status)
+    const withCompletion = isEndedTaskStatus(status)
       ? { ...withBlocker, completedAt: task.completedAt ?? now }
       : omit(withBlocker, 'completedAt');
     await this.#store.save(withCompletion);
