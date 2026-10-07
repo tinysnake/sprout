@@ -1,6 +1,32 @@
 import { renderIcon } from '../icons.js';
 import { stateManager, type PrototypeState } from '../state.js';
-import type { NestedAgentRun, ProjectItem, TaskItem } from '../types.js';
+import { isActiveIntentTaskStatus, isEndedTaskStatus, TASK_STATUS_DATA, type TaskStatus } from '../../../../src/task/model.ts';
+import type { NestedAgentRun, ProjectItem, TaskItem, TaskLifecycleState } from '../types.js';
+
+const PROTOTYPE_TASK_STATUS_ALIASES: Partial<Record<TaskLifecycleState, TaskStatus>> = {
+  active: 'in-progress',
+  'Task pause requested': 'in-progress',
+  paused: 'in-progress',
+  'awaiting validation': 'in-progress',
+  ending: 'in-progress',
+  recovery: 'in-progress',
+  completed: 'done',
+};
+
+function sharedTaskStatus(lifecycle: TaskLifecycleState): TaskStatus | undefined {
+  if (Object.hasOwn(TASK_STATUS_DATA, lifecycle)) return lifecycle as TaskStatus;
+  return PROTOTYPE_TASK_STATUS_ALIASES[lifecycle];
+}
+
+function hasActiveIntent(lifecycle: TaskLifecycleState): boolean {
+  const status = sharedTaskStatus(lifecycle);
+  return status !== undefined && isActiveIntentTaskStatus(status);
+}
+
+function hasEndedIntent(lifecycle: TaskLifecycleState): boolean {
+  const status = sharedTaskStatus(lifecycle);
+  return status !== undefined && isEndedTaskStatus(status);
+}
 
 export function renderTasksView(state: PrototypeState): HTMLElement {
   const container = document.createElement('div');
@@ -34,24 +60,20 @@ function renderTaskListPage(
 ): HTMLElement {
   const currentFilter = state.taskFilter || 'all';
 
-  const activeCount = projectTasks.filter(
-    (t) => t.lifecycle === 'active' || t.lifecycle === 'Task pause requested'
-  ).length;
+  const activeCount = projectTasks.filter((t) => hasActiveIntent(t.lifecycle)).length;
   const validationCount = projectTasks.filter((t) => t.lifecycle === 'awaiting validation').length;
   const blockedCount = projectTasks.filter((t) => t.lifecycle === 'blocked').length;
   const proposedCount = projectTasks.filter((t) => t.lifecycle === 'proposed').length;
   const recoveryCount = projectTasks.filter((t) => t.lifecycle === 'recovery').length;
-  const completedCount = projectTasks.filter(
-    (t) => t.lifecycle === 'completed' || t.lifecycle === 'stopped' || t.lifecycle === 'cancelled'
-  ).length;
+  const endedCount = projectTasks.filter((t) => hasEndedIntent(t.lifecycle)).length;
 
   const filteredTasks = projectTasks.filter((t) => {
-    if (currentFilter === 'active') return t.lifecycle === 'active' || t.lifecycle === 'Task pause requested';
+    if (currentFilter === 'active') return hasActiveIntent(t.lifecycle);
     if (currentFilter === 'validation') return t.lifecycle === 'awaiting validation';
     if (currentFilter === 'blocked') return t.lifecycle === 'blocked';
     if (currentFilter === 'proposed') return t.lifecycle === 'proposed';
     if (currentFilter === 'recovery') return t.lifecycle === 'recovery';
-    if (currentFilter === 'ended') return t.lifecycle === 'completed' || t.lifecycle === 'stopped' || t.lifecycle === 'cancelled';
+    if (currentFilter === 'ended') return hasEndedIntent(t.lifecycle);
     if (currentFilter === 'stopped') return t.lifecycle === 'stopped';
     if (currentFilter === 'cancelled') return t.lifecycle === 'cancelled';
     return true;
@@ -82,7 +104,7 @@ function renderTaskListPage(
           <option value="blocked" ${currentFilter === 'blocked' ? 'selected' : ''}>Blocked (${blockedCount})</option>
           <option value="proposed" ${currentFilter === 'proposed' ? 'selected' : ''}>Proposals (${proposedCount})</option>
           <option value="recovery" ${currentFilter === 'recovery' ? 'selected' : ''}>Recovery (${recoveryCount})</option>
-          <option value="ended" ${currentFilter === 'ended' ? 'selected' : ''}>Ended (${completedCount})</option>
+          <option value="ended" ${currentFilter === 'ended' ? 'selected' : ''}>Ended (${endedCount})</option>
           <option value="stopped" ${currentFilter === 'stopped' ? 'selected' : ''}>Stopped</option>
           <option value="cancelled" ${currentFilter === 'cancelled' ? 'selected' : ''}>Cancelled</option>
         </select>
@@ -115,12 +137,7 @@ function renderTaskListPage(
                   } else if (t.lifecycle === 'blocked' || t.lifecycle === 'recovery') {
                     statusColor = 'red';
                     borderClass = 'border-red';
-                  } else if (
-                    t.lifecycle === 'completed' ||
-                    t.lifecycle === 'stopped' ||
-                    t.lifecycle === 'cancelled' ||
-                    t.lifecycle === 'rejected'
-                  ) {
+                  } else if (hasEndedIntent(t.lifecycle) || t.lifecycle === 'rejected') {
                     statusColor = 'neutral';
                     borderClass = 'border-neutral';
                   }
@@ -223,12 +240,7 @@ function renderTaskDetailPage(
     taskStateColor = 'yellow';
   } else if (selectedTask.lifecycle === 'blocked' || selectedTask.lifecycle === 'recovery') {
     taskStateColor = 'red';
-  } else if (
-    selectedTask.lifecycle === 'completed' ||
-    selectedTask.lifecycle === 'stopped' ||
-    selectedTask.lifecycle === 'cancelled' ||
-    selectedTask.lifecycle === 'rejected'
-  ) {
+  } else if (hasEndedIntent(selectedTask.lifecycle) || selectedTask.lifecycle === 'rejected') {
     taskStateColor = 'neutral';
   }
 
@@ -557,7 +569,7 @@ function renderTaskDetailPage(
           Current Version: <strong>v${selectedTask.currentVersion.version}</strong> · Edited by: ${selectedTask.currentVersion.createdBy}
         </div>
       </div>
-      <button class="btn btn-secondary btn-sm edit-task-content-btn" ${selectedTask.lifecycle === 'completed' || selectedTask.lifecycle === 'stopped' || selectedTask.lifecycle === 'cancelled' ? 'disabled' : ''}>
+      <button class="btn btn-secondary btn-sm edit-task-content-btn" ${hasEndedIntent(selectedTask.lifecycle) || selectedTask.lifecycle === 'stopped' ? 'disabled' : ''}>
         ${renderIcon('edit', 14)} Edit Specification (Create v${selectedTask.currentVersion.version + 1})
       </button>
     </div>
@@ -640,9 +652,8 @@ function renderTaskDetailPage(
 
   // Section 6: Live Controls Sticky Action Bar (Two-Stage Pause, Interrupt, Resume, Discard)
   if (
-    selectedTask.lifecycle !== 'completed' &&
+    !hasEndedIntent(selectedTask.lifecycle) &&
     selectedTask.lifecycle !== 'stopped' &&
-    selectedTask.lifecycle !== 'cancelled' &&
     selectedTask.lifecycle !== 'proposed' &&
     selectedTask.lifecycle !== 'rejected'
   ) {
