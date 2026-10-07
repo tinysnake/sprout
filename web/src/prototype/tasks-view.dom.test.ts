@@ -53,21 +53,46 @@ test('archived Tasks view classifies active intent and ended statuses from the s
       'completed, failed, and cancelled contribute to the ended count');
     assert.ok(allTasks.querySelector('[data-task="task-status-0"] .status-pill.green'),
       'stopped uses the active-intent badge treatment');
-    assert.deepEqual(taskIds(render('active')), [
+    const activeTaskIds = [
       'task-status-0', 'task-status-1', 'task-status-2', 'task-status-3',
       'task-status-4', 'task-status-5', 'task-status-6', 'task-status-7',
-    ]);
-    assert.deepEqual(taskIds(render('ended')), ['task-status-8', 'task-status-9', 'task-status-10']);
+    ];
+    const endedTaskIds = ['task-status-8', 'task-status-9', 'task-status-10'];
+    assert.deepEqual(taskIds(render('active')), activeTaskIds);
+    assert.deepEqual(taskIds(render('ended')), endedTaskIds);
+    for (const taskId of activeTaskIds) {
+      const badge = allTasks.querySelector(`[data-task="${taskId}"] .status-pill`);
+      assert.ok(badge && !badge.classList.contains('neutral'), `${taskId} retains active-intent list badge treatment`);
+    }
+    for (const taskId of endedTaskIds) {
+      const badge = allTasks.querySelector(`[data-task="${taskId}"] .status-pill`);
+      assert.ok(badge?.classList.contains('neutral'), `${taskId} uses ended list badge treatment`);
+    }
 
-    const stoppedDetail = renderTasksView({
+    const renderDetail = (taskId: string) => renderTasksView({
       ...base,
       tasks,
       taskFilter: 'all',
       taskViewMode: 'detail',
-      selectedTaskId: 'task-status-0',
+      selectedTaskId: taskId,
     });
-    assert.ok(stoppedDetail.querySelector('.lifecycle-detail-row .status-pill.green'),
-      'the stopped Task detail badge also uses the active-intent treatment');
+    const stoppedDetail = renderDetail('task-status-0');
+    const stoppedBadge = stoppedDetail.querySelector('.lifecycle-detail-row .status-pill');
+    assert.ok(stoppedBadge?.classList.contains('green'),
+      'the stopped Task detail badge uses the active-intent treatment');
+    assert.doesNotMatch(stoppedDetail.textContent ?? '', /reopen/i,
+      'the archived stopped Task detail does not offer Reopen');
+    for (const taskId of activeTaskIds) {
+      const badge = renderDetail(taskId).querySelector('.lifecycle-detail-row .status-pill');
+      assert.ok(badge && !badge.classList.contains('neutral'), `${taskId} retains active-intent detail badge treatment`);
+    }
+    for (const taskId of endedTaskIds) {
+      const detail = renderDetail(taskId);
+      const badge = detail.querySelector('.lifecycle-detail-row .status-pill');
+      assert.ok(badge?.classList.contains('neutral'), `${taskId} uses ended detail badge treatment`);
+      assert.equal(detail.querySelector<HTMLButtonElement>('.edit-task-content-btn')?.disabled, true,
+        `${taskId} does not expose active content editing`);
+    }
   } finally {
     await cleanup();
   }
