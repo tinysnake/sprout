@@ -5,7 +5,7 @@ import { isEndedTaskStatus, type Task, type TaskActor, type TaskBlocker, type Ta
 import type { TaskService } from './service.ts';
 import { TaskTerminalMutationError, type TaskEnvironmentLifecycle, type TaskRecoveryAction } from './environment-lifecycle.ts';
 import type { TaskProposalService } from './proposal-service.ts';
-import { createExecutionStrategy, executionModeAdmissionRefusal, type ExecutionStrategy } from '../execution-mode.ts';
+import { createExecutionStrategy, taskExecutionModeAdmissionRefusal, type ExecutionStrategy } from '../execution-mode.ts';
 
 export type TaskBlockerInput = Omit<TaskBlocker, 'createdBy' | 'createdAt'>;
 export type TaskCompletionClaimInput = Omit<TaskCompletionClaim, 'id' | 'actor' | 'at' | 'contentVersion'>;
@@ -199,7 +199,7 @@ export class TaskControlService {
   }
 
   assertExecutionModeAvailable(): void {
-    const refusal = executionModeAdmissionRefusal(this.#executionStrategy);
+    const refusal = taskExecutionModeAdmissionRefusal(this.#executionStrategy);
     if (refusal !== undefined) throw new TaskControlError('execution-mode-unavailable', refusal);
   }
 

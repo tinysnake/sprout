@@ -7,7 +7,7 @@ import type { TaskService } from './service.ts';
 import { TaskEnvironmentLeaseRefusal, type TaskEnvironmentLifecycle } from './environment-lifecycle.ts';
 import type { TaskProposalService } from './proposal-service.ts';
 import type { TaskProposalStore } from './proposal-store.ts';
-import { createExecutionStrategy, executionModeAdmissionRefusal, type ExecutionStrategy } from '../execution-mode.ts';
+import { createExecutionStrategy, taskExecutionModeAdmissionRefusal, type ExecutionStrategy } from '../execution-mode.ts';
 import { TaskProposalError, type TaskProposalBeginInput } from './proposal-model.ts';
 
 export type TaskAdmissionErrorCode = 'invalid-command' | 'lead-ineligible' | 'environment-ineligible'
@@ -237,7 +237,7 @@ export class TaskAdmissionService {
   }
 
   #requireExecutionMode(): void {
-    const refusal = executionModeAdmissionRefusal(this.#executionStrategy);
+    const refusal = taskExecutionModeAdmissionRefusal(this.#executionStrategy);
     if (refusal !== undefined) throw new TaskAdmissionError('execution-mode-unavailable', refusal);
   }
 

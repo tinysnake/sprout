@@ -96,6 +96,8 @@ export interface RunView {
   readonly agentId: string;
   readonly prompt: string;
   readonly status: string;
+  /** Durable placement chosen at admission; absent only on older server responses. */
+  readonly executionMode?: import('../execution-mode.ts').ExecutionMode;
   readonly events: readonly { readonly type: string; readonly [key: string]: unknown }[];
   /**
    * The durable Task this run advances, when it is a Task run (#28).
@@ -179,6 +181,7 @@ export function toRunView(run: AgentRun): RunView {
     agentId: run.agentId,
     prompt: run.prompt,
     status: run.status,
+    executionMode: run.executionMode ?? 'environment-hosted',
     events: run.events,
     ...(run.taskId !== undefined ? { taskId: run.taskId } : {}),
     handOffAttached: run.handOff !== undefined,

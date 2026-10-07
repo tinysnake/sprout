@@ -41,6 +41,10 @@ export interface AgentRun {
   readonly id: string;
   readonly agentId: string;
   readonly prompt: string;
+  /** Immutable placement selected when this run was admitted. Legacy rows are Environment-hosted. */
+  readonly executionMode?: import('../execution-mode.ts').ExecutionMode;
+  /** Opaque local Engine host profile identity for Host-run attribution and continuation partitioning. */
+  readonly engineHostProfileId?: string;
   /**
    * The environment instance this run actually used, resolved from the agent's
    * project at submission. Persisted so the choice survives a restart.

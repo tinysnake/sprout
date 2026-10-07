@@ -30,6 +30,7 @@ interface RunView {
   readonly agentId: string;
   readonly prompt: string;
   readonly status: string;
+  readonly executionMode?: 'environment-hosted' | 'host-run';
   readonly events: readonly RunEvent[];
   readonly failure?: string;
   readonly result?: { readonly status?: string; readonly text?: string; readonly message?: string };
@@ -972,6 +973,8 @@ function render(run: RunView): void {
     status.textContent = run.status;
     status.dataset.status = run.status;
   }
+  const placement = element.querySelector<HTMLElement>('.placement');
+  if (placement) placement.textContent = run.executionMode === 'host-run' ? 'Sprout host' : 'Environment';
 
   const events = element.querySelector<HTMLUListElement>('.events');
   if (events) {
@@ -1008,7 +1011,10 @@ function createRunElement(run: RunView): HTMLElement {
   title.textContent = run.agentId;
   const status = document.createElement('span');
   status.className = 'status';
-  header.append(title, status);
+  const placement = document.createElement('span');
+  placement.className = 'placement';
+  placement.textContent = run.executionMode === 'host-run' ? 'Sprout host' : 'Environment';
+  header.append(title, status, placement);
 
   const prompt = document.createElement('p');
   prompt.className = 'prompt';

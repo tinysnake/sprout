@@ -60,6 +60,29 @@ test('a hand-off is attached exactly when the environment instance changed', () 
   );
 });
 
+test('Host-run hand-offs follow Engine host profile identity instead of Environment identity', () => {
+  assert.equal(shouldAttachHandOff({
+    previousEnvironmentInstanceId: '', currentEnvironmentInstanceId: '',
+    previousExecutionMode: 'host-run', currentExecutionMode: 'host-run',
+    previousEngineHostProfileId: 'profile-a', currentEngineHostProfileId: 'profile-a',
+  }), false);
+  assert.equal(shouldAttachHandOff({
+    previousEnvironmentInstanceId: '', currentEnvironmentInstanceId: '',
+    previousExecutionMode: 'host-run', currentExecutionMode: 'host-run',
+    previousEngineHostProfileId: 'profile-a', currentEngineHostProfileId: 'profile-b',
+  }), true);
+  assert.equal(shouldAttachHandOff({
+    previousEnvironmentInstanceId: 'container-1', currentEnvironmentInstanceId: '',
+    previousExecutionMode: 'environment-hosted', currentExecutionMode: 'host-run',
+    currentEngineHostProfileId: 'profile-a',
+  }), true);
+
+  const handOff = buildHandOffContext([run({
+    executionMode: 'host-run', engineHostProfileId: 'profile-a', environmentInstanceId: '',
+  })], { ...identity, currentCreatedAt: 2_000 });
+  assert.match(handOff?.text ?? '', /Engine host profile profile-a/);
+});
+
 test('previousRun picks the agent\'s most recent run, across projects', () => {
   const history: readonly AgentRun[] = [
     run({ id: 'a', createdAt: 1_000, environmentInstanceId: 'mac-mini-1' }),

@@ -24,6 +24,8 @@ import { classifyEngineTurnFailure, isRetryableEngineTurnFailure, sanitizedTurnF
  */
 
 export interface PiTurnState {
+  /** Versioned protocol source for usage attribution. */
+  sourceVersion: string;
   /** Assistant text accumulated in the current turn. */
   text: string;
   /** The last assistant text block completed, which is a turn's answer. */
@@ -41,8 +43,9 @@ export interface PiTurnState {
   } | undefined;
 }
 
-export function newPiTurnState(): PiTurnState {
+export function newPiTurnState(sourceVersion = 'pi 0.85.1'): PiTurnState {
   return {
+    sourceVersion,
     text: '',
     finalText: '',
     failure: undefined,
@@ -275,7 +278,7 @@ function createPiTurnResult(
       ...(hasUsage ? {
         billingBasis: 'unknown' as const,
         source: 'pi-protocol:message_end',
-        sourceVersion: 'pi 0.85.1',
+        sourceVersion: state.sourceVersion,
       } : {}),
     };
   }
@@ -288,7 +291,7 @@ function createPiTurnResult(
     ...(hasUsage ? {
       billingBasis: 'unknown' as const,
       source: 'pi-protocol:message_end',
-      sourceVersion: 'pi 0.85.1',
+      sourceVersion: state.sourceVersion,
     } : {}),
   };
 }

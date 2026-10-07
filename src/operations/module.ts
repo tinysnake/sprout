@@ -8,6 +8,7 @@ import { DiagnosticsService, diagnosticSubject, type OperationalStore } from './
 import { feedTarget, type FeedTarget } from '../web/feed.ts';
 import type { AgentRun } from '../run/model.ts';
 import type { Task } from '../task/model.ts';
+import type { HostPiReadiness } from '../engine/pi-host.ts';
 import { type ExecutionStrategy } from '../execution-mode.ts';
 import { fact, projectEngines, projectDiagnosticCorrelation, diagnosticIdentity, isDiagnosticTarget, type DiagnosticEvent, type DiagnosticCorrelation, type EventKind, type EventState, type OperatorSettings, type WebDiagnostic } from './contract.ts';
 
@@ -24,6 +25,7 @@ export class OperatorDiagnostics {
     readonly enrollments: Pick<EnvironmentEnrollmentService, 'list' | 'readiness'>;
     readonly recovery: Pick<EnvironmentRecoveryService, 'list'>;
     readonly executionStrategy: ExecutionStrategy;
+    readonly hostPiReadiness?: () => Promise<HostPiReadiness | undefined>;
     readonly connected?: (instanceId: string) => boolean;
     readonly run?: (id: string) => Promise<Pick<AgentRun, 'id' | 'projectId' | 'agentId'> | undefined>;
     readonly task?: (id: string) => Promise<Pick<Task, 'id' | 'projectId'> | undefined>;
@@ -42,7 +44,16 @@ export class OperatorDiagnostics {
   async settings(currentSessionId: string): Promise<OperatorSettings> {
     const sessions = await this.options.auth.listSessions(currentSessionId);
     if (!sessions.some(s => s.current)) throw new Error('authenticated session required');
+    const hostPi = await this.options.hostPiReadiness?.();
     return { versions: PRODUCT_VERSIONS, executionMode: this.options.executionStrategy.mode,
+      ...(hostPi === undefined ? { hostPi: { status: 'not-configured' as const } } : { hostPi: {
+        status: hostPi.status,
+        installation: hostPi.installation,
+        authentication: hostPi.authentication,
+        modelAvailability: hostPi.modelAvailability,
+        adapterControls: hostPi.adapterControls,
+        ...(hostPi.version !== undefined ? { version: hostPi.version } : {}),
+      } }),
       session: { authenticated: true, activeCount: sessions.length },
       access: { boundary: 'private-network-and-authentication', publicInternetSupported: false },
       responsibilities: { web: ['sessions', 'enrollment', 'recovery', 'diagnostics'], hostLocal: ['credentials', 'engine-login', 'service', 'network', 'backup', 'upgrade'] } };

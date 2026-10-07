@@ -83,6 +83,16 @@ test('a run view exposes progress and the terminal result without server interna
   );
 });
 
+test('run projections expose placement while keeping the local host profile identity private', () => {
+  const view = toRunView(run({
+    environmentInstanceId: '', executionMode: 'host-run', engineHostProfileId: 'opaque-local-profile',
+  }));
+  assert.equal(view.executionMode, 'host-run');
+  assert.equal('environmentInstanceId' in view, false);
+  assert.equal('engineHostProfileId' in view, false);
+  assert.equal(JSON.stringify(view).includes('opaque-local-profile'), false);
+});
+
 test('optional run fields are absent rather than null when the run has none', () => {
   const view = toRunView(run());
   for (const field of ['taskId', 'failure', 'result', 'tokenUsage', 'completedAt']) {

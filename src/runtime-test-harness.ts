@@ -15,6 +15,7 @@ import { readinessRequirements } from './environment/readiness.ts';
 import type { ReadinessObservationAuthority } from './environment/readiness-authority.ts';
 import { InMemoryLeaseStore } from './environment/pool.ts';
 import type { HostConfiguration } from './host-config.ts';
+import type { HostPiEngineAdapter } from './engine/pi-host.ts';
 import type { Project } from './project/model.ts';
 import {
   WORKER_PROTOCOL_VERSION,
@@ -318,6 +319,7 @@ export async function build(
     readonly turns?: readonly ScriptedTurn[];
     readonly configuration?: Partial<HostConfiguration>;
     readonly environment?: RuntimeEnvironment;
+    readonly hostPi?: HostPiEngineAdapter;
     /** Start the Web surface, as the host entrypoint does before reconciling. */
     readonly listen?: boolean;
   } = {},
@@ -334,6 +336,7 @@ export async function build(
     configuration: hostConfiguration(options.configuration),
     projectRoot: '/synthetic/project-root',
     environment,
+    ...(options.hostPi !== undefined ? { hostPi: options.hostPi } : {}),
     stores,
   });
   // The host entrypoint listens before reconciling and before installing

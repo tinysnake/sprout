@@ -94,7 +94,11 @@ const COST_SCHEMA: Schema = {
 const TIME_RANGE_SCHEMA: Schema = {
   from: instant, to: instant, timeZone: text, bounds: enumeration('[start, end)'), attribution: enumeration('settlement'),
 };
-const WORK_CORRELATION_SCHEMA: Schema = { runId: identifier, projectId: identifier, taskId: identifier, agentId: identifier, environmentInstanceId: identifier };
+const WORK_CORRELATION_SCHEMA: Schema = {
+  runId: identifier, projectId: identifier, taskId: identifier, agentId: identifier,
+  environmentInstanceId: identifier,
+  executionMode: enumeration('environment-hosted', 'host-run'),
+};
 const ROUTING_CORRELATION_SCHEMA: Schema = { attemptId: identifier, batchId: identifier, projectId: identifier };
 const ACTIVITY_STATUS = enumeration('active', 'completed', 'failed', 'interrupted', 'stopped');
 const IDENTITY_SCHEMA: Schema = {

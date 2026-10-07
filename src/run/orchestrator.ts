@@ -10,6 +10,7 @@ import type { ReadinessRequirementScope } from '../environment/readiness.ts';
 import type { EnvironmentPool } from '../environment/pool.ts';
 import type { AgentRunEvent, EngineAdapter, EngineSession, EngineTurnResult } from '../engine/port.ts';
 import { EngineResumeRefusedError } from '../engine/port.ts';
+import { HostPiEngineAdapter, isHostPiEffortSupported } from '../engine/pi-host.ts';
 import { createIdFactory, type IdFactory } from '../ids.ts';
 import { assembleProjectContract, renderProjectContract } from '../project/contract.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
@@ -58,6 +59,8 @@ export interface RunOrchestratorOptions {
   readonly engines:
     | ReadonlyMap<string, EngineAdapter>
     | ((environmentInstanceId: string) => Promise<ReadonlyMap<string, EngineAdapter>>);
+  /** Separate local Engine profile for runs that do not acquire an Environment lease. */
+  readonly hostPi?: HostPiEngineAdapter;
   readonly agents: AgentRegistry;
   /** Current Agent configuration authority; when supplied it also owns lifecycle refusal. */
   readonly resolveAgent?: (agentId: string) => Promise<AgentDefinition | undefined>;
@@ -223,6 +226,7 @@ type SessionAttempt =
 export class RunOrchestrator {
   readonly #taskGroupPosts: RunOrchestratorOptions['taskGroupPosts'];
   readonly #engines: RunOrchestratorOptions['engines'];
+  readonly #hostPi: HostPiEngineAdapter | undefined;
   readonly #agents: AgentRegistry;
   readonly #resolveAgent: (agentId: string) => Promise<AgentDefinition | undefined>;
   readonly #projects: ProjectRegistry | undefined;
@@ -264,6 +268,7 @@ export class RunOrchestrator {
   constructor(options: RunOrchestratorOptions) {
     this.#taskGroupPosts = options.taskGroupPosts;
     this.#engines = options.engines;
+    this.#hostPi = options.hostPi;
     this.#agents = options.agents;
     this.#resolveAgent = options.resolveAgent ?? (async (id) => this.#agents.get(id));
     this.#projects = options.projects;
@@ -300,6 +305,7 @@ export class RunOrchestrator {
       agentId: request.agentId,
       prompt: request.prompt,
       environmentInstanceId: '',
+      ...(this.#executionStrategy.mode === 'host-run' ? { executionMode: 'host-run' as const } : {}),
       status: 'queued',
       events: [],
       ...(request.taskId !== undefined ? { taskId: request.taskId } : {}),
@@ -332,6 +338,10 @@ export class RunOrchestrator {
         }, 'admission'),
       );
       return { id: run.id };
+    }
+
+    if (this.#executionStrategy.mode === 'host-run') {
+      return this.#submitHostRun(run, agent, request);
     }
 
     // A Task run's prompt is assembled from the Task's goal, constraints, and
@@ -533,6 +543,116 @@ export class RunOrchestrator {
     const settled = this.#execute(recorded, agent, workspace).then((run) => this.settleTaskRun(run));
     this.#settled.set(recorded.id, settled);
     return { id: recorded.id };
+  }
+
+  async #submitHostRun(
+    initial: AgentRun,
+    agent: AgentDefinition,
+    request: SubmitRunRequest,
+  ): Promise<{ id: string }> {
+    const refuse = async (message: string): Promise<{ id: string }> => {
+      await this.#finish(initial, 'failed', { status: 'failed', message }, 'admission');
+      return { id: initial.id };
+    };
+    if (request.taskId !== undefined || request.environmentInstanceId !== undefined ||
+        request.environmentLeaseId !== undefined || request.environmentPreference !== undefined ||
+        request.projectWorkspaceId !== undefined || request.projectWorkspacePath !== undefined ||
+        request.taskBootstrapInstructions !== undefined) {
+      return refuse('Host-run Pi accepts one-round Message conversations without Environment or Task bindings');
+    }
+    const projects = this.#projects?.forAgent(agent.id) ?? [];
+    const selectedProject = request.projectId === undefined
+      ? projects[0]
+      : projects.find(project => project.id === request.projectId);
+    if (selectedProject === undefined) {
+      return refuse(request.projectId === undefined
+        ? `agent ${agent.id} has no Project authority for a Host-run conversation`
+        : `agent ${agent.id} is not a member of project ${request.projectId}`);
+    }
+    const host = this.#hostPi;
+    if (host === undefined) return refuse('Host-run execution has no configured local Pi Engine profile');
+    const options = effectiveWorkOptions(agent);
+    const option = options.find(candidate =>
+      candidate.engine === 'pi' && candidate.workModel === host.authorizedModel &&
+      isHostPiEffortSupported(candidate.effort || 'medium'));
+    if (option === undefined) {
+      return refuse(`agent ${agent.id} has no Pi work option authorized by the local Engine profile`);
+    }
+    const readiness = await host.readiness(true);
+    if (readiness.status !== 'ready') {
+      const reason = readiness.authentication === 'not-ready'
+        ? 'authentication is not ready'
+        : readiness.modelAvailability === 'unavailable'
+          ? 'the exact authorized model is unavailable'
+          : readiness.adapterControls === 'unavailable'
+            ? 'required isolation controls are unavailable'
+            : readiness.installation !== 'ready'
+              ? 'the installed Pi runtime is unavailable'
+              : 'readiness is unknown';
+      return refuse(`Host-run Pi admission failed for this Engine profile: ${reason}`);
+    }
+    const recorded: AgentRun = {
+      ...initial,
+      projectId: selectedProject.id,
+      executionMode: 'host-run',
+      engineHostProfileId: host.profileId,
+      workOption: option,
+      configurationVersion: agent.configurationVersion ?? 1,
+    };
+    this.#runs.set(recorded.id, recorded);
+    await this.#store.save(recorded);
+    const settled = this.#executeHostRun(recorded, agent, host, option);
+    this.#settled.set(recorded.id, settled);
+    return { id: recorded.id };
+  }
+
+  async #executeHostRun(
+    initial: AgentRun,
+    agent: AgentDefinition,
+    host: HostPiEngineAdapter,
+    option: AgentWorkOption,
+  ): Promise<AgentRun> {
+    if (this.#stopRequests.has(initial.id)) return this.#finish(initial, 'interrupted', { status: 'interrupted' });
+    const running = await this.#advance(initial, { status: 'running' });
+    let prepared = running;
+    try {
+      const assembled = await this.#assembleInput(initial, agent, running.id);
+      if (assembled.handOff !== undefined) prepared = await this.#advance(running, { handOff: assembled.handOff });
+      const workingDirectory = `host-profile:${host.profileId}:agent:${agent.id}`;
+      const identity: SessionKeyIdentity = {
+        agentId: agent.id,
+        engine: 'pi',
+        environmentInstanceId: '',
+        executionMode: 'host-run',
+        engineHostProfileId: host.profileId,
+        workingDirectory,
+      };
+      const stored = this.#sessionKeys ? await this.#sessionKeys.get(identity) : undefined;
+      let attempt = await this.#runSession(
+        host, agent, option, assembled.prompt, prepared, stored?.key, assembled.instructions,
+        workingDirectory, undefined, undefined, undefined,
+      );
+      if (stored !== undefined && !attempt.ok && attempt.resumeRefused) {
+        if (this.#sessionKeys) await this.#sessionKeys.delete(identity);
+        attempt = await this.#runSession(
+          host, agent, option, assembled.prompt, prepared, undefined, assembled.instructions,
+          workingDirectory, undefined, undefined, undefined,
+        );
+      }
+      if (!attempt.ok) {
+        return this.#finish(attempt.run, 'failed', attempt.result ?? {
+          status: 'failed', message: attempt.message,
+        });
+      }
+      if (this.#sessionKeys && attempt.result.status === 'completed' && attempt.engineSessionKey) {
+        await this.#sessionKeys.save({ ...identity, key: attempt.engineSessionKey, updatedAt: this.#clock.now() });
+      }
+      return this.#settleWithResult(attempt.run, attempt.result);
+    } catch {
+      return this.#finish(prepared, 'failed', {
+        status: 'failed', message: 'Host-run Pi execution failed',
+      });
+    }
   }
 
   /**
@@ -931,6 +1051,8 @@ export class RunOrchestrator {
         agentId: agent.id,
         engine: option.engine,
         environmentInstanceId: initial.environmentInstanceId,
+        executionMode: initial.executionMode ?? 'environment-hosted',
+        ...(initial.engineHostProfileId !== undefined ? { engineHostProfileId: initial.engineHostProfileId } : {}),
         workingDirectory,
       };
       const stored = this.#sessionKeys ? await this.#sessionKeys.get(identity) : undefined;
@@ -1219,6 +1341,10 @@ export class RunOrchestrator {
       shouldAttachHandOff({
         previousEnvironmentInstanceId: handOff.previousEnvironmentInstanceId,
         currentEnvironmentInstanceId: run.environmentInstanceId,
+        previousExecutionMode: handOff.previousExecutionMode ?? 'environment-hosted',
+        currentExecutionMode: run.executionMode ?? 'environment-hosted',
+        ...(handOff.previousEngineHostProfileId !== undefined ? { previousEngineHostProfileId: handOff.previousEngineHostProfileId } : {}),
+        ...(run.engineHostProfileId !== undefined ? { currentEngineHostProfileId: run.engineHostProfileId } : {}),
       });
 
     return {

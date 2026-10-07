@@ -27,6 +27,9 @@ export interface SessionKeyIdentity {
   readonly agentId: string;
   readonly engine: string;
   readonly environmentInstanceId: string;
+  /** Execution mode and Engine host profile are independent continuation dimensions. */
+  readonly executionMode?: import('../execution-mode.ts').ExecutionMode;
+  readonly engineHostProfileId?: string;
   /** The working directory the engine session was created in. */
   readonly workingDirectory: string;
 }
@@ -36,6 +39,8 @@ export interface StoredSessionKey {
   readonly agentId: string;
   readonly engine: string;
   readonly environmentInstanceId: string;
+  readonly executionMode: import('../execution-mode.ts').ExecutionMode;
+  readonly engineHostProfileId: string;
   /** One-way runtime-derived identity for the working directory. */
   readonly workingDirectoryId: string;
   readonly key: string;
@@ -78,7 +83,11 @@ export function workingDirectoryId(workingDirectory: string): string {
  * containing the delimiter cannot collide with another slot.
  */
 export function sessionKeyId(identity: SessionKeyIdentity): string {
+  const executionMode = identity.executionMode ?? 'environment-hosted';
+  const engineHostProfileId = identity.engineHostProfileId ?? identity.environmentInstanceId;
   return JSON.stringify([
+    executionMode,
+    engineHostProfileId,
     identity.agentId,
     identity.engine,
     identity.environmentInstanceId,
@@ -100,6 +109,8 @@ export class InMemorySessionKeyStore implements SessionKeyStore {
       agentId: record.agentId,
       engine: record.engine,
       environmentInstanceId: record.environmentInstanceId,
+      executionMode: record.executionMode ?? 'environment-hosted',
+      engineHostProfileId: record.engineHostProfileId ?? record.environmentInstanceId,
       workingDirectoryId: workingDirectoryId(record.workingDirectory),
       key: record.key,
       updatedAt: record.updatedAt,

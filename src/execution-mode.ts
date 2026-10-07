@@ -40,21 +40,36 @@ export interface ExecutionStrategy {
     readonly available: boolean;
     readonly refusal?: string;
   };
+  readonly taskAdmission: {
+    readonly available: boolean;
+    readonly refusal?: string;
+  };
 }
 
 const HOST_RUN_UNAVAILABLE =
-  'Host-run execution is unavailable until its engine and remote operation capabilities are implemented.';
+  'Host-run execution is unavailable because this host does not meet the isolated Pi conversation controls.';
 
 /** Construct the one immutable execution strategy for a Sprout process. */
-export function createExecutionStrategy(mode: ExecutionMode): ExecutionStrategy {
+const HOST_RUN_TASK_REFUSAL = 'Task execution requires Environment-hosted mode because Tasks need an Environment workspace and lease.';
+
+export function createExecutionStrategy(mode: ExecutionMode, hostRunSupported = false): ExecutionStrategy {
+  const supported = mode === 'environment-hosted' || hostRunSupported;
+  const tasksSupported = mode === 'environment-hosted';
   return Object.freeze({
     mode,
-    admission: mode === 'environment-hosted'
+    admission: supported
       ? Object.freeze({ available: true })
       : Object.freeze({ available: false, refusal: HOST_RUN_UNAVAILABLE }),
+    taskAdmission: tasksSupported
+      ? Object.freeze({ available: true })
+      : Object.freeze({ available: false, refusal: HOST_RUN_TASK_REFUSAL }),
   });
 }
 
 export function executionModeAdmissionRefusal(strategy: ExecutionStrategy): string | undefined {
   return strategy.admission.available ? undefined : strategy.admission.refusal;
+}
+
+export function taskExecutionModeAdmissionRefusal(strategy: ExecutionStrategy): string | undefined {
+  return strategy.taskAdmission.available ? undefined : strategy.taskAdmission.refusal;
 }

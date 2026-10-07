@@ -52,6 +52,8 @@ interface RunRow {
   readonly agent_id: string;
   readonly prompt: string;
   readonly environment_instance_id: string;
+  readonly execution_mode: string;
+  readonly engine_host_profile_id: string | null;
   readonly project_id: string | null;
   readonly task_id: string | null;
   readonly status: string;
@@ -101,6 +103,8 @@ export class SqliteRunStore implements RunStore {
         agent_id TEXT NOT NULL,
         prompt TEXT NOT NULL,
         environment_instance_id TEXT NOT NULL,
+        execution_mode TEXT NOT NULL DEFAULT 'environment-hosted',
+        engine_host_profile_id TEXT,
         project_id TEXT,
         status TEXT NOT NULL,
         events TEXT NOT NULL,
@@ -125,6 +129,9 @@ export class SqliteRunStore implements RunStore {
     // Added after the table shipped; a database from before this column still
     // has its runs, they simply carry no recorded hand-off.
     this.#addColumnIfMissing('agent_runs', 'project_id', 'TEXT');
+    this.#addColumnIfMissing('agent_runs', 'execution_mode', "TEXT NOT NULL DEFAULT 'environment-hosted'");
+    this.#addColumnIfMissing('agent_runs', 'engine_host_profile_id', 'TEXT');
+    this.#db.exec("UPDATE agent_runs SET engine_host_profile_id = environment_instance_id WHERE engine_host_profile_id IS NULL AND execution_mode = 'environment-hosted'");
     this.#addColumnIfMissing('agent_runs', 'hand_off', 'TEXT');
     this.#addColumnIfMissing('agent_runs', 'failure_class', "TEXT CHECK(failure_class IN ('admission', 'environment', 'restart', 'execution'))");
     this.#addColumnIfMissing('agent_runs', 'task_id', 'TEXT');
@@ -174,8 +181,8 @@ export class SqliteRunStore implements RunStore {
     this.#db
       .prepare(
         `INSERT INTO agent_runs
-           (id, agent_id, prompt, environment_instance_id, project_id, task_id, status, events, lease_id, failure, failure_class, result, created_at, completed_at, hand_off, token_usage, replay_sequence, work_option, configuration_version, workspace_binding, recovery_settlement, recovered_events, retry_of_run_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (id, agent_id, prompt, environment_instance_id, execution_mode, engine_host_profile_id, project_id, task_id, status, events, lease_id, failure, failure_class, result, created_at, completed_at, hand_off, token_usage, replay_sequence, work_option, configuration_version, workspace_binding, recovery_settlement, recovered_events, retry_of_run_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            status = excluded.status,
            events = excluded.events,
@@ -200,6 +207,8 @@ export class SqliteRunStore implements RunStore {
         run.agentId,
         run.prompt,
         run.environmentInstanceId,
+        run.executionMode ?? 'environment-hosted',
+        run.engineHostProfileId ?? (run.executionMode === 'host-run' ? null : run.environmentInstanceId),
         run.projectId ?? null,
         run.taskId ?? null,
         run.status,
@@ -286,6 +295,8 @@ export class SqliteSessionKeyStore implements SessionKeyStore {
         agent_id TEXT NOT NULL,
         engine TEXT NOT NULL,
         environment_instance_id TEXT NOT NULL,
+        execution_mode TEXT NOT NULL DEFAULT 'environment-hosted',
+        engine_host_profile_id TEXT NOT NULL DEFAULT '',
         working_directory_id TEXT NOT NULL,
         session_key TEXT NOT NULL,
         updated_at INTEGER NOT NULL
@@ -297,6 +308,20 @@ export class SqliteSessionKeyStore implements SessionKeyStore {
     const names = new Set(columns.map((column) => column.name));
     if (names.has('working_directory') && !names.has('working_directory_id')) {
       this.#migrateLegacySessionKeys();
+      return;
+    }
+    if (!names.has('execution_mode')) {
+      this.#db.exec("ALTER TABLE agent_session_keys ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'environment-hosted'");
+    }
+    if (!names.has('engine_host_profile_id')) {
+      this.#db.exec("ALTER TABLE agent_session_keys ADD COLUMN engine_host_profile_id TEXT NOT NULL DEFAULT ''");
+    }
+    const legacySlots = this.#db.prepare("SELECT slot, agent_id, engine, environment_instance_id, working_directory_id FROM agent_session_keys WHERE engine_host_profile_id = ''").all() as unknown as readonly SessionKeyRow[];
+    const rekey = this.#db.prepare('UPDATE agent_session_keys SET slot = ?, engine_host_profile_id = ? WHERE slot = ?');
+    for (const row of legacySlots) {
+      const profileId = row.environment_instance_id;
+      const slot = JSON.stringify(['environment-hosted', profileId, row.agent_id, row.engine, row.environment_instance_id, row.working_directory_id]);
+      rekey.run(slot, profileId, row.slot);
     }
   }
 
@@ -311,6 +336,8 @@ export class SqliteSessionKeyStore implements SessionKeyStore {
           agent_id TEXT NOT NULL,
           engine TEXT NOT NULL,
           environment_instance_id TEXT NOT NULL,
+          execution_mode TEXT NOT NULL DEFAULT 'environment-hosted',
+          engine_host_profile_id TEXT NOT NULL,
           working_directory_id TEXT NOT NULL,
           session_key TEXT NOT NULL,
           updated_at INTEGER NOT NULL
@@ -318,14 +345,16 @@ export class SqliteSessionKeyStore implements SessionKeyStore {
       `);
       const insert = this.#db.prepare(`
         INSERT INTO agent_session_keys
-          (slot, agent_id, engine, environment_instance_id, working_directory_id, session_key, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+          (slot, agent_id, engine, environment_instance_id, execution_mode, engine_host_profile_id, working_directory_id, session_key, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       for (const row of rows) {
         const identity: SessionKeyIdentity = {
           agentId: row.agent_id,
           engine: row.engine,
           environmentInstanceId: row.environment_instance_id,
+          executionMode: 'environment-hosted',
+          engineHostProfileId: row.environment_instance_id,
           workingDirectory: row.working_directory,
         };
         const directoryId = workingDirectoryId(row.working_directory);
@@ -333,6 +362,8 @@ export class SqliteSessionKeyStore implements SessionKeyStore {
           sessionKeyId(identity),
           row.agent_id,
           row.engine,
+          row.environment_instance_id,
+          'environment-hosted',
           row.environment_instance_id,
           directoryId,
           row.session_key,
@@ -358,8 +389,8 @@ export class SqliteSessionKeyStore implements SessionKeyStore {
     this.#db
       .prepare(
         `INSERT INTO agent_session_keys
-           (slot, agent_id, engine, environment_instance_id, working_directory_id, session_key, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+           (slot, agent_id, engine, environment_instance_id, execution_mode, engine_host_profile_id, working_directory_id, session_key, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(slot) DO UPDATE SET
            session_key = excluded.session_key,
            updated_at = excluded.updated_at`,
@@ -369,6 +400,8 @@ export class SqliteSessionKeyStore implements SessionKeyStore {
         record.agentId,
         record.engine,
         record.environmentInstanceId,
+        record.executionMode ?? 'environment-hosted',
+        record.engineHostProfileId ?? record.environmentInstanceId,
         directoryId,
         record.key,
         record.updatedAt,
@@ -414,6 +447,9 @@ function toRun(row: RunRow): AgentRun {
     agentId: row.agent_id,
     prompt: row.prompt,
     environmentInstanceId: row.environment_instance_id,
+    ...(row.execution_mode === 'host-run' ? { executionMode: 'host-run' as const } : {}),
+    ...(row.engine_host_profile_id !== null && row.execution_mode === 'host-run'
+      ? { engineHostProfileId: row.engine_host_profile_id } : {}),
     ...(row.project_id !== null ? { projectId: row.project_id } : {}),
     ...(row.task_id !== null ? { taskId: row.task_id } : {}),
     status: row.status as AgentRunStatus,
@@ -441,6 +477,8 @@ interface SessionKeyRow {
   readonly agent_id: string;
   readonly engine: string;
   readonly environment_instance_id: string;
+  readonly execution_mode: string;
+  readonly engine_host_profile_id: string;
   readonly working_directory_id: string;
   readonly session_key: string;
   readonly updated_at: number;
@@ -460,6 +498,8 @@ function toStoredSessionKey(row: SessionKeyRow): StoredSessionKey {
     agentId: row.agent_id,
     engine: row.engine,
     environmentInstanceId: row.environment_instance_id,
+    executionMode: row.execution_mode === 'host-run' ? 'host-run' : 'environment-hosted',
+    engineHostProfileId: row.engine_host_profile_id,
     workingDirectoryId: row.working_directory_id,
     key: row.session_key,
     updatedAt: row.updated_at,

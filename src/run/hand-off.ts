@@ -34,8 +34,12 @@ const DEFAULT_MAX_CHARACTERS = 1_200;
 const MAX_ENTRY_CHARACTERS = 400;
 
 export interface HandOffContext {
-  /** The instance the previous run used. */
+  /** The Environment instance the previous run used, when Environment-hosted. */
   readonly previousEnvironmentInstanceId: string;
+  /** Execution placement used by the prior run. */
+  readonly previousExecutionMode?: import('../execution-mode.ts').ExecutionMode;
+  /** Opaque local Engine profile identity, when the prior run was Host-run. */
+  readonly previousEngineHostProfileId?: string;
   /** The bounded, fact-form summary text. */
   readonly text: string;
   /** Which runs contributed a fact, so the hand-off is auditable. */
@@ -57,9 +61,17 @@ export interface HandOffContext {
 export function shouldAttachHandOff(request: {
   readonly previousEnvironmentInstanceId: string | undefined;
   readonly currentEnvironmentInstanceId: string;
+  readonly previousExecutionMode?: import('../execution-mode.ts').ExecutionMode;
+  readonly currentExecutionMode?: import('../execution-mode.ts').ExecutionMode;
+  readonly previousEngineHostProfileId?: string;
+  readonly currentEngineHostProfileId?: string;
 }): boolean {
   const previous = request.previousEnvironmentInstanceId;
   if (previous === undefined) return false;
+  const previousMode = request.previousExecutionMode ?? 'environment-hosted';
+  const currentMode = request.currentExecutionMode ?? 'environment-hosted';
+  if (previousMode !== currentMode) return true;
+  if (currentMode === 'host-run') return request.previousEngineHostProfileId !== request.currentEngineHostProfileId;
   return previous !== request.currentEnvironmentInstanceId;
 }
 
@@ -133,8 +145,11 @@ function priorRuns(
  * How the hand-off opens, so a reader knows it is prior-work context and not a
  * user request. Chosen so the shortest useful hand-off still states the move.
  */
-function moveNotice(previousEnvironmentInstanceId: string): string {
-  return `This run continues prior work after a move from environment instance ${previousEnvironmentInstanceId}.`;
+function moveNotice(previous: AgentRun): string {
+  const placement = previous.executionMode === 'host-run'
+    ? `Engine host profile ${previous.engineHostProfileId ?? 'unknown'}`
+    : `environment instance ${previous.environmentInstanceId}`;
+  return `This run continues prior work after a move from ${placement}.`;
 }
 
 /**
@@ -183,13 +198,17 @@ export function buildHandOffContext(
     // silently exceeded.
     return {
       previousEnvironmentInstanceId: previous.environmentInstanceId,
-      text: bound(moveNotice(previous.environmentInstanceId), maxCharacters),
+      previousExecutionMode: previous.executionMode ?? 'environment-hosted',
+      ...(previous.engineHostProfileId !== undefined ? { previousEngineHostProfileId: previous.engineHostProfileId } : {}),
+      text: bound(moveNotice(previous), maxCharacters),
       sourceRunIds: [],
     };
   }
 
   return {
     previousEnvironmentInstanceId: previous.environmentInstanceId,
+    previousExecutionMode: previous.executionMode ?? 'environment-hosted',
+    ...(previous.engineHostProfileId !== undefined ? { previousEngineHostProfileId: previous.engineHostProfileId } : {}),
     text: entries.join('\n'),
     sourceRunIds,
   };
@@ -197,7 +216,9 @@ export function buildHandOffContext(
 
 /** One bounded fact line for a run, or `undefined` when it has no fact to state. */
 function factFor(run: AgentRun): string | undefined {
-  const where = run.environmentInstanceId;
+  const where = run.executionMode === 'host-run'
+    ? `Engine host profile ${run.engineHostProfileId ?? 'unknown'}`
+    : run.environmentInstanceId;
   if (run.status === 'stopped') return `- Stopped in ${where}`;
   switch (run.result?.status) {
     case 'completed': {
@@ -242,7 +263,9 @@ function bound(text: string, limit: number): string {
 export function renderHandOffPrompt(handOff: HandOffContext, prompt: string): string {
   return [
     '## Hand-off context',
-    'You are continuing prior work after moving to a different environment instance.',
+    handOff.previousExecutionMode === 'host-run'
+      ? 'You are continuing prior work after moving to a different Engine host profile.'
+      : 'You are continuing prior work after moving to a different environment instance.',
     'The following is a factual summary of earlier results. It contains no',
     'transcript and no other agent\'s private reasoning.',
     '',

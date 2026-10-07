@@ -48,10 +48,24 @@ test('a stored key round-trips through SQLite across a restart', async () => {
     agentId: identity.agentId,
     engine: identity.engine,
     environmentInstanceId: identity.environmentInstanceId,
+    executionMode: 'environment-hosted',
+    engineHostProfileId: identity.environmentInstanceId,
     workingDirectoryId: workingDirectoryId(identity.workingDirectory),
     key: 'sess-persisted',
     updatedAt: 1_000,
   });
+});
+
+test('Host-run continuation slots include the execution mode and Engine host profile', async () => {
+  const store = new InMemorySessionKeyStore();
+  const hostA = { ...identity, environmentInstanceId: '', executionMode: 'host-run' as const, engineHostProfileId: 'profile-a' };
+  const hostB = { ...hostA, engineHostProfileId: 'profile-b' };
+  await store.save({ ...hostA, key: 'host-a', updatedAt: 1_000 });
+  await store.save({ ...hostB, key: 'host-b', updatedAt: 1_001 });
+  assert.notEqual(sessionKeyId({ ...hostA, workingDirectory: identity.workingDirectory }),
+    sessionKeyId({ ...hostB, workingDirectory: identity.workingDirectory }));
+  assert.equal((await store.get({ ...hostA, workingDirectory: identity.workingDirectory }))?.key, 'host-a');
+  assert.equal((await store.get({ ...hostB, workingDirectory: identity.workingDirectory }))?.key, 'host-b');
 });
 
 test('re-saving a slot replaces its key instead of duplicating it', async () => {
@@ -105,6 +119,32 @@ test('SQLite session-key rows do not retain the working directory verbatim', asy
   db.close();
 
   assert.equal(JSON.stringify(rows).includes(rawWorkingDirectory), false);
+});
+
+test('a versioned hashed session-key table is re-keyed with Environment-hosted identity dimensions', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-session-key-v2-'));
+  const dbPath = join(dir, 'sprout.db');
+  const db = new DatabaseSync(dbPath);
+  db.exec(`CREATE TABLE agent_session_keys (
+    slot TEXT PRIMARY KEY, agent_id TEXT NOT NULL, engine TEXT NOT NULL,
+    environment_instance_id TEXT NOT NULL, working_directory_id TEXT NOT NULL,
+    session_key TEXT NOT NULL, updated_at INTEGER NOT NULL
+  )`);
+  const directoryId = workingDirectoryId(identity.workingDirectory);
+  db.prepare(`INSERT INTO agent_session_keys VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+    JSON.stringify([identity.agentId, identity.engine, identity.environmentInstanceId, directoryId]),
+    identity.agentId, identity.engine, identity.environmentInstanceId, directoryId, 'sess-v2', 1_000,
+  );
+  const store = new SqliteSessionKeyStore({ db });
+  const restored = await store.get(identity);
+  const rows = db.prepare('SELECT * FROM agent_session_keys').all();
+  store.close();
+  db.close();
+
+  assert.equal(restored?.key, 'sess-v2');
+  assert.equal(restored?.executionMode, 'environment-hosted');
+  assert.equal(restored?.engineHostProfileId, identity.environmentInstanceId);
+  assert.equal(rows.length, 1);
 });
 
 test('opening a legacy session-key table removes verbatim working directories', async () => {

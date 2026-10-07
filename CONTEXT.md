@@ -21,7 +21,7 @@ The single authentication boundary through which the Local Operator MVP's one Hu
 _Avoid_: Admin account, Team owner
 
 **Project**:
-A durable collaboration and management boundary with its own members, optional goal and rules, Environment access, Project workspaces, channels, and history. A Project remains complete when it has no Agent or Environment, although it cannot begin Agent work until the required resources are present.
+A durable collaboration and management boundary with its own members, optional goal and rules, Environment access, Project workspaces, channels, and history. A Project remains complete when it has no Agent or Environment; a project Message may still receive a Host-run Pi reply when its Agent and Sprout-host Engine profile are authorized.
 _Avoid_: Project group, group chat
 
 **Project channel**:
@@ -105,19 +105,23 @@ A persistent worker identity with its own capabilities, model configuration, and
 _Avoid_: Process, bot instance, environment agent
 
 **Agent work option**:
-One entry in an Agent's ordered execution preferences, naming an engine, work model, and effort. At run admission Sprout chooses the first option available on the selected Environment instance, and it never changes options automatically after an engine accepts the run.
+One entry in an Agent's ordered execution preferences, naming an engine, work model, and effort. Environment-hosted admission checks the selected Environment's observed facts; Host-run admission checks the local Pi profile's exact authorized model and supported effort before accepting the Message run. Sprout never switches options after an engine accepts a run.
 _Avoid_: Environment binding, model fallback retry
 
 **Execution mode**:
-The immutable, process-wide choice made when a Sprout instance starts: `environment-hosted` places engine execution in the selected Environment worker, while `host-run` places engine execution on the Sprout host. Omission selects `environment-hosted` on every startup. Settings reports the effective mode; changing it requires restarting Sprout with a different startup argument.
+The immutable, process-wide choice made when a Sprout instance starts: `environment-hosted` places engine execution in the selected Environment worker, while `host-run` places supported one-round Message conversations on the Sprout host through its authorized Pi profile. Host-run Message admission needs no work Environment lookup or lease. It does not provide Project workspace access or Task execution; Tasks require Environment-hosted mode. Omission selects `environment-hosted` on every startup. Settings reports the effective mode and Host Pi readiness; changing mode requires restarting Sprout with a different startup argument.
 _Avoid_: Browser preference, runtime switch
 
 **Engine host**:
-The host that runs an engine process, owns its engine session storage, and holds its engine login. It is the Environment host in `environment-hosted` mode and the Sprout host in `host-run` mode, independently of the work Environment that owns files and remote operations.
+The host that runs an engine process, owns its engine session storage, and holds its engine login. It is the Environment host in `environment-hosted` mode and the Sprout host in `host-run` mode. A Host-run Pi profile has one explicit provider/model authority and a host-local session namespace, independent of any work Environment.
 _Avoid_: Work Environment, Project workspace
 
+**Host Pi readiness**:
+A Sprout-host-local, non-inference observation that the pinned Pi runtime, configured authentication, exact authorized model, and required isolated adapter controls are available for one Host-run profile. It does not contact an Environment Worker or perform a model turn.
+_Avoid_: Environment readiness, smoke run, hidden model call
+
 **Agent run**:
-One bounded activation of an agent in response to a message, task, or system event. A run executing inside a Task is a nested activation: it neither acquires nor releases that Task's environment lease.
+One bounded activation of an agent in response to a message, task, or system event. Its durable execution mode records where the engine ran; a Host-run record also names its opaque Engine host profile. A run executing inside a Task is a nested activation: it neither acquires nor releases that Task's environment lease.
 _Avoid_: Agent, task
 
 **Agent run stop**:
@@ -125,11 +129,11 @@ An intentional request by a Human or Task lead to settle one active Task-linked 
 _Avoid_: Chat run interruption, Task pause, Task end
 
 **Chat run interruption**:
-A Human-authorized request from Chat to settle an active run outside a Task. Its outcome is interrupted with a Human-stop reason, and its run-held Environment lease is released before the conversation is reused.
+A Human-authorized request from Chat to settle an active run outside a Task. Its outcome is interrupted with a Human-stop reason. An Environment-hosted run releases its run-held Environment lease before the conversation is reused; a Host-run Pi child is interrupted and closed without contacting an Environment.
 _Avoid_: Agent run stop, Task interruption, Task end
 
 **Usage activity**:
-One model-consuming activity observed by Sprout: either an Agent run using its work model or a Routing attempt using a wake model. A Routing attempt belongs to its Project but never to an Agent or Task.
+One model-consuming activity observed by Sprout: either an Agent run using its work model or a Routing attempt using a wake model. A run activity records its execution placement and Engine host profile when applicable. A Routing attempt belongs to its Project but never to an Agent or Task.
 _Avoid_: Billable run, Agent run
 
 **Usage observation**:
@@ -165,7 +169,7 @@ The Human escalation available while a Task pause request still has an active ag
 _Avoid_: Interruption, Task pause, Task end
 
 **Session key**:
-The opaque, engine-native identifier of the conversation an agent run continued or created, stored by Sprout so the next run in the same environment and working directory can continue it. Owned by the engine; Sprout chooses it for Pi and captures it for the others.
+The opaque, engine-native identifier of the conversation an agent run continued or created, stored by Sprout so a later run in the same execution mode, Engine host profile, Environment slot, and working directory can continue it. Owned by the engine; Sprout chooses it for Pi and captures it for the others.
 _Avoid_: Session id, thread id, conversation id
 
 **Work model**:

@@ -9,14 +9,16 @@ import { AgentRegistry, type AgentDefinition } from './agent/registry.ts';
 import type { AgentStore } from './agent/store.ts';
 import { AgentService } from './agent/service.ts';
 import type { Agent } from './agent/model.ts';
+import type { AgentWorkOption } from './agent/model.ts';
 import { currentConfiguration, currentOptions } from './agent/model.ts';
-import { projectAgentCompatibility } from './agent/compatibility.ts';
+import { projectAgentCompatibility, type AgentCompatibilityProjection, type OptionAvailabilityState } from './agent/compatibility.ts';
 import {
   CollaborationCoordinator,
   type CollaborationCoordinatorOptions,
 } from './collaboration/coordinator.ts';
 import type { CollaborationStore } from './collaboration/store.ts';
 import type { EngineAdapter } from './engine/port.ts';
+import { createProductionHostPiAdapter, isHostPiEffortSupported, type HostPiEngineAdapter, type HostPiReadiness } from './engine/pi-host.ts';
 import type { EnvironmentDefinition, EnvironmentInstance } from './environment/model.ts';
 import {
   ADMISSION_CAPABILITY,
@@ -342,6 +344,10 @@ export interface SproutRuntime {
   readonly environmentSource: EnvironmentSource;
   /** Immutable execution strategy selected once for this process. */
   readonly executionStrategy: ExecutionStrategy;
+  /** The optional Sprout-host Pi profile used by Host-run conversations. */
+  readonly hostPi: HostPiEngineAdapter | undefined;
+  /** A non-inference readiness observation independent of Environment Workers. */
+  hostPiReadiness(): Promise<HostPiReadiness | undefined>;
   /**
    * The enrollment-backed outbound Worker gateway and its connection epochs
    * (#115). Present so Web-created pending enrollments have a machine channel.
@@ -397,6 +403,8 @@ export interface SproutRuntimeOptions {
    * assembled without starting a worker or an engine.
    */
   readonly environment?: RuntimeEnvironment;
+  /** Injected local Pi Engine profile for Host-run composition and tests. */
+  readonly hostPi?: HostPiEngineAdapter;
   /**
    * Overrides the production SQLite stores.
    *
@@ -423,6 +431,60 @@ export type SproutTestComposition = {
     workerGateway: WorkerGateway;
     readinessWorkflow: EnvironmentReadinessWorkflow;
 };
+
+export function projectHostPiCompatibility(
+  workOptions: readonly AgentWorkOption[],
+  host: HostPiEngineAdapter | undefined,
+  readiness: HostPiReadiness | undefined,
+): AgentCompatibilityProjection {
+  const options = workOptions.map((option) => {
+    let state: OptionAvailabilityState;
+    let reason: string;
+    if (host === undefined) {
+      state = 'unknown';
+      reason = 'No Sprout-host Pi profile is configured.';
+    } else if (option.engine !== 'pi') {
+      state = 'missing';
+      reason = 'Host-run supports the Pi engine only.';
+    } else if (option.workModel !== host.authorizedModel) {
+      state = 'model-unavailable';
+      reason = 'The exact work model is not authorized by the Sprout-host Pi profile.';
+    } else if (!isHostPiEffortSupported(option.effort || 'medium')) {
+      state = 'model-unavailable';
+      reason = 'The requested Pi effort is not supported by the Sprout host.';
+    } else if (readiness === undefined || readiness.status === 'unknown') {
+      state = 'unknown';
+      reason = 'Sprout-host Pi readiness is unknown.';
+    } else if (readiness.installation === 'missing' || readiness.installation === 'unsupported') {
+      state = 'missing';
+      reason = 'The pinned Pi runtime is unavailable on the Sprout host.';
+    } else if (readiness.authentication === 'not-ready') {
+      state = 'login-required';
+      reason = 'Pi authentication is not ready for the Sprout-host profile.';
+    } else if (readiness.modelAvailability === 'unavailable') {
+      state = 'model-unavailable';
+      reason = 'The exact authorized model is unavailable on the Sprout host.';
+    } else if (readiness.adapterControls === 'unavailable') {
+      state = 'model-unavailable';
+      reason = 'Required isolated Pi controls are unavailable on the Sprout host.';
+    } else if (readiness.status === 'unavailable') {
+      state = 'unknown';
+      reason = 'Sprout-host Pi readiness is unavailable or unverified.';
+    } else {
+      state = 'available';
+      reason = 'The exact Pi model and effort are ready on the Sprout host.';
+    }
+    return { option, state, reason };
+  });
+  const firstAvailable = options.find((option) => option.state === 'available');
+  return {
+    options,
+    available: firstAvailable !== undefined,
+    ...(firstAvailable !== undefined ? { firstAvailable: firstAvailable.option } : {}),
+    ...(firstAvailable === undefined ? { unavailableReason: options[0]?.reason ?? 'No work option is configured.' } : {}),
+    explanation: 'Host-run compatibility uses only the Sprout-host Pi profile. It does not inspect Environment readiness; Project membership and exact model authority are checked again at run admission.',
+  };
+}
 
 function taskGroupSyncInput(task: Task): TaskGroupSyncInput | undefined {
   const admission = task.admission;
@@ -493,7 +555,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     leaseTtlMs,
   } = configuration;
 
-  const executionStrategy = createExecutionStrategy(configuration.executionMode);
+  const hostPi = options.hostPi ?? (options.environment === undefined
+    ? createProductionHostPiAdapter(process.env, { providerRoot: join(projectRoot, '..', 'pi-extensions', 'pi-magpie') })
+    : undefined);
+  const executionStrategy = createExecutionStrategy(configuration.executionMode, hostPi !== undefined);
 
   /**
    * The host facts carrier and platform selection both depend on.
@@ -1072,6 +1137,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       // (ADR-0003), and so execution follows the leased instance (F1, #18).
       engines: (requestedInstanceId) => runtimeEnvironment.adapters(requestedInstanceId),
       executionStrategy,
+      ...(hostPi !== undefined ? { hostPi } : {}),
       agents,
       resolveAgent,
       // Observed engine facts (#87) per instance, so run admission can take the
@@ -1781,6 +1847,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
 
     operations = new OperatorDiagnostics({ store: stores.operations ?? new MemoryOperationalStore(), schema: stores.schemaVersion ?? null, auth: operatorSessions, enrollments, recovery,
       executionStrategy,
+      hostPiReadiness: () => hostPi === undefined ? Promise.resolve(undefined) : hostPi.readiness(),
       connected: (instanceId) => workerGateway.liveFor(instanceId) !== undefined,
       run: async (id) => {
         const run = orchestrator.get(id) ?? await durableStores.runs.get(id);
@@ -1977,6 +2044,18 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           agents: agentService,
           onMutation: scheduleCatalogRefresh,
           compatibility: async (agent: Agent, requestedInstanceId?: string) => {
+            if (executionStrategy.mode === 'host-run') {
+              const readiness = hostPi === undefined ? undefined : await hostPi.readiness();
+              const projection = projectHostPiCompatibility(currentOptions(agent), hostPi, readiness);
+              return {
+                agentId: agent.id,
+                available: projection.available,
+                ...(projection.firstAvailable !== undefined ? { firstAvailable: projection.firstAvailable } : {}),
+                ...(projection.unavailableReason !== undefined ? { unavailableReason: projection.unavailableReason } : {}),
+                options: projection.options,
+                explanation: projection.explanation,
+              };
+            }
             // The compatibility projection reports the first eligible enrolled
             // instance's observed engines, falling back to enrolled instances
             // with observed facts when none is yet eligible (#129 AC1, AC2).
@@ -2083,8 +2162,13 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       enrollmentEnvironment,
       environmentSource,
       executionStrategy,
+      hostPi,
       engines,
       refreshEnvironmentCatalog,
+
+      async hostPiReadiness(): Promise<HostPiReadiness | undefined> {
+        return hostPi === undefined ? undefined : hostPi.readiness(true);
+      },
 
       /** Reconcile runs, then Task lifecycle, then recovery records, then
        * collaboration; runs first so no reply can ever be fabricated for an

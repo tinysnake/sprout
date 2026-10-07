@@ -82,3 +82,30 @@ test('export selects typed facts from enrollment, readiness and recovery without
   await auth.revokeSession(session.session.id);
   await assert.rejects(operations.settings(session.session.id));
 });
+
+test('Host Pi Settings projects local readiness facts without exposing its profile identity', async () => {
+  const secretProfileId = 'opaque-local-profile-id';
+  const auth = new OperatorSessionService({ store: new InMemoryOperatorSessionStore() });
+  await auth.initializeOrRecover('synthetic-credential');
+  const login = (await auth.signIn('synthetic-credential'))!;
+  const session = await auth.authenticate(login.bearerToken);
+  assert.ok(session.authenticated);
+  const operations = new OperatorDiagnostics({
+    store: new MemoryOperationalStore(), schema: 22, auth,
+    executionStrategy: createExecutionStrategy('host-run', true),
+    hostPiReadiness: async () => ({
+      profileId: secretProfileId, engine: 'pi', status: 'ready', installation: 'ready',
+      authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready',
+      version: '1.0.4', observedAt: 1_000,
+    }),
+    enrollments: { list: async () => [] } as never,
+    recovery: { list: async () => [] } as never,
+  });
+  const settings = await operations.settings(session.session.id);
+  assert.equal(settings.executionMode, 'host-run');
+  assert.deepEqual(settings.hostPi, {
+    status: 'ready', installation: 'ready', authentication: 'ready',
+    modelAvailability: 'available', adapterControls: 'ready', version: '1.0.4',
+  });
+  assert.equal(JSON.stringify(settings).includes(secretProfileId), false);
+});

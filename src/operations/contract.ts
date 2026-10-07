@@ -71,6 +71,15 @@ export interface OperatorSettings {
   readonly versions: DiagnosticVersions;
   /** Authoritative execution mode selected when this Sprout process started. */
   readonly executionMode: ExecutionMode;
+  /** Read-only local Pi readiness; independent of Environment Worker readiness. */
+  readonly hostPi?: {
+    readonly status: 'not-configured' | 'ready' | 'unavailable' | 'unknown';
+    readonly installation?: 'ready' | 'missing' | 'unsupported' | 'unknown';
+    readonly authentication?: 'ready' | 'not-ready' | 'unknown';
+    readonly modelAvailability?: 'available' | 'unavailable' | 'unknown';
+    readonly adapterControls?: 'ready' | 'unavailable' | 'unknown';
+    readonly version?: string;
+  };
   readonly session: { readonly authenticated: true; readonly activeCount: number };
   readonly access: { readonly boundary: 'private-network-and-authentication'; readonly publicInternetSupported: false };
   readonly responsibilities: { readonly web: readonly ['sessions', 'enrollment', 'recovery', 'diagnostics']; readonly hostLocal: readonly ['credentials', 'engine-login', 'service', 'network', 'backup', 'upgrade'] };
