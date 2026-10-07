@@ -75,6 +75,61 @@ test('authenticated Pause and Interrupt route stop an active Task run and preser
   } finally { await runtime.close(); }
 });
 
+test('authenticated Task Resume directly restores a Force Released Task through the Human control route', async () => {
+  const credential = randomBytes(32).toString('base64url');
+  const { runtime } = await build({
+    configuration: { operatorCredential: credential }, listen: false,
+    environment: scriptedEnvironment({ adapters: new Map([['scripted', new ScriptedEngineAdapter({ turns: [] })]]) }),
+  });
+  const { port } = await runtime.api.listen(Number(process.env.TASK_STOPPED_RESUME_PORT ?? 0));
+  const base = new URL('http://localhost');
+  base.port = String(port);
+  try {
+    const signIn = await fetch(new URL('/api/auth/session', base), {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ credential }),
+    });
+    const cookie = (signIn.headers.get('set-cookie') ?? '').split(';', 1)[0]!;
+    const { csrfToken } = await signIn.json() as { csrfToken: string };
+    const post = (path: string, body: unknown, session = true, csrf = true) => fetch(new URL(path, base), {
+      method: 'POST', headers: { 'content-type': 'application/json', ...(session ? { cookie } : {}), ...(csrf ? { 'x-sprout-csrf': csrfToken } : {}) },
+      body: JSON.stringify(body),
+    });
+    const proposalResponse = await post(`/api/projects/${PROJECT_ID}/task-proposals`, content);
+    assert.equal(proposalResponse.status, 201);
+    const { proposal } = await proposalResponse.json() as { proposal: { id: string; revision: number } };
+    const begunResponse = await post(`/api/task-proposals/${proposal.id}/begin`, {
+      expectedRevision: proposal.revision, environmentInstanceId: INSTANCE_ID,
+      lead: { memberId: 'operator', memberKind: 'human' }, reason: 'Human approval',
+    });
+    assert.equal(begunResponse.status, 201);
+    const { task } = await begunResponse.json() as { task: TaskView };
+    const before = (await runtime.tasks.get(task.id))!;
+    const oldLeaseId = before.environmentLeaseId!;
+    await runtime.stores.tasks.save({
+      ...before, status: 'stopped', completedAt: 500, environmentLifecycleState: 'discarded',
+      blockerReason: 'Task stopped by the Human operator using Force Release; unresolved facts recorded.',
+      forcedRelease: { actor: 'operator', reason: 'Emergency release', unresolvedFacts: ['engine stop not proved'], at: 500 },
+    });
+    assert.ok(runtime.pool.releaseTaskLease(oldLeaseId));
+
+    const path = `/api/tasks/${task.id}/resume`;
+    assert.equal((await post(path, { reason: 'Continue the original work.' }, false)).status, 401);
+    assert.equal((await post(path, { reason: 'Continue the original work.' }, true, false)).status, 403);
+    assert.equal((await post(path, { reason: 'Continue the original work.', actor: { memberId: 'scout', memberKind: 'agent' } })).status, 400);
+
+    const resumedResponse = await post(path, { reason: 'Continue the original work.' });
+    assert.equal(resumedResponse.status, 200);
+    const resumed = (await resumedResponse.json() as { task: TaskView }).task;
+    assert.equal(resumed.status, 'in-progress');
+    assert.equal(resumed.environmentLifecycleState, 'idle');
+    assert.notEqual(resumed.environmentLeaseId, oldLeaseId);
+    assert.equal(resumed.completedAt, undefined);
+    assert.equal(resumed.forcedRelease?.unresolvedFacts[0], 'engine stop not proved');
+    assert.equal(resumed.controlHistory?.at(-1)?.action, 'resumed');
+    assert.equal(resumed.controlHistory?.some((event) => event.action === 'reopened'), false);
+  } finally { await runtime.close(); }
+});
+
 test('authenticated Human may submit a marked substitute claim for an Agent-led Task and accept it to completion', async () => {
   const credential = randomBytes(32).toString('base64url');
   const { runtime } = await build({

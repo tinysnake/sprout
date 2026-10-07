@@ -23,28 +23,30 @@ import type { EnvironmentPreference } from '../environment/model.ts';
  * The durable lifecycle of one Task.
  *
  * `todo` and `blocked` are both *advanceable*: starting work from either moves
- * the Task to `in-progress`. The terminal states are `done`, `failed`,
- * `stopped`, and `cancelled`; a terminal Task is never silently reopened by advancement.
+ * the Task to `in-progress`. Status family and Task-group freeze behavior are
+ * defined together in `TASK_STATUS_DATA`; `stopped` keeps live intent while its
+ * Force Released Task group stays frozen until a Human resumes it.
  */
-export type TaskStatus =
-  | 'todo'
-  | 'in-progress'
-  | 'blocked'
-  | 'done'
-  | 'failed'
-  | 'stopped'
-  | 'cancelled';
+export const TASK_STATUS_DATA = {
+  todo: { family: 'active-intent', freezeTaskGroup: false },
+  'in-progress': { family: 'active-intent', freezeTaskGroup: false },
+  blocked: { family: 'active-intent', freezeTaskGroup: false },
+  done: { family: 'ended', freezeTaskGroup: true },
+  failed: { family: 'ended', freezeTaskGroup: true },
+  stopped: { family: 'active-intent', freezeTaskGroup: true },
+  cancelled: { family: 'ended', freezeTaskGroup: true },
+} as const satisfies Record<string, { readonly family: 'active-intent' | 'ended'; readonly freezeTaskGroup: boolean }>;
+
+export type TaskStatus = keyof typeof TASK_STATUS_DATA;
+type TaskStatusInFamily<Family extends 'active-intent' | 'ended'> = {
+  [Status in TaskStatus]: typeof TASK_STATUS_DATA[Status]['family'] extends Family ? Status : never
+}[TaskStatus];
+export type ActiveIntentTaskStatus = TaskStatusInFamily<'active-intent'>;
+export type EndedTaskStatus = TaskStatusInFamily<'ended'>;
 
 /** Every status, for validation and for the store's SQL CHECK arguments. */
-export const TASK_STATUSES: readonly TaskStatus[] = [
-  'todo',
-  'in-progress',
-  'blocked',
-  'done',
-  'failed',
-  'stopped',
-  'cancelled',
-];
+export const TASK_STATUSES: readonly TaskStatus[] = Object.keys(TASK_STATUS_DATA) as TaskStatus[];
+
 
 /** The outer Task-held-environment lifecycle (#32), separate from Task progress. */
 export type TaskEnvironmentLifecycleState =
@@ -119,7 +121,7 @@ export type TaskControlEvent =
   | { readonly action: 'content-revised'; readonly actor: TaskActor; readonly at: number; readonly reason: string; readonly contentVersion: number; readonly previous: TaskContent; readonly content: TaskContent }
   | { readonly action: 'pause-requested'; readonly actor: TaskActor; readonly at: number; readonly reason: string }
   | { readonly action: 'pause-retry-required' | 'pause-request-cancelled'; readonly actor: TaskActor; readonly at: number; readonly reason: string }
-  | { readonly action: 'paused' | 'interrupt-requested' | 'resumed'; readonly actor: TaskActor; readonly at: number; readonly reason: string }
+  | { readonly action: 'resumed'; readonly actor: TaskActor; readonly at: number; readonly reason: string; readonly fromStatus?: 'stopped' }
   | { readonly action: 'subordinate-run-stop-requested'; readonly actor: TaskActor; readonly at: number; readonly runId: string; readonly reason: string }
   | { readonly action: 'blocker-raised'; readonly actor: TaskActor; readonly at: number; readonly blocker: TaskBlocker }
   | { readonly action: 'blocker-cleared'; readonly actor: TaskActor; readonly at: number; readonly reason: string }
@@ -252,9 +254,14 @@ export interface TaskWithRuns {
   readonly runs: readonly TaskRunLink[];
 }
 
-/** The terminal statuses a Task can reach. */
-export function isTerminalTaskStatus(status: TaskStatus): boolean {
-  return status === 'done' || status === 'failed' || status === 'stopped' || status === 'cancelled';
+/** Whether the Task still carries live intent, including stopped and paused work. */
+export function isActiveIntentTaskStatus(status: TaskStatus): status is ActiveIntentTaskStatus {
+  return TASK_STATUS_DATA[status].family === 'active-intent';
+}
+
+/** Whether the Task intent has ended; stopped is deliberately excluded. */
+export function isEndedTaskStatus(status: TaskStatus): status is EndedTaskStatus {
+  return TASK_STATUS_DATA[status].family === 'ended';
 }
 
 /** Whether advancing a Task from `status` is permitted. */

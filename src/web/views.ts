@@ -37,7 +37,7 @@ import type {
 import { sanitizeObservedReadiness } from '../environment/readiness-observation.ts';
 import type { AgentRun, TokenUsage } from '../run/model.ts';
 import type { Agent, AgentWorkOption } from '../agent/model.ts';
-import type { Task, TaskRunLink, TaskWithRuns } from '../task/model.ts';
+import type { Task, TaskRunLink, TaskStatus, TaskWithRuns } from '../task/model.ts';
 import { normalizeEnrollment, type EnvironmentEnrollment } from '../environment/enrollment.ts';
 import type { EnvironmentRecoveryRecord, ForceReleaseRecord } from '../environment/recovery.ts';
 import {
@@ -1562,7 +1562,7 @@ export interface TaskGroupScopeView extends ConversationScopeBaseView {
   readonly taskTitle: string;
   readonly status: 'active' | 'frozen';
   readonly frozenAt?: number;
-  readonly terminalTaskStatus?: 'done' | 'failed' | 'stopped' | 'cancelled';
+  readonly terminalTaskStatus?: TaskStatus;
   readonly content: {
     readonly currentVersion: number;
     readonly versions: readonly TaskGroupContentVersionView[];

@@ -30,6 +30,7 @@
  * shared privacy boundary before it becomes durable.
  */
 
+import type { TaskStatus } from '../task/model.ts';
 import { createHash } from 'node:crypto';
 import { redactSensitiveText, sanitizeOperatorText } from '../environment/privacy.ts';
 
@@ -194,7 +195,7 @@ export interface TaskGroupScope extends ConversationScopeBase {
     readonly versions: readonly TaskGroupContentVersion[];
   };
   readonly frozenAt?: number;
-  readonly terminalTaskStatus?: 'done' | 'failed' | 'stopped' | 'cancelled';
+  readonly terminalTaskStatus?: TaskStatus;
 }
 
 /** One durable conversation scope. */

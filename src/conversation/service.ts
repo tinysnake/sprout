@@ -72,6 +72,7 @@ import {
   type WorkingGroupMembership,
   type WorkingGroupScope,
 } from './model.ts';
+import { TASK_STATUSES, TASK_STATUS_DATA, isEndedTaskStatus, type TaskStatus } from '../task/model.ts';
 import type { ConversationScopeStore } from './store.ts';
 import { redactSensitiveText, sanitizeOperatorText } from '../environment/privacy.ts';
 import {
@@ -152,7 +153,7 @@ export interface PreparedProjectChannel {
 
 export interface ConversationTaskFacts {
   readonly projectId: string;
-  readonly status: string;
+  readonly status: TaskStatus;
 }
 
 /** The Task authority facts needed to fail closed after Task termination. */
@@ -191,8 +192,8 @@ export interface TaskGroupSyncInput {
   readonly constraints: readonly string[];
   readonly lead: ConversationActor;
   readonly contentVersion: number;
-  readonly status: string;
-  /** A durable Human reopen event is required to thaw a terminal Task group. */
+  readonly status: TaskStatus;
+  /** A durable Human Reopen or stopped-Task Resume event permits thaw. */
   readonly allowThaw?: boolean;
   readonly versionActor?: ConversationActor;
   readonly reason?: string;
@@ -544,16 +545,17 @@ export class ConversationScopeService {
    */
   async syncTaskGroup(input: TaskGroupSyncInput): Promise<TaskGroupScope> {
     const facts = await this.#facts(input.projectId);
+    const taskStatus = input.status as TaskStatus;
     if (typeof input.taskId !== 'string' || input.taskId.trim() === ''
       || !Number.isSafeInteger(input.contentVersion) || input.contentVersion < 1
-      || !['todo', 'in-progress', 'blocked', 'done', 'failed', 'stopped', 'cancelled'].includes(input.status)) {
+      || !TASK_STATUSES.includes(taskStatus)) {
       throw new ConversationScopeError('task-group-content-conflict', 'Task group requires a valid Task binding and content version');
     }
     const id = taskGroupScopeId(input.taskId);
     const taskTitle = sanitizeOperatorText(input.title, { fallback: 'Task group', maxLength: 120 });
     const goal = sanitizeWorkingGroupGoal(input.goal);
     const rules = sanitizeWorkingGroupRules(input.constraints);
-    const terminalStatus = isTerminalTaskStatus(input.status) ? input.status : undefined;
+    const frozenTaskStatus = TASK_STATUS_DATA[taskStatus].freezeTaskGroup ? taskStatus : undefined;
     const actor = input.versionActor ?? input.lead;
     const reason = sanitizeWorkingGroupReason(
       input.reason ?? `Task content version ${input.contentVersion} was bound to this Task group.`,
@@ -588,7 +590,7 @@ export class ConversationScopeService {
               rules,
             }],
           },
-          ...(terminalStatus !== undefined ? { frozenAt: now, terminalTaskStatus: terminalStatus } : {}),
+          ...(frozenTaskStatus !== undefined ? { frozenAt: now, terminalTaskStatus: frozenTaskStatus } : {}),
           createdAt: now,
           updatedAt: now,
         };
@@ -600,7 +602,7 @@ export class ConversationScopeService {
       let next = group;
       if (group.frozenAt !== undefined) {
         if (terminalStatus !== undefined) {
-          if (group.terminalTaskStatus !== terminalStatus || latest.taskContentVersion !== input.contentVersion
+          if (group.terminalTaskStatus !== frozenTaskStatus || latest.taskContentVersion !== input.contentVersion
             || latest.taskTitle !== taskTitle || latest.goal !== goal || JSON.stringify(latest.rules) !== JSON.stringify(rules)) {
             throw new ConversationScopeError('task-group-binding-conflict', `frozen Task group ${group.id} cannot be rebound or revised`);
           }
@@ -639,8 +641,8 @@ export class ConversationScopeService {
           updatedAt: now,
         };
       }
-      if (terminalStatus !== undefined) {
-        next = { ...next, frozenAt: now, terminalTaskStatus: terminalStatus, updatedAt: now };
+      if (frozenTaskStatus !== undefined) {
+        next = { ...next, frozenAt: now, terminalTaskStatus: frozenTaskStatus, updatedAt: now };
       }
       saved = next;
       return next;
@@ -1038,7 +1040,7 @@ export class ConversationScopeService {
         if (task === undefined || task.projectId !== scope.projectId) {
           return { scopeId, writable: false, reason: 'task-group-task-unavailable' };
         }
-        if (isTerminalTaskStatus(task.status)) {
+        if (isEndedTaskStatus(task.status)) {
           return { scopeId, writable: false, reason: 'task-group-frozen' };
         }
       }
@@ -1270,10 +1272,6 @@ export class ConversationScopeService {
       );
     }
   }
-}
-
-function isTerminalTaskStatus(status: string): status is 'done' | 'failed' | 'stopped' | 'cancelled' {
-  return status === 'done' || status === 'failed' || status === 'stopped' || status === 'cancelled';
 }
 
 export { ConversationScopeError } from './model.ts';

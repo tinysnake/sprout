@@ -701,6 +701,23 @@ test('Task reopen control-history events produce separate task-centric Feed beat
   assert.equal(beats[0]?.target?.taskId, 'task-reopen');
 });
 
+test('Task Resume control-history events produce distinct task-resumed Feed beats', async () => {
+  const history: TaskControlEvent[] = [
+    { action: 'resumed', actor: { memberId: 'operator', memberKind: 'human' }, at: 1_000, reason: 'The original Environment is available again.', fromStatus: 'stopped' },
+  ];
+  const snapshot = await projectFeed(sources({
+    projects: [{ id: 'proj-resume', displayName: 'Resume Project' }],
+    tasks: [makeTask({ id: 'task-resume', projectId: 'proj-resume', status: 'in-progress', controlHistory: history })],
+  }));
+  const beat = snapshot.activity.find((item) => item.kind === 'task-resumed');
+  assert.ok(beat);
+  assert.equal(beat.id, 'task-resumed:task-resume:1000:0');
+  assert.equal(beat.summary, 'Task resumed by Human operator: The original Environment is available again.');
+  assert.deepEqual(beat.scopes, ['proj-resume']);
+  assert.equal(beat.target?.surface, 'project-task-detail');
+  assert.doesNotMatch(beat.summary, /reopened/i);
+});
+
 test('isFeedDeepLink accepts canonical targets and rejects malformed identities', () => {
   assert.ok(isFeedDeepLink({ surface: 'project-task-detail', taskId: 'task-1', path: '/project/tasks/task-1' }));
   assert.ok(isFeedDeepLink({ surface: 'project-tasks', proposalId: 'p 1', path: '/project/tasks?proposal=p%201' }));
