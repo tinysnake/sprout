@@ -9,15 +9,9 @@ document; all quoted values are synthetic fixtures, regex patterns, or placehold
 
 ---
 
-## 1. The problem this research addresses
+**Status: HISTORICAL (reconciled 2026-10-07).** This document preserves the research evidence and alternatives gathered for the earlier routing-text sanitization decision. The owner chose #220 Option A after full M2 acceptance reached #179’s revisit trigger. [ADR-0007 now records the active limited guarantee](../adr/0007-message-and-wake-routing-semantics.md#wake-model-privacy-guarantee-amended-2026-10-07): private sources remain excluded and recognized patterns are redacted, while unlabelled opaque values in free text may reach the wake model. This research is retained as decision history, not as the active privacy contract or a requirement to implement the superseded shape-independent sanitizer.
 
-**Reconciliation note (2026-10-07):** The ADR wording quoted below is the
-historical contract consulted for this research. The owner chose #220 Option A
-after full M2 acceptance reached #179’s revisit trigger.
-[ADR-0007 now records the accepted limited guarantee](../adr/0007-message-and-wake-routing-semantics.md#wake-model-privacy-guarantee-amended-2026-10-07):
-private sources remain excluded and recognized patterns are redacted, while
-unlabelled opaque values in free text may reach the wake model. The original
-research evidence and alternatives below remain historical findings.
+## 1. The historical problem this research addressed
 
 At the consulted revision, ADR-0007 imposed a two-sided constraint on the bounded routing context sent to the wake model
 (`docs/adr/0007-message-and-wake-routing-semantics.md`, consulted at `278f73cc`):

@@ -114,17 +114,19 @@ Under ADR-0007 and ADR-0008, the wake model receives only curated Project-shared
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ FROZEN ROUTING CONTEXT MANIFEST (ADR-0007)                                  │
 ├──────────────────────────────────────┬──────────────────────────────────────┤
-│ ✅ INCLUDED IN ROUTING CONTEXT       │ ❌ STRICTLY EXCLUDED (PRIVACY BOUNDARY)│
+│ ✅ INCLUDED IN ROUTING CONTEXT       │ ❌ NO INDEPENDENT SOURCE              │
 ├──────────────────────────────────────┼──────────────────────────────────────┤
 │ 1. Batch inputs (ID, author, text)   │ 1. Direct Messages & DM histories    │
 │ 2. Project Contract (Goal & Rules)   │ 2. Agent private memory & scratchpads│
 │ 3. Candidate Agent responsibilities  │ 3. Engine sessions & raw transcripts │
 │ 4. Recent Project channel messages   │ 4. Tool call outputs & stdin/stdout  │
-│ 5. Public Task state summaries       │ 5. Overlay/engine credentials & keys │
-│ 6. Non-routing projected replies     │ 6. Host paths & private network facts│
+│ 5. Public Task state summaries       │ 5. Credential and key records        │
+│ 6. Non-routing projected replies     │ 6. Host/private-network records      │
 │                                      │ 7. Transient Environment capacity    │
 └──────────────────────────────────────┴──────────────────────────────────────┘
 ```
+
+**Source-exclusion limit:** These items have no independent source in the builder. A sensitive value copied into included prose may survive unless it matches a recognized redaction pattern; see [ADR-0007’s limited guarantee](adr/0007-message-and-wake-routing-semantics.md#wake-model-privacy-guarantee-amended-2026-10-07).
 
 > **Why Transient Environment Capacity is Excluded:** Transient worker disconnection or busy status must never cause the wake model to silently substitute a different agent for the one whose declared Project responsibility best matches the user's input.
 
