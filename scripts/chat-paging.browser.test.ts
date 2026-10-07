@@ -36,7 +36,7 @@ const service = {
     }
     return rows.slice(Math.max(0, end - options.limit), end);
   },
-  listProjectEvents: async () => [], listRoutingBatches: async () => ({ batches: [], windows: [] }), listActiveRuns: async () => [],
+  listProjectEvents: async () => ({ events: [], hasOlder: false }), listRoutingBatches: async () => ({ batches: [], windows: [] }), listActiveRuns: async () => [],
   inspectScope: async () => ({ scope, state: { scopeId: scope.id, writable: true }, context: { scopeId: scope.id, projectId: 'project', kind: 'project', project: { contentVersion: 1, goal: '', rules: [] } } }),
   subscribeRunStatuses: () => () => {},
 };
@@ -164,14 +164,17 @@ test('automatic positioning in Chromium: near-top bottom following and growth is
 test('Chromium user wheel pages with loading status and preserves the visible anchor', { skip: browserSkip }, async () => {
   await client.evaluate('(() => { document.querySelector(".chat-messages-body").style.height="200px"; window.holdOlder=true; })()');
   await settleLayout();
+  await client.evaluate('(() => { const viewport = document.querySelector(".chat-messages-body"); window.pagingAnchor = null; viewport.addEventListener("scroll", () => { if (window.pagingAnchor || viewport.scrollTop > 40) return; const row = [...viewport.querySelectorAll("[data-message-id], [data-event-id]")].find(item => item.getBoundingClientRect().bottom > viewport.getBoundingClientRect().top); if (row) window.pagingAnchor = { id: row.dataset.messageId || row.dataset.eventId, top: row.getBoundingClientRect().top, scrollTop: viewport.scrollTop }; }, true); })()');
   const rect = await client.evaluate('(() => { const r = document.querySelector(".chat-messages-body").getBoundingClientRect(); return {x:r.x+100,y:r.y+100}; })()');
-  const anchor = await client.evaluate('(() => { const row=document.querySelector("[data-message-id]"); const viewport=document.querySelector(".chat-messages-body"); return {id:row.dataset.messageId,top:row.getBoundingClientRect().top + viewport.scrollTop}; })()');
   await client.call('Input.dispatchMouseEvent', { type: 'mouseWheel', x: rect.x, y: rect.y, deltaX: 0, deltaY: -100000 });
-  await until(() => client.evaluate('document.querySelector(".chat-messages-body").textContent.includes("Loading older messages")'), 'loading older status');
+  await until(() => client.evaluate('document.querySelector(".chat-messages-body").textContent.includes("Loading older chat rows")'), 'loading older status');
+  const anchor = await client.evaluate('window.pagingAnchor');
+  assert.ok(anchor, 'scroll capture records the viewport anchor before the paging handler runs');
+  const loading = await client.evaluate('(() => { const status = document.querySelector(".chat-older-loading"); const rect = status.getBoundingClientRect(); return { height: rect.height, top: rect.top, scrollTop: document.querySelector(".chat-messages-body").scrollTop }; })()');
   await client.evaluate('window.releaseOlder()');
   await until(() => client.evaluate('window.snapshot().count === window.snapshot().pageSize * 2'), 'older rows');
   await settleLayout();
-  const top = await client.evaluate(`document.querySelector('[data-message-id="${anchor.id}"]').getBoundingClientRect().top`);
-  assert.ok(Math.abs(top - anchor.top) <= 1, 'visible row remains anchored');
+  const after = await client.evaluate(`(() => { const viewport = document.querySelector(".chat-messages-body"); const row = [...viewport.querySelectorAll("[data-message-id], [data-event-id]")].find(item => item.dataset.messageId === "${anchor.id}" || item.dataset.eventId === "${anchor.id}"); return { top: row?.getBoundingClientRect().top, scrollTop: viewport.scrollTop, loading: Boolean(document.querySelector(".chat-older-loading")) }; })()`);
+  assert.ok(Math.abs(after.top - anchor.top) <= 1, `visible row remains anchored (${anchor.id}): ${anchor.top} -> ${after.top}; scrollTop ${anchor.scrollTop} -> ${after.scrollTop}; loading height ${loading.height}; status remains ${after.loading}`);
   assert.equal((await client.evaluate('window.snapshot()')).olderRequests, 1, 'anchor restoration does not cascade');
 });
