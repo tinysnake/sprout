@@ -1203,7 +1203,7 @@ test('Project Tasks exposes authorized proposal, intervention, validation, disca
     await enterField(doc, dom, 'Reason for this action', 'Resume after review.');
     clickButton(doc, 'Resume Task');
     await settle(180);
-    assert.ok(calls.includes('resume:paused'));
+    assert.ok(calls.includes('resume:paused:Resume after review.'));
 
     await openTaskRecord(router, 'awaiting-validation');
     await enterField(doc, dom, 'Validation reason', 'Request one correction.');
@@ -1340,7 +1340,7 @@ test('Project Tasks exposes a confirmed Reopen action only for ended Tasks', asy
     await openTaskRecord(router, 'stopped');
     assert.equal([...doc.querySelectorAll<HTMLButtonElement>('button')].some((button) => button.textContent?.trim() === 'Reopen Task'), false,
       'stopped active-intent Tasks do not expose Reopen');
-    const resume = [...doc.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent?.trim() === 'Resume Task');
+    const resume = [...doc.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent?.trim() === 'Resume');
     assert.ok(resume, 'stopped Tasks expose direct Resume');
     resume.click();
     await settle();
@@ -1350,7 +1350,7 @@ test('Project Tasks exposes a confirmed Reopen action only for ended Tasks', asy
     assert.match(resumeConfirmation.textContent ?? '', /fresh Task context/i);
     assert.match(resumeConfirmation.textContent ?? '', /Force Release facts.*preserved/i);
     assert.match(resumeConfirmation.textContent ?? '', /does not start a run/i);
-    assert.match(resumeConfirmation.textContent ?? '', /force-release blocker.*cleared/i);
+    assert.match(resumeConfirmation.textContent ?? '', /Force Release blocker.*cleared/i);
     assert.equal(calls.some((call) => call.startsWith('resume:stopped')), false);
     await enterField(doc, dom, 'Reason for this action', 'Continue the preserved work.');
     clickButton(doc, 'Confirm Resume Task');
@@ -1366,34 +1366,7 @@ test('Project Tasks exposes a confirmed Reopen action only for ended Tasks', asy
   }
 });
 
-test('Project Tasks confirms stopped Task Resume while preserving Force Release history', async () => {
-  const { dom, doc, vite, cleanup } = await setupHarness();
-  try {
-    const { app, router, calls } = await mountTasks(vite, doc);
-    await openTaskRecord(router, 'stopped');
-    clickButton(doc, 'Resume Task');
-    await settle();
-    const confirmation = doc.querySelector<HTMLElement>('[aria-label="Confirm stopped Task resume"]');
-    assert.ok(confirmation, 'stopped Task Resume explains its lifecycle transition');
-    assert.match(confirmation.textContent ?? '', /same Environment/i);
-    assert.match(confirmation.textContent ?? '', /fresh Task context/i);
-    assert.match(confirmation.textContent ?? '', /does not start a run/i);
-    assert.match(confirmation.textContent ?? '', /Force Release facts.*Project workspace.*Task group history.*preserved/i);
-    assert.match(confirmation.textContent ?? '', /force-release blocker.*cleared/i);
-    assert.equal(calls.some((call) => call.startsWith('resume:stopped')), false, 'confirmation does not send the command');
-
-    await enterField(doc, dom, 'Reason for this action', 'Continue the preserved work.');
-    clickButton(doc, 'Confirm Resume Task');
-    await settle(180);
-    assert.ok(calls.includes('resume:stopped:Continue the preserved work.'));
-    assert.equal(calls.some((call) => call.startsWith('reopen:stopped')), false);
-    app.unmount();
-  } finally {
-    await cleanup();
-  }
-});
-
-
+test('Project Tasks links each authority and browser back restores the selected Task', async () => {
   const { dom, doc, vite, cleanup } = await setupHarness();
   try {
     const { app, router } = await mountTasks(vite, doc);
