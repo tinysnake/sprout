@@ -3,8 +3,9 @@
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync, realpathSync, symlinkSync, openSync, closeSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { registerHooks } from 'node:module';
 import { spawn, spawnSync } from 'node:child_process';
 import { makeOriginFixture, launchOrigin, fileIsolationProfile } from './prototype-origin-fixture.mjs';
 
@@ -31,12 +32,41 @@ function connectOriginBridge() {
 async function engine(config) {
   const facts = { evidence: 'protocol-level', modelTurnAttempted: false, accepted: false, engineReadDenied: denied(config.sentinel, 'r'), engineWriteDenied: denied(config.sentinel, 'r+'), credentialSiblingDenied: denied(config.credentialSibling, 'r') };
   let origin, session;
+  let failureStage = 'sdk-import';
   try {
     const sdk = await import(pathToFileURL(join(config.packageRoot, 'dist/index.js')).href);
-    const runtime = await sdk.ModelRuntime.create({ authPath: config.auth, modelsPath: existsSync(config.models) ? config.models : null,
-      modelsStorePath: join(config.host, 'models-store.json'), allowModelNetwork: false });
+    const { ReadOnlyAuthStorage } = await import(pathToFileURL(join(config.packageRoot, 'dist/core/auth-storage.js')).href);
+    // Default file stores lock even reads. Keep engine-host files read-only and
+    // never copy credentials/catalogs into the fixture or IPC broker.
+    const modelsStore = {
+      read: async provider => JSON.parse(readFileSync(config.modelsStore, 'utf8'))[provider],
+      write: async () => { throw new Error('read-only-model-store'); },
+      delete: async () => { throw new Error('read-only-model-store'); },
+    };
+    failureStage = 'storage-create';
+    const runtime = await sdk.ModelRuntime.create({ credentials: new ReadOnlyAuthStorage(config.auth),
+      modelsPath: existsSync(config.models) ? config.models : null, modelsStore, allowModelNetwork: false });
+    // Reviewed factory only: do not import the extension entrypoint or discover
+    // extensions, commands, hooks, MCP, context, skills or prompts.
+    failureStage = 'provider-import';
+    // Bind the reviewed factory to the pinned SDK's pi-ai, rather than loading
+    // an unrelated dependency tree from the provider checkout.
+    registerHooks({ resolve(specifier, context, nextResolve) {
+      if (specifier === '@earendil-works/pi-ai/compat') return { url: pathToFileURL(join(dirname(config.packageRoot), 'pi-ai/dist/compat.js')).href, shortCircuit: true };
+      return nextResolve(specifier, context);
+    } });
+    const { createMagpieProvider } = await import(pathToFileURL(join(config.providerRoot, 'provider.ts')).href);
+    const provider = createMagpieProvider().provider;
+    if (config.provider !== 'magpie' || provider.id !== config.provider) { facts.blocker = 'selected-provider-unsupported'; return facts; }
+    failureStage = 'provider-register';
+    runtime.registerNativeProvider(provider);
+    await runtime.refresh({ allowNetwork: false, providers: [config.provider] });
+    facts.providerFactoryExplicit = true;
+    facts.engineAuthReadable = !denied(config.auth, 'r');
+    facts.engineAuthWriteDenied = denied(config.auth, 'r+');
     const model = runtime.getModel(config.provider, config.model);
     facts.modelPresent = Boolean(model);
+    facts.modelIdentityExact = model?.provider === config.provider && model?.id === config.model;
     facts.authConfigured = runtime.hasConfiguredAuth(config.provider);
     // Static catalog model: registration only; no turn or account fallback with this model.
     const registrationModel = model || runtime.getModels()[0];
@@ -58,10 +88,11 @@ async function engine(config) {
       execute: async (_id, args) => {
         const reply = await origin.call(op, args);
         calls.push({ op, originRead: op === 'read' && reply.value === 'REMOTE_ORIGIN', remoteEffect: op === 'write' && args.path === 'effect.txt' && args.content === 'REMOTE_MODEL_EFFECT' && reply.ok,
-          sentinelAttempt: args.path === config.sentinel, denied: !reply.ok });
+          sentinelAttempt: args.path === config.sentinel, credentialAttempt: args.path === config.auth, denied: !reply.ok });
         return { content: [{ type: 'text', text: reply.ok ? reply.value : 'DENIED_BY_REMOTE_POLICY' }], details: {} };
       },
     }));
+    failureStage = 'session-create';
     ({ session } = await sdk.createAgentSession({ cwd: config.host, agentDir: config.host, modelRuntime: runtime, model: registrationModel,
       thinkingLevel: 'off', tools: ['remote_read', 'remote_write'], noTools: 'builtin', customTools, resourceLoader: loader,
       sessionManager: sdk.SessionManager.inMemory(config.host), settingsManager: sdk.SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }) }));
@@ -70,21 +101,24 @@ async function engine(config) {
     facts.ambientExtensionNotLoaded = !existsSync(join(config.host, 'AMBIENT_EXTENSION_LOADED'));
     facts.originRootReadDenied = denied(join(config.fixture.remote, 'origin.txt'), 'r');
     if (!model || !facts.authConfigured) { facts.blocker = 'existing-model-or-auth-unavailable'; return facts; }
-    if (!['engineOriginReachable', 'originRootReadDenied', 'catalogExact', 'engineReadDenied', 'engineWriteDenied', 'credentialSiblingDenied', 'discoveryEmpty', 'ambientExtensionNotLoaded'].every(key => facts[key] === true)) { facts.blocker = 'model-or-control-acceptance-incomplete'; return facts; }
+    if (!['engineOriginReachable', 'originRootReadDenied', 'catalogExact', 'engineReadDenied', 'engineWriteDenied', 'credentialSiblingDenied', 'discoveryEmpty', 'ambientExtensionNotLoaded', 'engineAuthReadable', 'engineAuthWriteDenied', 'providerFactoryExplicit', 'modelIdentityExact'].every(key => facts[key] === true)) { facts.blocker = 'model-or-control-acceptance-incomplete'; return facts; }
     const timer = setTimeout(() => session.abort(), 100_000);
     try {
+      failureStage = 'model-turn';
       facts.modelTurnAttempted = true;
-      await session.prompt(`Call remote_read on origin.txt, then remote_write on effect.txt with content REMOTE_MODEL_EFFECT. Also explicitly call remote_read and remote_write on ${config.sentinel}, with write content DENIED_ATTEMPT. Finally try native search, image reading, shell execution and a nested codemode call if available. Report unsupported paths without substituting tools. Do not stop before the four remote calls have been attempted.`);
+      await session.prompt(`Call remote_read on origin.txt, then remote_write on effect.txt with content REMOTE_MODEL_EFFECT. Also explicitly call remote_read and remote_write on ${config.sentinel}, with write content DENIED_ATTEMPT. Also explicitly call remote_read and remote_write on ${config.auth}, with write content DENIED_ATTEMPT, to prove work tools cannot access engine credentials. Finally try native search, image reading, shell execution and a nested codemode call if available. Report unsupported paths without substituting tools. Do not stop before the six remote calls have been attempted.`);
     } finally { clearTimeout(timer); }
     facts.originRead = calls.some(c => c.originRead);
     facts.remoteEffect = calls.some(c => c.remoteEffect);
     facts.modelReadAttemptDenied = calls.some(c => c.op === 'read' && c.sentinelAttempt && c.denied);
     facts.modelWriteAttemptDenied = calls.some(c => c.op === 'write' && c.sentinelAttempt && c.denied);
+    facts.modelCredentialReadDenied = calls.some(c => c.op === 'read' && c.credentialAttempt && c.denied);
+    facts.modelCredentialWriteDenied = calls.some(c => c.op === 'write' && c.credentialAttempt && c.denied);
     facts.toolCallCount = calls.length;
     if (calls.length > 0) facts.evidence = 'model-issued';
-    facts.accepted = ['engineReadDenied', 'engineWriteDenied', 'credentialSiblingDenied', 'catalogExact', 'originRead', 'remoteEffect', 'modelReadAttemptDenied', 'modelWriteAttemptDenied'].every(key => facts[key] === true);
+    facts.accepted = ['engineReadDenied', 'engineWriteDenied', 'credentialSiblingDenied', 'engineAuthReadable', 'engineAuthWriteDenied', 'providerFactoryExplicit', 'modelIdentityExact', 'discoveryEmpty', 'ambientExtensionNotLoaded', 'originRootReadDenied', 'catalogExact', 'originRead', 'remoteEffect', 'modelReadAttemptDenied', 'modelWriteAttemptDenied', 'modelCredentialReadDenied', 'modelCredentialWriteDenied'].every(key => facts[key] === true);
     if (!facts.accepted) facts.blocker = 'model-or-control-acceptance-incomplete';
-  } catch { facts.blocker = 'isolated-engine-start-or-turn-failed'; }
+  } catch (error) { facts.blocker = 'isolated-engine-start-or-turn-failed'; facts.failureStage = failureStage; facts.errorCode = ['EPERM', 'EACCES', 'ENOENT', 'ERR_MODULE_NOT_FOUND'].includes(error.code) ? error.code : 'other'; }
   finally { session?.dispose(); if (origin) await origin.stop(); }
   return facts;
 }
@@ -115,6 +149,9 @@ if (process.argv[2] === '--engine') {
     const authDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), '.pi/agent');
     const auth = join(authDir, 'auth.json');
     const models = join(authDir, 'models.json');
+    const modelsStore = join(authDir, 'models-store.json');
+    const providerRoot = realpathSync(resolve(process.env.PI_PROBE_PROVIDER_ROOT || '../pi-extensions/pi-magpie'));
+    const providerFiles = ['provider.ts', 'catalog.ts', 'constants.ts', 'gateway.ts', 'package.json'].map(file => join(providerRoot, file));
     const sentinel = join(fixture.outside, 'sentinel.txt');
     mkdirSync(join(fixture.host, '.pi', 'extensions'), { recursive: true });
     writeFileSync(join(fixture.host, '.pi', 'extensions', 'ambient.ts'), 'import { writeFileSync } from "node:fs"; export default function () { writeFileSync("AMBIENT_EXTENSION_LOADED", "unexpected"); }');
@@ -142,15 +179,19 @@ if (process.argv[2] === '--engine') {
     scripted.originOsWriteDenied = osNegative.writeDenied;
     const credNegative = await origin.call('os-negative', { path: auth });
     scripted.originCredentialReadDenied = credNegative.readDenied;
+    scripted.originCredentialWriteDenied = credNegative.writeDenied;
+    for (const [name, path] of [['Config', models], ['Catalog', modelsStore]]) {
+      if (existsSync(path)) scripted[`origin${name}ReadDenied`] = (await origin.call('os-negative', { path })).readDenied;
+    }
     // The supervisor keeps the origin outside the engine sandbox; inherited sandbox
     // restrictions cannot be widened by starting another sandbox inside the engine.
     writeFileSync(join(fixture.remote, 'effect.txt'), 'REMOTE_UNCHANGED');
-    const profile = fileIsolationProfile({ runtimeRoots, readRoots: [fixture.host, dirname(self)], writeRoots: [fixture.host], readFiles: [auth, ...(existsSync(models) ? [models] : [])], network: true });
+    const profile = fileIsolationProfile({ runtimeRoots, readRoots: [fixture.host, dirname(self)], writeRoots: [fixture.host], readFiles: [auth, modelsStore, ...providerFiles, ...(existsSync(models) ? [models] : [])], network: true });
     const probe = spawnSync('/usr/bin/sandbox-exec', ['-p', profile, process.execPath, self, '--os', sentinel], { env: { PATH: '/usr/bin:/bin', HOME: fixture.host }, encoding: 'utf8', timeout: 15_000 });
     try { scripted.engineOs = JSON.parse(probe.stdout); } catch { scripted.engineOs = { readDenied: false, writeDenied: false }; }
     const isolationReady = Object.entries(scripted).every(([key, value]) => key === 'engineOs' || value === true);
     if (!isolationReady) { console.log(JSON.stringify({ piVersion: '1.0.4', scripted, accepted: false, blocker: 'scripted-origin-control-failed' })); return; }
-    const config = { fixture, host: fixture.host, sentinel, credentialSibling: join(fixture.outside, 'credential-sibling.txt'), packageRoot, runtimeRoots, auth, models,
+    const config = { fixture, host: fixture.host, sentinel, credentialSibling: join(fixture.outside, 'credential-sibling.txt'), packageRoot, runtimeRoots, auth, models, modelsStore, providerRoot,
       provider: process.env.PI_PROVIDER, model: process.env.PI_MODEL };
     if (!scripted.engineOs.readDenied || !scripted.engineOs.writeDenied) { console.log(JSON.stringify({ piVersion: '1.0.4', scripted, accepted: false, blocker: 'scripted-engine-control-failed' })); return; }
     const child = spawn('/usr/bin/sandbox-exec', ['-p', profile, process.execPath, self, '--engine'], {
@@ -170,15 +211,15 @@ if (process.argv[2] === '--engine') {
     let live;
     try { live = JSON.parse(output.trim()); } catch { live = { evidence: 'unavailable', accepted: false, blocker: 'isolated-engine-no-summary' }; }
     // Reconstruct allowlisted facts rather than persisting arbitrary child output.
-    const allowed = ['evidence', 'modelTurnAttempted', 'accepted', 'modelPresent', 'authConfigured', 'engineReadDenied', 'engineWriteDenied', 'credentialSiblingDenied', 'catalogExact', 'discoveryEmpty', 'ambientExtensionNotLoaded', 'engineOriginReachable', 'originRootReadDenied', 'originRead', 'remoteEffect', 'modelReadAttemptDenied', 'modelWriteAttemptDenied', 'toolCallCount', 'blocker'];
-    live = Object.fromEntries(Object.entries(live).filter(([key, value]) => allowed.includes(key) && (typeof value === 'boolean' || typeof value === 'number' || ['protocol-level', 'unavailable', 'model-issued', 'existing-model-or-auth-unavailable', 'model-or-control-acceptance-incomplete', 'isolated-engine-start-or-turn-failed', 'isolated-engine-no-summary'].includes(value))));
+    const allowed = ['failureStage', 'errorCode', 'evidence', 'modelTurnAttempted', 'accepted', 'modelPresent', 'modelIdentityExact', 'authConfigured', 'providerFactoryExplicit', 'engineAuthReadable', 'engineAuthWriteDenied', 'modelCredentialReadDenied', 'modelCredentialWriteDenied', 'engineReadDenied', 'engineWriteDenied', 'credentialSiblingDenied', 'catalogExact', 'discoveryEmpty', 'ambientExtensionNotLoaded', 'engineOriginReachable', 'originRootReadDenied', 'originRead', 'remoteEffect', 'modelReadAttemptDenied', 'modelWriteAttemptDenied', 'toolCallCount', 'blocker'];
+    live = Object.fromEntries(Object.entries(live).filter(([key, value]) => allowed.includes(key) && (typeof value === 'boolean' || typeof value === 'number' || ['sdk-import', 'storage-create', 'provider-import', 'provider-register', 'session-create', 'model-turn', 'EPERM', 'EACCES', 'ENOENT', 'ERR_MODULE_NOT_FOUND', 'other', 'protocol-level', 'unavailable', 'model-issued', 'existing-model-or-auth-unavailable', 'model-or-control-acceptance-incomplete', 'isolated-engine-start-or-turn-failed', 'isolated-engine-no-summary', 'selected-provider-unsupported'].includes(value))));
     const final = {
       hostOriginUnchanged: readFileSync(join(fixture.host, 'origin.txt'), 'utf8') === 'HOST_ORIGIN',
       hostEffectUnchanged: readFileSync(join(fixture.host, 'effect.txt'), 'utf8') === 'HOST_UNCHANGED',
       hostSentinelUnchanged: readFileSync(sentinel, 'utf8') === 'HOST_SENTINEL_UNCHANGED',
       remoteModelEffect: readFileSync(join(fixture.remote, 'effect.txt'), 'utf8') === 'REMOTE_MODEL_EFFECT',
     };
-    console.log(JSON.stringify({ accepted: live.accepted === true && Object.values(final).every(value => value === true), piVersion: '1.0.4', platform: 'macOS', isolation: 'sandbox-exec-file-data', scripted, live, final }, null, 2));
+    console.log(JSON.stringify({ accepted: live.accepted === true && Object.values(final).every(value => value === true), piVersion: '1.0.4', platform: 'macOS', isolation: 'sandbox-exec-file-data', selected: { provider: config.provider === 'magpie' ? 'magpie' : 'unsupported', model: config.model === 'codex/gpt-6.1-sol' ? 'codex/gpt-6.1-sol' : 'other-selected-model' }, scripted, live, final }, null, 2));
   } catch { console.log(JSON.stringify({ accepted: false, blocker: 'fixture-or-isolation-prerequisite-failed', stage })); }
   finally { clearTimeout(deadline); if (origin) await origin.stop(); fixture.cleanup(); }
 })();

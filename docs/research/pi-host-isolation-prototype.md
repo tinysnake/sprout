@@ -1,191 +1,230 @@
 # Pi host isolation and separate-origin prototype (#239)
 
-Scope: Run `r225`, Job `r225-pro-worker-a1`, attempt 1. Base `4574a061`.
-Disposable experiment only; no production integration. Fact-only final output is
-captured in `docs/research/pi-host-isolation-prototype-evidence.json`.
+Scope: Run `r225`, Job `r225-pro-worker-a2`, rework r2. Base `4574a061`,
+inherited r1 commit `699cec1a`. Disposable experiment only; no production
+integration. Final allowlisted facts are in
+`docs/research/pi-host-isolation-prototype-evidence.json`.
 
-## Verdict
+## Verdict and rework triage
 
-**Blocked; no accepted production route and no model-issued acceptance.**
+**The bounded model-issued route passes on Pi 1.0.4 / macOS.** The unchanged
+selected provider/model, `magpie` / `codex/gpt-6.1-sol`, makes six typed calls:
+remote marker read, remote effect write, denied host sentinel read/write, and
+denied engine credential-file read/write. All three host markers remain
+unchanged. This is a separate local sandbox origin, never an enrolled remote
+deployment or an accepted production adapter. Ticket acceptance belongs to the
+Orchestrator; this report does not close #239 or change dependency state.
 
-Pi 1.0.4 can construct an isolated SDK session exposing exactly two typed tools,
-`remote_read` and `remote_write`, with explicit empty discovery. A separate,
-credential-free, network-denied sandbox process executes those operations in a
-scratch origin. Scripted operations and OS negative checks pass. The selected
-Job provider/model is absent from the explicit SDK model catalog, and that
-provider has no configured authentication in the existing local auth runtime.
-`modelPresent=false`, `authConfigured=false`, `modelTurnAttempted=false`.
-No model prompt was issued. No other provider/account was substituted.
+I read the complete r1 Dispatch and Work record and all four inherited artifacts
+before edits. The actual problem was an incomplete engine runtime configuration,
+not demonstrated missing external auth. r1 pointed ModelRuntime at a nonexistent
+fixture-local catalog, disabled network catalog refresh, omitted the selected
+provider's registration, and used default auth storage that locks even reads
+under a profile denying lock writes. The resulting `modelPresent=false` /
+`authConfigured=false` was not sufficient evidence of a missing prerequisite.
+No inference was attempted, so r1 could not meet model-issued acceptance.
 
-**Unblock condition:** make the already-authorized Job provider/model available
-through a reviewed native Pi 1.0.4 model configuration and existing local
-authentication under these isolation/discovery controls, then rerun the probe.
-If that route depends on an automatically loaded provider extension, its narrowly
-scoped registration must be reviewed and admitted explicitly; enabling ambient
-extensions or broad credential-directory access is not the remedy. Installation,
-login, credential copying and choosing another account were not attempted.
+The session resolves `PI_PROVIDER=magpie`, `PI_MODEL=codex/gpt-6.1-sol`.
+One initial environment observation did not return PI_MODEL; it was rechecked
+before configuring any turn. The SDK provider id is exactly `magpie`, supplied
+by the existing `pi-magpie` provider factory; `codex` in the model id is not an
+instruction to substitute the SDK's `openai-codex` provider. Engine-host auth and
+cached catalog already contain this route. A read-only native runtime diagnostic
+without the factory still returned false/false; explicit registration of the
+reviewed factory made both true. Missing provider registration is therefore a
+live-isolated cause; catalog-path and lock-reader faults are additional source
+findings, not separately measured attribution of each r1 false flag.
+No provider/model/account was substituted.
 
-#240 remains blocked on #239 acceptance. The fixture is reusable by #248 and
-#240 for their experiments, but fixture availability does not waive #239 or
-#248's engine acceptance. Windows, enrolled remote deployment, and real remote
-host behavior remain unproven.
+## Corrected engine-local authentication route
+
+Only the engine gets literal read allowances for the existing `auth.json`,
+`models.json` (when present), and `models-store.json`. Its HOME and
+PI_CODING_AGENT_DIR remain the scratch runner, preventing accidental home-based
+resource discovery; explicit storage objects supply the authorized engine data.
+No credentials or catalog/config contents are copied into scratch directories,
+broker requests, committed artifacts, or origin processes.
+
+The pinned SDK's `ReadOnlyAuthStorage` reads the existing auth file without
+creating locks. An explicit read-only ModelsStore reads the existing host catalog
+and rejects write/delete. Catalog network refresh stays disabled. The existing
+`pi-magpie/provider.ts` factory is explicitly registered with
+`registerNativeProvider`, then refreshed with `allowNetwork:false`. Only its
+reviewed `provider.ts`, `catalog.ts`, `constants.ts`, `gateway.ts`, and
+`package.json` have literal engine read allowances. A Node resolve hook binds
+its `@earendil-works/pi-ai/compat` import to the pinned Pi release, avoiding its
+checkout's unrelated dependency tree. The extension `index.ts` is never imported:
+no UI hooks, commands, quota/routing-file helpers, shell helper calls, or ambient
+extension discovery run. Imported gateway helper definitions include CLI/file
+helpers; factory auth/catalog/inference paths do not invoke them. Those helpers
+are not model tools.
+
+A first sandbox attempt after the storage/factory change failed before provider
+registration because the factory resolved dependencies outside admitted runtime
+roots. Binding only its pi-ai import to the pinned release fixed startup without
+allowing the provider checkout's node_modules or broad credential-directory reads.
+The final engine can read auth but cannot open it for writing. The origin's
+direct OS auth read/write and config/catalog reads are denied. The model's work
+tool auth read/write requests are denied independently by origin path policy.
+Auth refresh that needs credential writes remains unsupported.
 
 ## Reproduction and reusable fixture
 
-Run `node scripts/probe-pi-host-isolation.mjs` with an explicit 180-second command
-timeout on the pinned macOS engine host. The script has a 170-second overall
-bound, a 130-second engine-child bound, 150-second origin bounds, 10-second RPC
-bounds and a 100-second turn-abort request. These are experiment bounds, not
-remote-stop acceptance. No listening service or port is used.
+Run `node scripts/probe-pi-host-isolation.mjs` with an explicit 180-second timeout
+from this checkout on the existing engine host. The reviewed factory checkout
+must already exist: the default relative path is `../pi-extensions/pi-magpie`;
+`PI_PROBE_PROVIDER_ROOT` can name that same existing checkout elsewhere. The
+script does not install or log in to an engine/provider, resolve another model,
+or fall back to another account. Missing prerequisites produce a blocker.
+`PI_PROBE_PACKAGE_ROOT` can name the existing pinned Pi package.
 
-- `scripts/prototype-origin-fixture.mjs`: exports `makeOriginFixture`,
-  `fileIsolationProfile`, `launchOrigin`, and `operate`; also supplies the origin
-  child entrypoint. Host and origin have identical `origin.txt` / `effect.txt`
-  names with distinct public synthetic markers. The host has an external read/
-  write sentinel and a synthetic credential-sibling sentinel. Cleanup removes
-  the disposable directory after children settle.
-- `scripts/probe-pi-host-isolation.mjs`: drives scripted negatives, the real Pi
-  SDK registration, and an optional real model turn only when the selected
-  provider/model/auth and isolation prerequisites are available. It records
-  only allowlisted facts, never native events, model text, request bodies,
-  credentials, paths or raw stderr. On the engine deadline the supervisor kills
-  the local engine process group; origin lifetime is separately supervised.
-- The origin is a separate local OS process, reached over correlated stdio
-  JSON requests from the supervisor. The isolated engine forwards typed requests
-  to that supervisor over a bounded IPC broker; the supervisor launches the
-  origin before the engine so the origin does not inherit the engine's denial
-  of origin-root access. The engine can reach the origin through this broker
-  while its direct origin-marker read is OS-denied. It is **not an enrolled Worker, MCP transport, container,
-  separate machine or production remote deployment**. Engine and origin use
-  separate file-access profiles, working roots and sanitized environments.
-  This deliberately answers origin/control questions without introducing the
-  Environment operations Module scheduled for later tickets.
+The script has a 170-second overall bound, a 130-second engine process-group kill,
+150-second origin bounds, 10-second RPC bounds, and a 100-second turn-abort request.
+These are local experiment bounds, not remote-stop acceptance. No listener or
+service port is used. Prompts, model text, events, raw stderr, auth values,
+endpoint addresses and host paths are not retained in the artifacts. Safe stage
+and error-code classifications distinguish startup failure from absent auth.
 
-The optional model-issued path asks the model to read the origin marker, write
-`REMOTE_MODEL_EFFECT`, explicitly attempt both read and write of the outside
-host sentinel, and attempt unavailable native search/image/shell/nested paths.
-It observes tool callbacks and final fixture effects rather than accepting an
-assistant's assertion of success. A static catalog model may instantiate the
-registration-only session when the selected model is missing; it receives **no
-prompt**, makes no inference request and supplies only protocol-level evidence.
+`scripts/prototype-origin-fixture.mjs` remains the r1 shared fixture: host and
+origin have same-name `origin.txt` and `effect.txt` with distinct synthetic
+markers. Outside-host and credential-sibling sentinels support direct OS checks.
+The supervisor launches the credential-free, network-denied origin before the
+engine and forwards only correlated read/write IPC. Direct engine access to the
+origin marker is OS-denied; typed calls reach it through the supervisor broker.
+The origin independently validates relative paths and denies absolute paths,
+traversal, symlinks and parent escapes. Cleanup follows child settlement.
 
-## Pins and controls
+## Declared controls and unsupported paths
 
-| Item | Pinned observation / policy |
+| Item | Observation / policy |
 |---|---|
-| Pi | Installed CLI/package `1.0.4`; candidate only, no accepted live route |
-| Platform | macOS `26.6.2`; no Windows evidence |
-| Node | `26.9.0` used by this experiment |
-| SDK constructor | `createAgentSession`, explicit `tools: ['remote_read', 'remote_write']`, `noTools: 'builtin'`, `customTools` |
-| Discovery | Custom `ResourceLoader` returning no extensions, skills, prompts, agent context or themes; in-memory `SettingsManager` and `SessionManager` |
-| OS mechanism | Deprecated macOS `sandbox-exec`, file data reads/writes denied outside explicit roots/files; file metadata is allowed |
-| Engine access | Read harness scripts, installed Pi runtime, system runtime roots and the Homebrew runtime tree; read/write scratch host runner; exact existing auth/config files readable, not writable; engine network allowed for inference |
-| Origin access | Read its scratch root, harness scripts and runtime roots; write only its scratch root; network denied; no auth/config-file allowance; clean environment with no credential variables |
-| Path policy | Relative paths only; deny absolute paths, traversal, symlinks and parent escapes; no arbitrary command, image, search or nested-call operation |
-| Auth boundary | Existing local auth file remains local and uncopied; trusted engine auth runtime may read it, work executor cannot; authentication refresh requiring file writes is unsupported by this read-only auth allowance |
+| Pi | Existing CLI and package `1.0.4`; live SDK route demonstrated |
+| Platform / Node | macOS `26.6.2`, Node `26.9.0`; Windows unproven |
+| Selected identity | `magpie` / `codex/gpt-6.1-sol`, exact SDK identity checked before prompting |
+| Tool catalog | Exactly `remote_read`, `remote_write`; explicit `tools`, `noTools:'builtin'`, `customTools` |
+| Discovery | Empty ResourceLoader extensions, skills, prompts, agent context, themes; in-memory settings/session |
+| OS isolation | Deprecated macOS sandbox-exec: file-data reads/writes denied except explicit roots/files; metadata allowed |
+| Engine | Scratch read/write; script/runtime/system trees read-only; literal provider/auth/config/catalog files read-only; inference network allowed |
+| Origin | Own scratch root and harness/runtime reads; writes only own scratch root; network denied; no auth/config/catalog allowance |
+| Exclusions | Native read/write/edit/bash/PowerShell, search/grep/find/ls, image operations, codemode/nested models and automatic MCP discovery absent |
+| Unsupported replacements | Origin RPC image/search/shell/nested operations return unsupported; no alternate executor is supplied |
 
-The Homebrew tree allowance is a disposable runtime concession, **not a
-production minimum-access profile**. Attempts to narrow it to package/library
-subtrees aborted Node startup here. Production must inventory and pin required
-runtime files and any secrets in allowed runtime roots, and verify that narrower
-policy. System configuration reads and file metadata remain allowed; this is
-file-content isolation, not metadata confidentiality or a full syscall sandbox.
-An initial profile without necessary system ancestor/symlink reads also aborted
-startup; adding literal system ancestors allowed execution while the negative
-sentinel checks continued to deny file data reads/writes. An unrestricted-read
-control launched Node successfully, but is not isolation evidence.
+The Homebrew runtime tree allowance inherited from r1 is broad and read-only;
+production must inventory necessary runtime files and secrets before adopting a
+narrower profile. System configuration reads and file metadata remain allowed.
+This proves file-content denial against the declared sentinels, not a full
+syscall sandbox or metadata confidentiality. Cwd or write isolation alone cannot
+explain the direct read denials. The trusted engine may read its own auth; its
+work tools cannot. MCP attachment is not builtin-tool exclusion.
 
-Pinned installed source fingerprints (SHA-256):
+## Evidence classes
 
-- `dist/core/sdk.js`: `c5d5360f061b3b9f70dea1a0a424deb8a9a9417ed32a4c8d88bc9d0bfe7a75f5`
-- `dist/core/model-runtime.js`: `da26f76339a031456f6d239a249159231776f760ab4ac538c6b54c417dea6f67`
-
-## Evidence classes and final observations
-
-| Evidence class | Observed result | Limit |
+| Class | Observed evidence | Limit |
 |---|---|---|
-| Source-only | Pinned SDK full-control example, SDK option declarations, ModelRuntime declarations/implementation, MCP documentation and CLI parser | Describes controls; does not prove a model turn |
-| Scripted | Origin read returned the remote synthetic marker; origin write affected only remote `effect.txt` | Deterministic RPC requests, not model-issued |
-| Scripted | Absolute read/write, traversal write, symlink read/write all denied | Tool policy negatives on disposable fixtures |
-| Scripted | Origin bypass of tool policy still received OS read/write denial against outside host sentinel | Uses direct open attempts, so path validation cannot explain denial |
-| Scripted | Origin direct read of actual existing local auth file denied | No credential content was returned or retained |
-| Scripted | Engine process direct sentinel read/write denied; synthetic credential sibling read denied | Engine child running under the candidate profile |
-| Scripted | Search, images, shell and nested-call RPC operations visibly unsupported | No remote substitutes are provided for those operations |
-| Scripted | Isolated engine broker read reached the remote marker, while direct origin-root read was OS-denied | Supervisor-origin bridge, no model inference |
-| Protocol-level | Real Pi SDK active catalog exactly `remote_read`, `remote_write`; discovery empty | Model-visible declarations, not successful model use |
-| Protocol-level | Planted ambient extension/config/MCP/context fixtures did not change the catalog; extension effect marker absent | Explicit loader/settings path, not proof of every CLI configuration route |
-| Model-issued | **None**; selected model/auth prerequisite unavailable | Acceptance remains blocked |
+| Source-only | SDK registration/discovery controls; locked default auth/model storage; ReadOnlyAuthStorage; explicit Magpie factory/auth/catalog/stream paths | Source review is not a turn |
+| Scripted | Same-name remote marker read and remote-only write; absolute read/write, traversal write, symlink read/write denied | Deterministic requests, not model-issued |
+| Scripted | Direct engine and origin OS sentinel opens for read/write denied; origin actual auth read/write and config/catalog reads denied | OS negatives bypass tool validation; no data returned |
+| Protocol-level | Exact two-tool catalog, empty loader, planted ambient extension/config/MCP/context did not change catalog or create marker | Does not prove every possible CLI discovery route |
+| Protocol-level | Search/image/shell/nested RPC rejected; builtin paths excluded from model catalog | Model narration about unsupported tools is not relied upon |
+| Model-issued | Six observed SDK tool callbacks; remote content read/effect write; host sentinel and actual auth read/write denied | A real turn against a separate local process; no enrolled/cross-host proof |
+| Final fixture state | Host origin/effect/sentinel unchanged; remote model effect present | Fact-only summary `accepted=true` denotes this prototype's gate |
 
-Final fixture facts: host origin unchanged, host effect unchanged, outside host
-sentinel unchanged; remote model effect absent. `accepted=false`. Probe exit zero
-means diagnostic execution finished, not acceptance. It is not a production gate.
+The updated acceptance gate additionally requires exact model identity, explicit
+provider registration, engine auth readability/write denial, discovery checks,
+and both model-issued credential denials. No assistant assertion substitutes for
+observed callbacks or fixture effects.
 
 ## Candidate production-facing control contract
 
-1. Construct one immutable engine policy before admitting a Host-run turn:
-   engine/version/platform, runner roots, literal auth/config allowances,
-   builtin exclusions, explicit discovery, typed operation catalog and selected
-   execution origin. Fail closed if any prerequisite or OS negative fails.
-2. Use the existing Runtime/EngineSession orchestration seam. The narrow SDK
-   route replaces argv discovery with explicit loader/settings/catalog control;
-   the #253 CLI route would still require verified builtin exclusion and explicit
-   configuration. MCP attachment alone is never builtin exclusion.
-3. A remote tool callback forwards validated typed arguments only. The isolated
-   origin enforces its root independently; no fallback to local execution,
-   another origin, another mode or another account. Native read/write/edit/bash,
-   PowerShell, grep/find/ls, images, codemode, nested models and automatic MCP
-   discovery stay absent until separately proven replacements exist.
-4. Keep authentication in the trusted engine process. Do not serialize credentials
-   to work executors or grant them credential-directory reads. Caller APIs that
-   bypass tools (for example direct SDK shell methods) must not be exposed to
-   model input. This experiment does not implement that production adapter.
-5. Later production operations must add enrollment/Project authority, leases,
-   generation fencing, durable operation identity, uncertain-outcome inspection
-   and Worker-observed cancellation. This prototype provides none of those.
-   An accepted abort or a killed host engine is not remote-stop proof.
+1. Freeze engine version/platform, selected provider/model/account route, explicit
+   provider registration, auth/config/catalog file allowances, runner roots,
+   discovery controls, builtin exclusion and typed catalog before a turn. Fail
+   closed on missing prerequisites or any OS negative. The trusted engine owns
+   authentication; work tools never receive credential storage or credential values.
+2. Reuse the Runtime/EngineSession seam with an explicit SDK loader/settings/catalog
+   adapter. Do not interpret MCP attachment or CLI cwd as builtin exclusion or host
+   read isolation. The provider factory is a reviewed control-plane dependency,
+   not general extension loading.
+3. Forward validated typed operations only to the selected origin, whose boundary
+   enforces its own root. Never fall back locally, switch mode/origin/account, or
+   expose SDK shell methods to model input. Admit other operations only after
+   separate replacement/isolation evidence.
+4. Production still needs enrollment/Project authority, leases, generation fencing,
+   durable operation identity, uncertain-outcome inspection and Worker-observed
+   cancellation. Neither an accepted abort nor killing the local engine proves a
+   remote operation stopped. This prototype implements none of those controls.
 
-## Repository verification and missing inputs
+## Pinned primary sources
 
-- `npm ci --ignore-scripts --no-audit --no-fund`: repository dependencies only;
-  no engine/model installation or login.
-- `npm run typecheck`, explicit 180-second timeout: exit zero.
-- `npm test`, explicit 180-second command timeout: no passing full-suite result.
-  The initial tool result reported a command failure with zero passes and no
-  useful failure body. Diagnostic reruns still using `npm test`, with a shorter
-  120-second internal suite deadline and the required 180-second command bound,
-  timed out in browser DOM suites. Timeout candidates included chat routing,
-  ChatView, Tasks and Usage tests; candidates are not proven causes. No production
-  or test code was changed. Generated timeout diagnostics were removed.
-- Final probe: all reported scripted booleans true; Pi registration catalog exact;
-  selected model/auth absent, so no model turn and no accepted route.
-- Syntax checks and `git diff --check`: clean.
+SHA-256 fingerprints of reviewed installed SDK files:
 
-`AGENTS.local.md`, `docs/research/host-run-engines-remote-environment-tools.md`,
-`docs/research/225-feasibility-ordering-ticket.md`, and `scripts/probe-*.mjs`
-were absent from base `4574a061`. Existing `scripts/probe-*.ts`, repository
-instructions, `CONTEXT.md`, the ordering verdict and #253 Work record were
-consulted. Missing documents were not reconstructed as authoritative evidence.
-Context7 lookup failed to fetch; pinned installed SDK docs/source supplied the
-API facts. No model-content artifacts, production workspace edits, merge, push,
-engine login or broad OAR replacement occurred.
+- `dist/core/sdk.js`: `c5d5360f061b3b9f70dea1a0a424deb8a9a9417ed32a4c8d88bc9d0bfe7a75f5`
+- `dist/core/model-runtime.js`: `da26f76339a031456f6d239a249159231776f760ab4ac538c6b54c417dea6f67`
+- `dist/core/auth-storage.js`: `0b45029901579032b19273a1427f63b622df8e1aaf9ea185eb932c0d4898998c`
+- `dist/core/models-store.js`: `acef4e29470ea2ed5adc4f8e8d4981e9214c79ebf4e7eba4ad705ff81da68ed4`
 
-## Standing integration references consulted
+SHA-256 fingerprints of the existing explicitly admitted provider source:
 
-No source code was copied. These references justify reusing explicit adapter
-control and fail-closed supervision principles, but none of the consulted slices
-supplies this ticket's model-issued isolation proof:
+- `pi-magpie/provider.ts`: `23e1afbbf69aea8404d600c029e94fa915c8fd81b3ab96e17e687365563c7e80`
+- `pi-magpie/catalog.ts`: `a6467bb8366b9b52462ace44f3ef528c2036fe5bf0eeb69215107b70e135920d`
+- `pi-magpie/constants.ts`: `92fbbba1c4ad0aa96eaf35d407fe76b837bc19bdb9d1f2614cb751ecc5618d89`
+- `pi-magpie/gateway.ts`: `fcf9c535364ab7b54713bf9079d0419018be639362306d66011e7843646443e8`
+
+These are consulted fingerprints; the disposable script does not enforce source
+hashes. Production immutable admission must pin/verify those dependencies.
+Context7 CLI lookup was unavailable without installing a package; no installation
+was performed. Pinned installed SDK declarations/source and the reviewed existing
+provider source supplied API facts.
+
+## Repository verification
+
+- `npm run typecheck`: exit 0, explicit 180-second command bound.
+- Final model probe: `accepted=true`, six model-issued tool calls, exact selected
+  identity and every recorded negative/control/final-fixture boolean true. An
+  earlier successful turn preceded the exact-identity assertion; the recorded
+  artifact is the final rerun with that assertion.
+- Ticket `npm test`: explicit 180-second subprocess timeout; terminated by
+  SIGKILL after 180010 ms. The suite also emitted its own 180000-ms timeout
+  diagnostic. No pass/fail counters or passing full-suite result were obtained.
+  Final candidates: `web/src/shell/shell.dom.test.ts`, including the phone-header
+  connection-status/theme-control test at line 206. Candidates are not causes.
+- Base `4574a061`: extracted with `git archive` into a temporary directory and
+  linked to the same repository dependencies; no existing checkout was touched.
+  `npm test` used an explicit 180-second outer subprocess timeout and 175000-ms
+  internal suite deadline to leave time for its diagnostic. Exit 124 after
+  175459 ms, no passing counters. Candidates included `routes.dom.test.ts`
+  (idle Message/Project-event announcements, line 1099), `tasks.dom.test.ts`
+  (blocker responsibility kinds, line 1084), and Agents prototype DOM suites.
+  The five-second deadline difference is explicit; this is a reproduced bounded
+  full-suite timeout on base, not proof of one identical hung test or its cause.
+- `git diff 4574a061 -- src web package.json package-lock.json
+  scripts/test-summary.ts scripts/test-progress-reporter.mjs`: no differences.
+  Production, tests, manifests and the suite runner are identical to base. The
+  timeout reproduces without the prototype artifacts being imported by tests.
+- Probe syntax and `git diff --check`: pass. No production or test code changed.
+
+Full-suite verification remains incomplete; neither record is claimed green.
+The test timeout is pre-existing under this environment's bounded suite runs;
+its precise cause is unresolved. Raw logs and machine paths are not committed.
+
+## Standing integration references
+
+The r1 reference consultation is inherited, with no copied source. The rework
+changes explicit native provider/auth admission only; none of these reference
+slices supplies model-issued isolation proof:
 
 - Cumora `622498370cf76965a18d3c5041b040f0e57237d0`,
-  `server/src/agents/computer/engine.ts`: dedicated engine home, fixed bridge,
-  version-dependent flags, fail-closed boundaries and explicit opt-in for engines
-  without verified isolation. Adopt fail-closed admission; no unsandboxed opt-in
-  here because #225 forbids a local fallback.
+  `server/src/agents/computer/engine.ts`: adopt explicit engine admission and
+  fail-closed boundaries; no unsandboxed opt-in under #225.
 - AionUi `6744099b279b991c17e31c243f0920477bd31cb6`,
-  `docs/prds/conversations/acp/permissions.md`: permission approvals and request
-  lifecycle. Approval UI does not substitute for host read isolation, so it is
-  outside this disposable fixture's acceptance seam.
+  `docs/prds/conversations/acp/permissions.md`: request/approval lifecycle;
+  approval UI cannot replace host read isolation.
 - Paperclip `06484b3c4153b6201f1a07304694793b1fdf36dd`,
-  `packages/adapters/claude-local/src/server/execute.remote.test.ts`: adapter
-  execution-target/SSH bridge composition and workspace transport are mocked
-  there. Reuse the separation of engine and execution target as design; do not
-  import a mocked remote test as live origin evidence or copy/sync credentials.
+  `packages/adapters/claude-local/src/server/execute.remote.test.ts`: engine/target
+  separation as design; mocked transport is not live remote evidence and no
+  credential synchronization is adopted.
+
+Remaining fog: production minimum runtime reads, auth refresh requiring writes,
+Windows isolation, enrolled cross-host deployment and cancellation/fencing remain
+unproven. Existing r1 missing-input observations remain historical; no missing
+document was reconstructed as an authority.

@@ -1,8 +1,12 @@
 {
-  "accepted": false,
+  "accepted": true,
   "piVersion": "1.0.4",
   "platform": "macOS",
   "isolation": "sandbox-exec-file-data",
+  "selected": {
+    "provider": "magpie",
+    "model": "codex/gpt-6.1-sol"
+  },
   "scripted": {
     "originRead": true,
     "remoteWrite": true,
@@ -18,31 +22,114 @@
     "originOsReadDenied": true,
     "originOsWriteDenied": true,
     "originCredentialReadDenied": true,
+    "originCredentialWriteDenied": true,
+    "originConfigReadDenied": true,
+    "originCatalogReadDenied": true,
     "engineOs": {
       "readDenied": true,
       "writeDenied": true
     }
   },
   "live": {
-    "evidence": "protocol-level",
-    "modelTurnAttempted": false,
-    "accepted": false,
+    "evidence": "model-issued",
+    "modelTurnAttempted": true,
+    "accepted": true,
     "engineReadDenied": true,
     "engineWriteDenied": true,
     "credentialSiblingDenied": true,
-    "modelPresent": false,
-    "authConfigured": false,
+    "providerFactoryExplicit": true,
+    "engineAuthReadable": true,
+    "engineAuthWriteDenied": true,
+    "modelPresent": true,
+    "modelIdentityExact": true,
+    "authConfigured": true,
     "engineOriginReachable": true,
     "catalogExact": true,
     "discoveryEmpty": true,
     "ambientExtensionNotLoaded": true,
     "originRootReadDenied": true,
-    "blocker": "existing-model-or-auth-unavailable"
+    "originRead": true,
+    "remoteEffect": true,
+    "modelReadAttemptDenied": true,
+    "modelWriteAttemptDenied": true,
+    "modelCredentialReadDenied": true,
+    "modelCredentialWriteDenied": true,
+    "toolCallCount": 6
   },
   "final": {
     "hostOriginUnchanged": true,
     "hostEffectUnchanged": true,
     "hostSentinelUnchanged": true,
-    "remoteModelEffect": false
+    "remoteModelEffect": true
+  },
+  "reworkTriage": {
+    "priorAttempt": {
+      "commit": "699cec1a",
+      "modelPresent": false,
+      "authConfigured": false,
+      "modelTurnAttempted": false,
+      "blocker": "existing-model-or-auth-unavailable"
+    },
+    "hostRuntimeWithoutProviderFactory": {
+      "modelPresent": false,
+      "authConfigured": false
+    },
+    "hostRuntimeWithExplicitProviderFactory": {
+      "modelPresent": true,
+      "authConfigured": true,
+      "sdkProvider": "magpie",
+      "sdkModel": "codex/gpt-6.1-sol"
+    },
+    "existingSelectedCredential": {
+      "nonemptyKey": true,
+      "explicitRoot": true
+    },
+    "sourceOnlyFaults": [
+      "fixture-local-absent-models-store",
+      "locked-file-readers-under-read-only-auth-allowance",
+      "selected-provider-factory-not-registered"
+    ]
+  },
+  "verification": {
+    "typecheck": {
+      "command": "npm run typecheck",
+      "timeoutMs": 180000,
+      "exitCode": 0
+    },
+    "ticketFullSuite": {
+      "command": "npm test",
+      "timeoutMs": 180000,
+      "internalTimeoutMs": 180000,
+      "exitCode": null,
+      "signal": "SIGKILL",
+      "elapsedMs": 180010,
+      "passingCountersAvailable": false,
+      "timeoutCandidates": [
+        "web/src/shell/shell.dom.test.ts:206"
+      ]
+    },
+    "baseFullSuite": {
+      "commit": "4574a061",
+      "checkout": "temporary-git-archive",
+      "dependencies": "same-installed-repository-dependencies",
+      "command": "npm test",
+      "timeoutMs": 180000,
+      "internalTimeoutMs": 175000,
+      "exitCode": 124,
+      "elapsedMs": 175459,
+      "passingCountersAvailable": false,
+      "timeoutCandidates": [
+        "web/src/app/routes.dom.test.ts:1099",
+        "web/src/modules/tasks/tasks.dom.test.ts:1084",
+        "web/src/prototype/agents-wake-management.dom.test.ts:8",
+        "web/src/prototype/agents.dom.test.ts"
+      ]
+    },
+    "productionTestsManifestsAndRunnerIdenticalToBase": true,
+    "fullSuiteGreen": false,
+    "timeoutReproducedOnBase": true,
+    "preciseTimeoutCauseProven": false,
+    "syntaxCheckPassed": true,
+    "diffCheckPassed": true
   }
 }
