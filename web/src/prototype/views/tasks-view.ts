@@ -569,7 +569,7 @@ function renderTaskDetailPage(
           Current Version: <strong>v${selectedTask.currentVersion.version}</strong> · Edited by: ${selectedTask.currentVersion.createdBy}
         </div>
       </div>
-      <button class="btn btn-secondary btn-sm edit-task-content-btn" ${selectedTask.lifecycle === 'completed' || selectedTask.lifecycle === 'stopped' || selectedTask.lifecycle === 'cancelled' ? 'disabled' : ''}>
+      <button class="btn btn-secondary btn-sm edit-task-content-btn" ${hasEndedIntent(selectedTask.lifecycle) || selectedTask.lifecycle === 'stopped' ? 'disabled' : ''}>
         ${renderIcon('edit', 14)} Edit Specification (Create v${selectedTask.currentVersion.version + 1})
       </button>
     </div>
@@ -652,9 +652,8 @@ function renderTaskDetailPage(
 
   // Section 6: Live Controls Sticky Action Bar (Two-Stage Pause, Interrupt, Resume, Discard)
   if (
-    selectedTask.lifecycle !== 'completed' &&
+    !hasEndedIntent(selectedTask.lifecycle) &&
     selectedTask.lifecycle !== 'stopped' &&
-    selectedTask.lifecycle !== 'cancelled' &&
     selectedTask.lifecycle !== 'proposed' &&
     selectedTask.lifecycle !== 'rejected'
   ) {
