@@ -9,6 +9,7 @@ import { OperatorDiagnostics } from './module.ts';
 import { MemoryOperationalStore, diagnosticSubject } from './service.ts';
 import { OperatorSessionService } from '../auth/service.ts';
 import { InMemoryOperatorSessionStore } from '../auth/store.ts';
+import { createExecutionStrategy } from '../execution-mode.ts';
 
 test('diagnostic recovery rows retain correlation and validated owners across journal reopen', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'diagnostic-correlation-'));
@@ -22,6 +23,7 @@ test('diagnostic recovery rows retain correlation and validated owners across jo
     { id: 'recovery-holder', holderKind: 'task', holderId: 'task-1', decisions: [{ kind: 'released', at: 4000 }] },
   ] };
   const options = { schema: 22, auth: new OperatorSessionService({ store: new InMemoryOperatorSessionStore() }),
+    executionStrategy: createExecutionStrategy('environment-hosted'),
     enrollments: { list: async () => [] } as never, recovery: recovery as never,
     task: async (id: string) => id === 'task-1' ? { id, projectId: 'project-1', goal: 'PRIVATE_GOAL' } : undefined,
     run: async (id: string) => id === 'run-2' ? { id, projectId: 'project-1', agentId: 'agent-1', prompt: 'PRIVATE_PROMPT' } : undefined,
@@ -60,6 +62,7 @@ test('export selects typed facts from enrollment, readiness and recovery without
   assert.ok(session.authenticated);
   const enrollment = { id: privateText, status: 'approved', displayName: privateText, worker: { identityDigest: privateText }, decisions: [{ kind: 'approved', at: 1, actor: privateText, reason: privateText }] };
   const operations = new OperatorDiagnostics({ store: new MemoryOperationalStore(), schema: 22, auth,
+    executionStrategy: createExecutionStrategy('environment-hosted'),
     enrollments: { list: async () => [enrollment], readiness: async () => ({ readiness: { connection: { state: 'online', address: privateText }, compatibility: { state: 'compatible', detail: privateText }, engines: [{ engine: 'pi', readiness: 'ready', models: [privateText], authMode: privateText, version: privateText }], workSafety: { state: 'recovery' } } }) } as never,
     recovery: { list: async () => [{ id: privateText, decisions: [{ kind: 'interrupted', at: 2, reason: privateText }, { kind: 'force-released', at: 3, reason: privateText }], unresolvedFacts: [privateText] }] } as never,
   });
@@ -73,6 +76,7 @@ test('export selects typed facts from enrollment, readiness and recovery without
   assert.equal(JSON.stringify(first).includes(login.bearerToken), false);
   const settings = await operations.settings(session.session.id);
   assert.equal(settings.session.activeCount, 1);
+  assert.equal(settings.executionMode, 'environment-hosted');
   assert.equal(settings.access.publicInternetSupported, false);
   assert.equal(JSON.stringify(settings).includes(privateText), false);
   await auth.revokeSession(session.session.id);

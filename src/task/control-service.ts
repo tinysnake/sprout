@@ -5,10 +5,11 @@ import { isEndedTaskStatus, type Task, type TaskActor, type TaskBlocker, type Ta
 import type { TaskService } from './service.ts';
 import { TaskTerminalMutationError, type TaskEnvironmentLifecycle, type TaskRecoveryAction } from './environment-lifecycle.ts';
 import type { TaskProposalService } from './proposal-service.ts';
+import { createExecutionStrategy, executionModeAdmissionRefusal, type ExecutionStrategy } from '../execution-mode.ts';
 
 export type TaskBlockerInput = Omit<TaskBlocker, 'createdBy' | 'createdAt'>;
 export type TaskCompletionClaimInput = Omit<TaskCompletionClaim, 'id' | 'actor' | 'at' | 'contentVersion'>;
-export type TaskControlErrorCode = 'unknown-task' | 'authority-required' | 'invalid-command' | 'lifecycle-conflict';
+export type TaskControlErrorCode = 'unknown-task' | 'authority-required' | 'invalid-command' | 'lifecycle-conflict' | 'execution-mode-unavailable';
 
 export class TaskControlError extends Error {
   readonly code: TaskControlErrorCode;
@@ -31,6 +32,7 @@ export class TaskControlService {
   readonly #runs: TaskControlRunPort;
   readonly #now: () => number;
   readonly #id: () => string;
+  readonly #executionStrategy: ExecutionStrategy;
 
   constructor(options: {
     readonly tasks: TaskService;
@@ -39,6 +41,7 @@ export class TaskControlService {
     readonly runs: TaskControlRunPort;
     readonly now?: () => number;
     readonly id?: () => string;
+    readonly executionStrategy?: ExecutionStrategy;
   }) {
     this.#tasks = options.tasks;
     this.#lifecycle = options.lifecycle;
@@ -46,6 +49,7 @@ export class TaskControlService {
     this.#runs = options.runs;
     this.#now = options.now ?? Date.now;
     this.#id = options.id ?? (() => `claim-${randomUUID()}`);
+    this.#executionStrategy = options.executionStrategy ?? createExecutionStrategy('environment-hosted');
   }
 
   async reviseForHuman(taskId: string, input: {
@@ -83,6 +87,7 @@ export class TaskControlService {
   }
 
   async resumeForHuman(taskId: string, input: { readonly reason: string }): Promise<Task> {
+    this.assertExecutionModeAvailable();
     const actor = await this.#humanForTask(taskId);
     const task = await this.#task(taskId);
     const reason = commandReason(input?.reason);
@@ -177,11 +182,13 @@ export class TaskControlService {
   }
 
   async reopenForHuman(taskId: string, input: { readonly reason: string }): Promise<Task> {
+    this.assertExecutionModeAvailable();
     const actor = await this.#humanForTask(taskId);
     return this.#lifecycle.reopen(taskId, actor, commandReason(input?.reason));
   }
 
   async recoverForHuman(taskId: string, input: { readonly action: TaskRecoveryAction; readonly reason: string }): Promise<Task> {
+    if (input?.action === 'resume') this.assertExecutionModeAvailable();
     const actor = await this.#humanForTask(taskId);
     const current = await this.#task(taskId);
     if (input?.action === 'discard' && current.environmentLifecycleState === 'discarded') return current;
@@ -189,6 +196,11 @@ export class TaskControlService {
       throw new TaskControlError('invalid-command', 'action must be resume or discard');
     }
     return this.#lifecycle.recoverForHuman(taskId, input.action, actor, commandReason(input.reason));
+  }
+
+  assertExecutionModeAvailable(): void {
+    const refusal = executionModeAdmissionRefusal(this.#executionStrategy);
+    if (refusal !== undefined) throw new TaskControlError('execution-mode-unavailable', refusal);
   }
 
   async stopSubordinateForHumanLead(taskId: string, input: { readonly runId: string; readonly reason: string }): Promise<Task> {

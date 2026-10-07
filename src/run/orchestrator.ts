@@ -1,4 +1,5 @@
 import type { AgentDefinition, AgentRegistry } from '../agent/registry.ts';
+import { createExecutionStrategy, executionModeAdmissionRefusal, type ExecutionStrategy } from '../execution-mode.ts';
 import { effectiveWorkOptions, type AgentWorkOption } from '../agent/model.ts';
 import {
   evaluateAdmissibleWorkOption,
@@ -128,6 +129,8 @@ export interface RunOrchestratorOptions {
    * The current core-owned engine/model requirement resolver (#128, #129).
    */
   readonly requirements?: () => Promise<ReadinessRequirementScope | undefined>;
+  /** One immutable process strategy shared with Task and Runtime admission. */
+  readonly executionStrategy?: ExecutionStrategy;
   /**
    * The durable Project workspace binding for one (Project, Environment), when
    * the build wires Project access (#93, ADR-0008).
@@ -247,6 +250,7 @@ export class RunOrchestrator {
       ) => Promise<RunWorkspaceBinding | undefined>)
     | undefined;
   readonly #requirements: (() => Promise<ReadinessRequirementScope | undefined>) | undefined;
+  readonly #executionStrategy: ExecutionStrategy;
 
   readonly #runs = new Map<string, AgentRun>();
   readonly #sessions = new Map<string, EngineSession>();
@@ -280,6 +284,7 @@ export class RunOrchestrator {
     this.#strictAdmission = options.strictAdmission ?? options.engineFacts !== undefined;
     this.#workspaceBinding = options.workspaceBinding;
     this.#requirements = options.requirements;
+    this.#executionStrategy = options.executionStrategy ?? createExecutionStrategy('environment-hosted');
   }
 
   /**
@@ -308,6 +313,15 @@ export class RunOrchestrator {
       ...(request.retryOfRunId !== undefined ? { retryOfRunId: request.retryOfRunId } : {}),
       createdAt: this.#clock.now(),
     };
+
+    const refusal = executionModeAdmissionRefusal(this.#executionStrategy);
+    if (refusal !== undefined) {
+      await this.settleTaskRun(await this.#finish(run, 'failed', {
+        status: 'failed',
+        message: refusal,
+      }, 'admission'));
+      return { id: run.id };
+    }
 
     const agent = await this.#resolveAgent(request.agentId);
     if (!agent) {

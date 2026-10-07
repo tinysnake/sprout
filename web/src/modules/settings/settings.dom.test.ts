@@ -303,6 +303,43 @@ test('Settings F4: protocol range and migration guidance never imply verified co
   });
 });
 
+test('Settings execution mode is read-only, marked stale offline, and refreshed after reconnect', async () => {
+  let settingsReads = 0;
+  await withSettings(async ({ doc, service }) => {
+    (doc.querySelector('.settings-tab-system') as HTMLButtonElement).click();
+    await settle();
+    let mode = doc.querySelector<HTMLElement>('[data-settings-section="execution-mode"]');
+    assert.ok(mode);
+    assert.equal(mode.getAttribute('data-execution-mode'), 'host-run');
+    assert.equal(mode.getAttribute('data-execution-mode-stale'), 'false');
+    assert.match(mode.textContent ?? '', /Effective mode/);
+    assert.match(mode.textContent ?? '', /Restart Sprout/);
+    assert.equal(mode.querySelectorAll('button, input, select').length, 0, 'mode has no browser mutation control');
+    assert.equal(settingsReads, 1);
+
+    service.setState({ status: 'offline', connection: 'offline', loading: false });
+    await settle();
+    mode = doc.querySelector<HTMLElement>('[data-settings-section="execution-mode"]');
+    assert.equal(mode?.getAttribute('data-execution-mode-stale'), 'true');
+    assert.match(mode?.textContent ?? '', /Last confirmed · stale/);
+    assert.match(doc.body.textContent ?? '', /Connection is stale/);
+
+    service.setState({ status: 'online', connection: 'online', loading: false });
+    await settle(180);
+    mode = doc.querySelector<HTMLElement>('[data-settings-section="execution-mode"]');
+    assert.equal(settingsReads, 2, 'reconnect triggers one fresh authoritative settings read');
+    assert.equal(mode?.getAttribute('data-execution-mode'), 'host-run');
+    assert.equal(mode?.getAttribute('data-execution-mode-stale'), 'false');
+    assert.match(mode?.textContent ?? '', /Effective mode/);
+  }, service => {
+    const loadSettings = service.loadSettings.bind(service);
+    service.loadSettings = async () => {
+      settingsReads += 1;
+      return { ...await loadSettings(), executionMode: 'host-run' };
+    };
+  });
+});
+
 test('Settings F5: DOM text contains no transport-security assurance absent from the contract', async () => {
   await withSettings(async ({ doc }) => {
     for (const tabSelector of ['.settings-tab-access', '.settings-tab-system', '.settings-tab-data']) {

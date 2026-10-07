@@ -18,6 +18,7 @@ import { SqliteStore } from '../store/db.ts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createExecutionStrategy, type ExecutionStrategy } from '../execution-mode.ts';
 
 const content = {
   title: 'Snapshot task',
@@ -34,6 +35,7 @@ function fixture(options: {
   readonly taskStore?: TaskStore;
   readonly proposalStore?: TaskProposalStore;
   readonly leaseStore?: LeaseStore;
+  readonly executionStrategy?: ExecutionStrategy;
 } = {}) {
   const memberIds = options.agents ?? ['scout', 'scribe'];
   const taskStore = options.taskStore ?? new InMemoryTaskStore();
@@ -98,6 +100,7 @@ function fixture(options: {
   const admissions = new TaskAdmissionService({
     proposals, proposalStore, tasks, lifecycle, projects,
     agentAuthority: { agentIsActive: async id => memberIds.includes(id) },
+    ...(options.executionStrategy !== undefined ? { executionStrategy: options.executionStrategy } : {}),
     ids: { task: () => 'task-1', lease: () => 'unused-lease', run: () => 'unused-run', message: () => 'unused-message', projectEvent: () => 'unused-event' },
     now: () => 100,
   });
@@ -113,6 +116,19 @@ const beginInput = (lead: { memberId: string; memberKind: 'human' | 'agent' }, e
   environmentInstanceId,
   lead,
   reason: 'Approved for the Project milestone.',
+});
+
+test('Host-run Task begin reports unavailable before consuming a proposal, preparing context, or acquiring a lease', async () => {
+  const context = fixture({ executionStrategy: createExecutionStrategy('host-run') });
+  const proposal = await propose(context);
+  await assert.rejects(
+    context.admissions.beginProposal(proposal.id, { memberId: 'operator', memberKind: 'human' }, beginInput({ memberId: 'operator', memberKind: 'human' })),
+    error => error instanceof TaskAdmissionError && error.code === 'execution-mode-unavailable',
+  );
+  assert.equal((await context.proposals.get(proposal.id)).status, 'proposed');
+  assert.deepEqual(context.pool.leases(), []);
+  assert.deepEqual(context.materializations, []);
+  assert.deepEqual(context.submissions, []);
 });
 
 test('a Human lead begins one frozen proposal snapshot without waking an Agent', async () => {
