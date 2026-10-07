@@ -238,10 +238,17 @@ test('the frozen context carries the project contract, candidates, and privacy b
   assert.match(context, /Report what you observed\./);
   assert.match(context, /- scout: responsibilities: Investigate \| collaboration instructions: Ask first\./);
   assert.match(context, /- forge: responsibilities: Build/);
-  assert.match(context, /Privacy boundary — this context deliberately excludes:/);
-  for (const exclusion of ROUTING_CONTEXT_EXCLUSIONS) {
-    assert.ok(context.includes(exclusion), `exclusion listed: ${exclusion}`);
-  }
+  const privacyStatement =
+    'Privacy boundary — source selection provides no routing-context source for ' +
+    'direct Messages and replies, structured credential records, host and ' +
+    'private-network records, Agent-private memory, raw reasoning, engine ' +
+    'sessions and transcripts, tool output, or transient Environment availability. ' +
+    'At build, recognized sensitive patterns in admitted text are redacted; ' +
+    'unlabelled opaque values in admitted prose may still be present.';
+  assert.ok(context.includes(privacyStatement));
+  assert.ok(!context.includes('deliberately excludes'));
+  assert.ok(!context.includes('credentials, tokens, and secrets'));
+  assert.ok(!context.includes('host identity and private network facts'));
   assert.deepEqual(plan[0]!.manifest.exclusions, [...ROUTING_CONTEXT_EXCLUSIONS]);
 });
 

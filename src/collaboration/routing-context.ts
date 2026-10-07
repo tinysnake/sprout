@@ -164,9 +164,12 @@ function renderSharedPrefix(
     'Open Tasks (curated public state, lead, and blocker summary; no Environment, lease, or run facts):',
     '- (no explicitly relevant Tasks)',
     '',
-    'Privacy boundary — this context deliberately excludes: ' +
-      ROUTING_CONTEXT_EXCLUSIONS.join('; ') +
-      '.',
+    'Privacy boundary — source selection provides no routing-context source for ' +
+      'direct Messages and replies, structured credential records, host and ' +
+      'private-network records, Agent-private memory, raw reasoning, engine ' +
+      'sessions and transcripts, tool output, or transient Environment availability. ' +
+      'At build, recognized sensitive patterns in admitted text are redacted; ' +
+      'unlabelled opaque values in admitted prose may still be present.',
     '',
   ];
   return lines.join('\n');
