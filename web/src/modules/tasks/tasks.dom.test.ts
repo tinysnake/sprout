@@ -9,8 +9,6 @@ import type { TaskBlockerInput, TaskBrowserAdapter } from '../../adapters/task-a
 import type { ProjectManagementService, ProjectOverviewData } from '../projects/types.ts';
 import { createShellConnectionController } from '../../shell/connection.ts';
 
-process.on('unhandledRejection', (reason) => console.error('DEBUG_UNHANDLED_REJECTION', reason));
-
 const GLOBALS = [
   'HTMLElement', 'HTMLButtonElement', 'HTMLFormElement', 'HTMLInputElement', 'HTMLSelectElement', 'HTMLTextAreaElement',
   'SVGElement', 'Element', 'Document', 'DocumentFragment', 'location', 'history', 'localStorage', 'navigator',
