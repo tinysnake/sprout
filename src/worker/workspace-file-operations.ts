@@ -49,7 +49,9 @@ export class WorkerWorkspaceFiles {
     if (previous && (input.generation < previous.generation || input.connectionEpoch < previous.connectionEpoch)) {
       throw new Error('stale workspace binding');
     }
-    if (previous && input.generation === previous.generation && input.bindingId !== previous.bindingId) {
+    if (previous && input.generation === previous.generation &&
+      (input.bindingId !== previous.bindingId || input.workspaceId !== previous.workspaceId ||
+        input.kind !== previous.kind || input.path !== previous.path)) {
       throw new Error('conflicting workspace binding');
     }
     this.#bindings.set(input.projectId, { ...input, root });
