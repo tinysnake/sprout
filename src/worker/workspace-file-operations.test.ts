@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EndpointCarrier } from './carrier.ts';
@@ -34,6 +34,63 @@ test('Worker MCP inspection reads only the bound root manifest and returns sanit
   const unsupported = await files.inspectMcpConfiguration({ ...binding, format: 'claude-code-mcp-json-v1' });
   assert.equal(unsupported.status, 'unsupported');
   assert.deepEqual(unsupported.servers, []);
+});
+
+test('Worker launches a selected stdio MCP server in the bound workspace, validates calls, and fences by lease', async (t) => {
+  const workerRoot = await mkdtemp(join(tmpdir(), 'sprout-mcp-worker-'));
+  const hostRoot = await mkdtemp(join(tmpdir(), 'sprout-mcp-host-'));
+  t.after(async () => {
+    await rm(workerRoot, { recursive: true, force: true });
+    await rm(hostRoot, { recursive: true, force: true });
+  });
+  const connection = await worker(workerRoot);
+  t.after(() => connection.close());
+  const selected = await connection.contexts.validateWorkspace({ projectId: 'project-mcp', environmentInstanceId: 'env-1', kind: 'relative', path: 'repo' });
+  const binding = {
+    projectId: 'project-mcp', environmentInstanceId: 'env-1', bindingId: 'binding-mcp',
+    generation: 1, connectionEpoch: 4, workspaceId: selected.workspaceId, kind: 'relative', path: 'repo',
+  } as const;
+  await connection.contexts.attachWorkspaceBinding(binding);
+  const serverScript = `
+    import { createInterface } from 'node:readline';
+    import { writeFileSync } from 'node:fs';
+    writeFileSync('mcp-worker-location.txt', 'launched-in-bound-workspace');
+    const tools = [{ name: 'echo', description: 'Echo the supplied text.', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false } }];
+    const input = createInterface({ input: process.stdin });
+    function send(message) { process.stdout.write(JSON.stringify(message) + '\\n'); }
+    input.on('line', line => {
+      const request = JSON.parse(line);
+      if (request.method === 'initialize') send({ jsonrpc: '2.0', id: request.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'fixture', version: '1' } } });
+      else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools } });
+      else if (request.method === 'tools/call') send({ jsonrpc: '2.0', id: request.id, result: { content: [{ type: 'text', text: request.params.arguments.text }] } });
+    });
+  `;
+  await writeFile(join(workerRoot, 'repo', '.mcp.json'), JSON.stringify({ mcpServers: {
+    'fixture-server': { command: process.execPath, args: ['--input-type=module', '-e', serverScript], env: { MCP_FIXTURE_PRIVATE: 'private-config-value' } },
+  } }));
+  const lease = { leaseId: 'lease-mcp-1', holderKind: 'run' as const, holderId: 'run-mcp-1', runId: 'run-mcp-1' };
+  const started = await connection.contexts.startProjectMcp({ ...binding, ...lease, format: 'claude-code-mcp-json-v1' });
+  assert.equal(started.status, 'ready');
+  assert.equal(started.servers.length, 1);
+  assert.equal(started.servers[0]?.name, 'fixture-server');
+  assert.deepEqual(started.servers[0]?.tools.map(tool => ({ name: tool.name, server: tool.server })), [{ name: 'echo', server: 'fixture-server' }]);
+  assert.equal(JSON.stringify(started).includes('private-config-value'), false);
+  assert.equal(JSON.stringify(started).includes(process.execPath), false);
+  assert.equal(JSON.stringify(started).includes(workerRoot), false);
+  assert.equal(await readFile(join(workerRoot, 'repo', 'mcp-worker-location.txt'), 'utf8'), 'launched-in-bound-workspace');
+  assert.equal(await readFile(join(hostRoot, 'mcp-worker-location.txt')).catch(() => ''), '', 'the configured host-side directory was not used');
+  const processId = started.processId;
+  const toolId = started.servers[0]?.tools[0]?.id;
+  assert.ok(processId);
+  assert.ok(toolId);
+  const call = await connection.contexts.callProjectMcpTool({ ...binding, ...lease, processId, toolId, arguments: { text: 'hello from Project tool' } });
+  assert.deepEqual(call, { status: 'completed', text: 'hello from Project tool' });
+  const invalid = await connection.contexts.callProjectMcpTool({ ...binding, ...lease, processId, toolId, arguments: { text: 12 } });
+  assert.deepEqual(invalid, { status: 'failed', reason: 'invalid-arguments' });
+  const wrongLease = await connection.contexts.callProjectMcpTool({ ...binding, ...lease, leaseId: 'lease-other', processId, toolId, arguments: { text: 'must not route' } });
+  assert.deepEqual(wrongLease, { status: 'failed', reason: 'worker-refused' });
+  const stopped = await connection.contexts.stopProjectMcp({ ...binding, ...lease, processId });
+  assert.deepEqual(stopped, { status: 'stopped' });
 });
 
 test('Worker file reads return the same-name remote sentinel and deny traversal, another Project, and host paths', async (t) => {

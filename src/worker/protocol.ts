@@ -40,6 +40,9 @@ export const WORKER_METHODS = {
   /** Execute, inspect, or cancel a bounded remote file operation. */
   workspaceFileOperation: 'workspace/file-operation',
   inspectProjectMcpConfiguration: 'project/mcp-configuration/inspect',
+  startProjectMcp: 'project/mcp/start',
+  callProjectMcpTool: 'project/mcp/tool-call',
+  stopProjectMcp: 'project/mcp/stop',
   inspectWorkspaceFileOperation: 'workspace/file-operation/inspect',
   cancelWorkspaceFileOperation: 'workspace/file-operation/cancel',
   recoverySnapshot: 'recovery/snapshot',
@@ -170,7 +173,7 @@ export interface WorkerEngineDescription {
 
 export interface WorkerWorkspaceOperations {
   readonly version: 1;
-  readonly operations: readonly ('read' | 'search' | 'inspect-mcp-configuration')[];
+  readonly operations: readonly ('read' | 'search' | 'inspect-mcp-configuration' | 'start-project-mcp' | 'call-project-mcp-tool' | 'stop-project-mcp')[];
   readonly maxReadBytes: number;
   readonly maxSearchResults: number;
 }
@@ -306,6 +309,59 @@ export interface InspectProjectMcpConfigurationResult {
   readonly status: 'valid' | 'missing' | 'invalid' | 'unsupported';
   readonly format: 'claude-code-mcp-json-v1';
   readonly servers: readonly ProjectMcpServerDescriptor[];
+}
+
+export interface ProjectMcpLeaseIdentity {
+  readonly leaseId: string;
+  readonly holderKind: 'run' | 'task';
+  readonly holderId: string;
+  readonly runId: string;
+  readonly taskId?: string;
+}
+
+export interface StartProjectMcpParams extends WorkspaceBindingIdentity, ProjectMcpLeaseIdentity {
+  readonly format: 'claude-code-mcp-json-v1';
+}
+
+export interface ProjectMcpToolDeclaration {
+  readonly id: string;
+  readonly server: string;
+  readonly name: string;
+  readonly description: string;
+  readonly inputSchema: Readonly<Record<string, unknown>>;
+}
+
+export interface ProjectMcpServerStatus {
+  readonly name: string;
+  readonly status: 'ready' | 'missing-dependency' | 'invalid' | 'unsupported';
+  readonly tools: readonly ProjectMcpToolDeclaration[];
+}
+
+export interface StartProjectMcpResult {
+  readonly status: 'ready' | 'partial' | 'blocked';
+  readonly processId?: string;
+  readonly reason?: 'not-selected' | 'missing' | 'invalid' | 'unsupported' | 'worker-refused';
+  readonly servers: readonly ProjectMcpServerStatus[];
+}
+
+export interface CallProjectMcpToolParams extends WorkspaceBindingIdentity, ProjectMcpLeaseIdentity {
+  readonly processId: string;
+  readonly toolId: string;
+  readonly arguments: Readonly<Record<string, unknown>>;
+}
+
+export interface CallProjectMcpToolResult {
+  readonly status: 'completed' | 'failed' | 'unsupported';
+  readonly text?: string;
+  readonly reason?: 'unknown-tool' | 'invalid-arguments' | 'server-error' | 'invalid-result' | 'timeout' | 'worker-refused';
+}
+
+export interface StopProjectMcpParams extends WorkspaceBindingIdentity, ProjectMcpLeaseIdentity {
+  readonly processId: string;
+}
+
+export interface StopProjectMcpResult {
+  readonly status: 'stopped' | 'uncertain' | 'not-found';
 }
 
 export interface WorkspaceFileOperationParams extends Omit<WorkspaceBindingIdentity, 'path'> {

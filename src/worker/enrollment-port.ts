@@ -41,6 +41,12 @@ import type {
   CancelWorkspaceFileOperationResult,
   InspectProjectMcpConfigurationParams,
   InspectProjectMcpConfigurationResult,
+  StartProjectMcpParams,
+  StartProjectMcpResult,
+  CallProjectMcpToolParams,
+  CallProjectMcpToolResult,
+  StopProjectMcpParams,
+  StopProjectMcpResult,
   WorkerInfo,
   WorkerReadinessProbeResult,
 } from './protocol.ts';
@@ -239,6 +245,30 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
       !connection.info.workspaceOperations.operations.includes('inspect-mcp-configuration') ||
       this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
     const result = await connection.contexts.inspectProjectMcpConfiguration(input);
+    if (this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error('stale Worker epoch');
+    return result;
+  }
+
+  async startProjectMcp(environmentInstanceId: string, input: StartProjectMcpParams): Promise<StartProjectMcpResult> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || connection.info.workspaceOperations?.version !== 1 || !connection.info.workspaceOperations.operations.includes('start-project-mcp') || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    const result = await connection.contexts.startProjectMcp(input);
+    if (this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error('stale Worker epoch');
+    return result;
+  }
+
+  async callProjectMcpTool(environmentInstanceId: string, input: CallProjectMcpToolParams): Promise<CallProjectMcpToolResult> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || connection.info.workspaceOperations?.version !== 1 || !connection.info.workspaceOperations.operations.includes('call-project-mcp-tool') || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    const result = await connection.contexts.callProjectMcpTool(input);
+    if (this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error('stale Worker epoch');
+    return result;
+  }
+
+  async stopProjectMcp(environmentInstanceId: string, input: StopProjectMcpParams): Promise<StopProjectMcpResult> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || connection.info.workspaceOperations?.version !== 1 || !connection.info.workspaceOperations.operations.includes('stop-project-mcp') || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    const result = await connection.contexts.stopProjectMcp(input);
     if (this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error('stale Worker epoch');
     return result;
   }

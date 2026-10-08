@@ -29,10 +29,15 @@ import {
   type WorkerReadinessFacts,
   type WorkerReadinessProbeParams,
   type WorkerReadinessProbeResult,
+  type InspectProjectMcpConfigurationParams,
+  type StartProjectMcpParams,
+  type CallProjectMcpToolParams,
+  type StopProjectMcpParams,
 } from './protocol.ts';
 import { createAgentTaskGroupMessageBridge } from './agent-task-group-bridge.ts';
 import { WorkerWorkspace } from './workspace.ts';
 import { WorkerWorkspaceFiles } from './workspace-file-operations.ts';
+import { WorkerProjectMcp } from './project-mcp.ts';
 import type { WorkerRecoveryJournal } from './recovery-journal.ts';
 import {
   contractDeliveryDiagnostic,
@@ -119,6 +124,7 @@ export class EnvironmentWorker {
   readonly #sessions = new Map<string, LiveSession>();
   readonly #workspace: WorkerWorkspace | undefined;
   readonly #workspaceFiles: WorkerWorkspaceFiles | undefined;
+  readonly #projectMcp: WorkerProjectMcp | undefined;
   #counter = 0;
   #closed = false;
   #ownedEngineSession = false;
@@ -128,6 +134,7 @@ export class EnvironmentWorker {
     this.#options = options;
     this.#workspace = options.workspaceRoot === undefined ? undefined : new WorkerWorkspace(options.workspaceRoot);
     this.#workspaceFiles = this.#workspace === undefined ? undefined : new WorkerWorkspaceFiles(this.#workspace, options.environmentInstanceId);
+    this.#projectMcp = this.#workspace === undefined ? undefined : new WorkerProjectMcp(this.#workspace, options.environmentInstanceId);
     this.#transport = new LineJsonRpcTransport({
       input: options.input,
       output: options.output,
@@ -197,15 +204,27 @@ export class EnvironmentWorker {
         case WORKER_METHODS.validateWorkspace:
           this.#transport.respond(id, await this.#validateWorkspace(params as ValidateWorkspaceParams));
           return;
-        case WORKER_METHODS.attachWorkspaceBinding:
-          await this.#requireWorkspaceFiles().attach(params as import('./protocol.ts').AttachWorkspaceBindingParams);
+        case WORKER_METHODS.attachWorkspaceBinding: {
+          const binding = params as import('./protocol.ts').AttachWorkspaceBindingParams;
+          await this.#requireProjectMcp().attach(binding);
+          await this.#requireWorkspaceFiles().attach(binding);
           this.#transport.respond(id, { attached: true });
           return;
+        }
         case WORKER_METHODS.workspaceFileOperation:
           this.#transport.respond(id, await this.#requireWorkspaceFiles().execute(params as import('./protocol.ts').WorkspaceFileOperationParams));
           return;
         case WORKER_METHODS.inspectProjectMcpConfiguration:
-          this.#transport.respond(id, await this.#requireWorkspaceFiles().inspectMcpConfiguration(params as import('./protocol.ts').InspectProjectMcpConfigurationParams));
+          this.#transport.respond(id, await this.#requireWorkspaceFiles().inspectMcpConfiguration(params as InspectProjectMcpConfigurationParams));
+          return;
+        case WORKER_METHODS.startProjectMcp:
+          this.#transport.respond(id, await this.#requireProjectMcp().start(params as StartProjectMcpParams));
+          return;
+        case WORKER_METHODS.callProjectMcpTool:
+          this.#transport.respond(id, await this.#requireProjectMcp().call(params as CallProjectMcpToolParams));
+          return;
+        case WORKER_METHODS.stopProjectMcp:
+          this.#transport.respond(id, await this.#requireProjectMcp().stop(params as StopProjectMcpParams));
           return;
         case WORKER_METHODS.inspectWorkspaceFileOperation:
           this.#transport.respond(id, this.#requireWorkspaceFiles().inspect(params as import('./protocol.ts').InspectWorkspaceFileOperationParams));
@@ -246,7 +265,7 @@ export class EnvironmentWorker {
         standingInstructions: engine.capabilities.standingInstructions,
       })),
       ...(this.#workspaceFiles !== undefined ? { workspaceOperations: {
-        version: 1 as const, operations: ['read', 'search', 'inspect-mcp-configuration'] as const,
+        version: 1 as const, operations: ['read', 'search', 'inspect-mcp-configuration', 'start-project-mcp', 'call-project-mcp-tool', 'stop-project-mcp'] as const,
         maxReadBytes: 64 * 1024, maxSearchResults: 100,
       } } : {}),
       ...(this.#readiness !== undefined
@@ -403,6 +422,11 @@ export class EnvironmentWorker {
     return this.#workspaceFiles;
   }
 
+  #requireProjectMcp(): WorkerProjectMcp {
+    if (this.#projectMcp === undefined) throw new Error('Project MCP supervision is unavailable');
+    return this.#projectMcp;
+  }
+
   #requireWorkspace(): WorkerWorkspace {
     if (!this.#workspace) throw new Error('worker has no configured workspace root');
     return this.#workspace;
@@ -488,6 +512,7 @@ export class EnvironmentWorker {
     if (this.#closed) return;
     this.#closed = true;
     let fenced = true;
+    const mcpStopped = await this.#projectMcp?.shutdown() ?? true;
     const running: Promise<void>[] = [];
     for (const [sessionId, live] of this.#sessions) {
       await live.closeTaskGroupMessageBridge?.();
@@ -495,6 +520,7 @@ export class EnvironmentWorker {
       if (live.running !== undefined) running.push(live.running);
       await live.session.close().catch(() => { fenced = false; });
     }
+    if (!mcpStopped) fenced = false;
     if (fenced) {
       await settleOrTimeout(running);
       // A new process cannot fence an unknown engine left by an earlier killed
