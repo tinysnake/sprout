@@ -106,4 +106,3 @@ test('a pinned remote mutation refuses transport loss, revocation, and epoch cha
   assert.equal(leaseAcquisitions, 0, 'refused work does not acquire a lease');
   assert.equal(gateway.liveFor('env-b')?.epoch.connectionId, 'connection-b-1', 'a different live Environment never substitutes for the pinned target');
 });
-
