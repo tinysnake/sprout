@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { RemoteWorkspaceOperationResult, RemoteWorkspaceTools, RemoteProjectMcpTools } from '../engine/port.ts';
+import { RemoteProjectMcpStartupError } from '../engine/port.ts';
 import type { ProjectAccessService } from '../project/access-service.ts';
 import { accessIsConsistent, sanitizeWorkspaceSelection } from '../project/access.ts';
 import { sanitizeIdentifier, sanitizeOperatorText } from '../environment/privacy.ts';
@@ -234,10 +235,15 @@ export class EnvironmentOperations {
       throw new RemoteWorkspaceUnavailableError('worker-refused');
     }
     const catalog = safeMcpToolCatalog(started);
-    if (started.processId !== processId || started.status === 'blocked' || !catalog) {
+    if (started.processId !== processId || !catalog) {
       const stopped = await this.#stopMcpProcess(authority.identity, scope, processRow, processId);
       if (stopped !== 'stopped') await this.#noteUncertainMcp(scope);
-      throw new RemoteWorkspaceUnavailableError('worker-refused');
+      throw new RemoteProjectMcpStartupError('worker-refused');
+    }
+    if (started.status !== 'ready' || catalog.tools.length === 0) {
+      const stopped = await this.#stopMcpProcess(authority.identity, scope, processRow, processId);
+      if (stopped !== 'stopped') await this.#noteUncertainMcp(scope);
+      throw new RemoteProjectMcpStartupError(mcpStartupFailureReason(started, catalog.tools.length));
     }
     processRow = { ...processRow, state: 'running', updatedAt: this.#clock() };
     try { await this.#store.saveMcpProcess(processRow); }
@@ -605,6 +611,17 @@ export class EnvironmentOperations {
   async #saveState(row: RemoteOperationIdentity, state: RemoteOperationState): Promise<void> {
     await this.#store.save({ ...row, state, updatedAt: this.#clock() });
   }
+}
+
+function mcpStartupFailureReason(
+  result: StartProjectMcpResult,
+  toolCount: number,
+): RemoteProjectMcpStartupError['reason'] {
+  if (result.servers.some(server => server.status === 'missing-dependency') || result.reason === 'missing') return 'missing-dependency';
+  if (result.servers.some(server => server.status === 'invalid') || result.reason === 'invalid') return 'invalid-configuration';
+  if (result.servers.some(server => server.status === 'unsupported') || result.reason === 'unsupported') return 'unsupported-configuration';
+  if (toolCount === 0) return 'no-tools';
+  return 'worker-refused';
 }
 
 function sanitizeMcpInspection(result: InspectProjectMcpConfigurationResult): Pick<ProjectMcpInspection, 'status' | 'servers'> | undefined {

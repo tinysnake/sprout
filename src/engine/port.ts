@@ -190,6 +190,15 @@ export interface RemoteProjectMcpTools {
   close(): Promise<'stopped' | 'uncertain'>;
 }
 
+export class RemoteProjectMcpStartupError extends Error {
+  readonly reason: 'missing-dependency' | 'invalid-configuration' | 'unsupported-configuration' | 'no-tools' | 'worker-refused';
+  constructor(reason: 'missing-dependency' | 'invalid-configuration' | 'unsupported-configuration' | 'no-tools' | 'worker-refused') {
+    super(`Project MCP startup failed (${reason})`);
+    this.name = 'RemoteProjectMcpStartupError';
+    this.reason = reason;
+  }
+}
+
 /** Engine-facing typed operations. Authorization and target selection live above the Engine port. */
 export interface RemoteWorkspaceTools {
   readonly binding: {

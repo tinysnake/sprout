@@ -329,6 +329,28 @@ function openDialog(kind: DialogKind, memberId = '', environmentId = '') {
   dialog.value = kind;
 }
 
+function mcpInspectionDetail(inspection: ProjectMcpInspectionView): string {
+  switch (inspection.status) {
+    case 'not-selected': return 'Select the supported Project MCP format before inspection.';
+    case 'missing': return 'Add a .mcp.json file to the bound Project workspace.';
+    case 'invalid': return 'Check the .mcp.json syntax and workspace file permissions, then inspect again.';
+    case 'unsupported': return 'Use mcpServers with stdio entries containing command and optional args or env fields.';
+    case 'valid': return `Configuration syntax is valid${inspection.servers.length ? `; ${inspection.servers.length} stdio server${inspection.servers.length === 1 ? '' : 's'} declared` : '; no servers declared'}. Server dependencies and tool availability are checked only during an authorized run; readiness has not been observed yet.`;
+    case 'blocked':
+      switch (inspection.reason) {
+        case 'worker-offline': return 'Reconnect the approved Environment Worker, then inspect again.';
+        case 'stale-epoch': return 'The Worker connection changed. Retry inspection against the current connection.';
+        case 'capability-denied': return 'Approve the required remote workspace capability for this Worker.';
+        case 'workspace-unbound': return 'Bind an authorized Project workspace to this Environment.';
+        case 'access-ended': return 'Restore active Project access to this Environment before inspecting.';
+        case 'project-denied': return 'Confirm this Project is active and the Agent has Project membership.';
+        case 'lease-required': return 'An active Environment lease is required for this operation.';
+        case 'unsupported': return 'Update the Environment Worker to a version that supports Project MCP inspection.';
+        default: return 'The Worker refused inspection. Check approval, capability permission, and the workspace binding.';
+      }
+  }
+}
+
 async function inspectMcpConfiguration(environmentInstanceId: string) {
   const projectId = currentProject.value?.id;
   const currentService = service.value;
@@ -652,7 +674,7 @@ const addMemberExhausted = computed(() => dialog.value === 'add-member' && unass
                     <div v-if="currentContent.mcpConfiguration && entry.status === 'active'" class="mt-2 border-t border-[var(--border-subtle)] pt-2">
                       <Button variant="secondary" size="sm" class="min-h-[40px]" :disabled="controlsDisabled" @click="inspectMcpConfiguration(entry.environmentInstanceId)">Inspect selected MCP configuration</Button>
                       <p v-if="mcpInspections[entry.environmentInstanceId]" class="mt-1 text-[10px] text-[var(--text-secondary)]" :data-mcp-inspection="mcpInspections[entry.environmentInstanceId]?.status">
-                        Inspection {{ mcpInspections[entry.environmentInstanceId]?.status }}<span v-if="mcpInspections[entry.environmentInstanceId]?.reason"> · {{ mcpInspections[entry.environmentInstanceId]?.reason }}</span>
+                        {{ mcpInspectionDetail(mcpInspections[entry.environmentInstanceId]!) }}
                         <span v-if="mcpInspections[entry.environmentInstanceId]?.servers.length"> · {{ mcpInspections[entry.environmentInstanceId]?.servers.map(server => server.name).join(', ') }}</span>
                       </p>
                     </div>

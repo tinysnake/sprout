@@ -40,6 +40,7 @@ interface McpServerProcess {
   readonly name: string;
   readonly client: StdioMcpClient;
   readonly tools: Map<string, ToolOrigin>;
+  readonly secretValues: readonly string[];
 }
 interface ProjectMcpProcess {
   readonly id: string;
@@ -100,6 +101,7 @@ export class WorkerProjectMcp {
     let totalTools = 0;
     for (const declaration of manifest.servers) {
       let client: StdioMcpClient | undefined;
+      const secretValues = Object.values(declaration.env).filter(value => value.length > 0);
       try {
         client = await StdioMcpClient.launch(declaration, binding.root);
         const advertised = await client.discoverTools();
@@ -116,15 +118,15 @@ export class WorkerProjectMcp {
           const safeServer = sanitizeIdentifier(declaration.name, { fallback: '', kind: 'generic', maxLength: 64 });
           const id = randomUUID();
           const safeName = sanitizeIdentifier(`${safeServer}_${safeTool}`, { fallback: '', kind: 'generic', maxLength: 120 });
-          const description = sanitizeOperatorText(tool.description, { fallback: 'No description was provided.', maxLength: 1_000 });
-          const schema = sanitizeInputSchema(tool.inputSchema);
+          const description = redactMcpText(sanitizeOperatorText(tool.description, { fallback: 'No description was provided.', maxLength: 1_000 }), secretValues);
+          const schema = sanitizeInputSchema(tool.inputSchema, 0, secretValues);
           if (!safeTool || !safeServer || !safeName || !schema) { rejectedDeclaration = true; continue; }
           const descriptor: ProjectMcpToolDeclaration = { id, server: safeServer, name: safeTool, description, inputSchema: schema };
           tools.set(id, { declaration: descriptor, rawName: tool.name, schema });
           declarations.push(descriptor);
         }
         totalTools += declarations.length;
-        servers.push({ name: declaration.name, client, tools });
+        servers.push({ name: declaration.name, client, tools, secretValues });
         publicServers.push({ name: sanitizeIdentifier(declaration.name, { fallback: 'unknown-server', kind: 'generic', maxLength: 64 }), status: rejectedDeclaration ? 'unsupported' : 'ready', tools: declarations });
       } catch (error) {
         if (client) await client.close();
@@ -178,7 +180,7 @@ export class WorkerProjectMcp {
       for (const item of response.content) {
         if (!isRecord(item) || item.type !== 'text' || typeof item.text !== 'string') return remember(result('unsupported', 'invalid-result'));
         if (remaining <= 0) break;
-        const sanitized = redactSensitiveText(item.text).slice(0, remaining);
+        const sanitized = redactMcpText(item.text, origin.server.secretValues).slice(0, remaining);
         chunks.push(sanitized);
         remaining -= sanitized.length;
       }
@@ -241,7 +243,7 @@ class StdioMcpClient {
   static async launch(server: ManifestServer, cwd: string): Promise<StdioMcpClient> {
     const child = spawn(server.command, [...server.args], {
       cwd,
-      env: { ...process.env, ...server.env },
+      env: mcpChildEnvironment(server.env),
       shell: false,
       windowsHide: true,
       detached: process.platform !== 'win32',
@@ -397,16 +399,17 @@ async function readManifest(root: string): Promise<{ readonly status: 'valid'; r
   }
 }
 
-function sanitizeInputSchema(value: unknown, depth = 0): JsonRecord | undefined {
+function sanitizeInputSchema(value: unknown, depth = 0, secretValues: readonly string[] = []): JsonRecord | undefined {
   if (!isRecord(value) || depth > 10 || Object.keys(value).length > 32) return undefined;
   const allowed = new Set(['type', 'description', 'properties', 'required', 'items', 'enum', 'additionalProperties', 'minimum', 'maximum', 'minLength', 'maxLength', 'minItems', 'maxItems']);
   if (Object.keys(value).some(key => !allowed.has(key))) return undefined;
   const type = value.type;
   if (typeof type !== 'string' || !['object', 'array', 'string', 'number', 'integer', 'boolean', 'null'].includes(type)) return undefined;
   const result: JsonRecord = { type };
-  if (typeof value.description === 'string') result.description = sanitizeOperatorText(value.description, { fallback: '', maxLength: 1_000 });
+  if (typeof value.description === 'string') result.description = redactMcpText(sanitizeOperatorText(value.description, { fallback: '', maxLength: 1_000 }), secretValues);
   if (value.enum !== undefined) {
-    if (!Array.isArray(value.enum) || value.enum.length > 64 || value.enum.some(item => item !== null && !['string', 'number', 'boolean'].includes(typeof item))) return undefined;
+    if (!Array.isArray(value.enum) || value.enum.length > 64 || value.enum.some(item => item !== null && !['string', 'number', 'boolean'].includes(typeof item)) ||
+        value.enum.some(item => typeof item === 'string' && secretValues.some(secret => secret.length > 0 && item.includes(secret)))) return undefined;
     result.enum = value.enum;
   }
   if (type === 'object') {
@@ -415,7 +418,7 @@ function sanitizeInputSchema(value: unknown, depth = 0): JsonRecord | undefined 
     const safeProperties: JsonRecord = {};
     for (const [key, schema] of Object.entries(properties)) {
       const safeKey = sanitizeIdentifier(key, { fallback: '', kind: 'generic', maxLength: 64 });
-      const safeSchema = sanitizeInputSchema(schema, depth + 1);
+      const safeSchema = sanitizeInputSchema(schema, depth + 1, secretValues);
       if (!safeKey || safeKey !== key || !safeSchema) return undefined;
       safeProperties[safeKey] = safeSchema;
     }
@@ -429,7 +432,7 @@ function sanitizeInputSchema(value: unknown, depth = 0): JsonRecord | undefined 
       result.additionalProperties = false;
     }
   } else if (type === 'array') {
-    const items = sanitizeInputSchema(value.items, depth + 1);
+    const items = sanitizeInputSchema(value.items, depth + 1, secretValues);
     if (!items) return undefined;
     result.items = items;
   }
@@ -485,6 +488,22 @@ function validateValue(schema: JsonRecord, value: unknown, depth: number): boole
 function enumMatches(enumValues: unknown, value: unknown): boolean { return enumValues === undefined || (Array.isArray(enumValues) && enumValues.some(item => item === value)); }
 function validEnvironment(value: unknown): value is Record<string, string> {
   return isRecord(value) && Object.keys(value).length <= 64 && Object.entries(value).every(([key, item]) => /^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(key) && typeof item === 'string' && item.length <= 4096);
+}
+function mcpChildEnvironment(overrides: Readonly<Record<string, string>>): Record<string, string> {
+  const inheritedKeys = ['PATH', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ'];
+  const environment: Record<string, string> = {};
+  for (const key of inheritedKeys) {
+    const value = process.env[key];
+    if (value !== undefined) environment[key] = value;
+  }
+  return { ...environment, ...overrides };
+}
+function redactMcpText(text: string, secretValues: readonly string[]): string {
+  let result = text;
+  for (const secret of [...secretValues].filter(value => value.length > 0).sort((a, b) => b.length - a.length)) {
+    result = result.split(secret).join('<redacted-project-mcp-secret>');
+  }
+  return redactSensitiveText(result);
 }
 function validLease(input: ProjectMcpLeaseIdentity): LeaseScope | undefined {
   if (!input.leaseId || input.leaseId.length > 128 || !input.runId || input.runId.length > 128 || !input.holderId || input.holderId.length > 128) return undefined;

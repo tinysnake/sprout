@@ -100,6 +100,14 @@ _Avoid_: Agent role
 The persistent working area of one project inside one environment instance: the repository, project rules, IDE state, build results, and caches. It outlives any one Task or agent run, and successive Tasks in the same project and environment reuse it.
 _Avoid_: Environment instance, Task context directory
 
+**Project MCP configuration**:
+The Human-selected format that permits an Environment Worker to inspect the Project workspace's MCP server declarations when an authorized run holds its Environment lease. A repository file alone does not authorize server startup.
+_Avoid_: Repository MCP permission, implicit plugin configuration
+
+**Project MCP tool**:
+A typed operation advertised by a configured stdio server and bound to its Environment Worker, Project workspace binding, and containing run or Task lease. The supported tool catalog does not imply support for MCP resources, prompts, notifications, cancellation, or server-to-client requests.
+_Avoid_: Universal MCP capability, arbitrary server selector
+
 **Agent**:
 A persistent worker identity with its own capabilities, model configuration, and private memory, independent of any environment instance or project.
 _Avoid_: Process, bot instance, environment agent

@@ -9,7 +9,7 @@ import {
 import type { ReadinessRequirementScope } from '../environment/readiness.ts';
 import type { EnvironmentPool } from '../environment/pool.ts';
 import type { AgentRunEvent, EngineAdapter, EngineSession, EngineTurnResult } from '../engine/port.ts';
-import { EngineResumeRefusedError } from '../engine/port.ts';
+import { EngineResumeRefusedError, RemoteProjectMcpStartupError } from '../engine/port.ts';
 import { HostPiEngineAdapter, isHostPiEffortSupported } from '../engine/pi-host.ts';
 import { createIdFactory, type IdFactory } from '../ids.ts';
 import { assembleProjectContract, renderProjectContract } from '../project/contract.ts';
@@ -754,13 +754,13 @@ export class RunOrchestrator {
         if (!this.#remoteProjectMcp) throw new Error('Project MCP Worker bridge is unavailable');
         const lease = this.#pool.getLease(initial.leaseId);
         if (!lease) throw new Error('Project MCP lease is unavailable');
-        mcpMayHaveStarted = true;
         remoteProjectMcp = await this.#remoteProjectMcp(initial.projectId ?? '', agent.id, {
           environmentInstanceId: initial.environmentInstanceId, leaseId: initial.leaseId, runId: initial.id,
           holderKind: lease.holderKind ?? 'run', holderId: lease.holderId,
           ...(lease.taskId !== undefined ? { taskId: lease.taskId } : {}),
           leaseCapability: lease.capability === 'agent-run' ? 'agent-run' : 'project-mcp',
         });
+        mcpMayHaveStarted = true;
       }
       const remoteWorkspace = await this.#remoteWorkspace?.(initial.projectId ?? '', agent.id);
       let attempt = await this.#runSession(
@@ -783,9 +783,12 @@ export class RunOrchestrator {
         await this.#sessionKeys.save({ ...identity, key: attempt.engineSessionKey, updatedAt: this.#clock.now() });
       }
       return this.#settleWithResult(attempt.run, attempt.result);
-    } catch {
+    } catch (error) {
+      const message = error instanceof RemoteProjectMcpStartupError
+        ? this.#projectMcpStartupFailureMessage(error.reason)
+        : 'Host-run Pi execution failed';
       return this.#finish(prepared, 'failed', {
-        status: 'failed', message: 'Host-run Pi execution failed',
+        status: 'failed', message,
       });
     } finally {
       if (initial.leaseId !== undefined) {
@@ -824,6 +827,16 @@ export class RunOrchestrator {
     return reason === 'no-project'
       ? `no project grants agent ${agent.id} access to an environment for capability: ${agent.capability}`
       : `no available environment for capability: ${agent.capability}`;
+  }
+
+  #projectMcpStartupFailureMessage(reason: RemoteProjectMcpStartupError['reason']): string {
+    switch (reason) {
+      case 'missing-dependency': return 'Project MCP could not start because a configured server dependency is missing on the Worker. Install the server dependency on the assigned Environment and retry.';
+      case 'invalid-configuration': return 'Project MCP could not start because the selected .mcp.json configuration is invalid. Correct it in the bound Project workspace and retry.';
+      case 'unsupported-configuration': return 'Project MCP could not start because the selected configuration or server features are unsupported. Use a stdio server that exposes tools and retry.';
+      case 'no-tools': return 'Project MCP started, but the server exposed no supported tools. Configure a server with an MCP tools capability and retry.';
+      case 'worker-refused': return 'The Environment Worker refused Project MCP startup. Check its connection, approval, and capability permission, then retry.';
+    }
   }
 
   /**

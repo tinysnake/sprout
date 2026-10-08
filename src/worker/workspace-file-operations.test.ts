@@ -55,14 +55,22 @@ test('Worker launches a selected stdio MCP server in the bound workspace, valida
     import { createInterface } from 'node:readline';
     import { writeFileSync } from 'node:fs';
     writeFileSync('mcp-worker-location.txt', 'launched-in-bound-workspace');
-    const tools = [{ name: 'echo', description: 'Echo the supplied text.', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false } }];
+    const tools = [
+      { name: 'echo', description: 'Echo the supplied text.', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false } },
+      { name: 'secret-check', description: 'Check the server process environment.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+    ];
     const input = createInterface({ input: process.stdin });
     function send(message) { process.stdout.write(JSON.stringify(message) + '\\n'); }
     input.on('line', line => {
       const request = JSON.parse(line);
       if (request.method === 'initialize') send({ jsonrpc: '2.0', id: request.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'fixture', version: '1' } } });
       else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools } });
-      else if (request.method === 'tools/call') send({ jsonrpc: '2.0', id: request.id, result: { content: [{ type: 'text', text: request.params.arguments.text }] } });
+      else if (request.method === 'tools/call') {
+        const text = request.params.name === 'secret-check'
+          ? 'configured=' + process.env.MCP_FIXTURE_PRIVATE + '; inherited=' + (process.env.SPROUT_TEST_PRIVATE_TOKEN ?? 'unset')
+          : request.params.arguments.text;
+        send({ jsonrpc: '2.0', id: request.id, result: { content: [{ type: 'text', text }] } });
+      }
     });
   `;
   await writeFile(join(workerRoot, 'repo', '.mcp.json'), JSON.stringify({ mcpServers: {
@@ -77,7 +85,7 @@ test('Worker launches a selected stdio MCP server in the bound workspace, valida
   assert.deepEqual(await connection.contexts.startProjectMcp(startInput), started, 'retry with the durable process id reuses the supervised process');
   assert.equal(started.servers.length, 1);
   assert.equal(started.servers[0]?.name, 'fixture-server');
-  assert.deepEqual(started.servers[0]?.tools.map(tool => ({ name: tool.name, server: tool.server })), [{ name: 'echo', server: 'fixture-server' }]);
+  assert.deepEqual(started.servers[0]?.tools.map(tool => tool.name), ['echo', 'secret-check']);
   assert.equal(JSON.stringify(started).includes('private-config-value'), false);
   assert.equal(JSON.stringify(started).includes(process.execPath), false);
   assert.equal(JSON.stringify(started).includes(workerRoot), false);
@@ -91,6 +99,17 @@ test('Worker launches a selected stdio MCP server in the bound workspace, valida
   const call = await connection.contexts.callProjectMcpTool(callInput);
   assert.deepEqual(call, { processId, operationId, status: 'completed', text: 'hello from Project tool' });
   assert.deepEqual(await connection.contexts.callProjectMcpTool(callInput), call, 'retry with the same operation identity returns the bounded result without another call');
+  const secretTool = started.servers[0]?.tools.find(tool => tool.name === 'secret-check');
+  assert.ok(secretTool);
+  const secretCheck = await connection.contexts.callProjectMcpTool({
+    ...binding, ...lease, processId, operationId: '44444444-4444-4444-8444-444444444444', toolId: secretTool.id, arguments: {},
+  });
+  assert.deepEqual(secretCheck, {
+    processId, operationId: '44444444-4444-4444-8444-444444444444', status: 'completed',
+    text: 'configured=<redacted-project-mcp-secret>; inherited=unset',
+  }, 'explicit MCP env secrets are redacted and Worker process secrets are not inherited');
+  assert.equal(JSON.stringify(secretCheck).includes('private-config-value'), false);
+  assert.equal(JSON.stringify(secretCheck).includes('worker-process-secret-sentinel'), false);
   assert.deepEqual(await connection.contexts.callProjectMcpTool({ ...callInput, arguments: { text: 'different arguments' } }),
     { processId, operationId, status: 'failed', reason: 'worker-refused' });
   const invalidOperationId = '22222222-2222-4222-8222-222222222222';
@@ -101,6 +120,33 @@ test('Worker launches a selected stdio MCP server in the bound workspace, valida
   assert.deepEqual(wrongLease, { processId, operationId: wrongOperationId, status: 'failed', reason: 'worker-refused' });
   const stopped = await connection.contexts.stopProjectMcp({ ...binding, ...lease, processId });
   assert.deepEqual(stopped, { processId, status: 'stopped' });
+});
+
+test('Worker reports a missing MCP server dependency without exposing command configuration', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'sprout-mcp-missing-dependency-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const connection = await worker(root);
+  t.after(() => connection.close());
+  const selected = await connection.contexts.validateWorkspace({ projectId: 'missing-mcp', environmentInstanceId: 'env-1', kind: 'relative', path: 'repo' });
+  const binding = {
+    projectId: 'missing-mcp', environmentInstanceId: 'env-1', bindingId: 'binding-missing',
+    generation: 1, connectionEpoch: 4, workspaceId: selected.workspaceId, kind: 'relative', path: 'repo',
+  } as const;
+  await connection.contexts.attachWorkspaceBinding(binding);
+  await writeFile(join(root, 'repo', '.mcp.json'), JSON.stringify({ mcpServers: {
+    missing: { command: 'sprout-ticket-244-missing-mcp-fixture-command' },
+  } }));
+  const processId = '55555555-5555-4555-8555-555555555555';
+  const lease = { leaseId: 'lease-missing', holderKind: 'run' as const, holderId: 'run-missing', runId: 'run-missing' };
+  const started = await connection.contexts.startProjectMcp({
+    ...binding, ...lease, processId, format: 'claude-code-mcp-json-v1',
+  });
+  assert.deepEqual(started, {
+    processId, status: 'blocked', reason: 'missing',
+    servers: [{ name: 'missing', status: 'missing-dependency', tools: [] }],
+  });
+  assert.equal(JSON.stringify(started).includes('sprout-ticket-244-missing-mcp-fixture-command'), false);
+  assert.deepEqual(await connection.contexts.stopProjectMcp({ ...binding, ...lease, processId }), { processId, status: 'stopped' });
 });
 
 test('Worker file reads return the same-name remote sentinel and deny traversal, another Project, and host paths', async (t) => {
@@ -192,6 +238,7 @@ async function worker(root: string) {
       import { EnvironmentWorker } from ${JSON.stringify(server)};
       import { ScriptedEngineAdapter } from ${JSON.stringify(scripted)};
       import { serveWorkerEndpoint, WORKER_READY_PREFIX } from ${JSON.stringify(carrier)};
+      process.env.SPROUT_TEST_PRIVATE_TOKEN = 'worker-process-secret-sentinel';
       const endpoint = await serveWorkerEndpoint({ serve: (socket) => new EnvironmentWorker({
         environmentInstanceId: 'env-1', engines: new Map([['scripted', new ScriptedEngineAdapter({ turns: [] })]]),
         input: socket, output: socket, workspaceRoot: ${JSON.stringify(root)},
