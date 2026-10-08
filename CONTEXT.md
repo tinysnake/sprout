@@ -100,6 +100,18 @@ _Avoid_: Agent role
 The persistent working area of one project inside one environment instance: the repository, project rules, IDE state, build results, and caches. It outlives any one Task or agent run, and successive Tasks in the same project and environment reuse it.
 _Avoid_: Environment instance, Task context directory
 
+**Run context**:
+A private, temporary working area inside an Environment for one Agent run. It holds disposable execution state while the Agent works in the persistent Project workspace; it does not replace or own that workspace.
+_Avoid_: Project workspace, Task context directory
+
+**Remote workspace operation**:
+A bounded request by an Agent run to read, search, edit, patch, or run an allowlisted command against its authorized Project workspace through one pinned Environment binding. Its outcome stays attributable to that request when the caller loses the response and must inspect it.
+_Avoid_: Host-local operation, Environment fallback
+
+**Remote workspace operation outcome**:
+The recorded result and settlement state of one Remote workspace operation. It may be completed, failed, cancelled, or require recovery; an uncertain outcome remains inspectable without creating a replacement operation.
+_Avoid_: Command log, retry result
+
 **Agent**:
 A persistent worker identity with its own capabilities, model configuration, and private memory, independent of any environment instance or project.
 _Avoid_: Process, bot instance, environment agent
