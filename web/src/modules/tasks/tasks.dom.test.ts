@@ -517,7 +517,7 @@ test('Task run audit explains absent events, result, duration and usage when dis
     ({ app } = await mountTasks(vite, doc, [], overview, { async getRun() {
       return auditRun({ events: [], result: undefined, completedAt: undefined, tokenUsage: undefined, status: 'running',
         executionPlacement: { mode: 'environment-hosted', engineHost: { kind: 'environment', id: 'instance-a', profile: { platform: 'macos', boundary: 'shared-host' } } },
-        processExecutionMode: 'host-run', executionModeMismatchReason: 'Run is recorded in environment-hosted mode and must be resumed with that mode.' });
+        processExecutionMode: 'host-run', executionModeMismatchReason: 'Run was recorded under environment-hosted; this Sprout process is host-run. Historical Runs are not replayed or relocated after restart.' });
     } }));
     const audit = await openCompletedAudit(doc);
     expandSummaryRows(audit);
@@ -528,7 +528,8 @@ test('Task run audit explains absent events, result, duration and usage when dis
     assert.match(audit.textContent ?? '', /Tokens unavailable/);
     assert.match(audit.textContent ?? '', /Recorded placement · environment-hosted · environment instance-a · macos\/shared-host/);
     assert.match(audit.textContent ?? '', /Current Sprout mode · host-run/);
-    assert.match(audit.textContent ?? '', /Run is recorded in environment-hosted mode/);
+    assert.match(audit.textContent ?? '', /Run was recorded under environment-hosted/);
+    assert.match(audit.textContent ?? '', /Historical Runs are not replayed or relocated after restart/);
   } finally { app?.unmount(); await cleanup(); }
 });
 

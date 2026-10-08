@@ -39,7 +39,7 @@ import type { AgentRun, TokenUsage } from '../run/model.ts';
 import type { Agent, AgentWorkOption } from '../agent/model.ts';
 import type { Task, TaskRunLink, TaskStatus, TaskWithRuns } from '../task/model.ts';
 import type { ExecutionMode } from '../execution-mode.ts';
-import { executionModeMismatchReason, legacyEnvironmentPlacement } from '../execution-placement.ts';
+import { executionModeMismatchReason, legacyEnvironmentPlacement, runExecutionModeMismatchReason } from '../execution-placement.ts';
 import { normalizeEnrollment, type EnvironmentEnrollment } from '../environment/enrollment.ts';
 import type { EnvironmentRecoveryRecord, ForceReleaseRecord } from '../environment/recovery.ts';
 import {
@@ -179,9 +179,8 @@ export function summarizeRunHistory(runs: readonly RunView[]): RunHistoryTotals 
 
 export function toRunView(run: AgentRun, processExecutionMode?: ExecutionMode): RunView {
   const workspaceBinding = toRunWorkspaceBindingAttribution(run);
-  const modeMismatch = processExecutionMode !== undefined && run.executionPlacement !== undefined
-    && run.executionPlacement.mode !== processExecutionMode
-    ? executionModeMismatchReason(run.executionPlacement, processExecutionMode, 'Run')
+  const modeMismatch = processExecutionMode !== undefined
+    ? runExecutionModeMismatchReason(run.executionPlacement, processExecutionMode)
     : undefined;
   return {
     id: run.id,

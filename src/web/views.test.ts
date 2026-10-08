@@ -91,6 +91,23 @@ test('a run view exposes progress and the terminal result without server interna
   );
 });
 
+test('a standalone historical run mismatch reports its placement without implying Task continuation', () => {
+  const view = toRunView(run({
+    status: 'interrupted',
+    executionPlacement: {
+      mode: 'environment-hosted',
+      engineHost: { kind: 'environment', id: 'mac-mini-1', profile: { platform: 'macos', boundary: 'shared-host' } },
+    },
+  }), 'host-run');
+
+  assert.equal(view.taskId, undefined);
+  assert.equal(view.executionPlacement?.mode, 'environment-hosted');
+  assert.equal(view.processExecutionMode, 'host-run');
+  assert.match(view.executionModeMismatchReason ?? '', /Run was recorded under environment-hosted.*process is host-run/);
+  assert.match(view.executionModeMismatchReason ?? '', /Historical Runs are not replayed or relocated after restart/);
+  assert.doesNotMatch(view.executionModeMismatchReason ?? '', /Task|lease|continue/i);
+});
+
 test('optional run fields are absent rather than null when the run has none', () => {
   const view = toRunView(run());
   for (const field of ['taskId', 'failure', 'result', 'tokenUsage', 'completedAt']) {
@@ -298,6 +315,8 @@ test('a task view projects the whole record and its derived context state', () =
     executionPlacement: { mode: 'host-run', engineHost: { kind: 'sprout', id: 'sprout-test', profile: { platform: 'macos', boundary: 'shared-host' } } },
   }, 'environment-hosted');
   assert.match(endedMismatch.executionModeMismatchReason ?? '', /recorded under host-run.*this Sprout process is environment-hosted/);
+  assert.match(endedMismatch.executionModeMismatchReason ?? '', /Restart Sprout with --execution-mode host-run to continue it/);
+  assert.match(endedMismatch.executionModeMismatchReason ?? '', /Environment, workspace, and lease remain bound to the recorded Task/);
 });
 
 test('a task-with-runs view keeps run links ordered and hides an unsettled summary', () => {

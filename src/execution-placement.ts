@@ -66,10 +66,18 @@ export function normalizeLegacyTaskPlacement<T extends {
 export function executionModeMismatchReason(
   placement: ExecutionPlacement | undefined,
   processMode: ExecutionMode,
-  subject = 'Task',
 ): string | undefined {
   if (placement === undefined || placement.mode === processMode) return undefined;
-  return `${subject} was recorded under ${placement.mode}; this Sprout process is ${processMode}. Restart Sprout with --execution-mode ${placement.mode} to continue it. Its Environment, workspace, and lease remain bound to the recorded Task.`;
+  return `Task was recorded under ${placement.mode}; this Sprout process is ${processMode}. Restart Sprout with --execution-mode ${placement.mode} to continue it. Its Environment, workspace, and lease remain bound to the recorded Task.`;
+}
+
+/** Historical Runs retain their recorded placement and are never replayed after restart. */
+export function runExecutionModeMismatchReason(
+  placement: ExecutionPlacement | undefined,
+  processMode: ExecutionMode,
+): string | undefined {
+  if (placement === undefined || placement.mode === processMode) return undefined;
+  return `Run was recorded under ${placement.mode}; this Sprout process is ${processMode}. Historical Runs are not replayed or relocated after restart.`;
 }
 
 export class ExecutionModeMismatchError extends Error {
@@ -84,9 +92,8 @@ export class ExecutionModeMismatchError extends Error {
 export function requireMatchingExecutionMode(
   placement: ExecutionPlacement | undefined,
   processMode: ExecutionMode,
-  subject = 'Task',
 ): void {
-  const reason = executionModeMismatchReason(placement, processMode, subject);
+  const reason = executionModeMismatchReason(placement, processMode);
   if (reason !== undefined) throw new ExecutionModeMismatchError(reason);
 }
 
