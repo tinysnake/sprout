@@ -14,6 +14,7 @@ import {
   INSTANCE_ID,
   project,
   scriptedTurn,
+  waitFor,
 } from './runtime-test-harness.ts';
 
 test('Host-run reads an authorized Project file through an enrolled Worker without a remote model engine', async (t) => {
@@ -83,16 +84,24 @@ test('Host-run reads an authorized Project file through an enrolled Worker witho
     writeFileSync(join(workerRoot, 'repos', 'remote-read', 'sentinel.txt'), 'REMOTE_WORKER_SENTINEL');
     const bindingReadiness = await runtime.environmentOperations.bindingReadiness('remote-read-project');
     assert.equal(bindingReadiness[0]?.status, 'ready', 'remote binding readiness does not depend on an engine login');
+    const authorized = await runtime.environmentOperations.attach('remote-read-project', 'scout');
+    assert.equal(authorized.binding.bindingId, access.current?.bindingId);
+    const direct = await runtime.enrollmentEnvironment.executeWorkspaceFileOperation(INSTANCE_ID, {
+      ...authorized.binding, kind: 'relative', workspacePath: 'repos/remote-read', operationId: 'direct-runtime-read',
+      operation: 'read', path: 'sentinel.txt',
+    });
+    if (direct.status !== 'completed') throw new Error(`Direct Worker RPC failed: ${direct.failure ?? 'no failure detail'}`);
+    assert.equal(direct.content, 'REMOTE_WORKER_SENTINEL');
 
     const { id } = await runtime.orchestrator.submit({
       agentId: 'scout', projectId: 'remote-read-project', prompt: 'Read sentinel.txt.',
     });
     const run = await runtime.orchestrator.waitFor(id);
-    assert.equal(run.status, 'completed');
+    if (run.status !== 'completed') throw new Error(`Host-run failed: ${run.failure ?? 'no failure detail'}`);
     assert.equal(run.executionMode, 'host-run');
     assert.equal(run.engineHostProfileId, 'profile-runtime-remote-read');
     assert.equal(observed.length, 1);
-    assert.equal(observed[0]?.status, 'completed');
+    if (observed[0]?.status !== 'completed') throw new Error(`Remote read failed: ${observed[0]?.failure ?? 'no failure detail'}`);
     assert.equal(observed[0]?.content, 'REMOTE_WORKER_SENTINEL');
     assert.equal(observed[0]?.projectId, 'remote-read-project');
     assert.equal(observed[0]?.bindingId, access.current?.bindingId);
@@ -144,14 +153,14 @@ test('composed Runtime fails an attached remote read after Worker disconnection 
     assert.equal(tools.binding.bindingId, access.current?.bindingId);
 
     connection.close();
+    await waitFor(() => runtime.workerGateway.liveFor(INSTANCE_ID) === undefined, 'Worker disconnection');
     const readiness = await runtime.environmentOperations.bindingReadiness('disconnected-read-project');
     assert.equal(readiness[0]?.status, 'blocked');
     assert.equal(readiness[0]?.reason, 'worker-offline');
-    const result = await tools.read('sentinel.txt');
-    assert.equal(result.status, 'failed');
-    assert.equal(result.content, undefined);
-    assert.equal(result.failure, 'worker-unavailable');
-    assert.notEqual(result.content, 'LOCAL_HOST_SENTINEL', 'a lost Worker never falls back to a same-name local file');
+    await assert.rejects(
+      tools.read('sentinel.txt'),
+      (error: unknown) => error instanceof Error && 'reason' in error && error.reason === 'worker-offline',
+    );
     assert.equal(runtime.workerGateway.liveFor(INSTANCE_ID), undefined);
   } finally {
     await runtime.close();

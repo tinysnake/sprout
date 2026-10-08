@@ -276,11 +276,11 @@ test('the access adapter reads and commands the additive access routes', async (
       '/api/projects/project-sprout/access/mac-mini-1/end',
     ],
   );
-  assert.deepEqual(JSON.parse(String(calls[1]?.init?.body)), {
+  assert.deepEqual(JSON.parse(String(calls[2]?.init?.body)), {
     environmentInstanceId: 'mac-mini-1',
     workspace: { kind: 'default' },
   });
-  const changed = JSON.parse(String(calls[2]?.init?.body)) as { workspace: { kind: string; path: string } };
+  const changed = JSON.parse(String(calls[3]?.init?.body)) as { workspace: { kind: string; path: string } };
   assert.equal(changed.workspace.path, 'repos/third');
   // The typed view exposes the Worker-relative location, never an absolute path.
   const serialized = JSON.stringify(access);

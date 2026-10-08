@@ -58,9 +58,9 @@ export class WorkerWorkspaceFiles {
   }
 
   async execute(input: WorkspaceFileOperationParams): Promise<RemoteWorkspaceOperationResult> {
-    const binding = this.#requireBinding(input);
+    const binding = this.#requireBinding({ ...input, ...(input.workspacePath !== undefined ? { path: input.workspacePath } : {}) });
     if (typeof input.operationId !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(input.operationId)) throw new Error('invalid operation identity');
-    const fingerprint = JSON.stringify([input.projectId, input.environmentInstanceId, input.bindingId, input.generation, input.connectionEpoch, input.workspaceId, input.operation, input.path ?? '', input.query ?? '']);
+    const fingerprint = JSON.stringify([input.projectId, input.environmentInstanceId, input.bindingId, input.generation, input.connectionEpoch, input.workspaceId, input.kind, input.workspacePath ?? '', input.operation, input.path ?? '', input.query ?? '']);
     const prior = this.#operations.get(input.operationId);
     if (prior) {
       if (prior.fingerprint !== fingerprint) throw new Error('operation identity conflict');

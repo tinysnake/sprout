@@ -26,8 +26,10 @@ test('Worker file reads return the same-name remote sentinel and deny traversal,
   } as const;
   await connection.contexts.attachWorkspaceBinding(binding);
 
-  const remote = await connection.contexts.executeWorkspaceFileOperation({ ...binding, operationId: 'remote-read-1', operation: 'read', path: 'sentinel.txt' });
-  assert.equal(remote.status, 'completed');
+  const { path: workspacePath, ...bindingIdentity } = binding;
+  const operationBinding = { ...bindingIdentity, workspacePath };
+  const remote = await connection.contexts.executeWorkspaceFileOperation({ ...operationBinding, operationId: 'remote-read-1', operation: 'read', path: 'sentinel.txt' });
+  if (remote.status !== 'completed') throw new Error(`Worker read failed: ${remote.failure ?? 'no failure detail'}`);
   assert.equal(remote.content, 'REMOTE_PROJECT_SENTINEL');
   assert.notEqual(remote.content, 'LOCAL_HOST_SENTINEL', 'the same-name host fixture is not the read origin');
   assert.equal(remote.projectId, 'project-1');
@@ -35,13 +37,16 @@ test('Worker file reads return the same-name remote sentinel and deny traversal,
   assert.equal(remote.generation, 1);
   assert.equal(remote.connectionEpoch, 4);
 
-  const traversal = await connection.contexts.executeWorkspaceFileOperation({ ...binding, operationId: 'traversal-1', operation: 'read', path: '../sentinel.txt' });
+  const traversal = await connection.contexts.executeWorkspaceFileOperation({ ...operationBinding, operationId: 'traversal-1', operation: 'read', path: '../sentinel.txt' });
   assert.equal(traversal.status, 'failed');
   assert.equal(traversal.failure, 'invalid-path');
-  const hostRead = await connection.contexts.executeWorkspaceFileOperation({ ...binding, operationId: 'host-read-1', operation: 'read', path: hostSentinel });
+  const hostRead = await connection.contexts.executeWorkspaceFileOperation({ ...operationBinding, operationId: 'host-read-1', operation: 'read', path: hostSentinel });
   assert.equal(hostRead.status, 'failed');
   assert.equal(hostRead.failure, 'invalid-path');
-  await assert.rejects(connection.contexts.executeWorkspaceFileOperation({ ...binding, projectId: 'project-2', operationId: 'cross-project-1', operation: 'read', path: 'sentinel.txt' }), /request failed/i);
+  await assert.rejects(
+    connection.contexts.executeWorkspaceFileOperation({ ...operationBinding, projectId: 'project-2', operationId: 'cross-project-1', operation: 'read', path: 'sentinel.txt' }),
+    /Worker request could not be completed/i,
+  );
 });
 
 
@@ -60,18 +65,22 @@ test('Worker refuses a same-generation binding retarget and fences calls after a
     generation: 1, connectionEpoch: 4, workspaceId: first.workspaceId, kind: 'relative', path: 'repo-one',
   } as const;
   await files.attach(binding);
+  const { path: firstWorkspacePath, ...firstIdentity } = binding;
+  const firstOperationBinding = { ...firstIdentity, workspacePath: firstWorkspacePath };
   await assert.rejects(files.attach({ ...binding, workspaceId: second.workspaceId, path: 'repo-two' }), /conflicting workspace binding/);
 
-  const firstRead = await files.execute({ ...binding, operationId: 'operation-1', operation: 'read', path: 'sentinel.txt' });
+  const firstRead = await files.execute({ ...firstOperationBinding, operationId: 'operation-1', operation: 'read', path: 'sentinel.txt' });
   assert.equal(firstRead.content, 'first workspace', 'a refused attach leaves the original generation bound');
 
   const next = { ...binding, bindingId: 'binding-2', generation: 2, workspaceId: second.workspaceId, path: 'repo-two' } as const;
+  const { path: secondWorkspacePath, ...secondIdentity } = next;
+  const secondOperationBinding = { ...secondIdentity, workspacePath: secondWorkspacePath };
   await files.attach(next);
   await assert.rejects(
-    files.execute({ ...binding, operationId: 'operation-2', operation: 'read', path: 'sentinel.txt' }),
+    files.execute({ ...firstOperationBinding, operationId: 'operation-2', operation: 'read', path: 'sentinel.txt' }),
     /stale workspace binding/,
   );
-  const secondRead = await files.execute({ ...next, operationId: 'operation-3', operation: 'read', path: 'sentinel.txt' });
+  const secondRead = await files.execute({ ...secondOperationBinding, operationId: 'operation-3', operation: 'read', path: 'sentinel.txt' });
   assert.equal(secondRead.content, 'second workspace');
 
   await assert.rejects(files.attach({ ...next, bindingId: 'binding-3', generation: 3, connectionEpoch: 3 }), /stale workspace binding/);
