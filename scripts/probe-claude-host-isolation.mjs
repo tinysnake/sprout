@@ -113,7 +113,14 @@ if (process.argv[2] === '--auth') {
       };
       child.stderr.on('data', chunk => {
         classify(chunk);
-        if (!Object.keys(fact.types).length) console.log(chunk.toString().split('\n').slice(0, 3).map(line => line.replace(/(['"])[^'"\n]*\1/g, '<opaque>').replace(/\/[\w.\/-]+/g, '<path>').replace(/[A-Za-z0-9_-]{25,}/g, '<opaque>')).join('\n'));
+        if (!Object.keys(fact.types).length) {
+          const match = chunk.toString().match(/operation not permitted, open ['"]([^'"\n]+)['"]/);
+          if (match) {
+            const path = match[1];
+            fact.startupOpenTarget = path.startsWith('/$bunfs/') ? 'embedded-bunfs-resource' : path.startsWith(fixture.root) ? 'fixture-resource' : path.startsWith(homedir()) ? 'existing-home-resource' : path.startsWith('/') ? 'other-absolute-resource' : 'relative-resource';
+            if (path.startsWith('/$bunfs/')) console.log({ startupOpenTarget: 'embedded-bunfs-resource', resource: path.replace(/[A-Za-z0-9_-]{25,}/g, '<opaque>') });
+          }
+        }
       });
       child.stdout.on('data', classify);
       let session;
