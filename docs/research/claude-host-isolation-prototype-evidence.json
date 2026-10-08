@@ -55,7 +55,8 @@
         "Cannot": false,
         "not allowed": false,
         "requires": false
-      }
+      },
+      "startupOpenTarget": "other-absolute-resource"
     },
     {
       "types": {},
@@ -106,7 +107,8 @@
         "Cannot": false,
         "not allowed": false,
         "requires": false
-      }
+      },
+      "startupOpenTarget": "other-absolute-resource"
     },
     {
       "types": {},
@@ -157,7 +159,8 @@
         "Cannot": false,
         "not allowed": false,
         "requires": false
-      }
+      },
+      "startupOpenTarget": "other-absolute-resource"
     }
   ],
   "calls": [],
