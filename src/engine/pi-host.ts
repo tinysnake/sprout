@@ -273,14 +273,17 @@ class HostPiSession implements EngineSession {
     const input = typeof args === 'object' && args !== null ? args as Record<string, unknown> : {};
     let result: RemoteWorkspaceOperationResult;
     try {
+      const operationId = typeof input.operationId === 'string' ? input.operationId : undefined;
       if (!tools) throw new Error('remote workspace is unavailable');
-      if (operation === 'read' && typeof input.path === 'string') result = await tools.read(input.path);
-      else if (operation === 'search' && typeof input.query === 'string') result = await tools.search(input.query, typeof input.path === 'string' ? input.path : undefined);
+      if (operation === 'read' && typeof input.path === 'string') result = await tools.read(input.path, operationId);
+      else if (operation === 'search' && typeof input.query === 'string') result = await tools.search(input.query, typeof input.path === 'string' ? input.path : undefined, operationId);
+      else if (operation === 'edit' && typeof input.path === 'string' && typeof input.oldText === 'string' && typeof input.newText === 'string' && tools.edit) result = await tools.edit(input.path, input.oldText, input.newText, operationId);
+      else if (operation === 'patch' && typeof input.path === 'string' && Array.isArray(input.hunks) && tools.patch) result = await tools.patch(input.path, input.hunks as { before: string; after: string }[], operationId);
       else throw new Error('invalid remote operation');
     } catch {
       result = { operationId: 'unavailable', projectId: tools?.binding.projectId ?? '', environmentInstanceId: tools?.binding.environmentInstanceId ?? '',
         bindingId: tools?.binding.bindingId ?? '', generation: tools?.binding.generation ?? 0, connectionEpoch: tools?.binding.connectionEpoch ?? 0,
-        workspaceId: tools?.binding.workspaceId ?? '', operation: operation === 'search' ? 'search' : 'read', status: 'failed', failure: 'remote-operation-blocked' };
+        workspaceId: tools?.binding.workspaceId ?? '', operation: operation === 'search' ? 'search' : operation === 'edit' ? 'edit' : operation === 'patch' ? 'patch' : 'read', status: 'failed', failure: 'remote-operation-blocked' };
     }
     this.#child.stdin?.write(`${JSON.stringify({ op: 'remote-result', callId, result })}\n`);
   }

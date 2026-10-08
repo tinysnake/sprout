@@ -177,6 +177,7 @@ export interface RemoteWorkspaceOperationResult {
   readonly changedPaths?: readonly string[];
   readonly truncated?: boolean;
   readonly failure?: string;
+  readonly leaseConflict?: { readonly holderId: string; readonly state: 'active' | 'recovering' };
 }
 
 
@@ -190,10 +191,13 @@ export interface RemoteWorkspaceTools {
     readonly connectionEpoch: number;
     readonly workspaceId: string;
   };
-  read(path: string): Promise<RemoteWorkspaceOperationResult>;
-  search(query: string, path?: string): Promise<RemoteWorkspaceOperationResult>;
-  edit?(path: string, oldText: string, newText: string): Promise<RemoteWorkspaceOperationResult>;
-  patch?(path: string, hunks: readonly { readonly before: string; readonly after: string }[]): Promise<RemoteWorkspaceOperationResult>;
+  readonly operations?: readonly ('read' | 'search' | 'edit' | 'patch')[];
+  read(path: string, operationId?: string): Promise<RemoteWorkspaceOperationResult>;
+  search(query: string, path?: string, operationId?: string): Promise<RemoteWorkspaceOperationResult>;
+  edit?(path: string, oldText: string, newText: string, operationId?: string): Promise<RemoteWorkspaceOperationResult>;
+  patch?(path: string, hunks: readonly { readonly before: string; readonly after: string }[], operationId?: string): Promise<RemoteWorkspaceOperationResult>;
+  /** Release or protect a lazily acquired mutation lease after run settlement. */
+  settle?(outcome: 'settled' | 'unknown'): Promise<void>;
   inspect(operationId: string): Promise<{ readonly status: string }>;
   cancel(operationId: string): Promise<{ readonly accepted: boolean; readonly status: string }>;
 }

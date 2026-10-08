@@ -243,8 +243,8 @@ export class EnvironmentWorker {
         standingInstructions: engine.capabilities.standingInstructions,
       })),
       ...(this.#workspaceFiles !== undefined ? { workspaceOperations: {
-        version: 1 as const, operations: ['read', 'search'] as const,
-        maxReadBytes: 64 * 1024, maxSearchResults: 100,
+        version: 2 as const, operations: ['read', 'search', 'edit', 'patch'] as const,
+        maxReadBytes: 64 * 1024, maxSearchResults: 100, maxMutationBytes: 1024 * 1024,
       } } : {}),
       ...(this.#readiness !== undefined
         ? { readiness: this.#readiness }

@@ -168,10 +168,11 @@ export interface WorkerEngineDescription {
 }
 
 export interface WorkerWorkspaceOperations {
-  readonly version: 1;
-  readonly operations: readonly ('read' | 'search')[];
+  readonly version: 1 | 2;
+  readonly operations: readonly ('read' | 'search' | 'edit' | 'patch')[];
   readonly maxReadBytes: number;
   readonly maxSearchResults: number;
+  readonly maxMutationBytes?: number;
 }
 
 export interface WorkerInfo {

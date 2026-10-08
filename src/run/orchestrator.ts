@@ -144,7 +144,8 @@ export interface RunOrchestratorOptions {
   readonly executionStrategy?: ExecutionStrategy;
   readonly executionPlacementForEnvironment?: (environmentInstanceId: string) => ExecutionPlacement;
   /** Core-owned Host-run workspace operation attachment; never a model target selector. */
-  readonly remoteWorkspace?: (projectId: string, agentId: string) => Promise<import('../engine/port.ts').RemoteWorkspaceTools | undefined>;
+  readonly remoteWorkspace?: (projectId: string, agentId: string, runId: string,
+    onLeaseAcquired: (leaseId: string) => Promise<void>) => Promise<import('../engine/port.ts').RemoteWorkspaceTools | undefined>;
   /**
    * The durable Project workspace binding for one (Project, Environment), when
    * the build wires Project access (#93, ADR-0008).
@@ -673,6 +674,9 @@ export class RunOrchestrator {
     if (this.#stopRequests.has(initial.id)) return this.#finish(initial, 'interrupted', { status: 'interrupted' });
     const running = await this.#advance(initial, { status: 'running' });
     let prepared = running;
+    let remoteWorkspace: import('../engine/port.ts').RemoteWorkspaceTools | undefined;
+    let remoteSettlementUnknown = false;
+    let remoteEnvironmentInstanceId: string | undefined;
     try {
       const assembled = await this.#assembleInput(initial, agent, running.id);
       if (assembled.handOff !== undefined) prepared = await this.#advance(running, { handOff: assembled.handOff });
@@ -693,7 +697,12 @@ export class RunOrchestrator {
       const stored = this.#sessionKeys && identity !== undefined
         ? await this.#sessionKeys.get(identity)
         : undefined;
-      const remoteWorkspace = await this.#remoteWorkspace?.(initial.projectId ?? '', agent.id);
+      remoteWorkspace = await this.#remoteWorkspace?.(initial.projectId ?? '', agent.id, running.id, async leaseId => {
+        const environmentInstanceId = remoteEnvironmentInstanceId;
+        if (environmentInstanceId === undefined) throw new Error('remote Environment was not pinned before lease acquisition');
+        prepared = await this.#advance(prepared, { environmentInstanceId, leaseId });
+      });
+      remoteEnvironmentInstanceId = remoteWorkspace?.binding.environmentInstanceId;
       let attempt = await this.#runSession(
         host, agent, option, assembled.prompt, prepared, stored?.key, assembled.instructions,
         workingDirectory, undefined, undefined, undefined, remoteWorkspace,
@@ -706,6 +715,7 @@ export class RunOrchestrator {
         );
       }
       if (!attempt.ok) {
+        remoteSettlementUnknown = true;
         return this.#finish(attempt.run, 'failed', attempt.result ?? {
           status: 'failed', message: attempt.message,
         });
@@ -713,11 +723,19 @@ export class RunOrchestrator {
       if (this.#sessionKeys && identity !== undefined && attempt.result.status === 'completed' && attempt.engineSessionKey) {
         await this.#sessionKeys.save({ ...identity, key: attempt.engineSessionKey, updatedAt: this.#clock.now() });
       }
-      return this.#settleWithResult(attempt.run, attempt.result);
+      if (attempt.result.status === 'interrupted') remoteSettlementUnknown = true;
+      return await this.#settleWithResult(attempt.run, attempt.result);
     } catch {
+      remoteSettlementUnknown = true;
       return this.#finish(prepared, 'failed', {
         status: 'failed', message: 'Host-run Pi execution failed',
       });
+    } finally {
+      try { await remoteWorkspace?.settle?.(remoteSettlementUnknown ? 'unknown' : 'settled'); } catch {
+        // Settlement uncertainty protects the Environment; it never converts an
+        // already settled run into a second result or releases a lease.
+        remoteSettlementUnknown = true;
+      }
     }
   }
 

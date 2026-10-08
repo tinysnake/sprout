@@ -215,7 +215,7 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
 
   async attachWorkspaceBinding(environmentInstanceId: string, input: AttachWorkspaceBindingParams): Promise<{ readonly attached: true }> {
     const connection = await this.#connection(environmentInstanceId);
-    if (!connection || connection.info.workspaceOperations?.version !== 1 ||
+    if (!connection || (connection.info.workspaceOperations?.version !== 1 && connection.info.workspaceOperations?.version !== 2) ||
       !connection.info.workspaceOperations.operations.includes('read') ||
       !connection.info.workspaceOperations.operations.includes('search')) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
     const currentEpoch = this.connectionEpoch(environmentInstanceId);

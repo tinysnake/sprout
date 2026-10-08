@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 
-export type RemoteOperationState = 'running' | 'completed' | 'failed' | 'cancelled';
+export type RemoteOperationState = 'running' | 'completed' | 'failed' | 'cancelled' | 'unknown' | 'cancel-requested' | 'recovery-required';
 export interface RemoteOperationIdentity {
   readonly operationId: string;
   readonly fingerprint: string;
@@ -10,7 +10,7 @@ export interface RemoteOperationIdentity {
   readonly generation: number;
   readonly connectionEpoch: number;
   readonly workspaceId: string;
-  readonly operation: 'read' | 'search';
+  readonly operation: 'read' | 'search' | 'edit' | 'patch' | 'command';
   readonly state: RemoteOperationState;
   readonly updatedAt: number;
 }
@@ -21,7 +21,12 @@ export interface RemoteOperationIdentityStore {
 
 export class MemoryRemoteOperationIdentityStore implements RemoteOperationIdentityStore {
   readonly #rows = new Map<string, RemoteOperationIdentity>();
-  async save(row: RemoteOperationIdentity): Promise<void> { this.#rows.set(row.operationId, { ...row }); }
+  async save(row: RemoteOperationIdentity): Promise<void> {
+    const prior = this.#rows.get(row.operationId);
+    if (prior && prior.fingerprint !== row.fingerprint) throw new Error('remote operation identity conflict');
+    if (prior && prior.state !== 'running' && row.state === 'running') return;
+    this.#rows.set(row.operationId, { ...row });
+  }
   async get(id: string): Promise<RemoteOperationIdentity | undefined> { const row = this.#rows.get(id); return row ? { ...row } : undefined; }
 }
 
@@ -37,17 +42,20 @@ export class SqliteRemoteOperationIdentityStore implements RemoteOperationIdenti
     );`);
   }
   async save(row: RemoteOperationIdentity): Promise<void> {
+    const prior = await this.get(row.operationId);
+    if (prior && prior.fingerprint !== row.fingerprint) throw new Error('remote operation identity conflict');
     this.#db.prepare(`INSERT INTO remote_workspace_operations
       (operation_id,fingerprint,project_id,environment_instance_id,binding_id,generation,connection_epoch,workspace_id,operation,state,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(operation_id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at
-      WHERE fingerprint=excluded.fingerprint`).run(row.operationId,row.fingerprint,row.projectId,row.environmentInstanceId,row.bindingId,row.generation,row.connectionEpoch,row.workspaceId,row.operation,row.state,row.updatedAt);
+      WHERE fingerprint=excluded.fingerprint AND (remote_workspace_operations.state='running' OR excluded.state!='running')`)
+      .run(row.operationId,row.fingerprint,row.projectId,row.environmentInstanceId,row.bindingId,row.generation,row.connectionEpoch,row.workspaceId,row.operation,row.state,row.updatedAt);
   }
   async get(id: string): Promise<RemoteOperationIdentity | undefined> {
     const row = this.#db.prepare(`SELECT * FROM remote_workspace_operations WHERE operation_id = ?`).get(id) as Record<string, unknown> | undefined;
-    if (!row || !['read','search'].includes(String(row.operation)) || !['running','completed','failed','cancelled'].includes(String(row.state))) return undefined;
+    if (!row || !['read','search','edit','patch','command'].includes(String(row.operation)) || !['running','completed','failed','cancelled','unknown','cancel-requested','recovery-required'].includes(String(row.state))) return undefined;
     return { operationId: String(row.operation_id), fingerprint: String(row.fingerprint), projectId: String(row.project_id),
       environmentInstanceId: String(row.environment_instance_id), bindingId: String(row.binding_id), generation: Number(row.generation),
-      connectionEpoch: Number(row.connection_epoch), workspaceId: String(row.workspace_id), operation: row.operation as 'read'|'search',
+      connectionEpoch: Number(row.connection_epoch), workspaceId: String(row.workspace_id), operation: row.operation as RemoteOperationIdentity['operation'],
       state: row.state as RemoteOperationState, updatedAt: Number(row.updated_at) };
   }
 }

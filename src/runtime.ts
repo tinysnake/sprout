@@ -1163,9 +1163,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       // (ADR-0003), and so execution follows the leased instance (F1, #18).
       engines: (requestedInstanceId) => runtimeEnvironment.adapters(requestedInstanceId),
       executionStrategy,
-      remoteWorkspace: async (projectId, agentId) => {
+      remoteWorkspace: async (projectId, agentId, runId, onLeaseAcquired) => {
         if (!environmentOperations) return undefined;
-        try { return await environmentOperations.attach(projectId, agentId); }
+        try { return await environmentOperations.attach(projectId, agentId, runId, onLeaseAcquired); }
         catch { return undefined; }
       },
       ...(hostPi !== undefined ? { hostPi } : {}),
@@ -1604,6 +1604,8 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       catalog: environmentCatalog,
       enrollments,
       store: durableStores.remoteWorkspaceOperations ?? new MemoryRemoteOperationIdentityStore(),
+      pool,
+      leaseTtlMs: configuration.leaseTtlMs,
     });
     switchableEnvironment?.setTarget(enrollmentEnvironment);
     /**
