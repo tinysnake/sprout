@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { macOsTimezoneFiles } from './host-runtime-files.ts';
 import { mkdirSync, mkdtempSync, rmSync, existsSync, realpathSync, writeFileSync, readFileSync } from 'node:fs';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -538,6 +539,8 @@ export function isolationProfile(input: HostPiProbeInput & { readonly agentRoot:
     '(allow file-read-metadata)',
     '(allow file-read* (literal "/") (literal "/opt") (literal "/opt/homebrew") (literal "/opt/homebrew/opt") (literal "/opt/homebrew/Cellar") (literal "/private") (literal "/private/var") (literal "/var") (literal "/etc") (literal "/tmp"))',
     ...['/System', '/usr', '/bin', '/sbin', '/dev', '/private/etc', ...runtimeRoots].map(path => `(allow file-read* (subpath ${quote(path)}))`),
+    // JSC's ICU initialization stalls without its public OS timezone dataset (#250).
+    ...macOsTimezoneFiles().map(path => `(allow file-read-data (literal ${JSON.stringify(path)}))`),
     `(allow file-read* (subpath ${quote(agentRoot)}))`,
     ...files.map(path => `(allow file-read* (literal ${quote(path)}))`),
     `(allow file-write* (subpath ${quote(agentRoot)}))`,

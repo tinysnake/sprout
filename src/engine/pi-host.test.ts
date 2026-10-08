@@ -8,6 +8,7 @@ import type { ChildProcess } from 'node:child_process';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { macOsTimezoneFiles } from './host-runtime-files.ts';
 import { HostPiEngineAdapter, hostEngineProfileId, isolationProfile, type HostPiLaunchInput, type HostPiReadiness } from './pi-host.ts';
 import type { RemoteWorkspaceTools } from './port.ts';
 import { sanitizeStreamError, sanitizedProbeErrorFields, sanitizedPromptErrorFields } from './pi-error-facts.ts';
@@ -181,6 +182,23 @@ test('the Host Pi sandbox profile compiles with default-deny file rules', { skip
     assert.equal(result.error, undefined);
     assert.equal(result.signal, null);
     assert.equal(result.status, 0);
+    const timezoneFiles = macOsTimezoneFiles();
+    const timezoneFile = timezoneFiles[0];
+    assert.ok(timezoneFile, 'installed OS ICU data is present');
+    const outside = join(root, 'host-sentinel.txt');
+    writeFileSync(outside, 'HOST_SENTINEL');
+    const check = spawnSync('/usr/bin/sandbox-exec', ['-p', profile, process.execPath, '-e', `
+      const fs = require('node:fs');
+      const data = fs.readFileSync(process.argv[1]);
+      let runtimeWriteDenied = false, hostReadDenied = false;
+      try { const fd = fs.openSync(process.argv[1], 'r+'); fs.closeSync(fd); }
+      catch (error) { runtimeWriteDenied = ['EPERM', 'EACCES'].includes(error.code); }
+      try { fs.readFileSync(process.argv[2]); }
+      catch (error) { hostReadDenied = ['EPERM', 'EACCES'].includes(error.code); }
+      console.log(JSON.stringify({ readable: data.length > 0, runtimeWriteDenied, hostReadDenied }));
+    `, timezoneFile, outside], { timeout: 10_000, encoding: 'utf8' });
+    assert.equal(check.status, 0, 'runtime data can be read under the real profile');
+    assert.deepEqual(JSON.parse(check.stdout), { readable: true, runtimeWriteDenied: true, hostReadDenied: true });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
