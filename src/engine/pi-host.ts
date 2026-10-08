@@ -521,6 +521,7 @@ export function isolationProfile(input: HostPiProbeInput & { readonly agentRoot:
     join(providerRoot, 'package.json'),
     fileURLToPath(new URL('./pi-host-runner.mjs', import.meta.url)),
     fileURLToPath(new URL('./pi-runner-events.ts', import.meta.url)),
+    fileURLToPath(new URL('./pi-error-facts.ts', import.meta.url)),
     // The runner's TypeScript module needs the repository package scope read
     // (module format resolution) inside the sandbox; nothing else in the
     // repository is readable.
