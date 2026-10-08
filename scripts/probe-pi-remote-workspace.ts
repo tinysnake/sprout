@@ -23,6 +23,8 @@ let responseMentionsTool = false;
 let responseContainsMarker = false;
 const piToolNames: string[] = [];
 const providerRequestFacts: Record<string, unknown>[] = [];
+let hostSession: { turnFacts?: () => readonly Record<string, unknown>[] } | undefined;
+let engineFailure: string | undefined;
 const resultFacts: {
   readonly status: string;
   readonly operation: string;
@@ -78,6 +80,7 @@ function observeRemoteReads(adapter: HostPiEngineAdapter): HostPiEngineAdapter {
         },
       };
       const session = await adapter.startSession({ ...request, remoteWorkspace: observed });
+      hostSession = session as unknown as { turnFacts?: () => readonly Record<string, unknown>[] };
       return {
         sessionId: session.sessionId,
         engineSessionKey: session.engineSessionKey,
@@ -95,6 +98,7 @@ function observeRemoteReads(adapter: HostPiEngineAdapter): HostPiEngineAdapter {
           })();
           const completion = turn.completion.then((result) => {
             engineTurnStatus = result.status;
+            if (result.status === 'failed') engineFailure = result.message;
             return result;
           });
           return { events, completion };
@@ -188,7 +192,7 @@ try {
       const run = await runtime.orchestrator.waitFor(id);
       // turn-facts arrive on the child stdout after the terminal session event;
       // give them a beat to flush before reading the observed facts.
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, 1500));
       const observation = resultFacts[0];
       const accepted = run.status === 'completed' && observation?.status === 'completed' &&
         observation.operation === 'read' && observation.contentMatched && observation.identityMatched;
@@ -200,6 +204,8 @@ try {
         toolNames: piToolNames,
         providerRequestFacts,
         engineTurnStatus,
+        engineFailure,
+        turnFacts: hostSession?.turnFacts?.() ?? [],
         responseMentionsTool,
         responseContainsMarker,
         hostPiSessionStarted,
