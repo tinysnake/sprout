@@ -225,6 +225,11 @@ test('a run written before the project and hand-off columns existed still reads 
   assert.equal('projectId' in (restored ?? {}), false);
   assert.equal('handOff' in (restored ?? {}), false);
   assert.equal('tokenUsage' in (restored ?? {}), false);
+  const legacyPlacement = db
+    .prepare('SELECT execution_mode, engine_host_profile_id FROM agent_runs WHERE id = ?')
+    .get('legacy-1') as { readonly execution_mode: string; readonly engine_host_profile_id: string };
+  assert.equal(legacyPlacement.execution_mode, 'environment-hosted');
+  assert.equal(legacyPlacement.engine_host_profile_id, 'mac-mini-1');
 
   // And a new run can still be written through the migrated schema.
   await store.save(sampleRun({ id: 'after-migration' }));
