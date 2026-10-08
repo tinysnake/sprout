@@ -21,6 +21,7 @@
       "deniedOperation": [
         "open"
       ],
+      "systemPathMentioned": [],
       "pathClassMentioned": {
         "runner": false,
         "control": false,
@@ -70,6 +71,7 @@
       "deniedOperation": [
         "open"
       ],
+      "systemPathMentioned": [],
       "pathClassMentioned": {
         "runner": false,
         "control": false,
@@ -119,6 +121,7 @@
       "deniedOperation": [
         "open"
       ],
+      "systemPathMentioned": [],
       "pathClassMentioned": {
         "runner": false,
         "control": false,
