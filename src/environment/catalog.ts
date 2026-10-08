@@ -150,6 +150,7 @@ export function enrolledEnvironmentDefinition(platform: EnvironmentPlatform): En
     platform,
     capabilities: [
       { name: 'agent-run', requiresLease: true },
+      { name: 'project-mcp', requiresLease: true },
       { name: 'read-only-investigation', requiresLease: false },
     ],
   };

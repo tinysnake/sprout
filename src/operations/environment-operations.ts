@@ -1,15 +1,17 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { RemoteWorkspaceOperationResult, RemoteWorkspaceTools } from '../engine/port.ts';
+import type { RemoteWorkspaceOperationResult, RemoteWorkspaceTools, RemoteProjectMcpTools } from '../engine/port.ts';
 import type { ProjectAccessService } from '../project/access-service.ts';
 import { accessIsConsistent, sanitizeWorkspaceSelection } from '../project/access.ts';
 import { sanitizeIdentifier } from '../environment/privacy.ts';
 import type { ProjectService } from '../project/authority-service.ts';
+import { PROJECT_MCP_CONFIGURATION_FORMAT } from '../project/authority-model.ts';
 import type { ProjectEnvironmentAccess, WorkspaceBinding } from '../project/access.ts';
 import type { RuntimeEnvironment, WorkerGatewayView } from '../runtime.ts';
 import type { EnvironmentCatalog } from '../environment/catalog.ts';
 import type { EnvironmentEnrollmentService } from '../environment/enrollment-service.ts';
+import type { EnvironmentPool, EnvironmentLease } from '../environment/pool.ts';
 import type { RemoteOperationIdentityStore, RemoteOperationIdentity, RemoteOperationState } from './remote-operation-store.ts';
-import type { AttachWorkspaceBindingParams, WorkspaceFileOperationParams, InspectWorkspaceFileOperationParams, CancelWorkspaceFileOperationParams, InspectProjectMcpConfigurationResult } from '../worker/protocol.ts';
+import type { AttachWorkspaceBindingParams, InspectProjectMcpConfigurationParams, InspectProjectMcpConfigurationResult, StartProjectMcpParams, CallProjectMcpToolParams, StopProjectMcpParams, StartProjectMcpResult, CallProjectMcpToolResult, StopProjectMcpResult } from '../worker/protocol.ts';
 
 const MAX_SUPPORTED_READ_BYTES = 64 * 1024;
 const MAX_SUPPORTED_SEARCH_RESULTS = 100;
@@ -53,7 +55,8 @@ interface BindingCandidate {
  */
 type EnvironmentOperationsPort = Pick<RuntimeEnvironment,
   'info' | 'connectionEpoch' | 'attachWorkspaceBinding' | 'executeWorkspaceFileOperation' |
-  'inspectProjectMcpConfiguration' | 'inspectWorkspaceFileOperation' | 'cancelWorkspaceFileOperation'>;
+  'inspectProjectMcpConfiguration' | 'startProjectMcp' | 'callProjectMcpTool' | 'stopProjectMcp' |
+  'inspectWorkspaceFileOperation' | 'cancelWorkspaceFileOperation'>;
 type EnvironmentOperationsGateway = Pick<WorkerGatewayView, 'liveFor' | 'currentConnectionEpoch' | 'isCurrentConnection'>;
 type EnvironmentOperationsCatalog = Pick<EnvironmentCatalog, 'entry'>;
 type EnvironmentOperationsEnrollments = Pick<EnvironmentEnrollmentService, 'get'>;
@@ -63,7 +66,9 @@ export class EnvironmentOperations {
   readonly #access: Pick<ProjectAccessService, 'get' | 'listForProject'>;
   readonly #environment: Pick<RuntimeEnvironment,
     'info' | 'connectionEpoch' | 'attachWorkspaceBinding' | 'executeWorkspaceFileOperation' |
-    'inspectProjectMcpConfiguration' | 'inspectWorkspaceFileOperation' | 'cancelWorkspaceFileOperation'>;
+    'inspectProjectMcpConfiguration' | 'startProjectMcp' | 'callProjectMcpTool' | 'stopProjectMcp' |
+    'inspectWorkspaceFileOperation' | 'cancelWorkspaceFileOperation'>;
+  readonly #pool: Pick<EnvironmentPool, 'getLease' | 'markRecovering'>;
   readonly #gateway: Pick<WorkerGatewayView, 'liveFor' | 'currentConnectionEpoch' | 'isCurrentConnection'>;
   readonly #catalog: EnvironmentOperationsCatalog;
   readonly #enrollments: EnvironmentOperationsEnrollments;
@@ -77,6 +82,7 @@ export class EnvironmentOperations {
     readonly gateway: EnvironmentOperationsGateway;
     readonly catalog: EnvironmentOperationsCatalog;
     readonly enrollments: EnvironmentOperationsEnrollments;
+    readonly pool: Pick<EnvironmentPool, 'getLease' | 'markRecovering'>;
     readonly store: RemoteOperationIdentityStore;
     readonly clock?: () => number;
   }) {
@@ -86,6 +92,7 @@ export class EnvironmentOperations {
     this.#gateway = options.gateway;
     this.#catalog = options.catalog;
     this.#enrollments = options.enrollments;
+    this.#pool = options.pool;
     this.#store = options.store;
     this.#clock = options.clock ?? Date.now;
   }
@@ -157,6 +164,69 @@ export class EnvironmentOperations {
     } catch {
       return { environmentInstanceId, bindingId: binding.bindingId, generation: binding.generation!, status: 'blocked', reason: 'worker-refused', servers: [] };
     }
+  }
+
+  async attachProjectMcpTools(
+    projectId: string,
+    agentId: string,
+    scope: { readonly environmentInstanceId: string; readonly leaseId: string; readonly runId: string },
+  ): Promise<RemoteProjectMcpTools> {
+    const authority = await this.#assertProjectMcpAuthority(projectId, agentId, scope, false);
+    await this.#environment.attachWorkspaceBinding?.(scope.environmentInstanceId, authority.identity);
+    const startInput: StartProjectMcpParams = {
+      ...authority.identity,
+      format: authority.format,
+      leaseId: scope.leaseId,
+      holderKind: 'run',
+      holderId: scope.runId,
+      runId: scope.runId,
+    };
+    const started = await this.#environment.startProjectMcp?.(scope.environmentInstanceId, startInput);
+    if (!started) throw new RemoteWorkspaceUnavailableError('unsupported');
+    const catalog = safeMcpToolCatalog(started);
+    if (started.status === 'blocked' || !catalog) throw new RemoteWorkspaceUnavailableError('worker-refused');
+    const toolOrigins = new Map(catalog.tools.map(row => [row.public.name, row.workerId]));
+    let closed = false;
+    return {
+      binding: {
+        projectId, environmentInstanceId: scope.environmentInstanceId,
+        bindingId: authority.identity.bindingId, generation: authority.identity.generation,
+        connectionEpoch: authority.identity.connectionEpoch, workspaceId: authority.identity.workspaceId,
+      },
+      tools: catalog.tools.map(row => row.public),
+      call: async (name, arguments_) => {
+        if (closed) return { status: 'failed', reason: 'worker-refused' };
+        const workerToolId = toolOrigins.get(name);
+        if (!workerToolId || !isRecord(arguments_)) return { status: 'failed', reason: 'unknown-tool' };
+        const current = await this.#assertProjectMcpAuthority(projectId, agentId, scope, false);
+        if (!sameMcpBinding(current.identity, authority.identity)) return { status: 'failed', reason: 'worker-refused' };
+        const input: CallProjectMcpToolParams = {
+          ...authority.identity,
+          leaseId: scope.leaseId, holderKind: 'run', holderId: scope.runId, runId: scope.runId,
+          processId: started.processId!, toolId: workerToolId, arguments: arguments_,
+        };
+        const result = await this.#environment.callProjectMcpTool?.(scope.environmentInstanceId, input);
+        return sanitizeMcpCallResult(result);
+      },
+      close: async () => {
+        if (closed) return 'stopped';
+        closed = true;
+        if (!started.processId) return 'stopped';
+        try {
+          const currentLease = this.#pool.getLease(scope.leaseId);
+          if (!sameMcpLease(currentLease, scope)) throw new Error('MCP lease identity changed');
+          const stopInput: StopProjectMcpParams = {
+            ...authority.identity,
+            leaseId: scope.leaseId, holderKind: 'run', holderId: scope.runId, runId: scope.runId,
+            processId: started.processId,
+          };
+          const stopped = await this.#environment.stopProjectMcp?.(scope.environmentInstanceId, stopInput);
+          if (stopped?.status === 'stopped' || stopped?.status === 'not-found') return 'stopped';
+        } catch { /* The lease remains protected below. */ }
+        this.#pool.markRecovering(scope.leaseId);
+        return 'uncertain';
+      },
+    };
   }
 
   async attach(projectId: string, agentId: string): Promise<RemoteWorkspaceTools> {
@@ -256,6 +326,59 @@ export class EnvironmentOperations {
         if (result.accepted) await this.#saveState(row, 'cancelled');
         return { accepted: result.accepted, status: result.status };
       },
+    };
+  }
+
+  async #assertProjectMcpAuthority(
+    projectId: string,
+    agentId: string,
+    scope: { readonly environmentInstanceId: string; readonly leaseId: string; readonly runId: string },
+    allowRecovering: boolean,
+  ): Promise<{ readonly identity: AttachWorkspaceBindingParams; readonly format: typeof PROJECT_MCP_CONFIGURATION_FORMAT }> {
+    const project = await this.#projects.get(projectId);
+    const content = project?.content.versions.find(version => version.version === project.content.currentVersion);
+    if (!project || project.status !== 'active' || !content?.mcpConfiguration || content.mcpConfiguration.format !== PROJECT_MCP_CONFIGURATION_FORMAT || !hasAgent(project, agentId)) {
+      throw new RemoteWorkspaceUnavailableError('project-denied');
+    }
+    const lease = this.#pool.getLease(scope.leaseId);
+    if (!sameMcpLease(lease, scope) || (lease?.state !== 'active' && !(allowRecovering && lease?.state === 'recovering'))) {
+      throw new RemoteWorkspaceUnavailableError('lease-required');
+    }
+    const access = await this.#access.get(projectId, scope.environmentInstanceId);
+    const binding = access?.current;
+    if (!access || access.status !== 'active' || !binding || !accessIsConsistent(access) || access.projectId !== projectId) {
+      throw new RemoteWorkspaceUnavailableError('workspace-unbound');
+    }
+    const candidate = await this.#blockReason(projectId, undefined, access, binding);
+    if (candidate === 'capability-denied') {
+      // MCP has its own explicit capability grant; it does not inherit read-only-investigation.
+    } else if (candidate !== undefined && candidate !== 'lease-required') {
+      throw new RemoteWorkspaceUnavailableError(candidate);
+    }
+    const live = this.#gateway.liveFor(scope.environmentInstanceId);
+    if (!live || live.enrollment.status !== 'approved') throw new RemoteWorkspaceUnavailableError('worker-offline');
+    const enrollment = await this.#enrollments.get(live.enrollment.id);
+    if (!enrollment || enrollment.environmentInstanceId !== scope.environmentInstanceId || enrollment.status !== 'approved') throw new RemoteWorkspaceUnavailableError('worker-offline');
+    if (enrollment.capabilityPermissions['project-mcp'] !== true) throw new RemoteWorkspaceUnavailableError('capability-denied');
+    const epoch = live.epoch.epoch;
+    if (epoch !== this.#gateway.currentConnectionEpoch(enrollment.id) || !this.#gateway.isCurrentConnection(enrollment.id, live.epoch.connectionId) || this.#environment.connectionEpoch?.(scope.environmentInstanceId) !== epoch) {
+      throw new RemoteWorkspaceUnavailableError('stale-epoch');
+    }
+    const capability = this.#catalog.entry(scope.environmentInstanceId)?.definition.capabilities.find(row => row.name === 'project-mcp');
+    if (!capability || capability.requiresLease !== true) throw new RemoteWorkspaceUnavailableError('unsupported');
+    const info = await this.#environment.info?.(scope.environmentInstanceId);
+    const operations = info?.workspaceOperations?.operations;
+    if (!info || info.environmentInstanceId !== scope.environmentInstanceId ||
+        !operations?.includes('start-project-mcp') || !operations.includes('call-project-mcp-tool') || !operations.includes('stop-project-mcp')) {
+      throw new RemoteWorkspaceUnavailableError('unsupported');
+    }
+    return {
+      identity: {
+        projectId, environmentInstanceId: scope.environmentInstanceId, bindingId: binding.bindingId,
+        generation: binding.generation!, connectionEpoch: epoch, workspaceId: binding.workspaceId,
+        kind: binding.kind, ...(binding.path !== undefined ? { path: binding.path } : {}),
+      },
+      format: PROJECT_MCP_CONFIGURATION_FORMAT,
     };
   }
 

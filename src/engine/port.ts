@@ -176,6 +176,20 @@ export interface RemoteWorkspaceOperationResult {
   readonly failure?: string;
 }
 
+export interface ProjectMcpToolDeclaration {
+  readonly name: string;
+  readonly description: string;
+  readonly inputSchema: Readonly<Record<string, unknown>>;
+}
+
+/** Core-authorized Project MCP bridge. Tool names map to fixed Worker origins. */
+export interface RemoteProjectMcpTools {
+  readonly binding: RemoteWorkspaceTools['binding'];
+  readonly tools: readonly ProjectMcpToolDeclaration[];
+  call(name: string, arguments_: Readonly<Record<string, unknown>>): Promise<{ readonly status: 'completed' | 'failed' | 'unsupported'; readonly text?: string; readonly reason?: string }>;
+  close(): Promise<'stopped' | 'uncertain'>;
+}
+
 /** Engine-facing typed operations. Authorization and target selection live above the Engine port. */
 export interface RemoteWorkspaceTools {
   readonly binding: {
@@ -190,6 +204,7 @@ export interface RemoteWorkspaceTools {
   search(query: string, path?: string): Promise<RemoteWorkspaceOperationResult>;
   inspect(operationId: string): Promise<{ readonly status: string }>;
   cancel(operationId: string): Promise<{ readonly accepted: boolean; readonly status: string }>;
+  readonly mcp?: RemoteProjectMcpTools;
 }
 
 export interface StartSessionRequest {

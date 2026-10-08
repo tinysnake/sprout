@@ -266,6 +266,10 @@ export interface RuntimeEnvironment {
   executeWorkspaceFileOperation?(environmentInstanceId: string, input: WorkspaceFileOperationParams): Promise<import('./engine/port.ts').RemoteWorkspaceOperationResult>;
   /** Inspect a Project-selected MCP manifest on the Worker without returning its contents. */
   inspectProjectMcpConfiguration?(environmentInstanceId: string, input: InspectProjectMcpConfigurationParams): Promise<InspectProjectMcpConfigurationResult>;
+  /** Start, call, and stop selected Project MCP tools only on the bound Worker. */
+  startProjectMcp?(environmentInstanceId: string, input: import('./worker/protocol.ts').StartProjectMcpParams): Promise<import('./worker/protocol.ts').StartProjectMcpResult>;
+  callProjectMcpTool?(environmentInstanceId: string, input: import('./worker/protocol.ts').CallProjectMcpToolParams): Promise<import('./worker/protocol.ts').CallProjectMcpToolResult>;
+  stopProjectMcp?(environmentInstanceId: string, input: import('./worker/protocol.ts').StopProjectMcpParams): Promise<import('./worker/protocol.ts').StopProjectMcpResult>;
   inspectWorkspaceFileOperation?(environmentInstanceId: string, input: InspectWorkspaceFileOperationParams): Promise<InspectWorkspaceFileOperationResult>;
   cancelWorkspaceFileOperation?(environmentInstanceId: string, input: CancelWorkspaceFileOperationParams): Promise<CancelWorkspaceFileOperationResult>;
   /** The authenticated Worker epoch that currently owns one instance. */
