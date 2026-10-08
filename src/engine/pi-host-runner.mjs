@@ -108,8 +108,8 @@ async function createRuntime(config) {
   const { createMagpieProvider } = await import(pathToFileURL(join(config.providerRoot, 'provider.ts')).href);
   const provider = createMagpieProvider().provider;
   if (provider.id !== config.provider) throw Object.assign(new Error(), { stage: 'provider-identity', code: 'unsupported' });
-  const providerStream = provider.stream;
-  provider.stream = (model, context, options) => {
+  const providerCapture = { session: undefined };
+  const captureProviderRequest = (model, context, options) => {
     const declaredTools = new Map();
     for (const message of context.messages) {
       for (const tool of message.toolsRemoved ?? []) declaredTools.delete(tool.name);
@@ -117,7 +117,7 @@ async function createRuntime(config) {
     }
     const tools = [...declaredTools.values()];
     const remoteRead = tools.find((tool) => tool.name === 'remote_read');
-    const registeredRemoteRead = session?.getAllTools().find((tool) => tool.name === 'remote_read');
+    const registeredRemoteRead = providerCapture.session?.getAllTools().find((tool) => tool.name === 'remote_read');
     if (config.remoteWorkspace) {
       line({ kind: 'provider-request-facts', facts: {
         modelApi: model.api,
@@ -130,7 +130,16 @@ async function createRuntime(config) {
         remoteReadIsBuiltin: registeredRemoteRead?.sourceInfo?.source === 'builtin',
       } });
     }
+  };
+  const providerStream = provider.stream;
+  provider.stream = (model, context, options) => {
+    captureProviderRequest(model, context, options);
     return providerStream.call(provider, model, context, options);
+  };
+  const providerStreamSimple = provider.streamSimple;
+  provider.streamSimple = (model, context, options) => {
+    captureProviderRequest(model, context, options);
+    return providerStreamSimple.call(provider, model, context, options);
   };
   runtime.registerNativeProvider(provider);
   await runtime.refresh({ allowNetwork: false, providers: [config.provider] });
@@ -138,7 +147,7 @@ async function createRuntime(config) {
   const model = runtime.getModel(config.provider, config.model);
   const modelPresent = model?.provider === config.provider && model?.id === config.model;
   const authConfigured = runtime.hasConfiguredAuth(config.provider);
-  return { sdk, runtime, model: modelPresent ? model : undefined, modelPresent, authConfigured, packageVersion };
+  return { sdk, runtime, model: modelPresent ? model : undefined, modelPresent, authConfigured, packageVersion, providerCapture };
 }
 
 function emptyLoader(sdk, config) {
@@ -267,6 +276,7 @@ async function openSession(config, input) {
       sessionManager: manager,
       settingsManager: loaded.sdk.SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),
     }));
+    loaded.providerCapture.session = session;
     const selected = session.model;
     if (selected?.provider !== config.provider || selected?.id !== config.model ||
         JSON.stringify(session.getActiveToolNames().sort()) !== JSON.stringify(remoteToolNames.slice().sort()) ||
