@@ -7,6 +7,35 @@ import { EndpointCarrier } from './carrier.ts';
 import { WorkerWorkspace } from './workspace.ts';
 import { WorkerWorkspaceFiles } from './workspace-file-operations.ts';
 
+test('Worker MCP inspection reads only the bound root manifest and returns sanitized stdio descriptors', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'sprout-mcp-inspection-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const workspace = new WorkerWorkspace(root);
+  const selected = await workspace.validateWorkspace({ projectId: 'project-mcp', environmentInstanceId: 'env-mcp', kind: 'relative', path: 'repo' });
+  const files = new WorkerWorkspaceFiles(workspace, 'env-mcp');
+  const binding = {
+    projectId: 'project-mcp', environmentInstanceId: 'env-mcp', bindingId: 'binding-mcp',
+    generation: 1, connectionEpoch: 1, workspaceId: selected.workspaceId, kind: 'relative', path: 'repo',
+  } as const;
+  await files.attach(binding);
+  await writeFile(join(root, 'repo', '.mcp.json'), JSON.stringify({ mcpServers: {
+    filesystem: { command: 'fixture-command', args: ['--label', 'private-config-field'], env: { FIXTURE_SETTING: 'private-config-field' } },
+  } }));
+  const inspection = await files.inspectMcpConfiguration({ ...binding, format: 'claude-code-mcp-json-v1' });
+  assert.deepEqual(inspection, {
+    status: 'valid', format: 'claude-code-mcp-json-v1', servers: [{ name: 'filesystem', transport: 'stdio' }],
+  });
+  assert.equal(JSON.stringify(inspection).includes('fixture-command'), false);
+  assert.equal(JSON.stringify(inspection).includes('private-config-field'), false);
+
+  await writeFile(join(root, 'repo', '.mcp.json'), JSON.stringify({ mcpServers: {
+    remote: { type: 'http', url: 'https://example.invalid/mcp' },
+  } }));
+  const unsupported = await files.inspectMcpConfiguration({ ...binding, format: 'claude-code-mcp-json-v1' });
+  assert.equal(unsupported.status, 'unsupported');
+  assert.deepEqual(unsupported.servers, []);
+});
+
 test('Worker file reads return the same-name remote sentinel and deny traversal, another Project, and host paths', async (t) => {
   const hostRoot = await mkdtemp(join(tmpdir(), 'sprout-host-sentinel-'));
   const workerRoot = await mkdtemp(join(tmpdir(), 'sprout-remote-sentinel-'));

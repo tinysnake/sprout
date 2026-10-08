@@ -181,6 +181,7 @@ export class FixtureProjectService implements ProjectManagementService {
       rules: input.rules ?? first.rules,
       wakePolicy: input.wakePolicy ?? first.wakePolicy,
       routingIntervalMs: input.routingIntervalMs ?? first.routingIntervalMs,
+      ...(input.mcpConfiguration !== undefined ? { mcpConfiguration: input.mcpConfiguration } : {}),
     };
     project.content = { currentVersion: 1, versions: [initialVersion] };
     project.goal = initialVersion.goal;
@@ -204,7 +205,7 @@ export class FixtureProjectService implements ProjectManagementService {
     return copy(project);
   }
 
-  async updateProjectContent(id: string, input: { displayName?: string; goal: string | null; completionGuidance: string; rules: readonly string[]; wakePolicy: string; routingIntervalMs: number }): Promise<ProjectAuthorityView> {
+  async updateProjectContent(id: string, input: { displayName?: string; goal: string | null; completionGuidance: string; rules: readonly string[]; wakePolicy: string; routingIntervalMs: number; mcpConfiguration?: import('../../../adapters/project-api.js').ProjectMcpConfigurationSelection | null }): Promise<ProjectAuthorityView> {
     const project = this.#requireEditable(id);
     const current = this.#currentContent(project);
     const next = {
@@ -217,6 +218,9 @@ export class FixtureProjectService implements ProjectManagementService {
       rules: [...input.rules],
       wakePolicy: input.wakePolicy,
       routingIntervalMs: input.routingIntervalMs,
+      ...(input.mcpConfiguration === undefined
+        ? current.mcpConfiguration !== undefined ? { mcpConfiguration: current.mcpConfiguration } : {}
+        : input.mcpConfiguration !== null ? { mcpConfiguration: input.mcpConfiguration } : {}),
     };
     project.content = { currentVersion: next.version, versions: [...project.content.versions, next] };
     if (input.displayName !== undefined) project.displayName = input.displayName;
@@ -302,6 +306,15 @@ export class FixtureProjectService implements ProjectManagementService {
     delete (ended as { current?: unknown }).current;
     rows[index] = ended;
     return copy(ended);
+  }
+
+  async inspectProjectMcpConfiguration(id: string, environmentInstanceId: string) {
+    const project = this.#requireProject(id);
+    return {
+      environmentInstanceId,
+      status: this.#currentContent(project).mcpConfiguration ? 'valid' as const : 'not-selected' as const,
+      servers: this.#currentContent(project).mcpConfiguration ? [{ name: 'fixture-server', transport: 'stdio' as const }] : [],
+    };
   }
 
   async archiveProject(id: string): Promise<ProjectAuthorityView> {

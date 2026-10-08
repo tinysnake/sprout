@@ -1,5 +1,5 @@
 import type { ApiRequestContext, ApiRouter } from './router.ts';
-import { ProjectAuthorityError } from '../project/authority-model.ts';
+import { ProjectAuthorityError, PROJECT_MCP_CONFIGURATION_FORMAT } from '../project/authority-model.ts';
 import { ProjectAccessError, type WorkspaceSelection } from '../project/access.ts';
 import { redactSensitiveText } from '../environment/privacy.ts';
 import type { ProjectService } from '../project/authority-service.ts';
@@ -45,7 +45,7 @@ export interface ProjectRouterOptions {
    */
   readonly access?: ProjectAccessService;
   /** Current Project workspace binding readiness, independent of engine health. */
-  readonly environmentOperations?: Pick<EnvironmentOperations, 'bindingReadiness'>;
+  readonly environmentOperations?: Pick<EnvironmentOperations, 'bindingReadiness' | 'inspectMcpConfiguration'>;
   /** Atomic Project + selected Environment/workspace creation boundary. */
   readonly creation?: ProjectCreationService;
   /**
@@ -81,6 +81,15 @@ function parseResponsibilities(value: unknown): readonly string[] | 'invalid' | 
   if (value === undefined) return undefined;
   if (!Array.isArray(value) || !value.every((entry) => typeof entry === 'string')) return 'invalid';
   return value as readonly string[];
+}
+
+function parseMcpConfiguration(value: unknown, allowClear: boolean): import('../project/authority-model.ts').ProjectMcpConfiguration | null | undefined | 'invalid' {
+  if (value === undefined) return undefined;
+  if (value === null) return allowClear ? null : 'invalid';
+  if (typeof value !== 'object' || Array.isArray(value)) return 'invalid';
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).some(key => key !== 'format') || record.format !== PROJECT_MCP_CONFIGURATION_FORMAT) return 'invalid';
+  return { format: PROJECT_MCP_CONFIGURATION_FORMAT };
 }
 
 /** Read the status filter, accepting only the canonical lifecycle values. */
@@ -178,6 +187,8 @@ export function createProjectRouter(options: ProjectRouterOptions): ApiRouter {
           return json(context, 400, { error: 'rules must be an array of strings' });
         }
         const routingIntervalMs = body['routingIntervalMs'];
+        const mcpConfiguration = parseMcpConfiguration(body['mcpConfiguration'], false);
+        if (mcpConfiguration === 'invalid') return json(context, 400, { error: 'mcpConfiguration must select the supported claude-code-mcp-json-v1 format' });
         const agentMemberships = parseAgentMemberships(body['agentMemberships']);
         if (agentMemberships === 'invalid') {
           return json(context, 400, { error: 'agentMemberships must be an array of agent memberships' });
@@ -198,6 +209,7 @@ export function createProjectRouter(options: ProjectRouterOptions): ApiRouter {
             ...(rules !== undefined ? { rules } : {}),
             ...(wakePolicy !== undefined ? { wakePolicy } : {}),
             ...(typeof routingIntervalMs === 'number' ? { routingIntervalMs } : {}),
+            ...(mcpConfiguration !== undefined ? { mcpConfiguration } : {}),
             ...(agentMemberships !== undefined ? { agentMemberships } : {}),
             ...(reason !== undefined ? { reason } : {}),
           };
@@ -267,6 +279,8 @@ export function createProjectRouter(options: ProjectRouterOptions): ApiRouter {
         const reason = stringField(body, 'reason');
         const displayName = stringField(body, 'displayName');
         const wakePolicy = stringField(body, 'wakePolicy');
+        const mcpConfiguration = parseMcpConfiguration(body['mcpConfiguration'], true);
+        if (mcpConfiguration === 'invalid') return json(context, 400, { error: 'mcpConfiguration must select the supported claude-code-mcp-json-v1 format or be null to clear' });
         try {
           const project = await projects.updateContent(segments[2] ?? '', {
             ...(displayName !== undefined ? { displayName } : {}),
@@ -281,6 +295,7 @@ export function createProjectRouter(options: ProjectRouterOptions): ApiRouter {
             ...(rules !== undefined ? { rules } : {}),
             ...(wakePolicy !== undefined ? { wakePolicy } : {}),
             ...(typeof routingIntervalMs === 'number' ? { routingIntervalMs } : {}),
+            ...(mcpConfiguration !== undefined ? { mcpConfiguration } : {}),
             ...(reason !== undefined ? { reason } : {}),
           });
           return json(context, 200, { project: toProjectAuthorityView(project) });
@@ -457,6 +472,21 @@ export function createProjectRouter(options: ProjectRouterOptions): ApiRouter {
         if (environmentOperations === undefined) return json(context, 404, { error: 'unknown route' });
         const readiness = await environmentOperations.bindingReadiness(segments[2] ?? '');
         return json(context, 200, { readiness });
+      }
+
+      // GET /api/projects/:id/access/:environmentInstanceId/mcp-configuration —
+      // Worker-side manifest inspection returns sanitized declarations only.
+      if (
+        method === 'GET' &&
+        segments.length === 6 &&
+        segments[0] === 'api' &&
+        segments[1] === 'projects' &&
+        segments[3] === 'access' &&
+        segments[5] === 'mcp-configuration'
+      ) {
+        if (environmentOperations === undefined) return json(context, 404, { error: 'unknown route' });
+        const inspection = await environmentOperations.inspectMcpConfiguration(segments[2] ?? '', segments[4] ?? '');
+        return json(context, 200, { inspection });
       }
 
       // GET /api/projects/:id/access — list one Project's Environment access

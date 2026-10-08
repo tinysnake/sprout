@@ -204,6 +204,9 @@ export class EnvironmentWorker {
         case WORKER_METHODS.workspaceFileOperation:
           this.#transport.respond(id, await this.#requireWorkspaceFiles().execute(params as import('./protocol.ts').WorkspaceFileOperationParams));
           return;
+        case WORKER_METHODS.inspectProjectMcpConfiguration:
+          this.#transport.respond(id, await this.#requireWorkspaceFiles().inspectMcpConfiguration(params as import('./protocol.ts').InspectProjectMcpConfigurationParams));
+          return;
         case WORKER_METHODS.inspectWorkspaceFileOperation:
           this.#transport.respond(id, this.#requireWorkspaceFiles().inspect(params as import('./protocol.ts').InspectWorkspaceFileOperationParams));
           return;
@@ -243,7 +246,7 @@ export class EnvironmentWorker {
         standingInstructions: engine.capabilities.standingInstructions,
       })),
       ...(this.#workspaceFiles !== undefined ? { workspaceOperations: {
-        version: 1 as const, operations: ['read', 'search'] as const,
+        version: 1 as const, operations: ['read', 'search', 'inspect-mcp-configuration'] as const,
         maxReadBytes: 64 * 1024, maxSearchResults: 100,
       } } : {}),
       ...(this.#readiness !== undefined

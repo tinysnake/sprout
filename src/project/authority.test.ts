@@ -9,6 +9,8 @@ import {
   membershipForMemberId,
   sanitizeProjectDisplayName,
   sanitizeProjectGoal,
+  sanitizeProjectMcpConfiguration,
+  PROJECT_MCP_CONFIGURATION_FORMAT,
   sanitizeProjectRules,
   sanitizeRoutingIntervalMs,
   sanitizeWakePolicy,
@@ -16,6 +18,26 @@ import {
 import { ProjectService } from './authority-service.ts';
 import { InMemoryProjectAuthorityStore } from './authority-store.ts';
 import { GENERAL_COLLABORATION_TEMPLATE } from './template.ts';
+
+test('Project MCP configuration selection is versioned, explicit, and restricted to the supported format', async () => {
+  const projects = service();
+  const selected = await projects.create({
+    id: 'project-mcp-selection',
+    displayName: 'MCP selection',
+    mcpConfiguration: { format: PROJECT_MCP_CONFIGURATION_FORMAT },
+  });
+  assert.deepEqual(currentProjectContent(selected).mcpConfiguration, { format: PROJECT_MCP_CONFIGURATION_FORMAT });
+  const cleared = await projects.updateContent(selected.id, { mcpConfiguration: null });
+  assert.equal(currentProjectContent(cleared).mcpConfiguration, undefined);
+  assert.throws(
+    () => sanitizeProjectMcpConfiguration({ format: PROJECT_MCP_CONFIGURATION_FORMAT, path: '.mcp.json' }),
+    (error: unknown) => error instanceof ProjectAuthorityError && error.code === 'invalid-content',
+  );
+  assert.throws(
+    () => sanitizeProjectMcpConfiguration({ format: 'unsupported-http-mcp-v1' }),
+    (error: unknown) => error instanceof ProjectAuthorityError && error.code === 'invalid-content',
+  );
+});
 
 /**
  * Domain behaviour for durable Project, template-snapshot, and membership

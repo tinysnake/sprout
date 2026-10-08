@@ -2,13 +2,14 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { RemoteWorkspaceOperationResult, RemoteWorkspaceTools } from '../engine/port.ts';
 import type { ProjectAccessService } from '../project/access-service.ts';
 import { accessIsConsistent, sanitizeWorkspaceSelection } from '../project/access.ts';
+import { sanitizeIdentifier } from '../environment/privacy.ts';
 import type { ProjectService } from '../project/authority-service.ts';
 import type { ProjectEnvironmentAccess, WorkspaceBinding } from '../project/access.ts';
 import type { RuntimeEnvironment, WorkerGatewayView } from '../runtime.ts';
 import type { EnvironmentCatalog } from '../environment/catalog.ts';
 import type { EnvironmentEnrollmentService } from '../environment/enrollment-service.ts';
 import type { RemoteOperationIdentityStore, RemoteOperationIdentity, RemoteOperationState } from './remote-operation-store.ts';
-import type { AttachWorkspaceBindingParams, WorkspaceFileOperationParams, InspectWorkspaceFileOperationParams, CancelWorkspaceFileOperationParams } from '../worker/protocol.ts';
+import type { AttachWorkspaceBindingParams, WorkspaceFileOperationParams, InspectWorkspaceFileOperationParams, CancelWorkspaceFileOperationParams, InspectProjectMcpConfigurationParams, InspectProjectMcpConfigurationResult } from '../worker/protocol.ts';
 
 const MAX_SUPPORTED_READ_BYTES = 64 * 1024;
 const MAX_SUPPORTED_SEARCH_RESULTS = 100;
@@ -20,6 +21,15 @@ export interface RemoteWorkspaceReadiness {
   readonly generation?: number;
   readonly status: 'ready' | 'blocked';
   readonly reason?: RemoteWorkspaceBlock;
+}
+
+export interface ProjectMcpInspection {
+  readonly environmentInstanceId: string;
+  readonly bindingId?: string;
+  readonly generation?: number;
+  readonly status: 'not-selected' | 'blocked' | 'valid' | 'missing' | 'invalid' | 'unsupported';
+  readonly reason?: RemoteWorkspaceBlock;
+  readonly servers: InspectProjectMcpConfigurationResult['servers'];
 }
 
 export class RemoteWorkspaceUnavailableError extends Error {
@@ -43,7 +53,7 @@ interface BindingCandidate {
  */
 type EnvironmentOperationsPort = Pick<RuntimeEnvironment,
   'info' | 'connectionEpoch' | 'attachWorkspaceBinding' | 'executeWorkspaceFileOperation' |
-  'inspectWorkspaceFileOperation' | 'cancelWorkspaceFileOperation'>;
+  'inspectProjectMcpConfiguration' | 'inspectWorkspaceFileOperation' | 'cancelWorkspaceFileOperation'>;
 type EnvironmentOperationsGateway = Pick<WorkerGatewayView, 'liveFor' | 'currentConnectionEpoch' | 'isCurrentConnection'>;
 type EnvironmentOperationsCatalog = Pick<EnvironmentCatalog, 'entry'>;
 type EnvironmentOperationsEnrollments = Pick<EnvironmentEnrollmentService, 'get'>;
@@ -53,7 +63,7 @@ export class EnvironmentOperations {
   readonly #access: Pick<ProjectAccessService, 'get' | 'listForProject'>;
   readonly #environment: Pick<RuntimeEnvironment,
     'info' | 'connectionEpoch' | 'attachWorkspaceBinding' | 'executeWorkspaceFileOperation' |
-    'inspectWorkspaceFileOperation' | 'cancelWorkspaceFileOperation'>;
+    'inspectProjectMcpConfiguration' | 'inspectWorkspaceFileOperation' | 'cancelWorkspaceFileOperation'>;
   readonly #gateway: Pick<WorkerGatewayView, 'liveFor' | 'currentConnectionEpoch' | 'isCurrentConnection'>;
   readonly #catalog: EnvironmentOperationsCatalog;
   readonly #enrollments: EnvironmentOperationsEnrollments;
@@ -108,6 +118,45 @@ export class EnvironmentOperations {
         status: reason ? 'blocked' : 'ready', ...(reason ? { reason } : {}) });
     }
     return result;
+  }
+
+  async inspectMcpConfiguration(projectId: string, environmentInstanceId: string): Promise<ProjectMcpInspection> {
+    const project = await this.#projects.get(projectId);
+    if (!project || project.status !== 'active') return { environmentInstanceId, status: 'blocked', reason: 'project-denied', servers: [] };
+    const currentContent = project.content.versions.find(version => version.version === project.content.currentVersion);
+    const configuration = currentContent?.mcpConfiguration;
+    if (!configuration) return { environmentInstanceId, status: 'not-selected', servers: [] };
+    const access = await this.#access.get(projectId, environmentInstanceId);
+    if (!access) return { environmentInstanceId, status: 'blocked', reason: 'workspace-unbound', servers: [] };
+    const binding = access.current;
+    const reason = await this.#blockReason(projectId, undefined, access, binding);
+    if (reason) return { environmentInstanceId, status: 'blocked', reason, servers: [] };
+    if (!binding) return { environmentInstanceId, status: 'blocked', reason: 'workspace-unbound', servers: [] };
+    const live = this.#gateway.liveFor(environmentInstanceId);
+    const epoch = live?.epoch.epoch;
+    if (!live || epoch === undefined) return { environmentInstanceId, status: 'blocked', reason: 'worker-offline', servers: [] };
+    const identity: AttachWorkspaceBindingParams = {
+      projectId, environmentInstanceId, bindingId: binding.bindingId, generation: binding.generation!,
+      connectionEpoch: epoch, workspaceId: binding.workspaceId, kind: binding.kind,
+      ...(binding.path !== undefined ? { path: binding.path } : {}),
+    };
+    try {
+      const info = await this.#environment.info?.(environmentInstanceId);
+      if (!info?.workspaceOperations?.operations.includes('inspect-mcp-configuration') || !this.#environment.inspectProjectMcpConfiguration) {
+        return { environmentInstanceId, bindingId: binding.bindingId, generation: binding.generation!, status: 'blocked', reason: 'unsupported', servers: [] };
+      }
+      await this.#environment.attachWorkspaceBinding?.(environmentInstanceId, identity);
+      await this.#assertCurrent(projectId, undefined, environmentInstanceId, identity);
+      const result = await this.#environment.inspectProjectMcpConfiguration(environmentInstanceId, {
+        ...identity, format: configuration.format,
+      });
+      await this.#assertCurrent(projectId, undefined, environmentInstanceId, identity);
+      const sanitized = sanitizeMcpInspection(result);
+      if (!sanitized) throw new Error('invalid MCP inspection result');
+      return { environmentInstanceId, bindingId: binding.bindingId, generation: binding.generation!, ...sanitized };
+    } catch {
+      return { environmentInstanceId, bindingId: binding.bindingId, generation: binding.generation!, status: 'blocked', reason: 'worker-refused', servers: [] };
+    }
   }
 
   async attach(projectId: string, agentId: string): Promise<RemoteWorkspaceTools> {
@@ -247,9 +296,9 @@ export class EnvironmentOperations {
     return undefined;
   }
 
-  async #assertCurrent(projectId: string, agentId: string, environmentInstanceId: string, identity: AttachWorkspaceBindingParams): Promise<void> {
+  async #assertCurrent(projectId: string, agentId: string | undefined, environmentInstanceId: string, identity: AttachWorkspaceBindingParams): Promise<void> {
     const project = await this.#projects.get(projectId);
-    if (!project || project.status !== 'active' || !hasAgent(project, agentId)) throw new RemoteWorkspaceUnavailableError('project-denied');
+    if (!project || project.status !== 'active' || (agentId !== undefined && !hasAgent(project, agentId))) throw new RemoteWorkspaceUnavailableError('project-denied');
     const current = await this.#access.get(projectId, environmentInstanceId);
     if (!current || current.status !== 'active' || current.current?.bindingId !== identity.bindingId || current.current.generation !== identity.generation || current.current.workspaceId !== identity.workspaceId || current.current.kind !== identity.kind || current.current.path !== identity.path) throw new RemoteWorkspaceUnavailableError('access-ended');
     const live = this.#gateway.liveFor(environmentInstanceId);
@@ -266,6 +315,20 @@ export class EnvironmentOperations {
   async #saveState(row: RemoteOperationIdentity, state: RemoteOperationState): Promise<void> {
     await this.#store.save({ ...row, state, updatedAt: this.#clock() });
   }
+}
+
+function sanitizeMcpInspection(result: InspectProjectMcpConfigurationResult): Pick<ProjectMcpInspection, 'status' | 'servers'> | undefined {
+  if (!result || result.format !== 'claude-code-mcp-json-v1' ||
+      !['valid', 'missing', 'invalid', 'unsupported'].includes(result.status) ||
+      !Array.isArray(result.servers) || result.servers.length > 64) return undefined;
+  const servers: { name: string; transport: 'stdio' }[] = [];
+  for (const server of result.servers) {
+    if (!server || Object.keys(server).some(key => key !== 'name' && key !== 'transport') || server.transport !== 'stdio' ||
+        typeof server.name !== 'string' || sanitizeIdentifier(server.name, { fallback: '', kind: 'generic' }) !== server.name) return undefined;
+    servers.push({ name: server.name, transport: 'stdio' });
+  }
+  if (result.status !== 'valid' && servers.length !== 0) return undefined;
+  return { status: result.status, servers };
 }
 
 function hasAgent(project: Awaited<ReturnType<ProjectService['get']>> & {}, agentId: string): boolean {

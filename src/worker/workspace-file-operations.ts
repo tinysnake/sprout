@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { open, lstat, realpath, readdir, stat } from 'node:fs/promises';
 import { join, relative, resolve, sep } from 'node:path';
+import { sanitizeIdentifier } from '../environment/privacy.ts';
 import type { WorkerWorkspace } from './workspace.ts';
 import type {
   CancelWorkspaceFileOperationParams,
@@ -9,6 +10,8 @@ import type {
   WorkspaceFileOperationParams,
   CancelWorkspaceFileOperationResult,
   InspectWorkspaceFileOperationResult,
+  InspectProjectMcpConfigurationParams,
+  InspectProjectMcpConfigurationResult,
 } from './protocol.ts';
 import type { RemoteWorkspaceOperationResult } from '../engine/port.ts';
 
@@ -17,6 +20,8 @@ const MAX_SEARCH_FILES = 2_000;
 const MAX_SEARCH_BYTES = 8 * 1024 * 1024;
 const MAX_SEARCH_RESULTS = 100;
 const MAX_LINE_CHARS = 300;
+const MAX_MCP_CONFIGURATION_BYTES = 64 * 1024;
+const MCP_CONFIGURATION_FORMAT = 'claude-code-mcp-json-v1' as const;
 
 interface BoundWorkspace extends WorkspaceBindingIdentity { readonly root: string }
 interface OperationState {
@@ -55,6 +60,54 @@ export class WorkerWorkspaceFiles {
       throw new Error('conflicting workspace binding');
     }
     this.#bindings.set(input.projectId, { ...input, root });
+  }
+
+  inspectMcpConfiguration(input: InspectProjectMcpConfigurationParams): Promise<InspectProjectMcpConfigurationResult> {
+    const binding = this.#requireBinding(input);
+    if (input.format !== MCP_CONFIGURATION_FORMAT) {
+      return Promise.resolve({ status: 'unsupported', format: MCP_CONFIGURATION_FORMAT, servers: [] });
+    }
+    return this.#inspectMcpConfiguration(binding);
+  }
+
+  async #inspectMcpConfiguration(
+    binding: BoundWorkspace,
+  ): Promise<InspectProjectMcpConfigurationResult> {
+    const relativePath = '.mcp.json';
+    let file: string;
+    try { file = await containedFile(binding.root, relativePath); }
+    catch (error) {
+      if (typeof error === 'object' && error !== null && (error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { status: 'missing', format: MCP_CONFIGURATION_FORMAT, servers: [] };
+      }
+      return { status: 'invalid', format: MCP_CONFIGURATION_FORMAT, servers: [] };
+    }
+    try {
+      const handle = await open(file, 'r');
+      let text: string;
+      try {
+        const buffer = Buffer.alloc(MAX_MCP_CONFIGURATION_BYTES + 1);
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+        if (bytesRead > MAX_MCP_CONFIGURATION_BYTES) return { status: 'unsupported', format: MCP_CONFIGURATION_FORMAT, servers: [] };
+        text = buffer.subarray(0, bytesRead).toString('utf8');
+      } finally { await handle.close(); }
+      if (text.includes(String.fromCharCode(0xfffd))) return { status: 'invalid', format: MCP_CONFIGURATION_FORMAT, servers: [] };
+      const config: unknown = JSON.parse(text);
+      if (!isRecord(config) || Object.keys(config).some(key => key !== 'mcpServers') || !isRecord(config.mcpServers)) {
+        return { status: 'unsupported', format: MCP_CONFIGURATION_FORMAT, servers: [] };
+      }
+      const servers = Object.entries(config.mcpServers);
+      if (servers.length > 64) return { status: 'unsupported', format: MCP_CONFIGURATION_FORMAT, servers: [] };
+      const descriptors: { name: string; transport: 'stdio' }[] = [];
+      for (const [rawName, rawConfig] of servers) {
+        const name = sanitizeIdentifier(rawName, { fallback: '', kind: 'generic', maxLength: 64 });
+        if (!name || !validStdioDeclaration(rawConfig)) return { status: 'unsupported', format: MCP_CONFIGURATION_FORMAT, servers: [] };
+        descriptors.push({ name, transport: 'stdio' });
+      }
+      return { status: 'valid', format: MCP_CONFIGURATION_FORMAT, servers: descriptors };
+    } catch {
+      return { status: 'invalid', format: MCP_CONFIGURATION_FORMAT, servers: [] };
+    }
   }
 
   async execute(input: WorkspaceFileOperationParams): Promise<RemoteWorkspaceOperationResult> {
@@ -172,6 +225,19 @@ export class WorkerWorkspaceFiles {
     if (signal.aborted) return failure(input, 'cancelled', 'cancelled');
     return { ...identity(input), operationId: input.operationId, operation: 'search', status: 'completed', matches, ...(truncated ? { truncated: true } : {}) };
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function validStdioDeclaration(value: unknown): boolean {
+  if (!isRecord(value) || Object.keys(value).some(key => !['type', 'command', 'args', 'env'].includes(key))) return false;
+  if (value.type !== undefined && value.type !== 'stdio') return false;
+  if (typeof value.command !== 'string' || value.command.trim() === '' || value.command.length > 512) return false;
+  if (value.args !== undefined && (!Array.isArray(value.args) || value.args.length > 100 || value.args.some(arg => typeof arg !== 'string' || arg.length > 4_096))) return false;
+  if (value.env !== undefined && (!isRecord(value.env) || Object.keys(value.env).length > 64 || Object.entries(value.env).some(([key, entry]) => !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(key) || typeof entry !== 'string' || entry.length > 4_096))) return false;
+  return true;
 }
 
 function validIdentity(input: WorkspaceBindingIdentity): boolean {

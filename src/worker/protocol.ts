@@ -39,6 +39,7 @@ export const WORKER_METHODS = {
   attachWorkspaceBinding: 'workspace/binding/attach',
   /** Execute, inspect, or cancel a bounded remote file operation. */
   workspaceFileOperation: 'workspace/file-operation',
+  inspectProjectMcpConfiguration: 'project/mcp-configuration/inspect',
   inspectWorkspaceFileOperation: 'workspace/file-operation/inspect',
   cancelWorkspaceFileOperation: 'workspace/file-operation/cancel',
   recoverySnapshot: 'recovery/snapshot',
@@ -169,7 +170,7 @@ export interface WorkerEngineDescription {
 
 export interface WorkerWorkspaceOperations {
   readonly version: 1;
-  readonly operations: readonly ('read' | 'search')[];
+  readonly operations: readonly ('read' | 'search' | 'inspect-mcp-configuration')[];
   readonly maxReadBytes: number;
   readonly maxSearchResults: number;
 }
@@ -291,6 +292,21 @@ export interface WorkspaceBindingIdentity {
 }
 
 export interface AttachWorkspaceBindingParams extends WorkspaceBindingIdentity {}
+
+export interface InspectProjectMcpConfigurationParams extends WorkspaceBindingIdentity {
+  readonly format: 'claude-code-mcp-json-v1';
+}
+
+export interface ProjectMcpServerDescriptor {
+  readonly name: string;
+  readonly transport: 'stdio';
+}
+
+export interface InspectProjectMcpConfigurationResult {
+  readonly status: 'valid' | 'missing' | 'invalid' | 'unsupported';
+  readonly format: 'claude-code-mcp-json-v1';
+  readonly servers: readonly ProjectMcpServerDescriptor[];
+}
 
 export interface WorkspaceFileOperationParams extends Omit<WorkspaceBindingIdentity, 'path'> {
   /** Binding selection path, separate from the file path being read or searched. */

@@ -65,7 +65,8 @@ import {
   READINESS_AUTH_TYPES,
   READINESS_SOURCES,
 } from '../environment/readiness.ts';
-import type { ProjectAuthority } from '../project/authority-model.ts';
+import type { ProjectAuthority, ProjectMcpConfiguration } from '../project/authority-model.ts';
+import { sanitizeProjectMcpConfiguration } from '../project/authority-model.ts';
 import { currentTaskGroupContent, taskGroupStatus, workingGroupStatus } from '../conversation/model.ts';
 import type {
   ConversationScope,
@@ -79,6 +80,11 @@ import {
   type ProjectEnvironmentAccess,
   type WorkspaceBinding,
 } from '../project/access.ts';
+
+function safeProjectMcpConfiguration(value: ProjectMcpConfiguration): ProjectMcpConfiguration | undefined {
+  try { return sanitizeProjectMcpConfiguration(value); }
+  catch { return undefined; }
+}
 
 /** Bound and redact one free-text Project field for the wire. */
 function sanitizeProjectText(value: string): string {
@@ -1287,6 +1293,7 @@ export interface ProjectContentVersionView {
   readonly rules: readonly string[];
   readonly wakePolicy: string;
   readonly routingIntervalMs: number;
+  readonly mcpConfiguration?: ProjectMcpConfiguration;
   readonly memberships: readonly ProjectMembershipView[];
 }
 
@@ -1378,6 +1385,9 @@ export function toProjectAuthorityView(project: ProjectAuthority): ProjectAuthor
         rules: version.rules.map((rule) => sanitizeProjectText(rule)),
         wakePolicy: version.wakePolicy === 'wake-model-assisted' ? 'wake-model-assisted' : 'explicit-only',
         routingIntervalMs: version.routingIntervalMs,
+        ...(version.mcpConfiguration !== undefined ? {
+          mcpConfiguration: safeProjectMcpConfiguration(version.mcpConfiguration),
+        } : {}),
         memberships: version.memberships.map((membership) => ({
           memberId: sanitizeIdentifier(membership.memberId, { fallback: 'unknown-member', kind: 'generic' }),
           memberKind: membership.memberKind === 'human' ? 'human' : 'agent',

@@ -34,6 +34,8 @@ import {
   type WorkerInfo,
   type WorkerReadinessProbeParams,
   type WorkerReadinessProbeResult,
+  type InspectProjectMcpConfigurationParams,
+  type InspectProjectMcpConfigurationResult,
 } from './protocol.ts';
 import { sanitizeEngineTurnResult, WORKER_DIAGNOSTICS } from './diagnostics.ts';
 
@@ -272,6 +274,10 @@ export class WorkerContextClient {
 
   executeWorkspaceFileOperation(input: WorkspaceFileOperationParams): Promise<import('../engine/port.ts').RemoteWorkspaceOperationResult> {
     return sanitizedRequest(this.#transport.request(WORKER_METHODS.workspaceFileOperation, input));
+  }
+
+  inspectProjectMcpConfiguration(input: InspectProjectMcpConfigurationParams): Promise<InspectProjectMcpConfigurationResult> {
+    return sanitizedRequest(this.#transport.request(WORKER_METHODS.inspectProjectMcpConfiguration, input));
   }
 
   inspectWorkspaceFileOperation(input: InspectWorkspaceFileOperationParams): Promise<InspectWorkspaceFileOperationResult> {

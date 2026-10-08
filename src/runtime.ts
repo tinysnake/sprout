@@ -103,7 +103,7 @@ import type { Task } from './task/model.ts';
 import type { TaskStore } from './task/store.ts';
 import type { WorkerInfo, WorkerReadinessProbeResult } from './worker/protocol.ts';
 import type { ValidateWorkspaceParams, ValidateWorkspaceResult } from './worker/protocol.ts';
-import type { AttachWorkspaceBindingParams, WorkspaceFileOperationParams, InspectWorkspaceFileOperationParams, CancelWorkspaceFileOperationParams, InspectWorkspaceFileOperationResult, CancelWorkspaceFileOperationResult } from './worker/protocol.ts';
+import type { AttachWorkspaceBindingParams, WorkspaceFileOperationParams, InspectWorkspaceFileOperationParams, CancelWorkspaceFileOperationParams, InspectWorkspaceFileOperationResult, CancelWorkspaceFileOperationResult, InspectProjectMcpConfigurationParams, InspectProjectMcpConfigurationResult } from './worker/protocol.ts';
 import { createAgentTaskGroupMessageSender } from './collaboration/agent-task-group.ts';
 import { createRunApi, type RunApi } from './web/api.ts';
 import { createEnvironmentRouter } from './web/environment-router.ts';
@@ -264,6 +264,8 @@ export interface RuntimeEnvironment {
   attachWorkspaceBinding?(environmentInstanceId: string, input: AttachWorkspaceBindingParams): Promise<{ readonly attached: true }>;
   /** Typed read-only Workspace operations on the already accepted Worker. */
   executeWorkspaceFileOperation?(environmentInstanceId: string, input: WorkspaceFileOperationParams): Promise<import('./engine/port.ts').RemoteWorkspaceOperationResult>;
+  /** Inspect a Project-selected MCP manifest on the Worker without returning its contents. */
+  inspectProjectMcpConfiguration?(environmentInstanceId: string, input: InspectProjectMcpConfigurationParams): Promise<InspectProjectMcpConfigurationResult>;
   inspectWorkspaceFileOperation?(environmentInstanceId: string, input: InspectWorkspaceFileOperationParams): Promise<InspectWorkspaceFileOperationResult>;
   cancelWorkspaceFileOperation?(environmentInstanceId: string, input: CancelWorkspaceFileOperationParams): Promise<CancelWorkspaceFileOperationResult>;
   /** The authenticated Worker epoch that currently owns one instance. */
@@ -2459,6 +2461,12 @@ class EnrollmentEnvironmentDelegate implements RuntimeEnvironment {
     const target = this.#require();
     if (target.attachWorkspaceBinding === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
     return target.attachWorkspaceBinding(environmentInstanceId, input);
+  }
+
+  inspectProjectMcpConfiguration(environmentInstanceId: string, input: import('./worker/protocol.ts').InspectProjectMcpConfigurationParams) {
+    const target = this.#require();
+    if (target.inspectProjectMcpConfiguration === undefined) return Promise.reject(new Error('remote Project MCP inspection is unavailable'));
+    return target.inspectProjectMcpConfiguration(environmentInstanceId, input);
   }
 
   executeWorkspaceFileOperation(environmentInstanceId: string, input: import('./worker/protocol.ts').WorkspaceFileOperationParams) {

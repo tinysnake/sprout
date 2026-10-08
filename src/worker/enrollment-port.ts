@@ -39,6 +39,8 @@ import type {
   CancelWorkspaceFileOperationParams,
   InspectWorkspaceFileOperationResult,
   CancelWorkspaceFileOperationResult,
+  InspectProjectMcpConfigurationParams,
+  InspectProjectMcpConfigurationResult,
   WorkerInfo,
   WorkerReadinessProbeResult,
 } from './protocol.ts';
@@ -227,6 +229,16 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
     const connection = await this.#connection(environmentInstanceId);
     if (!connection || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
     const result = await connection.contexts.executeWorkspaceFileOperation(input);
+    if (this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error('stale Worker epoch');
+    return result;
+  }
+
+  async inspectProjectMcpConfiguration(environmentInstanceId: string, input: InspectProjectMcpConfigurationParams): Promise<InspectProjectMcpConfigurationResult> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || connection.info.workspaceOperations?.version !== 1 ||
+      !connection.info.workspaceOperations.operations.includes('inspect-mcp-configuration') ||
+      this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    const result = await connection.contexts.inspectProjectMcpConfiguration(input);
     if (this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error('stale Worker epoch');
     return result;
   }
