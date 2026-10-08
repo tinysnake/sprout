@@ -333,6 +333,7 @@ test('macOS, Windows, and container environments record the same lease rules and
   // why the lease registry needs no platform-specific rule (see CONTEXT.md).
   const expectedCapabilities = [
     { name: 'agent-run', requiresLease: true },
+    { name: 'project-mcp', requiresLease: true },
     { name: 'read-only-investigation', requiresLease: false },
   ];
   for (const selected of [macos, windows, container]) {
