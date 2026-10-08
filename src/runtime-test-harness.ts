@@ -130,6 +130,7 @@ export async function connectRuntimeWorker(
   enrollmentId: string,
   identityKeyPath: string,
   readiness: () => WorkerReadinessFacts = scriptedStartupReadiness,
+  workspaceRoot?: string,
 ): Promise<WorkerEnrollmentConnection> {
   const port = await runtimePort(runtime);
   const connection = await connectWorkerEnrollment({
@@ -143,6 +144,7 @@ export async function connectRuntimeWorker(
     environmentInstanceId: enrollment.environmentInstanceId,
     engines: new Map(),
     readiness,
+    ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
     input: connection.stream,
     output: connection.stream,
   });
