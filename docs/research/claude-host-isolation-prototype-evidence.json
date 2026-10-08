@@ -1,0 +1,148 @@
+{
+  "ticket": 250,
+  "base": "1d88fb0f",
+  "evidenceTier": "model-issued (Claude Code CLI pinned at 2.1.294, non-Claude backend via local gateway)",
+  "platform": "macOS",
+  "cli": "2.1.294",
+  "fixture": "separate local sandbox origin; not an enrolled remote deployment",
+  "turns": [
+    {
+      "types": {},
+      "toolUses": [],
+      "catalog": null,
+      "mcp": [],
+      "result": null,
+      "usage": null,
+      "exitCode": 1,
+      "signal": null,
+      "timedOut": false,
+      "sessionObserved": false,
+      "interrupted": false
+    },
+    {
+      "types": {},
+      "toolUses": [],
+      "catalog": null,
+      "mcp": [],
+      "result": null,
+      "usage": null,
+      "exitCode": 1,
+      "signal": null,
+      "timedOut": false,
+      "sessionObserved": false,
+      "interrupted": false
+    },
+    {
+      "types": {},
+      "toolUses": [],
+      "catalog": null,
+      "mcp": [],
+      "result": null,
+      "usage": null,
+      "exitCode": 1,
+      "signal": null,
+      "timedOut": false,
+      "sessionObserved": false,
+      "interrupted": true
+    }
+  ],
+  "calls": [],
+  "negatives": {
+    "origin_host": {
+      "id": 1,
+      "ok": true,
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "origin_project": {
+      "id": 2,
+      "ok": true,
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "origin_history": {
+      "id": 3,
+      "ok": true,
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "origin_auth": {
+      "id": 4,
+      "ok": true,
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "engine_host": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "bridge_host": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "engine_project": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "bridge_project": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "engine_history": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "bridge_history": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "engine_remote": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "bridge_remote": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "engine_auth": {
+      "readDenied": false,
+      "writeDenied": true
+    },
+    "bridge_auth": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "traversal": {
+      "id": 5,
+      "ok": false,
+      "reason": "path-or-content-denied"
+    },
+    "symlink": {
+      "id": 6,
+      "ok": false,
+      "reason": "path-or-content-denied"
+    },
+    "nested": {
+      "id": 7,
+      "ok": false,
+      "reason": "unsupported-operation"
+    },
+    "shell": {
+      "id": 8,
+      "ok": false,
+      "reason": "unsupported-operation"
+    }
+  },
+  "gaps": [
+    "Real Claude model behavior is unexercised.",
+    "E7 root-turn attribution race (upstream Claude issue #55 in #226) cannot be confirmed or refuted on this backend; open evidence gap.",
+    "Windows, enrolled cross-host deployment, production cancellation/fencing and authentication refresh unexercised."
+  ],
+  "final": {
+    "hostOriginUnchanged": true,
+    "hostEffectUnchanged": true,
+    "hostSentinelUnchanged": true,
+    "remoteEffect": false,
+    "ambientMarkerAbsent": true
+  }
+}

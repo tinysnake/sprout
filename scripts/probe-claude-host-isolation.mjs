@@ -101,7 +101,14 @@ if (process.argv[2] === '--auth') {
       if (Date.now() - started > 140_000) { facts.gaps.push('A subsequent session probe could not run within the overall deadline.'); return; }
       const fact = { types: {}, toolUses: [], catalog: null, mcp: [], result: null, usage: null, exitCode: null, signal: null, timedOut: false, sessionObserved: false, interrupted: interrupt };
       facts.turns.push(fact);
-      const child = spawn('/usr/bin/sandbox-exec', ['-p', profile, cli, ...baseArgs, ...extra, prompt], { cwd: fixture.host, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true }); children.add(child); child.stderr.resume();
+      const child = spawn('/usr/bin/sandbox-exec', ['-p', profile, cli, ...baseArgs, ...extra, prompt], { cwd: fixture.host, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true }); children.add(child);
+      let diagnostics = '';
+      const classify = chunk => {
+        diagnostics = (diagnostics + chunk.toString()).slice(-32_768);
+        fact.startupDiagnostics = Object.fromEntries(['unknown option','error','permission denied','operation not permitted','apiKeyHelper','authentication','EACCES','EPERM','ENOENT','--tools','--bare','--setting-sources','--permission-prompts','--disallowedTools','--mcp-config','--model','--print','--output-format','--no-chrome','bwrap','sandbox','Unable','Cannot','not allowed','requires'].map(token => [token, diagnostics.toLowerCase().includes(token.toLowerCase())]));
+      };
+      child.stderr.on('data', classify);
+      child.stdout.on('data', classify);
       let session;
       const timer = setTimeout(() => { fact.timedOut = true; kill(child); }, Math.min(65_000, 155_000 - (Date.now() - started)));
       const interruptTimer = interrupt ? setTimeout(() => { try { process.kill(-child.pid, 'SIGINT'); fact.interruptSent = true; } catch {} }, 1500) : null;
