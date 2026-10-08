@@ -1588,6 +1588,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       environment: enrollmentEnvironment,
       gateway: workerGateway,
       catalog: environmentCatalog,
+      enrollments,
       store: durableStores.remoteWorkspaceOperations ?? new MemoryRemoteOperationIdentityStore(),
     });
     switchableEnvironment?.setTarget(enrollmentEnvironment);
