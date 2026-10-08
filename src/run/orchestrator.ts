@@ -729,10 +729,10 @@ export class RunOrchestrator {
         : undefined;
       if (initial.leaseId !== undefined && initial.environmentInstanceId) {
         if (!this.#remoteProjectMcp) throw new Error('Project MCP Worker bridge is unavailable');
-        mcpMayHaveStarted = true;
         remoteProjectMcp = await this.#remoteProjectMcp(initial.projectId ?? '', agent.id, {
           environmentInstanceId: initial.environmentInstanceId, leaseId: initial.leaseId, runId: initial.id,
         });
+        mcpMayHaveStarted = true;
       }
       const remoteWorkspace = await this.#remoteWorkspace?.(initial.projectId ?? '', agent.id);
       let attempt = await this.#runSession(

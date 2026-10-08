@@ -121,6 +121,8 @@ export interface EnvironmentPoolOptions {
    * tests and callers that never opted into the dynamic catalog.
    */
   readonly eligibleInstanceIds?: readonly string[];
+  /** Additional capability-specific eligibility for bounded non-inference services such as Project MCP. */
+  readonly capabilityEligibleInstanceIds?: Readonly<Record<string, readonly string[]>>;
 }
 
 export class EnvironmentPool {
@@ -136,6 +138,7 @@ export class EnvironmentPool {
    * is eligible; a set means exactly those instances are.
    */
   #eligibleInstanceIds: ReadonlySet<string> | undefined;
+  #capabilityEligibleInstanceIds = new Map<string, ReadonlySet<string>>();
 
   constructor(options: EnvironmentPoolOptions) {
     for (const definition of options.definitions) {
@@ -146,6 +149,8 @@ export class EnvironmentPool {
     }
     this.#eligibleInstanceIds =
       options.eligibleInstanceIds === undefined ? undefined : new Set(options.eligibleInstanceIds);
+    this.#capabilityEligibleInstanceIds = new Map(Object.entries(options.capabilityEligibleInstanceIds ?? {})
+      .map(([capability, ids]) => [capability, new Set(ids)]));
     this.#clock = options.clock ?? systemClock;
     // A lease is persisted, so a per-process counter would collide with a
     // released historical lease after Sprout restarts.  The default is durable
@@ -198,6 +203,7 @@ export class EnvironmentPool {
     readonly definitions: readonly EnvironmentDefinition[];
     readonly instances: readonly EnvironmentInstance[];
     readonly eligibleInstanceIds?: readonly string[];
+    readonly capabilityEligibleInstanceIds?: Readonly<Record<string, readonly string[]>>;
   }): void {
     for (const definition of input.definitions) this.#definitions.set(definition.id, definition);
     for (const instance of input.instances) this.#instances.set(instance.id, instance);
@@ -205,6 +211,8 @@ export class EnvironmentPool {
       input.eligibleInstanceIds === undefined
         ? undefined
         : new Set(input.eligibleInstanceIds);
+    this.#capabilityEligibleInstanceIds = new Map(Object.entries(input.capabilityEligibleInstanceIds ?? {})
+      .map(([capability, ids]) => [capability, new Set(ids)]));
   }
 
   /** Whether an instance is currently eligible to admit new work. */
@@ -420,7 +428,7 @@ export class EnvironmentPool {
     // cannot serve a capability for new work (E2). Returning `undefined` is the
     // same "cannot be used" signal the resolution seam already understands, so
     // lease acquisition and run resolution fail closed without a new branch.
-    if (!this.isEligible(instanceId)) return undefined;
+    if (!this.isEligible(instanceId) && !this.#capabilityEligibleInstanceIds.get(capability)?.has(instanceId)) return undefined;
     const instance = this.#instances.get(instanceId);
     if (!instance) return undefined;
     const definition = this.#definitions.get(instance.definitionId);

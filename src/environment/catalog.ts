@@ -125,6 +125,8 @@ export interface EnvironmentCatalogEntry {
   readonly readiness: AssembledReadiness;
   readonly currentEpoch: number | undefined;
   readonly eligible: boolean;
+  /** May supervise Project MCP under its separate explicit permission and lease. */
+  readonly projectMcpEligible: boolean;
 }
 
 /** The platform-specific definition id an enrolled instance declares. */
@@ -262,6 +264,9 @@ export function projectCatalogEntry(input: EnvironmentCatalogInput): Environment
     connectionReady &&
     protocolCompatible &&
     requiredReadinessEstablished;
+  const projectMcpEligible = enrollment.status === 'approved' && platform !== 'unknown' &&
+    enrollment.capabilityPermissions['project-mcp'] === true && input.currentEpoch !== undefined &&
+    workSafety !== 'recovery' && workSafety !== 'reconciling';
   return {
     instanceId: enrollment.environmentInstanceId,
     enrollmentId: enrollment.id,
@@ -276,6 +281,7 @@ export function projectCatalogEntry(input: EnvironmentCatalogInput): Environment
     readiness,
     currentEpoch: input.currentEpoch,
     eligible,
+    projectMcpEligible,
   };
 }
 
@@ -439,6 +445,11 @@ export class EnvironmentCatalog {
   /** Every catalog instance id, eligible or not, for inspection. */
   instanceIds(): readonly string[] {
     return [...this.#entries.keys()];
+  }
+
+  /** The eligible instance ids whose explicit Project MCP grant can acquire a lease without model-engine readiness. */
+  projectMcpEligibleInstanceIds(): readonly string[] {
+    return this.entries().filter(entry => entry.projectMcpEligible).map(entry => entry.instanceId);
   }
 
   /** The eligible instance ids, in deterministic order. */

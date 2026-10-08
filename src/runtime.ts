@@ -1515,6 +1515,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           definitions: [configuredDefinition],
           instances: [configuredInstance],
           eligibleInstanceIds: [configuredInstance.id],
+          capabilityEligibleInstanceIds: {
+            'project-mcp': configuredDefinition.capabilities.some(capability => capability.name === 'project-mcp') ? [configuredInstance.id] : [],
+          },
         });
         void noteRunReconnectRetry(acceptedInstanceId).catch(() => {
           process.stderr.write(
@@ -1527,6 +1530,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         definitions: environmentCatalog.entries().map((entry) => entry.definition),
         instances: environmentCatalog.entries().map((entry) => entry.instance),
         eligibleInstanceIds: environmentCatalog.eligibleInstanceIds(),
+        capabilityEligibleInstanceIds: {
+          'project-mcp': environmentCatalog.projectMcpEligibleInstanceIds(),
+        },
       });
       void noteRunReconnectRetry(acceptedInstanceId).catch(() => {
         process.stderr.write(

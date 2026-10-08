@@ -182,10 +182,25 @@ export class EnvironmentOperations {
       holderId: scope.runId,
       runId: scope.runId,
     };
-    const started = await this.#environment.startProjectMcp(scope.environmentInstanceId, startInput);
-    if (!started) throw new RemoteWorkspaceUnavailableError('unsupported');
+    let started: StartProjectMcpResult;
+    try { started = await this.#environment.startProjectMcp(scope.environmentInstanceId, startInput); }
+    catch {
+      this.#pool.markRecovering(scope.leaseId);
+      throw new RemoteWorkspaceUnavailableError('worker-refused');
+    }
     const catalog = safeMcpToolCatalog(started);
-    if (started.status === 'blocked' || !catalog) throw new RemoteWorkspaceUnavailableError('worker-refused');
+    if (started.status === 'blocked' || !catalog) {
+      if (typeof started.processId === 'string' && started.processId.length > 0 && started.processId.length <= 128) {
+        try {
+          const stop = await this.#environment.stopProjectMcp?.(scope.environmentInstanceId, {
+            ...authority.identity, leaseId: scope.leaseId, holderKind: 'run', holderId: scope.runId, runId: scope.runId,
+            processId: started.processId,
+          });
+          if (stop?.status !== 'stopped' && stop?.status !== 'not-found') this.#pool.markRecovering(scope.leaseId);
+        } catch { this.#pool.markRecovering(scope.leaseId); }
+      } else if (started.processId !== undefined) this.#pool.markRecovering(scope.leaseId);
+      throw new RemoteWorkspaceUnavailableError('worker-refused');
+    }
     const toolOrigins = new Map(catalog.tools.map(row => [row.public.name, { workerId: row.workerId, schema: row.public.inputSchema }]));
     let closed = false;
     return {
@@ -465,14 +480,15 @@ function safeMcpToolCatalog(result: StartProjectMcpResult): { readonly processId
     for (const tool of server.tools) {
       if (!tool || tool.server !== server.name || typeof tool.id !== 'string' || tool.id.length < 1 || tool.id.length > 128 ||
           typeof tool.name !== 'string' || sanitizeIdentifier(tool.name, { fallback: '', kind: 'generic', maxLength: 64 }) !== tool.name ||
-          typeof tool.description !== 'string' || typeof tool.inputSchema !== 'object' || tool.inputSchema === null || Array.isArray(tool.inputSchema) ||
-          !validMcpSchema(tool.inputSchema, 0)) return undefined;
+          typeof tool.description !== 'string') return undefined;
+      const inputSchema = isRecord(tool.inputSchema) ? sanitizeMcpSchema(tool.inputSchema, 0) : undefined;
+      if (!inputSchema) return undefined;
       const safeTool = sanitizeIdentifier(tool.name, { fallback: '', kind: 'generic', maxLength: 64 });
       const name = sanitizeIdentifier(`mcp_${safeServer}_${safeTool}`, { fallback: '', kind: 'generic', maxLength: 128 });
       if (!name || names.has(name)) return undefined;
       names.add(name);
       tools.push({
-        public: { name, description: sanitizeOperatorText(tool.description, { fallback: 'Project MCP tool.', maxLength: 1_000 }), inputSchema: tool.inputSchema },
+        public: { name, description: sanitizeOperatorText(tool.description, { fallback: 'Project MCP tool.', maxLength: 1_000 }), inputSchema },
         workerId: tool.id,
       });
     }
@@ -481,28 +497,59 @@ function safeMcpToolCatalog(result: StartProjectMcpResult): { readonly processId
   return { ...(result.processId !== undefined ? { processId: result.processId } : {}), tools };
 }
 
-function validMcpSchema(schema: Readonly<Record<string, unknown>>, depth: number): boolean {
-  if (depth > 10 || Object.keys(schema).length > 32) return false;
+function sanitizeMcpSchema(schema: Record<string, unknown>, depth: number): Readonly<Record<string, unknown>> | undefined {
+  if (depth > 10 || Object.keys(schema).length > 32) return undefined;
   const allowed = new Set(['type', 'description', 'properties', 'required', 'items', 'enum', 'additionalProperties', 'minimum', 'maximum', 'minLength', 'maxLength', 'minItems', 'maxItems']);
   if (Object.keys(schema).some(key => !allowed.has(key)) || typeof schema.type !== 'string' ||
-      !['object', 'array', 'string', 'number', 'integer', 'boolean', 'null'].includes(schema.type)) return false;
-  if (schema.description !== undefined && typeof schema.description !== 'string') return false;
-  if (schema.enum !== undefined && (!Array.isArray(schema.enum) || schema.enum.length > 64 || schema.enum.some(item => item !== null && !['string', 'number', 'boolean'].includes(typeof item)))) return false;
+      !['object', 'array', 'string', 'number', 'integer', 'boolean', 'null'].includes(schema.type)) return undefined;
+  const result: Record<string, unknown> = { type: schema.type };
+  if (schema.description !== undefined) {
+    if (typeof schema.description !== 'string') return undefined;
+    result.description = sanitizeOperatorText(schema.description, { fallback: '', maxLength: 1_000 });
+  }
+  if (schema.enum !== undefined) {
+    if (!Array.isArray(schema.enum) || schema.enum.length > 64 || schema.enum.some(item => item !== null && !['string', 'number', 'boolean'].includes(typeof item))) return undefined;
+    const safeEnum = schema.enum.map(item => {
+      if (typeof item !== 'string') return item;
+      const safe = sanitizeOperatorText(item, { fallback: '', maxLength: 1_000 });
+      return safe === item ? safe : undefined;
+    });
+    if (safeEnum.some(item => item === undefined)) return undefined;
+    result.enum = safeEnum;
+  }
   if (schema.type === 'object') {
     const properties = schema.properties ?? {};
-    if (!isRecord(properties) || Object.keys(properties).length > 64 || Object.entries(properties).some(([key, value]) =>
-      sanitizeIdentifier(key, { fallback: '', kind: 'generic', maxLength: 64 }) !== key || !isRecord(value) || !validMcpSchema(value, depth + 1))) return false;
-    if (schema.required !== undefined && (!Array.isArray(schema.required) || schema.required.length > 64 ||
-        schema.required.some(key => typeof key !== 'string' || !Object.hasOwn(properties, key)))) return false;
-    if (schema.additionalProperties !== undefined && schema.additionalProperties !== false) return false;
+    if (!isRecord(properties) || Object.keys(properties).length > 64) return undefined;
+    const safeProperties: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(properties)) {
+      if (sanitizeIdentifier(key, { fallback: '', kind: 'generic', maxLength: 64 }) !== key || !isRecord(value)) return undefined;
+      const child = sanitizeMcpSchema(value, depth + 1);
+      if (!child) return undefined;
+      safeProperties[key] = child;
+    }
+    result.properties = safeProperties;
+    if (schema.required !== undefined) {
+      if (!Array.isArray(schema.required) || schema.required.length > 64 || schema.required.some(key => typeof key !== 'string' || !Object.hasOwn(safeProperties, key))) return undefined;
+      result.required = [...schema.required];
+    }
+    if (schema.additionalProperties !== undefined) {
+      if (schema.additionalProperties !== false) return undefined;
+      result.additionalProperties = false;
+    }
   } else if (schema.type === 'array') {
-    if (!isRecord(schema.items) || !validMcpSchema(schema.items, depth + 1)) return false;
+    if (!isRecord(schema.items)) return undefined;
+    const items = sanitizeMcpSchema(schema.items, depth + 1);
+    if (!items) return undefined;
+    result.items = items;
   }
   for (const key of ['minimum', 'maximum', 'minLength', 'maxLength', 'minItems', 'maxItems']) {
     const value = schema[key];
-    if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1_000_000)) return false;
+    if (value !== undefined) {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1_000_000) return undefined;
+      result[key] = value;
+    }
   }
-  return JSON.stringify(schema).length <= 16_384;
+  return JSON.stringify(result).length <= 16_384 ? result : undefined;
 }
 
 function validMcpArguments(schema: Readonly<Record<string, unknown>>, value: Readonly<Record<string, unknown>>): boolean {

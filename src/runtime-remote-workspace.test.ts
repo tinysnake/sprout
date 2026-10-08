@@ -208,3 +208,97 @@ test('composed Runtime blocks remote reads when the enrolled Worker lacks the fi
     await runtime.close();
   }
 });
+
+test('Host-run calls typed Project MCP tools under its active Environment lease and refuses a recovering lease', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-project-mcp-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const workerRoot = join(directory, 'worker-workspaces');
+  const keyPath = join(directory, 'worker-key.pem');
+  const model = 'provider/model-host';
+  const runtimeProject = { ...project(), memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }] };
+  const localEngine = new ScriptedEngineAdapter({ turns: [scriptedTurn('Project MCP tool completed.')] });
+  const observed: unknown[] = [];
+  const hostPi = {
+    id: 'pi', profileId: 'profile-runtime-project-mcp', authorizedModel: model,
+    capabilities: localEngine.capabilities,
+    async readiness() {
+      return { profileId: 'profile-runtime-project-mcp', engine: 'pi', status: 'ready', installation: 'ready',
+        authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready', version: '1.0.4', observedAt: 1 };
+    },
+    async startSession(request: StartSessionRequest) {
+      const mcp = request.remoteProjectMcp;
+      assert.ok(mcp, 'Runtime supplies its lease-bound Project MCP tools');
+      assert.equal(mcp.tools.length, 1);
+      assert.equal(mcp.tools[0]?.inputSchema.type, 'object');
+      const lease = runtime.pool.leases().find(row => row.capability === 'project-mcp');
+      assert.ok(lease);
+      assert.equal(lease.state, 'active');
+      assert.equal(lease.holderKind, 'run');
+      observed.push(await mcp.call(mcp.tools[0]!.name, { text: 'hello from Pi' }));
+      runtime.pool.markRecovering(lease.id);
+      await assert.rejects(mcp.call(mcp.tools[0]!.name, { text: 'stale call' }), /lease-required/);
+      assert.deepEqual(await mcp.call('mcp_unrelated_tool', { text: 'wrong origin' }), { status: 'failed', reason: 'unknown-tool' });
+      observed.push(await mcp.call(mcp.tools[0]!.name, { text: 12 } as unknown as Record<string, unknown>));
+      return localEngine.startSession(request);
+    },
+  } as unknown as HostPiEngineAdapter;
+  const runtime = await createRuntime({
+    configuration: hostConfiguration({
+      executionMode: 'host-run', environmentSource: 'enrollment',
+      runtimeConfiguration: {
+        agents: [{
+          id: 'scout', name: 'scout', engine: 'pi', capability: 'agent-run', model, effort: 'medium',
+          workOptions: [{ id: 'host-pi', engine: 'pi', workModel: model, effort: 'medium' }],
+        }],
+        project: runtimeProject,
+      },
+      databasePath: join(directory, 'state.db'),
+    }),
+    projectRoot: '/synthetic/project-root',
+    hostPi,
+  });
+  try {
+    const identity = loadOrCreateWorkerIdentity(keyPath);
+    const enrollment = await runtime.enrollments.requestEnrollment({
+      environmentInstanceId: INSTANCE_ID, displayName: 'Project MCP Worker', publicKey: workerPublicKey(identity.privateKey),
+      platform: 'macos', protocolVersion: '3.0', capabilityRequests: ['project-mcp'], engineFacts: [],
+    });
+    await runtime.enrollments.approve(enrollment.enrollment.id, { capabilityPermissions: { 'project-mcp': true } });
+    await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, workerRoot);
+    const projectId = 'remote-mcp-project';
+    await runtime.projectService.create({ id: projectId, displayName: 'Remote MCP Project' });
+    await runtime.projectService.addMembership(projectId, { agentId: 'scout' });
+    await runtime.projectService.updateContent(projectId, { mcpConfiguration: { format: 'claude-code-mcp-json-v1' } });
+    const access = await runtime.projectAccess.grant({
+      projectId, environmentInstanceId: INSTANCE_ID, selection: { kind: 'relative', path: 'repos/remote-mcp' },
+    });
+    assert.ok(access.current);
+    assert.equal(runtime.pool.requiresLease(INSTANCE_ID, 'project-mcp'), true, 'the enrolled catalog requires the MCP lease');
+    assert.deepEqual(runtime.projects.get(projectId)?.availableEnvironmentInstanceIds, [INSTANCE_ID], 'the active Project access grants the enrolled instance');
+    const serverScript = `
+      import { createInterface } from 'node:readline';
+      const tools = [{ name: 'echo', description: 'Echo supplied text.', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false } }];
+      const input = createInterface({ input: process.stdin });
+      const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
+      input.on('line', line => {
+        const request = JSON.parse(line);
+        if (request.method === 'initialize') send({ jsonrpc: '2.0', id: request.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'fixture', version: '1' } } });
+        else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools } });
+        else if (request.method === 'tools/call') send({ jsonrpc: '2.0', id: request.id, result: { content: [{ type: 'text', text: request.params.arguments.text }] } });
+      });
+    `;
+    writeFileSync(join(workerRoot, 'repos', 'remote-mcp', '.mcp.json'), JSON.stringify({ mcpServers: {
+      'fixture-server': { command: process.execPath, args: ['--input-type=module', '-e', serverScript] },
+    } }));
+    const { id } = await runtime.orchestrator.submit({ agentId: 'scout', projectId, prompt: 'Use the Project MCP echo tool.' });
+    const run = await runtime.orchestrator.waitFor(id);
+    assert.equal(run.status, 'completed', run.failure ?? 'run did not complete');
+    assert.deepEqual(observed, [
+      { status: 'completed', text: 'hello from Pi' },
+      { status: 'failed', reason: 'invalid-arguments' },
+    ]);
+    assert.equal(runtime.pool.leases().find(row => row.capability === 'project-mcp')?.state, 'recovering');
+  } finally {
+    await runtime.close();
+  }
+});
