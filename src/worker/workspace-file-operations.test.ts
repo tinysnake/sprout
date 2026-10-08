@@ -1,6 +1,7 @@
+import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EndpointCarrier } from './carrier.ts';
@@ -163,6 +164,36 @@ test('Worker operation identities replay completed edits without applying them t
   assert.equal(await readFile(target, 'utf8'), 'after');
 });
 
+test('Worker recycles temporary Run context separately and preserves the persistent Project workspace', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'sprout-worker-run-context-'));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const workspace = new WorkerWorkspace(root);
+  const selected = await workspace.validateWorkspace({ projectId: 'run-context-project', environmentInstanceId: 'env-1', kind: 'relative', path: 'repos/project' });
+  const binding = { projectId: 'run-context-project', environmentInstanceId: 'env-1', bindingId: 'run-context-binding', generation: 1,
+    connectionEpoch: 1, workspaceId: selected.workspaceId, kind: 'relative', path: 'repos/project' } as const;
+  const persistentFile = join(root, 'repos', 'project', 'src', 'result.txt');
+  await mkdir(join(root, 'repos', 'project', 'src'), { recursive: true });
+  await writeFile(persistentFile, 'persistent Project result');
+  const files = new WorkerWorkspaceFiles(workspace, 'env-1');
+  await files.attach(binding);
+  const context = { ...binding, runId: 'run-context-one' };
+  assert.deepEqual(await files.prepareRunContext(context), { prepared: true });
+  assert.equal(await files.inspectRunContext(context), 'present');
+  const contextDirectory = join(root, '.sprout-worker-state', 'run-contexts',
+    createHash('sha256').update(context.projectId).digest('hex').slice(0, 24),
+    createHash('sha256').update(context.runId).digest('hex').slice(0, 24));
+  assert.equal((await readFile(join(contextDirectory, 'manifest.json'), 'utf8')).includes('sprout-run-context-v1'), true);
+  const scratchFile = join(contextDirectory, 'scratch.txt');
+  await writeFile(scratchFile, 'temporary Run data');
+  assert.equal(await files.inspectRunContext(context), 'present');
+  assert.equal((await readFile(persistentFile, 'utf8')), 'persistent Project result');
+
+  await files.recycleRunContext(context);
+  assert.equal(await files.inspectRunContext(context), 'absent');
+  await assert.rejects(readFile(scratchFile));
+  assert.equal((await readFile(persistentFile, 'utf8')), 'persistent Project result');
+});
+
 test('Worker commands stream bounded sequenced output and cancellation remains inspectable until the process stops', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'sprout-worker-command-'));
   t.after(async () => rm(root, { recursive: true, force: true }));
@@ -179,7 +210,9 @@ test('Worker commands stream bounded sequenced output and cancellation remains i
     if (chunk.operationId === 'command-cancel-1') cancelStartedResolve();
   });
   await streamedFiles.attach(binding);
-  const streamed = await streamedFiles.execute({ ...bindingIdentity, workspacePath: path, operationId: 'command-stream-1',
+  const commandRunContext = { ...binding, runId: 'command-test-run' };
+  await streamedFiles.prepareRunContext(commandRunContext);
+  const streamed = await streamedFiles.execute({ ...bindingIdentity, workspacePath: path, operationId: 'command-stream-1', runId: commandRunContext.runId,
     operation: 'command', executable: 'node', args: ['-e', "process.stdout.write('OUT');process.stderr.write('ERR')"], timeoutMs: 5_000 });
   assert.equal(streamed.status, 'completed');
   assert.equal(streamed.exitCode, 0);
@@ -188,14 +221,27 @@ test('Worker commands stream bounded sequenced output and cancellation remains i
   assert.deepEqual(progress.map(chunk => chunk.sequence), [1, 2]);
   assert.deepEqual(progress.map(chunk => chunk.stream), ['stdout', 'stderr']);
 
-  const bounded = await streamedFiles.execute({ ...bindingIdentity, workspacePath: path, operationId: 'command-output-limit-1',
+  const bounded = await streamedFiles.execute({ ...bindingIdentity, workspacePath: path, operationId: 'command-output-limit-1', runId: commandRunContext.runId,
     operation: 'command', executable: 'node', args: ['-e', "process.stdout.write('x'.repeat(50000))"], timeoutMs: 5_000 });
   assert.equal(bounded.status, 'completed');
   assert.equal(bounded.truncated, true);
   assert.equal(Buffer.byteLength(bounded.output ?? '', 'utf8'), 32 * 1024);
   assert.deepEqual(bounded.outputChunks?.map(chunk => chunk.sequence), Array.from({ length: 32 }, (_, index) => index + 1));
 
-  const cancellationPromise = streamedFiles.execute({ ...bindingIdentity, workspacePath: path, operationId: 'command-cancel-1',
+  const actualProjectRoot = await workspace.projectWorkingDirectory(selected.workspaceId, selected.path, selected.kind);
+  const sanitized = await streamedFiles.execute({ ...bindingIdentity, workspacePath: path, operationId: 'command-sanitized-output-1',
+    operation: 'command', runId: commandRunContext.runId, executable: 'node', args: ['-e', `process.stdout.write('\\u001b[31m${actualProjectRoot}/private.txt\\u001b[0m:'+process.env.SPROUT_RUN_CONTEXT+'/scratch')`], timeoutMs: 5_000 });
+  assert.equal(sanitized.status, 'completed');
+  assert.equal(sanitized.output, '<project>/private.txt:<run-context>/scratch');
+  assert.doesNotMatch(sanitized.output ?? '', /\\u001b|sprout-worker-command-/);
+
+  const timedOut = await streamedFiles.execute({ ...bindingIdentity, workspacePath: path, operationId: 'command-timeout-1', runId: commandRunContext.runId,
+    operation: 'command', executable: 'node', args: ['-e', 'setInterval(()=>{},1000)'], timeoutMs: 100 });
+  assert.equal(timedOut.status, 'failed');
+  assert.equal(timedOut.failure, 'command-timeout');
+  assert.equal((await streamedFiles.inspect({ ...binding, operationId: 'command-timeout-1' })).status, 'failed');
+
+  const cancellationPromise = streamedFiles.execute({ ...bindingIdentity, workspacePath: path, operationId: 'command-cancel-1', runId: commandRunContext.runId,
     operation: 'command', executable: 'node', args: ['-e', "console.log('started');setInterval(()=>{},1000)"], timeoutMs: 10_000 });
   await cancelStarted;
   const accepted = await streamedFiles.cancel({ ...binding, operationId: 'command-cancel-1' });
@@ -224,8 +270,10 @@ test('Worker reports recovery-required when cancellation cannot prove descendant
     gracePeriodMs: 25,
   });
   await files.attach(binding);
+  const commandRunContext = { ...binding, runId: 'command-recovery-run' };
+  await files.prepareRunContext(commandRunContext);
   const { path, ...identity } = binding;
-  const operation = files.execute({ ...identity, workspacePath: path, operationId: 'command-unknown-1', operation: 'command', executable: 'node',
+  const operation = files.execute({ ...identity, workspacePath: path, operationId: 'command-unknown-1', runId: commandRunContext.runId, operation: 'command', executable: 'node',
     args: ['-e', "console.log('started');setInterval(()=>{},1000)"], timeoutMs: 10_000 });
   await started;
   const cancel = await files.cancel({ ...binding, operationId: 'command-unknown-1' });

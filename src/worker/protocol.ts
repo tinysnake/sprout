@@ -33,6 +33,11 @@ export const WORKER_METHODS = {
   /** Verify and recycle one owned Task context. */
   recycleTaskContext: 'context/recycle',
   inspectTaskContext: 'context/inspect',
+  /** Prepare one disposable Run context, separate from the persistent Project workspace. */
+  prepareRunContext: 'context/run/prepare',
+  /** Verify and recycle one settled disposable Run context. */
+  recycleRunContext: 'context/run/recycle',
+  inspectRunContext: 'context/run/inspect',
   /** Validate or prepare one Project workspace selection (#93). */
   validateWorkspace: 'workspace/validate',
   /** Attach one already-authorized, generation-fenced Project workspace. */
@@ -296,6 +301,7 @@ export interface WorkspaceBindingIdentity {
 }
 
 export interface AttachWorkspaceBindingParams extends WorkspaceBindingIdentity {}
+export interface RunContextParams extends WorkspaceBindingIdentity { readonly runId: string }
 
 export type WorkspaceFileOperationParams = Omit<WorkspaceBindingIdentity, 'path'> & {
   /** Binding selection path, separate from the file path being read, searched, or changed. */
@@ -306,7 +312,7 @@ export type WorkspaceFileOperationParams = Omit<WorkspaceBindingIdentity, 'path'
   | { readonly operation: 'search'; readonly path?: string; readonly query: string }
   | { readonly operation: 'edit'; readonly path: string; readonly oldText: string; readonly newText: string }
   | { readonly operation: 'patch'; readonly path: string; readonly hunks: readonly { readonly before: string; readonly after: string }[] }
-  | { readonly operation: 'command'; readonly executable: string; readonly args: readonly string[]; readonly cwd?: string; readonly timeoutMs?: number }
+  | { readonly operation: 'command'; readonly runId: string; readonly executable: string; readonly args: readonly string[]; readonly cwd?: string; readonly timeoutMs?: number }
 );
 
 export type WorkspaceFileOperationResult = RemoteWorkspaceOperationResult;

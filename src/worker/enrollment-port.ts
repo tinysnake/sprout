@@ -39,6 +39,7 @@ import type {
   CancelWorkspaceFileOperationParams,
   InspectWorkspaceFileOperationResult,
   CancelWorkspaceFileOperationResult,
+  RunContextParams,
   WorkspaceCommandProgress,
   WorkerInfo,
   WorkerReadinessProbeResult,
@@ -222,6 +223,27 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
     const currentEpoch = this.connectionEpoch(environmentInstanceId);
     if (currentEpoch !== input.connectionEpoch) throw new Error('stale Worker epoch');
     return connection.contexts.attachWorkspaceBinding(input);
+  }
+
+  async prepareRunContext(environmentInstanceId: string, input: RunContextParams): Promise<{ readonly prepared: true }> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    const result = await connection.contexts.prepareRunContext(input);
+    if (this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error('stale Worker epoch');
+    return result;
+  }
+
+  async recycleRunContext(environmentInstanceId: string, input: RunContextParams): Promise<void> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    await connection.contexts.recycleRunContext(input);
+    if (this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error('stale Worker epoch');
+  }
+
+  async inspectRunContext(environmentInstanceId: string, input: RunContextParams): Promise<'present' | 'absent' | 'unknown'> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    return connection.contexts.inspectRunContext(input);
   }
 
   async executeWorkspaceFileOperation(environmentInstanceId: string, input: WorkspaceFileOperationParams,

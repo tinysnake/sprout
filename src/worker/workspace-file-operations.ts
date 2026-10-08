@@ -87,11 +87,26 @@ export class WorkerWorkspaceFiles {
     this.#bindings.set(input.projectId, { ...input, root });
   }
 
+  async prepareRunContext(input: import('./protocol.ts').RunContextParams): Promise<{ readonly prepared: true }> {
+    this.#requireBinding(input);
+    return this.#workspace.prepareRunContext(input);
+  }
+
+  async recycleRunContext(input: import('./protocol.ts').RunContextParams): Promise<void> {
+    this.#requireBinding(input);
+    return this.#workspace.recycleRunContext(input);
+  }
+
+  async inspectRunContext(input: import('./protocol.ts').RunContextParams): Promise<'present' | 'absent' | 'unknown'> {
+    this.#requireBinding(input);
+    return this.#workspace.inspectRunContext(input);
+  }
+
   async execute(input: WorkspaceFileOperationParams): Promise<RemoteWorkspaceOperationResult> {
     const binding = this.#requireBinding({ ...input, ...(input.workspacePath !== undefined ? { path: input.workspacePath } : {}) });
     if (typeof input.operationId !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(input.operationId)) throw new Error('invalid operation identity');
     const inputPath = 'path' in input ? input.path ?? '' : '';
-    const fingerprint = createHash('sha256').update(JSON.stringify([input.projectId, input.environmentInstanceId, input.bindingId, input.generation, input.connectionEpoch, input.workspaceId, input.kind, input.workspacePath ?? '', input.operation, inputPath, input.operation === 'search' ? input.query : '', input.operation === 'edit' ? [input.oldText, input.newText] : input.operation === 'patch' ? input.hunks : input.operation === 'command' ? [input.executable, input.args, input.cwd ?? '', input.timeoutMs ?? 0] : []])).digest('hex');
+    const fingerprint = createHash('sha256').update(JSON.stringify([input.projectId, input.environmentInstanceId, input.bindingId, input.generation, input.connectionEpoch, input.workspaceId, input.kind, input.workspacePath ?? '', input.operation, inputPath, input.operation === 'search' ? input.query : '', input.operation === 'edit' ? [input.oldText, input.newText] : input.operation === 'patch' ? input.hunks : input.operation === 'command' ? [input.runId, input.executable, input.args, input.cwd ?? '', input.timeoutMs ?? 0] : []])).digest('hex');
     const mutating = input.operation === 'edit' || input.operation === 'patch' || input.operation === 'command';
     let prior = this.#operations.get(input.operationId);
     if (prior) {
@@ -271,12 +286,18 @@ export class WorkerWorkspaceFiles {
     let cwd: string;
     try { cwd = await containedDirectory(binding.root, input.cwd === undefined ? '' : safeRelative(input.cwd, false)); }
     catch { return failure(input, 'failed', 'invalid-path'); }
+    let runContext: string;
+    try {
+      if (!input.runId || input.runId.length > 512) throw new Error('run-context-unavailable');
+      const { root: _root, ...contextBinding } = binding;
+      runContext = await this.#workspace.runContextDirectory({ ...contextBinding, runId: input.runId });
+    } catch { return failure(input, 'failed', 'run-context-unavailable'); }
 
     return new Promise(resolveResult => {
       const child = spawn(input.executable, [...input.args], {
         cwd,
         detached: true,
-        env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: binding.root, TMPDIR: binding.root },
+        env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: runContext, TMPDIR: runContext, SPROUT_RUN_CONTEXT: runContext },
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
       });
@@ -292,7 +313,7 @@ export class WorkerWorkspaceFiles {
       let termination: Promise<boolean> | undefined;
       let spawnFailed = false;
       const append = (stream: 'stdout' | 'stderr', text: string): void => {
-        const cleaned = sanitizeCommandOutput(text, binding.root);
+        const cleaned = sanitizeCommandOutput(text, binding.root, runContext);
         let chunk = '';
         let chunkBytes = 0;
         const flush = (): void => {
@@ -343,10 +364,10 @@ export class WorkerWorkspaceFiles {
             output, outputChunks, exitCode: code, ...(truncated ? { truncated: true } : {}) };
           if (!treeStopped) {
             resolveResult({ ...base, status: 'recovery-required', failure: 'descendant-process-unknown' });
-          } else if (cancelRequested) {
-            resolveResult({ ...base, status: 'cancelled', failure: 'cancelled' });
           } else if (timedOut) {
             resolveResult({ ...base, status: 'failed', failure: 'command-timeout' });
+          } else if (cancelRequested) {
+            resolveResult({ ...base, status: 'cancelled', failure: 'cancelled' });
           } else if (spawnFailed) {
             resolveResult({ ...base, status: 'failed', failure: 'command-start-failed' });
           } else {
@@ -459,10 +480,11 @@ function defaultSignalProcessGroup(pid: number, signal: 'SIGTERM' | 'SIGKILL'): 
   catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
 }
 
-function sanitizeCommandOutput(text: string, projectRoot: string): string {
+function sanitizeCommandOutput(text: string, projectRoot: string, runContext: string): string {
   return text.replace(/\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g, '')
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
-    .split(projectRoot).join('<project>');
+    .split(projectRoot).join('<project>')
+    .split(runContext).join('<run-context>');
 }
 
 function validIdentity(input: WorkspaceBindingIdentity): boolean {
@@ -546,7 +568,7 @@ function failure(input: WorkspaceFileOperationParams, status: RemoteWorkspaceOpe
     ...(input.operation === 'command' ? { output: '', outputChunks: [], exitCode: null } : {}), failure: reason };
 }
 function errorCode(error: unknown): string {
-  if (error instanceof Error && ['invalid-path', 'not-text', 'file-too-large', 'content-conflict', 'invalid-patch', 'operation-limit', 'command-not-allowed', 'command-timeout'].includes(error.message)) return error.message;
+  if (error instanceof Error && ['invalid-path', 'not-text', 'file-too-large', 'content-conflict', 'invalid-patch', 'operation-limit', 'command-not-allowed', 'command-timeout', 'run-context-unavailable'].includes(error.message)) return error.message;
   const code = typeof error === 'object' && error !== null ? (error as NodeJS.ErrnoException).code : undefined;
   return code === 'ENOENT' ? 'not-found' : 'unsupported';
 }

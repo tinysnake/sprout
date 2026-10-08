@@ -22,6 +22,7 @@ import {
   type StartSessionResult,
   type PrepareTaskContextResult,
   type RecycleTaskContextParams,
+  type RunContextParams,
   type TaskContextMaterialization,
   type ValidateWorkspaceParams,
   type ValidateWorkspaceResult,
@@ -194,6 +195,16 @@ export class EnvironmentWorker {
           return;
         case WORKER_METHODS.inspectTaskContext:
           this.#transport.respond(id, await this.#requireWorkspace().inspectTaskContext(params as RecycleTaskContextParams));
+          return;
+        case WORKER_METHODS.prepareRunContext:
+          this.#transport.respond(id, await this.#requireWorkspaceFiles().prepareRunContext(params as RunContextParams));
+          return;
+        case WORKER_METHODS.recycleRunContext:
+          await this.#requireWorkspaceFiles().recycleRunContext(params as RunContextParams);
+          this.#transport.respond(id, {});
+          return;
+        case WORKER_METHODS.inspectRunContext:
+          this.#transport.respond(id, await this.#requireWorkspaceFiles().inspectRunContext(params as RunContextParams));
           return;
         case WORKER_METHODS.validateWorkspace:
           this.#transport.respond(id, await this.#validateWorkspace(params as ValidateWorkspaceParams));

@@ -10,7 +10,7 @@ import type { EnvironmentLease } from '../environment/pool.ts';
 import type { EnvironmentCatalog } from '../environment/catalog.ts';
 import type { EnvironmentEnrollmentService } from '../environment/enrollment-service.ts';
 import type { RemoteOperationIdentityStore, RemoteOperationIdentity, RemoteOperationState } from './remote-operation-store.ts';
-import type { AttachWorkspaceBindingParams, WorkspaceFileOperationParams, InspectWorkspaceFileOperationParams, CancelWorkspaceFileOperationParams } from '../worker/protocol.ts';
+import type { AttachWorkspaceBindingParams, WorkspaceFileOperationParams, InspectWorkspaceFileOperationParams, CancelWorkspaceFileOperationParams, RunContextParams } from '../worker/protocol.ts';
 
 const MAX_SUPPORTED_READ_BYTES = 64 * 1024;
 const MAX_SUPPORTED_SEARCH_RESULTS = 100;
@@ -47,7 +47,7 @@ interface BindingCandidate {
  */
 type EnvironmentOperationsPort = Pick<RuntimeEnvironment,
   'info' | 'connectionEpoch' | 'attachWorkspaceBinding' | 'executeWorkspaceFileOperation' |
-  'inspectWorkspaceFileOperation' | 'cancelWorkspaceFileOperation'>;
+  'inspectWorkspaceFileOperation' | 'cancelWorkspaceFileOperation' | 'prepareRunContext' | 'recycleRunContext' | 'inspectRunContext'>;
 type EnvironmentOperationsGateway = Pick<WorkerGatewayView, 'liveFor' | 'currentConnectionEpoch' | 'isCurrentConnection'>;
 type EnvironmentOperationsCatalog = Pick<EnvironmentCatalog, 'entry'>;
 type EnvironmentOperationsEnrollments = Pick<EnvironmentEnrollmentService, 'get'>;
@@ -57,7 +57,7 @@ export class EnvironmentOperations {
   readonly #access: Pick<ProjectAccessService, 'get' | 'listForProject'>;
   readonly #environment: Pick<RuntimeEnvironment,
     'info' | 'connectionEpoch' | 'attachWorkspaceBinding' | 'executeWorkspaceFileOperation' |
-    'inspectWorkspaceFileOperation' | 'cancelWorkspaceFileOperation'>;
+    'inspectWorkspaceFileOperation' | 'cancelWorkspaceFileOperation' | 'prepareRunContext' | 'recycleRunContext' | 'inspectRunContext'>;
   readonly #gateway: Pick<WorkerGatewayView, 'liveFor' | 'currentConnectionEpoch' | 'isCurrentConnection'>;
   readonly #catalog: EnvironmentOperationsCatalog;
   readonly #enrollments: EnvironmentOperationsEnrollments;
@@ -159,13 +159,17 @@ export class EnvironmentOperations {
       throw new RemoteWorkspaceUnavailableError('worker-refused');
     }
     const fixed = { ...identity };
+    const runContext: RunContextParams | undefined = runId === undefined ? undefined : { ...fixed, runId };
+    let runContextState: 'absent' | 'prepared' | 'unknown' = 'absent';
+    let contextPreparationUncertain = false;
     let mutationLease: EnvironmentLease | undefined;
     let leaseAcquisition: Promise<{ readonly acquired?: EnvironmentLease; readonly conflict?: { readonly holderId: string; readonly state: 'active' | 'recovering' }; readonly failure?: string }> | undefined;
     let pendingOperations = 0;
     let uncertainOutcome = false;
     let leaseCompromised = false;
     let settlementRequested = false;
-    const activeCommandIds = new Set<string>();
+    let settlementFinalizing = false;
+    const activeOperationIds = new Set<string>();
     const uncertainOperationIds = new Set<string>();
     let leaseKeepalive: ReturnType<typeof setInterval> | undefined;
 
@@ -215,10 +219,38 @@ export class EnvironmentOperations {
       return { acquired: result.lease };
     };
 
-    const settleLeaseIfReady = (): void => {
-      if (!settlementRequested || mutationLease === undefined || this.#pool === undefined) return;
-      if (leaseCompromised || uncertainOutcome || uncertainOperationIds.size > 0 || pendingOperations > 0) this.#pool.markRecovering(mutationLease.id);
-      else this.#pool.releaseLease(mutationLease.id);
+    const settleLeaseIfReady = async (): Promise<void> => {
+      if (!settlementRequested || mutationLease === undefined || this.#pool === undefined || settlementFinalizing) return;
+      if (runContextState === 'unknown' && contextPreparationUncertain && runContext !== undefined && this.#environment.inspectRunContext) {
+        try {
+          const inspected = await this.#environment.inspectRunContext(access.environmentInstanceId, runContext);
+          if (inspected === 'present') runContextState = 'prepared';
+          else if (inspected === 'absent') runContextState = 'absent';
+          if (inspected !== 'unknown') {
+            contextPreparationUncertain = false;
+            uncertainOutcome = leaseCompromised || uncertainOperationIds.size > 0;
+          }
+        } catch { /* An unavailable cleanup proof leaves the context and lease protected. */ }
+      }
+      if (leaseCompromised || uncertainOutcome || uncertainOperationIds.size > 0 || pendingOperations > 0 || runContextState === 'unknown') {
+        this.#pool.markRecovering(mutationLease.id);
+        return;
+      }
+      settlementFinalizing = true;
+      try {
+        if (runContextState === 'prepared' && runContext !== undefined) {
+          if (!this.#environment.recycleRunContext) throw new Error('Run context cleanup unavailable');
+          await this.#environment.recycleRunContext(access.environmentInstanceId, runContext);
+          runContextState = 'absent';
+        }
+        this.#pool.releaseLease(mutationLease.id);
+      } catch {
+        runContextState = 'unknown';
+        uncertainOutcome = true;
+        this.#pool.markRecovering(mutationLease.id);
+      } finally {
+        settlementFinalizing = false;
+      }
     };
 
     const execute = async (operation: 'read' | 'search' | 'edit' | 'patch' | 'command', input: {
@@ -228,7 +260,7 @@ export class EnvironmentOperations {
     }, requestedOperationId?: string, onProgress?: (progress: RemoteWorkspaceProgress) => void): Promise<RemoteWorkspaceOperationResult> => {
       const operationId = stableOperationId(runId, requestedOperationId);
       const normalized = normalizeOperationInput(operation, input);
-      const fingerprint = createHash('sha256').update(JSON.stringify([fixed, operation, normalized])).digest('hex');
+      const fingerprint = createHash('sha256').update(JSON.stringify([fixed, operation, runId ?? '', normalized])).digest('hex');
       const row: RemoteOperationIdentity = { operationId, fingerprint, projectId, environmentInstanceId: access.environmentInstanceId,
         bindingId: binding.bindingId, generation: binding.generation!, connectionEpoch: epoch, workspaceId: binding.workspaceId,
         operation, state: normalized.failure ? 'failed' : 'running', updatedAt: this.#clock() };
@@ -261,11 +293,7 @@ export class EnvironmentOperations {
         }
         const capability = this.#catalog.entry(access.environmentInstanceId)?.definition.capabilities.find(c => c.name === MUTATION_CAPABILITY);
         const info = await this.#environment.info?.(access.environmentInstanceId);
-        const supported = operation === 'command'
-          ? info?.workspaceOperations?.version === 3 && info.workspaceOperations.operations.includes('command')
-          : info?.workspaceOperations?.version === 2 || info?.workspaceOperations?.version === 3
-            ? info.workspaceOperations.operations.includes(operation)
-            : false;
+        const supported = info?.workspaceOperations?.version === 3 && info.workspaceOperations.operations.includes(operation);
         if (!capability || capability.requiresLease !== true || !supported || runId === undefined || this.#pool === undefined) {
           return operationResult(fixed, operationId, operation, 'failed', 'lease-required');
         }
@@ -289,6 +317,23 @@ export class EnvironmentOperations {
 
       const duplicate = await claimIdentity();
       if (duplicate) return duplicate;
+      if (mutating) {
+        if (runContext === undefined || runContextState === 'unknown') return operationResult(fixed, operationId, operation, 'failed', 'run-context-recovery-required');
+        if (runContextState === 'absent') {
+          try {
+            await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed, MUTATION_CAPABILITY);
+            if (!this.#environment.prepareRunContext) throw new Error('Run context preparation unavailable');
+            await this.#environment.prepareRunContext(access.environmentInstanceId, runContext);
+            runContextState = 'prepared';
+          } catch {
+            runContextState = 'unknown';
+            contextPreparationUncertain = true;
+            uncertainOutcome = true;
+            await this.#saveState(row, 'failed');
+            return operationResult(fixed, operationId, operation, 'failed', 'run-context-unknown-inspect-required');
+          }
+        }
+      }
       const { path: workspacePath, ...bindingIdentity } = fixed;
       const common = { ...bindingIdentity, ...(workspacePath !== undefined ? { workspacePath } : {}), operationId };
       const request: WorkspaceFileOperationParams = operation === 'read'
@@ -299,12 +344,12 @@ export class EnvironmentOperations {
             ? { ...common, operation, path: normalized.path!, oldText: normalized.oldText!, newText: normalized.newText! }
             : operation === 'patch'
               ? { ...common, operation, path: normalized.path!, hunks: normalized.hunks! }
-              : { ...common, operation, executable: normalized.executable!, args: normalized.args!, ...(normalized.cwd !== undefined ? { cwd: normalized.cwd } : {}), ...(normalized.timeoutMs !== undefined ? { timeoutMs: normalized.timeoutMs } : {}) };
+              : { ...common, operation, runId: runId!, executable: normalized.executable!, args: normalized.args!, ...(normalized.cwd !== undefined ? { cwd: normalized.cwd } : {}), ...(normalized.timeoutMs !== undefined ? { timeoutMs: normalized.timeoutMs } : {}) };
       let result: RemoteWorkspaceOperationResult;
       let progressSequence = 0;
       let progressBytes = 0;
       pendingOperations++;
-      if (operation === 'command') activeCommandIds.add(operationId);
+      if (mutating) activeOperationIds.add(operationId);
       try {
         if (!this.#environment.executeWorkspaceFileOperation) throw new Error('unsupported');
         result = await this.#environment.executeWorkspaceFileOperation(access.environmentInstanceId, request, progress => {
@@ -327,8 +372,8 @@ export class EnvironmentOperations {
         return operationResult(fixed, operationId, operation, 'failed', mutating ? 'outcome-unknown-inspect-required' : 'worker-unavailable');
       } finally {
         pendingOperations--;
-        if (operation === 'command') activeCommandIds.delete(operationId);
-        settleLeaseIfReady();
+        if (mutating) activeOperationIds.delete(operationId);
+        void settleLeaseIfReady();
       }
       await this.#saveState(row, result.status === 'completed' ? 'completed' : result.status);
       if (mutating && result.status !== 'recovery-required') {
@@ -354,12 +399,20 @@ export class EnvironmentOperations {
           await this.#saveState(row, 'unknown');
           uncertainOperationIds.add(operationId);
           uncertainOutcome = true;
-          settleLeaseIfReady();
+          void settleLeaseIfReady();
           return { status: 'unknown' };
         }
         return { status: row.state };
       }
-      const operationTerminal = isTerminalOperationState(result.status);
+      const operationTerminal = isTerminalOperationState(result.status) || result.status === 'recovery-required';
+      if (!operationTerminal) {
+        if (row.operation === 'edit' || row.operation === 'patch' || row.operation === 'command') {
+          uncertainOperationIds.add(operationId);
+          uncertainOutcome = true;
+        }
+        void settleLeaseIfReady();
+        return { status: result.status };
+      }
       if ((row.operation === 'edit' || row.operation === 'patch' || row.operation === 'command') && operationTerminal && result.result === undefined) return { status: 'unknown' };
       if (result.result && (result.result.status !== result.status ||
           !isBoundedRemoteResult(result.result, fixed, operationId, row.operation))) return { status: 'unknown' };
@@ -367,7 +420,7 @@ export class EnvironmentOperations {
         await this.#saveState(row, 'recovery-required');
         uncertainOperationIds.add(operationId);
         uncertainOutcome = true;
-        settleLeaseIfReady();
+        void settleLeaseIfReady();
         return { status: 'recovery-required' };
       }
       if (operationTerminal && result.status !== row.state) await this.#saveState(row, result.status);
@@ -375,8 +428,8 @@ export class EnvironmentOperations {
         uncertainOperationIds.delete(operationId);
         uncertainOutcome = leaseCompromised || uncertainOperationIds.size > 0;
       }
-      settleLeaseIfReady();
-      const status = result.status === 'running' && row.state === 'cancel-requested' ? 'cancel-requested' : result.status;
+      void settleLeaseIfReady();
+      const status = result.status;
       return { status, ...(result.result !== undefined ? { operation: result.result } : {}) };
     };
 
@@ -398,8 +451,8 @@ export class EnvironmentOperations {
     const mutationCapability = this.#catalog.entry(access.environmentInstanceId)?.definition.capabilities.find(c => c.name === MUTATION_CAPABILITY);
     const operations = await this.#environment.info?.(access.environmentInstanceId);
     if (enrollment?.capabilityPermissions[MUTATION_CAPABILITY] === true && mutationCapability?.requiresLease === true &&
-        (operations?.workspaceOperations?.version === 2 || operations?.workspaceOperations?.version === 3) &&
-        operations.workspaceOperations.operations.includes('edit') && operations.workspaceOperations.operations.includes('patch')) remoteOperations.push('edit', 'patch');
+        operations?.workspaceOperations?.version === 3 && operations.workspaceOperations.operations.includes('edit') &&
+        operations.workspaceOperations.operations.includes('patch')) remoteOperations.push('edit', 'patch');
     if (enrollment?.capabilityPermissions[MUTATION_CAPABILITY] === true && mutationCapability?.requiresLease === true &&
         operations?.workspaceOperations?.version === 3 && operations.workspaceOperations.operations.includes('command')) remoteOperations.push('command');
     return {
@@ -417,14 +470,16 @@ export class EnvironmentOperations {
         settlementRequested = true;
         if (leaseKeepalive !== undefined) clearInterval(leaseKeepalive);
         if (outcome === 'unknown') {
-          for (const operationId of activeCommandIds) {
-            uncertainOperationIds.add(operationId);
-            uncertainOutcome = true;
-            try { await cancelOperation(operationId); } catch { /* The Worker may be lost; lease remains protected. */ }
-            try { await inspectOperation(operationId); } catch { /* A failed inspection is unresolved outcome. */ }
+          const operationIds = new Set([...activeOperationIds, ...uncertainOperationIds]);
+          for (const operationId of operationIds) {
+            const row = await this.#store.get(operationId);
+            if (row?.operation === 'command') {
+              try { await cancelOperation(operationId); } catch { /* Worker loss leaves the lease protected. */ }
+            }
+            try { await inspectOperation(operationId); } catch { /* Failed inspection leaves the lease protected. */ }
           }
         }
-        settleLeaseIfReady();
+        await settleLeaseIfReady();
       },
       inspect: inspectOperation,
       cancel: cancelOperation,
@@ -473,7 +528,7 @@ export class EnvironmentOperations {
     const project = await this.#projects.get(projectId);
     if (!project || project.status !== 'active' || !hasAgent(project, agentId)) throw new RemoteWorkspaceUnavailableError('project-denied');
     const current = await this.#access.get(projectId, environmentInstanceId);
-    if (!current || current.status !== 'active' || current.current?.bindingId !== identity.bindingId || current.current.generation !== identity.generation || current.current.workspaceId !== identity.workspaceId || current.current.kind !== identity.kind || current.current.path !== identity.path) throw new RemoteWorkspaceUnavailableError('access-ended');
+    if (!current || current.status !== 'active' || !current.current || current.current.bindingId !== identity.bindingId || current.current.generation !== identity.generation || current.current.workspaceId !== identity.workspaceId || current.current.kind !== identity.kind || current.current.path !== identity.path) throw new RemoteWorkspaceUnavailableError('access-ended');
     const live = this.#gateway.liveFor(environmentInstanceId);
     if (!live) throw new RemoteWorkspaceUnavailableError('worker-offline');
     const enrollment = await this.#enrollments.get(live.enrollment.id);
@@ -562,7 +617,7 @@ function isBoundedRemoteResult(result: RemoteWorkspaceOperationResult, identity:
       total += Buffer.byteLength(chunk.text, 'utf8');
     }
     return total <= MAX_COMMAND_OUTPUT_BYTES && chunks.map(chunk => chunk.text).join('') === result.output &&
-      (result.failure === undefined || ['command-not-allowed','operation-limit','invalid-path','command-supervision-unsupported','command-timeout','command-start-failed','command-failed','cancelled','descendant-process-unknown','operation-identity-conflict','operation-journal-unavailable','outcome-unknown-inspect-required'].includes(result.failure));
+      (result.failure === undefined || ['command-not-allowed','operation-limit','invalid-path','command-supervision-unsupported','command-timeout','command-start-failed','command-failed','cancelled','descendant-process-unknown','run-context-unavailable','operation-identity-conflict','operation-journal-unavailable','outcome-unknown-inspect-required'].includes(result.failure));
   }
   if (result.status !== 'completed') {
     return result.content === undefined && result.matches === undefined &&

@@ -262,6 +262,10 @@ export interface RuntimeEnvironment {
   ): Promise<ValidateWorkspaceResult>;
   /** Bind one authorized Project workspace on the current authenticated Worker. */
   attachWorkspaceBinding?(environmentInstanceId: string, input: AttachWorkspaceBindingParams): Promise<{ readonly attached: true }>;
+  /** Create, recycle, or inspect one temporary Run context; Project files remain persistent. */
+  prepareRunContext?(environmentInstanceId: string, input: import('./worker/protocol.ts').RunContextParams): Promise<{ readonly prepared: true }>;
+  recycleRunContext?(environmentInstanceId: string, input: import('./worker/protocol.ts').RunContextParams): Promise<void>;
+  inspectRunContext?(environmentInstanceId: string, input: import('./worker/protocol.ts').RunContextParams): Promise<'present' | 'absent' | 'unknown'>;
   /** Typed read-only Workspace operations on the already accepted Worker. */
   executeWorkspaceFileOperation?(environmentInstanceId: string, input: WorkspaceFileOperationParams,
     onProgress?: (progress: import('./worker/protocol.ts').WorkspaceCommandProgress) => void): Promise<import('./engine/port.ts').RemoteWorkspaceOperationResult>;
@@ -2464,10 +2468,29 @@ class EnrollmentEnvironmentDelegate implements RuntimeEnvironment {
     return target.attachWorkspaceBinding(environmentInstanceId, input);
   }
 
-  executeWorkspaceFileOperation(environmentInstanceId: string, input: import('./worker/protocol.ts').WorkspaceFileOperationParams) {
+  prepareRunContext(environmentInstanceId: string, input: import('./worker/protocol.ts').RunContextParams) {
+    const target = this.#require();
+    if (target.prepareRunContext === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
+    return target.prepareRunContext(environmentInstanceId, input);
+  }
+
+  recycleRunContext(environmentInstanceId: string, input: import('./worker/protocol.ts').RunContextParams) {
+    const target = this.#require();
+    if (target.recycleRunContext === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
+    return target.recycleRunContext(environmentInstanceId, input);
+  }
+
+  inspectRunContext(environmentInstanceId: string, input: import('./worker/protocol.ts').RunContextParams) {
+    const target = this.#require();
+    if (target.inspectRunContext === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
+    return target.inspectRunContext(environmentInstanceId, input);
+  }
+
+  executeWorkspaceFileOperation(environmentInstanceId: string, input: import('./worker/protocol.ts').WorkspaceFileOperationParams,
+    onProgress?: (progress: import('./worker/protocol.ts').WorkspaceCommandProgress) => void) {
     const target = this.#require();
     if (target.executeWorkspaceFileOperation === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
-    return target.executeWorkspaceFileOperation(environmentInstanceId, input);
+    return target.executeWorkspaceFileOperation(environmentInstanceId, input, onProgress);
   }
 
   inspectWorkspaceFileOperation(environmentInstanceId: string, input: import('./worker/protocol.ts').InspectWorkspaceFileOperationParams) {

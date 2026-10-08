@@ -31,6 +31,7 @@ import {
   type CancelWorkspaceFileOperationParams,
   type InspectWorkspaceFileOperationResult,
   type CancelWorkspaceFileOperationResult,
+  type RunContextParams,
   type WorkspaceCommandProgress,
   type WorkerInfo,
   type WorkerReadinessProbeParams,
@@ -261,6 +262,18 @@ export class WorkerContextClient {
 
   recycle(input: RecycleTaskContextParams): Promise<void> {
     return sanitizedRequest(this.#transport.request(WORKER_METHODS.recycleTaskContext, input));
+  }
+
+  prepareRunContext(input: RunContextParams): Promise<{ readonly prepared: true }> {
+    return sanitizedRequest(this.#transport.request(WORKER_METHODS.prepareRunContext, input));
+  }
+
+  recycleRunContext(input: RunContextParams): Promise<void> {
+    return sanitizedRequest(this.#transport.request(WORKER_METHODS.recycleRunContext, input));
+  }
+
+  inspectRunContext(input: RunContextParams): Promise<'present' | 'absent' | 'unknown'> {
+    return sanitizedRequest(this.#transport.request(WORKER_METHODS.inspectRunContext, input));
   }
 
   validateWorkspace(input: ValidateWorkspaceParams): Promise<ValidateWorkspaceResult> {

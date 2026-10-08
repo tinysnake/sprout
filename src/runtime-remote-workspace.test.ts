@@ -227,6 +227,9 @@ test('Host-run edits and patches only through the enrolled Worker with one run-h
   let workerDispatches = 0;
   let leasesDuringRun: readonly { readonly capability: string }[] = [];
   const commandProgress: { readonly sequence: number; readonly stream: string; readonly text: string }[] = [];
+  let runContext: import('./worker/protocol.ts').RunContextParams | undefined;
+  let leaseStateWhenRunContextPrepared: string | undefined;
+  let runContextRecycled = false;
   let runtime: Awaited<ReturnType<typeof createRuntime>> | undefined;
   const hostPi = {
     id: 'pi', profileId: 'profile-runtime-remote-mutation', authorizedModel: model,
@@ -274,6 +277,17 @@ test('Host-run edits and patches only through the enrolled Worker with one run-h
     });
     await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, workerRoot);
     assert.equal(runtime.pool.requiresLeaseForBoundOperation(INSTANCE_ID, 'agent-run'), true);
+    const prepareRunContext = runtime.enrollmentEnvironment.prepareRunContext.bind(runtime.enrollmentEnvironment);
+    runtime.enrollmentEnvironment.prepareRunContext = async (environmentInstanceId, input) => {
+      runContext = input;
+      leaseStateWhenRunContextPrepared = runtime!.pool.leases().find(lease => lease.runId === input.runId)?.state;
+      return prepareRunContext(environmentInstanceId, input);
+    };
+    const recycleRunContext = runtime.enrollmentEnvironment.recycleRunContext.bind(runtime.enrollmentEnvironment);
+    runtime.enrollmentEnvironment.recycleRunContext = async (environmentInstanceId, input) => {
+      await recycleRunContext(environmentInstanceId, input);
+      runContextRecycled = true;
+    };
     const execute = runtime.enrollmentEnvironment.executeWorkspaceFileOperation.bind(runtime.enrollmentEnvironment);
     let loseNextResponse = true;
     runtime.enrollmentEnvironment.executeWorkspaceFileOperation = async (environmentInstanceId, input, onProgress) => {
@@ -314,6 +328,10 @@ test('Host-run edits and patches only through the enrolled Worker with one run-h
     assert.equal(readFileSync(localFile, 'utf8'), 'LOCAL_SENTINEL');
     assert.equal(leasesDuringRun.length, 1);
     assert.equal(leasesDuringRun[0]?.capability, 'agent-run');
+    assert.equal(leaseStateWhenRunContextPrepared, 'active', 'the temporary Run context is prepared only after lease acquisition');
+    assert.equal(runContext?.runId, submitted.id);
+    assert.equal(runContextRecycled, true, 'the Run context is recycled after known operation settlement');
+    assert.equal(await runtime.enrollmentEnvironment.inspectRunContext(INSTANCE_ID, runContext!), 'absent');
     assert.equal(runtime.pool.leases().length, 1, 'the released lease remains inspectable');
     assert.equal(runtime.pool.leases()[0]?.state, 'released', 'the run releases its lease after confirmed settlement');
 
@@ -347,6 +365,7 @@ test('an interrupted Host run protects its lease until remote command settlement
   const model = 'provider/model-host';
   const localEngine = new ScriptedEngineAdapter({ turns: [] });
   let commandResult: Promise<RemoteWorkspaceOperationResult> | undefined;
+  let runContext: import('./worker/protocol.ts').RunContextParams | undefined;
   let commandStarted!: () => void;
   const started = new Promise<void>(resolve => { commandStarted = resolve; });
   let settleCompletion!: (result: { readonly status: 'interrupted' }) => void;
@@ -394,6 +413,11 @@ test('an interrupted Host run protects its lease until remote command settlement
       capabilityPermissions: { 'agent-run': true, 'read-only-investigation': true },
     });
     await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, workerRoot);
+    const prepareRunContext = runtime.enrollmentEnvironment.prepareRunContext.bind(runtime.enrollmentEnvironment);
+    runtime.enrollmentEnvironment.prepareRunContext = async (environmentInstanceId, input) => {
+      runContext = input;
+      return prepareRunContext(environmentInstanceId, input);
+    };
     await runtime.projectService.create({ id: 'remote-command-cancel-project', displayName: 'Remote command cancellation Project' });
     await runtime.projectService.addMembership('remote-command-cancel-project', { agentId: 'scout' });
     await runtime.projectAccess.grant({ projectId: 'remote-command-cancel-project', environmentInstanceId: INSTANCE_ID,
@@ -411,12 +435,14 @@ test('an interrupted Host run protects its lease until remote command settlement
     assert.equal(interrupted.status, 'interrupted');
     assert.ok(unresolvedCancel);
     assert.equal(runtime.pool.leases()[0]?.state, 'recovering');
+    assert.equal(await runtime.enrollmentEnvironment.inspectRunContext(INSTANCE_ID, runContext!), 'present', 'unknown settlement preserves the temporary Run context');
 
     runtime.enrollmentEnvironment.cancelWorkspaceFileOperation = actualCancel;
     await actualCancel(INSTANCE_ID, unresolvedCancel!);
     const result = await commandResult!;
     assert.equal(result.status, 'cancelled');
-    assert.equal(runtime.pool.leases()[0]?.state, 'released');
+    await waitFor(() => runtime.pool.leases()[0]?.state === 'released', 'confirmed command and Run context cleanup');
+    assert.equal(await runtime.enrollmentEnvironment.inspectRunContext(INSTANCE_ID, runContext!), 'absent');
   } finally {
     await runtime.close();
   }
