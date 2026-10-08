@@ -36,6 +36,47 @@ function isDenied(path, flag) {
   }
 }
 
+function safeErrorName(error) {
+    const name = typeof error?.name === "string" ? error.name : "";
+    return /^[A-Za-z][A-Za-z0-9_ .-]{0,63}$/.test(name) ? name : "unknown";
+}
+
+function safeErrorCode(error) {
+    const code = typeof error?.code === "string" ? error.code : typeof error?.code === "number" ? String(error.code) : undefined;
+    return code !== undefined && /^[A-Za-z0-9_.:-]{1,64}$/.test(code) ? code : undefined;
+}
+
+function safeErrorStatus(error) {
+    return typeof error?.status === "number" && error.status >= 100 && error.status <= 599 ? error.status : undefined;
+}
+
+/** Sanitized provider-boundary error facts: identity fields only, never messages. */
+function sanitizeStreamError(error) {
+    const entry = { name: safeErrorName(error) };
+    const code = safeErrorCode(error);
+    const status = safeErrorStatus(error);
+    if (code !== undefined) entry.code = code;
+    if (status !== undefined) entry.status = status;
+    const cause = error?.cause;
+    if (cause && typeof cause === "object") {
+        const causeEntry = { name: safeErrorName(cause) };
+        const causeCode = safeErrorCode(cause);
+        if (causeCode !== undefined) causeEntry.code = causeCode;
+        entry.cause = causeEntry;
+    }
+    return entry;
+}
+
+/** Bounded model-authored tool arguments for the parent event stream. */
+function sanitizeToolArgs(args) {
+  if (args === undefined || args === null) return {};
+  try {
+    const json = JSON.stringify(args);
+    if (typeof json === 'string' && json.length <= 2048) return JSON.parse(json);
+  } catch { /* Unserializable arguments degrade to an empty object. */ }
+  return {};
+}
+
 function sanitizeUsage(raw) {
   if (typeof raw !== 'object' || raw === null) return undefined;
   const usage = raw;
@@ -221,6 +262,8 @@ async function openSession(config, input) {
   let session;
   const remotePending = new Map();
   let remoteCallSequence = 0;
+  const turnTelemetry = { streamCalls: 0, streamRejections: [] };
+  let rawEventTypes = {};
   const remoteCall = (operation, args) => new Promise((resolve) => {
     const callId = `${config.sessionId}-${++remoteCallSequence}`;
     remotePending.set(callId, resolve);
@@ -228,6 +271,28 @@ async function openSession(config, input) {
   });
   try {
     const loaded = await createRuntime(config);
+    // Provider-boundary probe: count every hand-off to the model transport and
+    // capture sanitized rejection identity (name/code/status only).
+    for (const method of ["streamSimple", "stream"]) {
+      const original = loaded.runtime[method];
+      if (typeof original !== "function") continue;
+      loaded.runtime[method] = function (...args) {
+        turnTelemetry.streamCalls += 1;
+        try {
+          const result = original.apply(this, args);
+          if (result && typeof result.then === "function") {
+            return result.then(undefined, (error) => {
+              turnTelemetry.streamRejections.push(sanitizeStreamError(error));
+              throw error;
+            });
+          }
+          return result;
+        } catch (error) {
+          turnTelemetry.streamRejections.push(sanitizeStreamError(error));
+          throw error;
+        }
+      };
+    }
     if (!loaded.modelPresent || !loaded.authConfigured || loaded.model === undefined) {
       line({ kind: 'failure', stage: 'model-readiness', code: 'not-ready' });
       return;
@@ -290,6 +355,8 @@ async function openSession(config, input) {
 
     let settled = false;
     session.subscribe((event) => {
+      const eventType = typeof event?.type === 'string' ? event.type : 'unknown';
+      rawEventTypes[eventType] = (rawEventTypes[eventType] ?? 0) + 1;
       if (event.type === 'message_update') {
         const update = event.assistantMessageEvent;
         if (update?.type === 'text_delta' && typeof update.delta === 'string') {
@@ -314,17 +381,23 @@ async function openSession(config, input) {
         line({ kind: 'pi-event', event: { type: 'agent_settled' } });
         return;
       }
-      if (update?.type === 'tool_execution_start') {
-        if (!remoteToolNames.includes(update.toolName)) {
+      if (event.type === 'tool_execution_start' || event.type === 'tool_execution_update' ||
+          event.type === 'tool_execution_end' || event.type === 'bash_execution_update') {
+        // Only the authorized remote workspace tools may execute in this
+        // session; every other tool path is a control violation. Tool events
+        // are top-level session events, never assistant-message events.
+        if (typeof event.toolName !== 'string' || !remoteToolNames.includes(event.toolName)) {
           session.abort();
           line({ kind: 'failure', stage: 'session-controls', code: 'control-violation' });
+          return;
+        }
+        if (event.type === 'tool_execution_start') {
+          line({ kind: 'pi-event', event: { type: 'tool_execution_start', toolName: event.toolName, args: sanitizeToolArgs(event.args) } });
         }
         return;
       }
-      if (event.type === 'tool_execution_start' || event.type === 'bash_execution_update') {
-        session.abort();
-        line({ kind: 'failure', stage: 'session-controls', code: 'control-violation' });
-      }
+      // Session framing events (agent_start, message_start, queue updates, …)
+      // carry no run progress; they are counted in turn facts only.
     });
     line({ kind: 'ready', sessionId: config.sessionId });
 
@@ -338,8 +411,13 @@ async function openSession(config, input) {
       }
       if (command?.op === 'prompt' && !settled && typeof command.prompt === 'string') {
         stage = 'turn';
+        rawEventTypes = {};
+        turnTelemetry.streamCalls = 0;
+        turnTelemetry.streamRejections.length = 0;
+        const turn = { fetchAttempts: 0, promptResolved: false, promptErrorName: undefined, promptErrorCode: undefined };
         const originalFetch = globalThis.fetch;
         const observedFetch = async function (input, init) {
+          turn.fetchAttempts += 1;
           if (config.remoteWorkspace) {
             let body;
             try { body = await readFetchBody(input, init); } catch { /* Keep observation failures out of the request path. */ }
@@ -350,11 +428,23 @@ async function openSession(config, input) {
         globalThis.fetch = observedFetch;
         try {
           await session.prompt(command.prompt, { expandPromptTemplates: false, source: 'rpc' });
+          turn.promptResolved = true;
         } catch (error) {
+          turn.promptErrorName = safeErrorName(error);
+          turn.promptErrorCode = safeErrorCode(error);
           const code = error?.code === 'ENOENT' ? 'missing' : 'other';
           line({ kind: 'failure', stage, code });
         } finally {
           if (globalThis.fetch === observedFetch) globalThis.fetch = originalFetch;
+          line({ kind: 'turn-facts', facts: {
+            promptResolved: turn.promptResolved,
+            ...(turn.promptErrorName !== undefined ? { promptErrorName: turn.promptErrorName } : {}),
+            ...(turn.promptErrorCode !== undefined ? { promptErrorCode: turn.promptErrorCode } : {}),
+            fetchAttempts: turn.fetchAttempts,
+            streamCalls: turnTelemetry.streamCalls,
+            streamRejections: [...turnTelemetry.streamRejections],
+            rawEventTypes: { ...rawEventTypes },
+          } });
         }
         return;
       }

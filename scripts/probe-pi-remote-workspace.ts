@@ -186,6 +186,9 @@ try {
       });
       stage = 'model-turn-wait';
       const run = await runtime.orchestrator.waitFor(id);
+      // turn-facts arrive on the child stdout after the terminal session event;
+      // give them a beat to flush before reading the observed facts.
+      await new Promise((resolve) => setTimeout(resolve, 500));
       const observation = resultFacts[0];
       const accepted = run.status === 'completed' && observation?.status === 'completed' &&
         observation.operation === 'read' && observation.contentMatched && observation.identityMatched;
