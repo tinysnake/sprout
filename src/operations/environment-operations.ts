@@ -159,13 +159,15 @@ export class EnvironmentOperations {
     }
     const fixed = { ...identity };
     let mutationLease: EnvironmentLease | undefined;
-    let leaseAcquisition: Promise<{ readonly acquired?: EnvironmentLease; readonly conflict?: { readonly holderId: string; readonly state: 'active' | 'recovering' } }> | undefined;
+    let leaseAcquisition: Promise<{ readonly acquired?: EnvironmentLease; readonly conflict?: { readonly holderId: string; readonly state: 'active' | 'recovering' }; readonly failure?: string }> | undefined;
     let pendingOperations = 0;
     let uncertainOutcome = false;
     let leaseKeepalive: ReturnType<typeof setInterval> | undefined;
 
-    const acquireMutationLease = async (): Promise<{ readonly acquired?: EnvironmentLease; readonly conflict?: { readonly holderId: string; readonly state: 'active' | 'recovering' } }> => {
-      if (runId === undefined || this.#pool === undefined || this.#pool.requiresLease(access.environmentInstanceId, MUTATION_CAPABILITY) !== true) return {};
+    const acquireMutationLease = async (): Promise<{ readonly acquired?: EnvironmentLease; readonly conflict?: { readonly holderId: string; readonly state: 'active' | 'recovering' }; readonly failure?: string }> => {
+      if (runId === undefined) return { failure: 'run-required' };
+      if (this.#pool === undefined) return { failure: 'lease-pool-unavailable' };
+      if (this.#pool.requiresLease(access.environmentInstanceId, MUTATION_CAPABILITY) !== true) return { failure: 'lease-capability-unavailable' };
       const prior = mutationLease;
       if (prior !== undefined) {
         const extended = this.#pool.extendLease(prior.id, this.#leaseTtlMs);
@@ -184,14 +186,14 @@ export class EnvironmentOperations {
       if (!result.ok) {
         return result.reason === 'conflict'
           ? { conflict: { holderId: result.heldBy ?? 'unknown-holder', state: result.state === 'recovering' ? 'recovering' : 'active' } }
-          : {};
+          : { failure: `lease-${result.reason}` };
       }
       mutationLease = result.lease;
       try { await onLeaseAcquired?.(result.lease.id); }
       catch {
         this.#pool.markRecovering(result.lease.id);
         uncertainOutcome = true;
-        return {};
+        return { failure: 'lease-reference-persistence-failed' };
       }
       const interval = Math.max(1_000, Math.floor(this.#leaseTtlMs / 3));
       leaseKeepalive = setInterval(() => {
@@ -245,7 +247,7 @@ export class EnvironmentOperations {
         }
         const lease = await leaseAcquisition;
         if (!lease.acquired) {
-          return operationResult(fixed, operationId, operation, 'failed', lease.conflict ? 'lease-conflict' : 'lease-unavailable', lease.conflict);
+          return operationResult(fixed, operationId, operation, 'failed', lease.conflict ? 'lease-conflict' : (lease.failure ?? 'lease-unavailable'), lease.conflict);
         }
         try {
           await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed, MUTATION_CAPABILITY);
@@ -254,8 +256,7 @@ export class EnvironmentOperations {
           return operationResult(fixed, operationId, operation, 'failed', 'remote-operation-blocked');
         }
       } else {
-        try { await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed); }
-        catch { return operationResult(fixed, operationId, operation, 'failed', 'remote-operation-blocked'); }
+        await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed);
       }
 
       await this.#store.save(row);

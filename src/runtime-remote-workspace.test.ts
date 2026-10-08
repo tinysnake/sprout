@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -204,6 +204,107 @@ test('composed Runtime blocks remote reads when the enrolled Worker lacks the fi
       runtime.environmentOperations.attach('denied-read-project', 'scout'),
       (error: unknown) => error instanceof Error && 'reason' in error && error.reason === 'capability-denied',
     );
+  } finally {
+    await runtime.close();
+  }
+});
+
+test('Host-run edits and patches only through the enrolled Worker with one run-held lease', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-remote-mutation-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const workerRoot = join(directory, 'worker-workspaces');
+  const hostRoot = join(directory, 'host-project');
+  const keyPath = join(directory, 'worker-key.pem');
+  const model = 'provider/model-host';
+  const localFile = join(hostRoot, 'repos', 'remote-mutation', 'src', 'target.txt');
+  mkdirSync(join(hostRoot, 'repos', 'remote-mutation', 'src'), { recursive: true });
+  writeFileSync(localFile, 'LOCAL_SENTINEL');
+  const localEngine = new ScriptedEngineAdapter({ turns: [scriptedTurn('Remote changes completed.')] });
+  const observed: RemoteWorkspaceOperationResult[] = [];
+  let leasesDuringRun: readonly { readonly capability: string }[] = [];
+  let capturedTools: StartSessionRequest['remoteWorkspace'];
+  let runtime: Awaited<ReturnType<typeof createRuntime>> | undefined;
+  const hostPi = {
+    id: 'pi', profileId: 'profile-runtime-remote-mutation', authorizedModel: model,
+    capabilities: localEngine.capabilities,
+    async readiness() {
+      return { profileId: 'profile-runtime-remote-mutation', engine: 'pi', status: 'ready', installation: 'ready',
+        authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready', version: '1.0.4', observedAt: 1 };
+    },
+    async startSession(request: StartSessionRequest) {
+      assert.deepEqual(request.remoteWorkspace?.operations, ['read', 'search', 'edit', 'patch']);
+      capturedTools = request.remoteWorkspace;
+      const tools = request.remoteWorkspace!;
+      observed.push(await tools.edit!('src/target.txt', 'REMOTE_SENTINEL', 'REMOTE_EDITED', 'sdk-edit-1'));
+      observed.push(await tools.patch!('src/target.txt', [{ before: 'REMOTE_EDITED', after: 'REMOTE_PATCHED' }], 'sdk-patch-1'));
+      leasesDuringRun = runtime!.pool.leases();
+      return localEngine.startSession(request);
+    },
+  } as unknown as HostPiEngineAdapter;
+  runtime = await createRuntime({
+    configuration: hostConfiguration({
+      executionMode: 'host-run', environmentSource: 'enrollment',
+      runtimeConfiguration: {
+        agents: [{ id: 'scout', name: 'scout', engine: 'pi', capability: 'agent-run', model, effort: 'medium',
+          workOptions: [{ id: 'host-pi', engine: 'pi', workModel: model, effort: 'medium' }] }],
+        project: { ...project(), memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }] },
+      },
+      databasePath: join(directory, 'state.db'),
+    }),
+    projectRoot: hostRoot,
+    hostPi,
+  });
+
+  try {
+    const identity = loadOrCreateWorkerIdentity(keyPath);
+    const enrollment = await runtime.enrollments.requestEnrollment({
+      environmentInstanceId: INSTANCE_ID, displayName: 'Remote mutation Worker',
+      publicKey: workerPublicKey(identity.privateKey), platform: 'macos', protocolVersion: '3.0',
+      capabilityRequests: ['agent-run', 'read-only-investigation'], engineFacts: [],
+    });
+    await runtime.enrollments.approve(enrollment.enrollment.id, {
+      capabilityPermissions: { 'agent-run': true, 'read-only-investigation': true },
+    });
+    await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, workerRoot);
+    assert.equal(runtime.pool.requiresLease(INSTANCE_ID, 'agent-run'), true,
+      runtime.environmentCatalog.entry(INSTANCE_ID)?.readiness.summary.reason ?? 'agent-run lease capability is unavailable');
+    await runtime.projectService.create({ id: 'remote-mutation-project', displayName: 'Remote mutation Project' });
+    await runtime.projectService.addMembership('remote-mutation-project', { agentId: 'scout' });
+    const access = await runtime.projectAccess.grant({
+      projectId: 'remote-mutation-project', environmentInstanceId: INSTANCE_ID,
+      selection: { kind: 'relative', path: 'repos/remote-mutation' },
+    });
+    mkdirSync(join(workerRoot, 'repos', 'remote-mutation', 'src'), { recursive: true });
+    writeFileSync(join(workerRoot, 'repos', 'remote-mutation', 'src', 'target.txt'), 'REMOTE_SENTINEL');
+
+    const submitted = await runtime.orchestrator.submit({ agentId: 'scout', projectId: 'remote-mutation-project', prompt: 'Edit and patch the remote file.' });
+    const run = await runtime.orchestrator.waitFor(submitted.id);
+    if (run.status !== 'completed') throw new Error(`Host-run failed: ${run.failure ?? 'no failure detail'}`);
+    assert.equal(observed.length, 2);
+    assert.deepEqual(observed.map(result => result.status), ['completed', 'completed'], JSON.stringify(observed));
+    assert.ok(observed.every(result => result.environmentInstanceId === INSTANCE_ID && result.bindingId === access.current?.bindingId));
+    assert.equal(readFileSync(join(workerRoot, 'repos', 'remote-mutation', 'src', 'target.txt'), 'utf8'), 'REMOTE_PATCHED');
+    assert.equal(readFileSync(localFile, 'utf8'), 'LOCAL_SENTINEL');
+    assert.equal(leasesDuringRun.length, 1);
+    assert.equal(leasesDuringRun[0]?.capability, 'agent-run');
+    assert.equal(runtime.pool.leases().length, 0, 'the run releases its lease after confirmed settlement');
+
+    const replay = await capturedTools!.edit!('src/target.txt', 'REMOTE_SENTINEL', 'CHANGED_PAYLOAD', 'sdk-edit-1');
+    assert.equal(replay.failure, 'operation-identity-conflict');
+    assert.equal(readFileSync(join(workerRoot, 'repos', 'remote-mutation', 'src', 'target.txt'), 'utf8'), 'REMOTE_PATCHED');
+    const sameIdentity = await capturedTools!.edit!('src/target.txt', 'REMOTE_SENTINEL', 'REMOTE_EDITED', 'sdk-edit-1');
+    assert.equal(sameIdentity.failure, 'operation-outcome-inspection-required');
+
+    const holder = await runtime.pool.acquireLeaseRevalidated({
+      instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'other-agent', runId: 'other-run', ttlMs: 60_000,
+    });
+    assert.equal(holder.ok, true);
+    const blockedTools = await runtime.environmentOperations.attach('remote-mutation-project', 'scout', 'blocked-run');
+    const blocked = await blockedTools.edit!('src/target.txt', 'REMOTE_PATCHED', 'SHOULD_NOT_APPLY', 'blocked-edit-1');
+    assert.equal(blocked.failure, 'lease-conflict');
+    assert.equal(blocked.leaseConflict?.holderId, 'other-agent');
+    assert.equal(readFileSync(join(workerRoot, 'repos', 'remote-mutation', 'src', 'target.txt'), 'utf8'), 'REMOTE_PATCHED');
+    runtime.pool.releaseLease(holder.lease.id);
   } finally {
     await runtime.close();
   }
