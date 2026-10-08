@@ -534,9 +534,9 @@ export function isolationProfile(input: HostPiProbeInput & { readonly agentRoot:
     fileURLToPath(new URL('./pi-host-runner.mjs', import.meta.url)),
     fileURLToPath(new URL('./pi-runner-events.ts', import.meta.url)),
     fileURLToPath(new URL('./pi-error-facts.ts', import.meta.url)),
-    // The runner's TypeScript module needs the repository package scope read
-    // (module format resolution) inside the sandbox; nothing else in the
-    // repository is readable.
+    fileURLToPath(new URL('../environment/privacy.ts', import.meta.url)),
+    // The runner and its shared sanitizer need these exact source modules and
+    // the repository package scope; nothing else in the repository is readable.
     fileURLToPath(new URL('../../package.json', import.meta.url)),
     input.authPath,
     input.modelsPath,

@@ -4,8 +4,11 @@ import { test } from 'node:test';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ScriptedEngineAdapter } from './engine/scripted.ts';
+import { createSessionEventProgressState, sessionEventDisposition } from './engine/pi-runner-events.ts';
+import { mapPiEvent, newPiTurnState } from './engine/pi-protocol.ts';
 import type { HostPiEngineAdapter } from './engine/pi-host.ts';
-import type { RemoteWorkspaceOperationResult, StartSessionRequest } from './engine/port.ts';
+import type { AgentRunEvent, RemoteWorkspaceOperationResult, StartSessionRequest } from './engine/port.ts';
+import { toRunView } from './web/views.ts';
 import { loadOrCreateWorkerIdentity, workerPublicKey } from './worker/enrollment-connector.ts';
 import {
   connectRuntimeWorker,
@@ -227,6 +230,8 @@ test('Host-run edits and patches only through the enrolled Worker with one run-h
   let workerDispatches = 0;
   let leasesDuringRun: readonly { readonly capability: string }[] = [];
   const commandProgress: { readonly sequence: number; readonly stream: string; readonly text: string }[] = [];
+  const pathSentinel = '/srv/synthetic-host/private/remote-sentinel.txt';
+  const credentialSentinel = 'api_key=ghp_abcdefghijklmnopqrstuvwx';
   let runContext: import('./worker/protocol.ts').RunContextParams | undefined;
   let leaseStateWhenRunContextPrepared: string | undefined;
   let runContextRecycled = false;
@@ -241,14 +246,69 @@ test('Host-run edits and patches only through the enrolled Worker with one run-h
     async startSession(request: StartSessionRequest) {
       assert.deepEqual(request.remoteWorkspace?.operations, ['read', 'search', 'edit', 'patch', 'command']);
       const tools = request.remoteWorkspace!;
-      observed.push(await tools.edit!('src/target.txt', 'REMOTE_SENTINEL', 'REMOTE_EDITED', 'sdk-edit-1'));
+      const runEvents: AgentRunEvent[] = [];
+      const turnState = newPiTurnState();
+      const eventState = {
+        settled: false,
+        remoteToolNames: ['remote_read', 'remote_search', 'remote_edit', 'remote_patch', 'remote_command', 'remote_inspect'],
+        progress: createSessionEventProgressState(),
+      };
+      const emitPiEvent = (event: Record<string, unknown>): void => {
+        const disposition = sessionEventDisposition(event, eventState);
+        if (disposition.action === 'pi-event') runEvents.push(...mapPiEvent(disposition.event, turnState).events);
+      };
+      const startTool = (toolName: string, args: unknown, toolCallId: string): void => {
+        emitPiEvent({ type: 'tool_execution_start', toolName, args, toolCallId });
+      };
+      const endTool = (toolName: string, result: RemoteWorkspaceOperationResult | { readonly status: string; readonly operation?: RemoteWorkspaceOperationResult }, toolCallId: string): void => {
+        emitPiEvent({ type: 'tool_execution_end', toolName, toolCallId, result: { content: [], details: result }, isError: result.status !== 'completed' });
+      };
+      const editArgs = { path: 'src/target.txt', oldText: pathSentinel, newText: credentialSentinel };
+      startTool('remote_edit', editArgs, 'call-edit-1');
+      observed.push(await tools.edit!('src/target.txt', pathSentinel, credentialSentinel, 'sdk-edit-1'));
+      endTool('remote_edit', observed[0]!, 'call-edit-1');
+      startTool('remote_inspect', { operationId: observed[0]!.operationId }, 'call-inspect-1');
       inspection = await tools.inspect(observed[0]!.operationId);
-      conflictingReplay = await tools.edit!('src/target.txt', 'REMOTE_SENTINEL', 'CHANGED_PAYLOAD', 'sdk-edit-1');
-      matchingReplay = await tools.edit!('src/target.txt', 'REMOTE_SENTINEL', 'REMOTE_EDITED', 'sdk-edit-1');
-      observed.push(await tools.patch!('src/target.txt', [{ before: 'REMOTE_EDITED', after: 'REMOTE_PATCHED' }], 'sdk-patch-1'));
-      observed.push(await tools.command!('node', ['-e', "process.stdout.write('REMOTE_COMMAND_OK\\n')"], { cwd: 'src', timeoutMs: 5_000 }, 'sdk-command-1', progress => commandProgress.push(progress)));
+      endTool('remote_inspect', inspection, 'call-inspect-1');
+      const conflictingArgs = { path: 'src/target.txt', oldText: pathSentinel, newText: 'CHANGED_PAYLOAD' };
+      startTool('remote_edit', conflictingArgs, 'call-edit-2');
+      conflictingReplay = await tools.edit!('src/target.txt', pathSentinel, 'CHANGED_PAYLOAD', 'sdk-edit-1');
+      endTool('remote_edit', conflictingReplay, 'call-edit-2');
+      startTool('remote_edit', editArgs, 'call-edit-3');
+      matchingReplay = await tools.edit!('src/target.txt', pathSentinel, credentialSentinel, 'sdk-edit-1');
+      endTool('remote_edit', matchingReplay, 'call-edit-3');
+      const patchArgs = { path: 'src/target.txt', hunks: [{ before: credentialSentinel, after: 'REMOTE_PATCHED' }] };
+      startTool('remote_patch', patchArgs, 'call-patch-1');
+      observed.push(await tools.patch!('src/target.txt', [{ before: credentialSentinel, after: 'REMOTE_PATCHED' }], 'sdk-patch-1'));
+      endTool('remote_patch', observed[1]!, 'call-patch-1');
+      const commandArgs = ['-e', "process.stdout.write('REMOTE_COMMAND_OK\\n')", pathSentinel];
+      startTool('remote_command', { executable: 'node', args: commandArgs, cwd: 'src', timeoutMs: 5_000 }, 'sdk-command-1');
+      let commandOutput = '';
+      observed.push(await tools.command!('node', commandArgs, { cwd: 'src', timeoutMs: 5_000 }, 'sdk-command-1', progress => {
+        commandProgress.push(progress);
+        commandOutput += progress.text;
+        emitPiEvent({ type: 'tool_execution_update', toolName: 'remote_command', toolCallId: 'sdk-command-1',
+          partialResult: { content: [{ type: 'text', text: commandOutput }], details: { sequence: progress.sequence, stream: progress.stream } } });
+      }));
+      endTool('remote_command', observed[2]!, 'sdk-command-1');
       leasesDuringRun = runtime!.pool.leases();
-      return localEngine.startSession(request);
+      const session = await localEngine.startSession(request);
+      return {
+        sessionId: session.sessionId,
+        engineSessionKey: session.engineSessionKey,
+        run(prompt: string) {
+          const turn = session.run(prompt);
+          return {
+            events: (async function* () {
+              yield* runEvents;
+              for await (const event of turn.events) yield event;
+            })(),
+            completion: turn.completion,
+          };
+        },
+        interrupt: session.interrupt.bind(session),
+        close: session.close.bind(session),
+      };
     },
   } as unknown as HostPiEngineAdapter;
   runtime = await createRuntime({
@@ -306,11 +366,25 @@ test('Host-run edits and patches only through the enrolled Worker with one run-h
       selection: { kind: 'relative', path: 'repos/remote-mutation' },
     });
     mkdirSync(join(workerRoot, 'repos', 'remote-mutation', 'src'), { recursive: true });
-    writeFileSync(join(workerRoot, 'repos', 'remote-mutation', 'src', 'target.txt'), 'REMOTE_SENTINEL');
+    writeFileSync(join(workerRoot, 'repos', 'remote-mutation', 'src', 'target.txt'), pathSentinel);
 
     const submitted = await runtime.orchestrator.submit({ agentId: 'scout', projectId: 'remote-mutation-project', prompt: 'Edit and patch the remote file.' });
     const run = await runtime.orchestrator.waitFor(submitted.id);
     if (run.status !== 'completed') throw new Error(`Host-run failed: ${run.failure ?? 'no failure detail'}`);
+    const projection = toRunView(run);
+    const persistedEvents = JSON.stringify(run.events);
+    const projectedEvents = JSON.stringify(projection.events);
+    for (const sentinel of [pathSentinel, credentialSentinel]) {
+      assert.ok(!persistedEvents.includes(sentinel), `persisted Run events omit ${sentinel.startsWith('/') ? 'the host path' : 'the credential'}`);
+      assert.ok(!projectedEvents.includes(sentinel), `Web Run projection omits ${sentinel.startsWith('/') ? 'the host path' : 'the credential'}`);
+    }
+    assert.match(persistedEvents, /Remote edit failed\./, 'remote edit status is visible independently of the model summary');
+    assert.match(persistedEvents, /Remote command completed\./);
+    assert.match(persistedEvents, /REMOTE_COMMAND_OK/);
+    assert.deepEqual(projection.events, run.events, 'the Web Run projection carries the sanitized persisted events');
+    const commandOutcomeIndex = run.events.findIndex(event => event.type === 'notice' && event.text === 'Remote command completed.');
+    const summaryIndex = run.events.findIndex(event => event.type === 'message' && event.final);
+    assert.ok(commandOutcomeIndex >= 0 && summaryIndex > commandOutcomeIndex, 'the remote outcome is visible before the model summary');
     assert.deepEqual(observed.map(result => result.status), ['failed', 'completed', 'completed'], JSON.stringify(observed));
     assert.equal(observed[0]?.failure, 'outcome-unknown-inspect-required');
     assert.equal(inspection?.status, 'completed');

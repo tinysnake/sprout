@@ -5,7 +5,7 @@ import { createInterface } from 'node:readline';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { registerHooks } from 'node:module';
-import { sessionEventDisposition } from './pi-runner-events.ts';
+import { createSessionEventProgressState, sessionEventDisposition } from './pi-runner-events.ts';
 import { safeErrorCode, safeErrorName, sanitizeStreamError, sanitizedPromptErrorFields } from './pi-error-facts.ts';
 
 const EXPECTED_PROVIDER_FILES = {
@@ -344,10 +344,11 @@ async function openSession(config, input) {
     }
 
     let settled = false;
+    let progressState = createSessionEventProgressState();
     session.subscribe((event) => {
       const eventType = typeof event?.type === 'string' ? event.type : 'unknown';
       rawEventTypes[eventType] = (rawEventTypes[eventType] ?? 0) + 1;
-      const disposition = sessionEventDisposition(event, { settled, remoteToolNames });
+      const disposition = sessionEventDisposition(event, { settled, remoteToolNames, progress: progressState });
       if (disposition.action === 'settle') {
         settled = true;
         line({ kind: 'pi-event', event: { type: 'agent_settled' } });
@@ -377,6 +378,7 @@ async function openSession(config, input) {
       }
       if (command?.op === 'prompt' && !settled && typeof command.prompt === 'string') {
         stage = 'turn';
+        progressState = createSessionEventProgressState();
         rawEventTypes = {};
         turnTelemetry.streamCalls = 0;
         turnTelemetry.streamRejections.length = 0;

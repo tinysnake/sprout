@@ -6,6 +6,7 @@ import { createProductionHostPiAdapter, type HostPiEngineAdapter } from '../src/
 import type { RemoteWorkspaceOperationResult, StartSessionRequest } from '../src/engine/port.ts';
 import { loadOrCreateWorkerIdentity, workerPublicKey } from '../src/worker/enrollment-connector.ts';
 import { sanitizedProbeErrorFields } from '../src/engine/pi-error-facts.ts';
+import { toRunView } from '../src/web/views.ts';
 import {
   connectRuntimeWorker,
   createRuntime,
@@ -48,7 +49,7 @@ function report(facts: Record<string, unknown>): void {
 }
 
 async function availablePortInAssignedRange(): Promise<number> {
-  for (let port = 41000; port <= 41009; port++) {
+  for (let port = 41010; port <= 41019; port++) {
     const server = createServer();
     const available = await new Promise<boolean>((resolveProbe) => {
       server.once('error', () => resolveProbe(false));
@@ -82,7 +83,7 @@ function observeRemoteWorkspace(adapter: HostPiEngineAdapter): HostPiEngineAdapt
         async read(path: string): Promise<RemoteWorkspaceOperationResult> {
           const response = await remote.read(path);
           resultFacts.push({ status: response.status, operation: response.operation,
-            resultMatched: response.content === 'REMOTE_WORKER_SENTINEL', identityMatched: identityMatches(response),
+            resultMatched: response.content?.startsWith('REMOTE_WORKER_SENTINEL\n') === true, identityMatched: identityMatches(response),
             outputBytes: Buffer.byteLength(response.content ?? '', 'utf8'), outputBounded: Buffer.byteLength(response.content ?? '', 'utf8') <= 64 * 1024,
             outputSanitized: true, progressSequences: [] });
           return response;
@@ -217,10 +218,12 @@ try {
         selection: { kind: 'relative', path: 'repos/pi-work' },
       });
       stage = 'fixture-write';
+      const pathArgumentSentinel = '/srv/synthetic-host/private/remote-sentinel.txt';
+      const credentialArgumentSentinel = 'api_key=ghp_abcdefghijklmnopqrstuvwx';
       const workerProjectRoot = join(workerRoot, 'repos', 'pi-work');
       await mkdir(join(workerProjectRoot, 'test'), { recursive: true });
       await writeFile(join(hostRoot, 'sentinel.txt'), 'LOCAL_HOST_SENTINEL');
-      await writeFile(join(workerProjectRoot, 'sentinel.txt'), 'REMOTE_WORKER_SENTINEL');
+      await writeFile(join(workerProjectRoot, 'sentinel.txt'), `REMOTE_WORKER_SENTINEL\n${pathArgumentSentinel}\n${credentialArgumentSentinel}`);
       await writeFile(join(workerProjectRoot, 'package.json'), JSON.stringify({ type: 'module', scripts: { test: 'node --test' } }, null, 2));
       await writeFile(join(workerProjectRoot, 'test', 'remote.test.js'), [
         "import assert from 'node:assert/strict';",
@@ -235,10 +238,19 @@ try {
       stage = 'model-turn';
       const { id } = await runtime.orchestrator.submit({
         agentId: 'scout', projectId: 'pi-remote-workspace-project',
-        prompt: 'Use the authorized remote tools in this exact order. First call remote_read once on sentinel.txt and confirm its exact text is REMOTE_WORKER_SENTINEL. Then call remote_edit once on sentinel.txt, replacing exactly REMOTE_WORKER_SENTINEL with REMOTE_EDITED_SENTINEL. Then call remote_command once with executable npm and args ["test", "--", "--test-reporter=tap"]. Do not use any other tool or infer success. Report the remote test counters only after the command passes.',
+        prompt: 'Use the authorized remote tools in this exact order. First call remote_read once on sentinel.txt. Then call remote_edit once, replacing exactly the full text returned by remote_read with REMOTE_EDITED_SENTINEL. Then call remote_command once with executable npm and args ["test", "--", "--test-reporter=tap"]. Do not use any other tool or repeat the file contents. Report the remote test counters only after the command passes.',
       });
       stage = 'model-turn-wait';
       const run = await runtime.orchestrator.waitFor(id);
+      const projectedEvents = toRunView(run).events;
+      const projectedEventJson = JSON.stringify(projectedEvents);
+      const visibleRemoteOutcomes = ['read', 'edit', 'command'].every(operation =>
+        projectedEvents.some(event => event.type === 'notice' && event.text === `Remote ${operation} completed.`));
+      const remoteProgressVisible = projectedEvents.some(event => event.type === 'tool-output' && typeof event.text === 'string' && event.text.trim() !== '');
+      const eventPrivacySentinelsAbsent = ![
+        workerRoot, hostRoot, pathArgumentSentinel, credentialArgumentSentinel,
+        'LOCAL_HOST_SENTINEL', 'REMOTE_WORKER_SENTINEL', 'REMOTE_EDITED_SENTINEL',
+      ].some(sentinel => projectedEventJson.includes(sentinel));
       // turn-facts arrive on the child stdout after the terminal session event;
       // give them a beat to flush before reading the observed facts.
       await new Promise((resolve) => setTimeout(resolve, 1500));
@@ -252,7 +264,8 @@ try {
       const lease = runtime.pool.leases().find(item => item.runId === id);
       const finalText = run.result?.status === 'completed' ? run.result.text : '';
       const modelReportedTestPass = /#\s*pass\s+1|tests?\s+passed|\bpass(?:ed|ing)?\b/i.test(finalText);
-      const modelFinalTextSanitized = !finalText.includes(workerRoot) && !finalText.includes(hostRoot);
+      const modelFinalTextSanitized = !finalText.includes(workerRoot) && !finalText.includes(hostRoot) &&
+        !finalText.includes(pathArgumentSentinel) && !finalText.includes(credentialArgumentSentinel);
       const progressContiguous = commandObservation !== undefined && commandObservation.progressSequences.length > 0 &&
         commandObservation.progressSequences.every((sequence, index) => sequence === index + 1);
       const accepted = run.status === 'completed' && engineTurnStatus === 'completed' && expectedTools &&
@@ -260,12 +273,16 @@ try {
         editObservation?.status === 'completed' && editObservation.operation === 'edit' && editObservation.resultMatched &&
         commandObservation?.status === 'completed' && commandObservation.operation === 'command' && commandObservation.resultMatched &&
         commandObservation.identityMatched && commandObservation.outputBounded && commandObservation.outputSanitized && progressContiguous && modelReportedTestPass && modelFinalTextSanitized &&
+        visibleRemoteOutcomes && remoteProgressVisible && eventPrivacySentinelsAbsent &&
         localFileUnchanged && remoteFileEdited && lease?.state === 'released';
       report({
         outcome: accepted ? 'model-issued-edit-and-test-passed' : 'model-issued-edit-and-test-incomplete',
         piVersion: readiness.version ?? 'unknown',
         runStatus: run.status,
         eventTypes: run.events.map((event) => event.type),
+        visibleRemoteOutcomes,
+        remoteProgressVisible,
+        eventPrivacySentinelsAbsent,
         toolNames: piToolNames,
         remoteOperations,
         providerRequestFacts,

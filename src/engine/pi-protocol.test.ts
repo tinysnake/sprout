@@ -35,24 +35,58 @@ test('assistant text deltas become incremental message events', () => {
   assert.equal(state.text, 'pi-tool-ok');
 });
 
-test('a tool call is reported from tool_execution_start with its arguments', () => {
+test('a remote tool call is attributable without persisting its arguments', () => {
   const state = newPiTurnState();
   const outcome = mapPiEvent(
     {
       type: 'tool_execution_start',
       toolCallId: 'call_2888666',
-      toolName: 'bash',
-      args: { command: 'echo pi-tool-ok' },
+      toolName: 'remote_edit',
+      args: {
+        path: '/srv/synthetic-host/private/sentinel.txt',
+        newText: 'api_key=ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      },
     },
     state,
   );
 
   assert.deepEqual(outcome.events, [
-    { type: 'tool-call', name: 'bash', detail: 'echo pi-tool-ok' },
+    { type: 'tool-call', name: 'remote_edit', detail: 'Remote operation requested.' },
   ]);
+  assert.ok(!JSON.stringify(outcome.events).includes('synthetic-host'));
+  assert.ok(!JSON.stringify(outcome.events).includes('API_KEY_3okwisn7'));
 });
 
-test('tool output is visible while the tool runs, not only when it ends', () => {
+test('remote progress is sanitized before becoming a Run output event', () => {
+  const state = newPiTurnState();
+  const outcome = mapPiEvent({
+    type: 'tool_execution_update',
+    toolName: 'remote_command',
+    partialResult: { content: [{ type: 'text', text: 'testing files\n/srv/synthetic-host/private/test.log\napi_key=ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }], details: {} },
+  }, state);
+
+  assert.equal(outcome.events[0]?.type, 'tool-output');
+  const text = outcome.events[0]?.type === 'tool-output' ? outcome.events[0].text : '';
+  assert.match(text, /testing files/);
+  assert.ok(!text.includes('/Users/synthetic-host'));
+  assert.ok(!text.includes('API_KEY_3okwisn7'));
+});
+
+test('remote terminal statuses are visible independently of the assistant summary', () => {
+  const state = newPiTurnState();
+  const statuses = ['completed', 'failed', 'cancelled', 'recovery-required'] as const;
+  for (const status of statuses) {
+    const outcome = mapPiEvent({
+      type: 'tool_execution_end',
+      toolName: 'remote_command',
+      isError: status !== 'completed',
+      result: { content: [], details: { operation: 'command', status } },
+    }, state);
+    assert.deepEqual(outcome.events, [{ type: 'notice', text: `Remote command ${status}.` }]);
+  }
+});
+
+test('tool execution updates and terminal results are visible', () => {
   const state = newPiTurnState();
   const partial = mapPiEvent(
     {
@@ -75,8 +109,8 @@ test('tool output is visible while the tool runs, not only when it ends', () => 
     state,
   );
 
-  assert.deepEqual(partial.events, [{ type: 'tool-output', text: 'pi-tool-ok\n' }]);
-  assert.deepEqual(ended.events, [{ type: 'tool-output', text: 'pi-tool-ok\n' }]);
+  assert.deepEqual(partial.events, [{ type: 'tool-output', text: 'pi-tool-ok' }]);
+  assert.deepEqual(ended.events, [{ type: 'tool-output', text: 'pi-tool-ok' }]);
 });
 
 test('streaming tool-call deltas are not reported as tool calls', () => {
@@ -315,7 +349,7 @@ test('the recorded probe stream maps to tool progress before the final answer', 
   assert.deepEqual(collected[0], {
     type: 'tool-call',
     name: 'bash',
-    detail: 'echo pi-tool-ok',
+    detail: '',
   });
   // Tool progress is visible *before* the turn settles, which is what the M1
   // observability policy requires.
