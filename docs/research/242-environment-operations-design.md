@@ -40,7 +40,27 @@ Command output travels as bounded, sequenced progress and a bounded final result
 - **Focused verification:** `npm run typecheck` passed. The focused Pi Host, Worker, Environment Operations, and Runtime suite passed 21/21.
 - **Domain and decision records:** `CONTEXT.md` now defines Run context and Remote workspace operation outcomes. The existing lease, Human authority, enrollment/epoch, and readiness ADRs remain consistent; no ADR change was needed.
 
-The full default-suite partition counters will be appended after the requested bounded runs.
+### Default-suite verification
+
+The current default globs contain 309 files and 2,366 tests. Four disjoint top-level partitions covered every file exactly once:
+
+| Partition | Files | Tests | Result | Duration |
+| --- | ---: | ---: | --- | ---: |
+| 1: Agent, collaboration, engine, and adapters | 55 | 468 | 468 passed | 2.6s |
+| 2: Environment, operations, projects, runs, app, and root config | 68 | 634 | 634 passed | 125.5s |
+| 3: Runtime, persistence, and modules | 87 | 589 | 589 passed after splits | Initial run reached 180s timeout |
+| 4: Web API, Worker, prototype, shell, and transport | 99 | 675 | 675 passed | 67.8s |
+
+Partition 3 was split after it reached the timeout. A 36-file Runtime-only attempt also reached the 180-second limit; an intermediate combined Runtime/persistence run produced no summary before the command limit and was subdivided again. The completed replacement runs were:
+
+| Replacement run | Files | Tests | Result | Duration |
+| --- | ---: | ---: | --- | ---: |
+| Runtime A | 18 | 78 | 78 passed | 24.0s |
+| Runtime B | 18 | 75 | 75 passed | 17.6s |
+| Store, Task, Usage, and test-summary | 28 | 208 | 208 passed | 6.9s |
+| Web modules | 23 | 228 | 228 passed | 104.0s |
+
+All 309 current default-suite files are covered by the four top-level partitions without overlap; the replacement runs account for all 87 files in Partition 3. Combined result: 2,366 passed, 0 failed. `npm run typecheck` passed.
 
 ## References
 
