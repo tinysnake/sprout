@@ -580,8 +580,8 @@ function normalizeOperationInput(operation: 'read' | 'search' | 'edit' | 'patch'
     if (input.executable !== 'node' && input.executable !== 'npm') return { failure: 'command-not-allowed' };
     if (!Array.isArray(input.args) || input.args.length > 64 || Array.from(input.args).some(arg => typeof arg !== 'string' || Buffer.byteLength(arg, 'utf8') > 4_096) ||
         Buffer.byteLength(JSON.stringify(input.args), 'utf8') > 16 * 1024) return { failure: 'operation-limit' };
-    const cwd = input.cwd === undefined ? undefined : normalizeRelativePath(input.cwd);
-    if (input.cwd !== undefined && cwd === undefined) return { failure: 'invalid-path' };
+    const cwd = input.cwd === undefined || input.cwd === '.' ? undefined : normalizeRelativePath(input.cwd);
+    if (input.cwd !== undefined && input.cwd !== '.' && cwd === undefined) return { failure: 'invalid-path' };
     if (cwd?.split('/')[0] === '.sprout') return { failure: 'invalid-path' };
     if (input.timeoutMs !== undefined && (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 100 || input.timeoutMs > 120_000)) return { failure: 'operation-limit' };
     return { executable: input.executable, args: [...input.args], ...(cwd !== undefined ? { cwd } : {}), ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}) };

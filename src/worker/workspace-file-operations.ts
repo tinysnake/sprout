@@ -284,7 +284,7 @@ export class WorkerWorkspaceFiles {
     const timeoutMs = input.timeoutMs ?? 30_000;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > MAX_COMMAND_DURATION_MS) return failure(input, 'failed', 'operation-limit');
     let cwd: string;
-    try { cwd = await containedDirectory(binding.root, input.cwd === undefined ? '' : safeRelative(input.cwd, false)); }
+    try { cwd = await containedDirectory(binding.root, input.cwd === undefined || input.cwd === '.' ? '' : safeRelative(input.cwd, false)); }
     catch { return failure(input, 'failed', 'invalid-path'); }
     let runContext: string;
     try {

@@ -305,7 +305,7 @@ async function openSession(config, input) {
         parameters: { type: 'object', properties: {
           executable: { type: 'string', enum: ['npm', 'node'] },
           args: { type: 'array', maxItems: 64, items: { type: 'string', maxLength: 4096 } },
-          cwd: { type: 'string' }, timeoutMs: { type: 'integer', minimum: 100, maximum: 120000 },
+          timeoutMs: { type: 'integer', minimum: 100, maximum: 120000 },
         }, required: ['executable', 'args'], additionalProperties: false },
         annotations: { readOnlyHint: false, destructiveHint: true },
         execute: async (id, args, _signal, onUpdate) => {

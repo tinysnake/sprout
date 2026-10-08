@@ -213,7 +213,7 @@ test('Worker commands stream bounded sequenced output and cancellation remains i
   const commandRunContext = { ...binding, runId: 'command-test-run' };
   await streamedFiles.prepareRunContext(commandRunContext);
   const streamed = await streamedFiles.execute({ ...bindingIdentity, workspacePath: path, operationId: 'command-stream-1', runId: commandRunContext.runId,
-    operation: 'command', executable: 'node', args: ['-e', "process.stdout.write('OUT');process.stderr.write('ERR')"], timeoutMs: 5_000 });
+    operation: 'command', executable: 'node', args: ['-e', "process.stdout.write('OUT');process.stderr.write('ERR')"], cwd: '.', timeoutMs: 5_000 });
   assert.equal(streamed.status, 'completed');
   assert.equal(streamed.exitCode, 0);
   assert.equal(streamed.output, 'OUTERR');

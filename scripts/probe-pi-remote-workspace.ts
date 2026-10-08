@@ -1,5 +1,5 @@
 import { createServer } from 'node:net';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createProductionHostPiAdapter, type HostPiEngineAdapter } from '../src/engine/pi-host.ts';
@@ -21,16 +21,24 @@ let hostPiSessionStarted = false;
 let remoteWorkspaceAttached = false;
 let engineTurnStatus: string | undefined;
 let responseMentionsTool = false;
-let responseContainsMarker = false;
+let responseContainsEditedMarker = false;
 const piToolNames: string[] = [];
 const providerRequestFacts: Record<string, unknown>[] = [];
+let remoteOperations: readonly string[] = [];
+let commandCwdClass = 'unset';
+let workerRootForSanitization = '';
 let hostSession: { turnFacts?: () => readonly Record<string, unknown>[] } | undefined;
 let engineFailure: string | undefined;
 const resultFacts: {
   readonly status: string;
   readonly operation: string;
-  readonly contentMatched: boolean;
+  readonly failure?: string;
+  readonly resultMatched: boolean;
   readonly identityMatched: boolean;
+  readonly outputBytes: number;
+  readonly outputBounded: boolean;
+  readonly outputSanitized: boolean;
+  readonly progressSequences: readonly number[];
 }[] = [];
 
 let stage = 'host-pi-profile';
@@ -51,7 +59,7 @@ async function availablePortInAssignedRange(): Promise<number> {
   throw new Error('assigned-port-block-unavailable');
 }
 
-function observeRemoteReads(adapter: HostPiEngineAdapter): HostPiEngineAdapter {
+function observeRemoteWorkspace(adapter: HostPiEngineAdapter): HostPiEngineAdapter {
   return {
     id: adapter.id,
     profileId: adapter.profileId,
@@ -63,20 +71,49 @@ function observeRemoteReads(adapter: HostPiEngineAdapter): HostPiEngineAdapter {
       const remote = request.remoteWorkspace;
       if (!remote) return adapter.startSession(request);
       remoteWorkspaceAttached = true;
+      remoteOperations = remote.operations ?? [];
+      const identityMatches = (response: RemoteWorkspaceOperationResult): boolean => response.projectId === remote.binding.projectId &&
+        response.environmentInstanceId === remote.binding.environmentInstanceId && response.bindingId === remote.binding.bindingId &&
+        response.generation === remote.binding.generation && response.connectionEpoch === remote.binding.connectionEpoch &&
+        response.workspaceId === remote.binding.workspaceId;
       const observed = {
         ...remote,
         observeProviderRequestFacts(facts: Record<string, unknown>) { providerRequestFacts.push(facts); },
         async read(path: string): Promise<RemoteWorkspaceOperationResult> {
           const response = await remote.read(path);
-          resultFacts.push({
-            status: response.status,
-            operation: response.operation,
-            contentMatched: response.content === 'REMOTE_WORKER_SENTINEL',
-            identityMatched: response.projectId === remote.binding.projectId &&
-              response.environmentInstanceId === remote.binding.environmentInstanceId &&
-              response.bindingId === remote.binding.bindingId && response.generation === remote.binding.generation &&
-              response.connectionEpoch === remote.binding.connectionEpoch && response.workspaceId === remote.binding.workspaceId,
+          resultFacts.push({ status: response.status, operation: response.operation,
+            resultMatched: response.content === 'REMOTE_WORKER_SENTINEL', identityMatched: identityMatches(response),
+            outputBytes: Buffer.byteLength(response.content ?? '', 'utf8'), outputBounded: Buffer.byteLength(response.content ?? '', 'utf8') <= 64 * 1024,
+            outputSanitized: true, progressSequences: [] });
+          return response;
+        },
+        async edit(path: string, oldText: string, newText: string, operationId?: string): Promise<RemoteWorkspaceOperationResult> {
+          const response = await remote.edit!(path, oldText, newText, operationId);
+          resultFacts.push({ status: response.status, operation: response.operation,
+            resultMatched: response.changedPaths?.length === 1 && response.changedPaths[0] === 'sentinel.txt',
+            identityMatched: identityMatches(response), outputBytes: 0, outputBounded: true, outputSanitized: true, progressSequences: [] });
+          return response;
+        },
+        async command(executable: string, args: readonly string[], options: { readonly cwd?: string; readonly timeoutMs?: number }, operationId: string,
+          onProgress?: (progress: import('../src/engine/port.ts').RemoteWorkspaceProgress) => void): Promise<RemoteWorkspaceOperationResult> {
+          commandCwdClass = options.cwd === undefined ? 'unset' : options.cwd === '.' ? 'project-root'
+            : options.cwd.startsWith('/') || /^[A-Za-z]:/.test(options.cwd) ? 'absolute'
+              : options.cwd.split(/[\\/]/).includes('..') ? 'traversal' : 'relative';
+          const progressSequences: number[] = [];
+          let progressBytes = 0;
+          const response = await remote.command!(executable, args, options, operationId, progress => {
+            progressSequences.push(progress.sequence);
+            progressBytes += Buffer.byteLength(progress.text, 'utf8');
+            onProgress?.(progress);
           });
+          const output = response.output ?? '';
+          const outputBytes = Buffer.byteLength(output, 'utf8');
+          resultFacts.push({ status: response.status, operation: response.operation,
+            ...(response.failure !== undefined ? { failure: response.failure } : {}),
+            resultMatched: /# tests 1\b[\s\S]*# pass 1\b/.test(output), identityMatched: identityMatches(response),
+            outputBytes, outputBounded: outputBytes <= 32 * 1024 && progressBytes <= 32 * 1024,
+            outputSanitized: !output.includes(workerRootForSanitization) && !/\x1B|[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(output),
+            progressSequences });
           return response;
         },
       };
@@ -91,8 +128,8 @@ function observeRemoteReads(adapter: HostPiEngineAdapter): HostPiEngineAdapter {
             for await (const event of turn.events) {
               if (event.type === 'tool-call') piToolNames.push(event.name);
               if (event.type === 'message') {
-                responseMentionsTool ||= event.text.includes('remote_read');
-                responseContainsMarker ||= event.text.includes('REMOTE_WORKER_SENTINEL');
+                responseMentionsTool ||= event.text.includes('remote_read') || event.text.includes('remote_edit') || event.text.includes('remote_command');
+                responseContainsEditedMarker ||= event.text.includes('REMOTE_EDITED_SENTINEL');
               }
               yield event;
             }
@@ -132,8 +169,12 @@ try {
       process.exitCode = 2;
     } else {
       const model = pi.authorizedModel;
+      const workerRoot = join(root, 'worker-workspaces');
+      workerRootForSanitization = workerRoot;
+      const hostRoot = join(root, 'host-files');
+      await mkdir(hostRoot, { recursive: true });
       stage = 'runtime-create';
-      const execution = observeRemoteReads(pi);
+      const execution = observeRemoteWorkspace(pi);
       runtime = await createRuntime({
         configuration: hostConfiguration({
           executionMode: 'host-run', environmentSource: 'enrollment',
@@ -146,7 +187,7 @@ try {
             project: { ...project(), memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }] },
           },
         }),
-        projectRoot: process.cwd(),
+        projectRoot: hostRoot,
         hostPi: execution,
       });
 
@@ -154,72 +195,110 @@ try {
       stage = 'worker-enrollment';
       const listening = await runtime.api.listen(port, '127.0.0.1');
       runtimePorts.set(runtime, Promise.resolve(listening.port));
-      const workerRoot = join(root, 'worker-workspaces');
       const keyPath = join(root, 'worker-identity.pem');
       const identity = loadOrCreateWorkerIdentity(keyPath);
       const enrollment = await runtime.enrollments.requestEnrollment({
         environmentInstanceId: INSTANCE_ID,
-        displayName: 'Pi remote read Worker',
+        displayName: 'Pi remote operation Worker',
         publicKey: workerPublicKey(identity.privateKey),
         platform: 'macos', protocolVersion: '3.0',
-        capabilityRequests: ['read-only-investigation'], engineFacts: [],
+        capabilityRequests: ['agent-run', 'read-only-investigation'], engineFacts: [],
       });
       await runtime.enrollments.approve(enrollment.enrollment.id, {
-        capabilityPermissions: { 'read-only-investigation': true },
+        capabilityPermissions: { 'agent-run': true, 'read-only-investigation': true },
       });
       await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, workerRoot);
-      stage = 'project-access';
-      stage = 'project-create';
-      await runtime.projectService.create({ id: 'pi-remote-read-project', displayName: 'Pi remote read Project' });
+      await runtime.projectService.create({ id: 'pi-remote-workspace-project', displayName: 'Pi remote workspace Project' });
       stage = 'project-membership';
-      await runtime.projectService.addMembership('pi-remote-read-project', { agentId: 'scout' });
+      await runtime.projectService.addMembership('pi-remote-workspace-project', { agentId: 'scout' });
       stage = 'workspace-grant';
       const access = await runtime.projectAccess.grant({
-        projectId: 'pi-remote-read-project', environmentInstanceId: INSTANCE_ID,
-        selection: { kind: 'relative', path: 'repos/pi-read' },
+        projectId: 'pi-remote-workspace-project', environmentInstanceId: INSTANCE_ID,
+        selection: { kind: 'relative', path: 'repos/pi-work' },
       });
       stage = 'fixture-write';
-      const hostRoot = join(root, 'host-files');
-      await mkdir(hostRoot, { recursive: true });
+      const workerProjectRoot = join(workerRoot, 'repos', 'pi-work');
+      await mkdir(join(workerProjectRoot, 'test'), { recursive: true });
       await writeFile(join(hostRoot, 'sentinel.txt'), 'LOCAL_HOST_SENTINEL');
-      await writeFile(join(workerRoot, 'repos', 'pi-read', 'sentinel.txt'), 'REMOTE_WORKER_SENTINEL');
+      await writeFile(join(workerProjectRoot, 'sentinel.txt'), 'REMOTE_WORKER_SENTINEL');
+      await writeFile(join(workerProjectRoot, 'package.json'), JSON.stringify({ type: 'module', scripts: { test: 'node --test' } }, null, 2));
+      await writeFile(join(workerProjectRoot, 'test', 'remote.test.js'), [
+        "import assert from 'node:assert/strict';",
+        "import { readFile } from 'node:fs/promises';",
+        "import { test } from 'node:test';",
+        "test('the model edit is present in the remote Project workspace', async () => {",
+        "  assert.equal(await readFile(new URL('../sentinel.txt', import.meta.url), 'utf8'), 'REMOTE_EDITED_SENTINEL');",
+        '});',
+        '',
+      ].join('\n'));
 
       stage = 'model-turn';
       const { id } = await runtime.orchestrator.submit({
-        agentId: 'scout', projectId: 'pi-remote-read-project',
-        prompt: 'You must call the remote_read tool exactly once with path sentinel.txt. Do not infer or guess its contents. Return only the exact text returned by that tool.',
+        agentId: 'scout', projectId: 'pi-remote-workspace-project',
+        prompt: 'Use the authorized remote tools in this exact order. First call remote_read once on sentinel.txt and confirm its exact text is REMOTE_WORKER_SENTINEL. Then call remote_edit once on sentinel.txt, replacing exactly REMOTE_WORKER_SENTINEL with REMOTE_EDITED_SENTINEL. Then call remote_command once with executable npm and args ["test", "--", "--test-reporter=tap"]. Do not use any other tool or infer success. Report the remote test counters only after the command passes.',
       });
       stage = 'model-turn-wait';
       const run = await runtime.orchestrator.waitFor(id);
       // turn-facts arrive on the child stdout after the terminal session event;
       // give them a beat to flush before reading the observed facts.
       await new Promise((resolve) => setTimeout(resolve, 1500));
-      const observation = resultFacts[0];
-      const accepted = run.status === 'completed' && observation?.status === 'completed' &&
-        observation.operation === 'read' && observation.contentMatched && observation.identityMatched;
+      const readObservation = resultFacts[0];
+      const editObservation = resultFacts[1];
+      const commandObservation = resultFacts[2];
+      const expectedCalls = ['remote_read', 'remote_edit', 'remote_command'];
+      const expectedTools = expectedCalls.every(name => piToolNames.filter(tool => tool === name).length === 1) && piToolNames.length === expectedCalls.length;
+      const localFileUnchanged = await readFile(join(hostRoot, 'sentinel.txt'), 'utf8') === 'LOCAL_HOST_SENTINEL';
+      const remoteFileEdited = await readFile(join(workerProjectRoot, 'sentinel.txt'), 'utf8') === 'REMOTE_EDITED_SENTINEL';
+      const lease = runtime.pool.leases().find(item => item.runId === id);
+      const finalText = run.result?.status === 'completed' ? run.result.text : '';
+      const modelReportedTestPass = /#\s*pass\s+1|tests?\s+passed|\bpass(?:ed|ing)?\b/i.test(finalText);
+      const modelFinalTextSanitized = !finalText.includes(workerRoot) && !finalText.includes(hostRoot);
+      const progressContiguous = commandObservation !== undefined && commandObservation.progressSequences.length > 0 &&
+        commandObservation.progressSequences.every((sequence, index) => sequence === index + 1);
+      const accepted = run.status === 'completed' && engineTurnStatus === 'completed' && expectedTools &&
+        resultFacts.length === 3 && readObservation?.status === 'completed' && readObservation.operation === 'read' && readObservation.resultMatched &&
+        editObservation?.status === 'completed' && editObservation.operation === 'edit' && editObservation.resultMatched &&
+        commandObservation?.status === 'completed' && commandObservation.operation === 'command' && commandObservation.resultMatched &&
+        commandObservation.identityMatched && commandObservation.outputBounded && commandObservation.outputSanitized && progressContiguous && modelReportedTestPass && modelFinalTextSanitized &&
+        localFileUnchanged && remoteFileEdited && lease?.state === 'released';
       report({
-        outcome: accepted ? 'model-issued-read-passed' : 'model-issued-read-incomplete',
+        outcome: accepted ? 'model-issued-edit-and-test-passed' : 'model-issued-edit-and-test-incomplete',
         piVersion: readiness.version ?? 'unknown',
         runStatus: run.status,
         eventTypes: run.events.map((event) => event.type),
         toolNames: piToolNames,
+        remoteOperations,
         providerRequestFacts,
         engineTurnStatus,
         engineFailure,
         turnFacts: hostSession?.turnFacts?.() ?? [],
         responseMentionsTool,
-        responseContainsMarker,
+        responseContainsEditedMarker,
         hostPiSessionStarted,
         remoteWorkspaceAttached,
         hostProfileMatched: run.engineHostProfileId === pi.profileId,
-        remoteReadCallCount: resultFacts.length,
-        remoteReadCompleted: observation?.status === 'completed',
-        remoteMarkerMatched: observation?.contentMatched ?? false,
-        bindingIdentityMatched: observation?.identityMatched ?? false,
+        operationSequence: resultFacts.map(result => result.operation),
+        readCompleted: readObservation?.status === 'completed',
+        readMarkerMatched: readObservation?.resultMatched ?? false,
+        editCompleted: editObservation?.status === 'completed',
+        editPathMatched: editObservation?.resultMatched ?? false,
+        commandCompleted: commandObservation?.status === 'completed',
+        commandFailure: commandObservation?.failure ?? 'none',
+        commandCwdClass,
+        remoteTestPassed: commandObservation?.resultMatched ?? false,
+        modelReportedTestPass,
+        modelFinalTextSanitized,
+        commandOutputBytes: commandObservation?.outputBytes ?? 0,
+        commandOutputBounded: commandObservation?.outputBounded ?? false,
+        commandOutputSanitized: commandObservation?.outputSanitized ?? false,
+        progressSequences: commandObservation?.progressSequences ?? [],
+        operationBindingsMatched: resultFacts.every(result => result.identityMatched),
+        localHostSentinelUnchanged: localFileUnchanged,
+        remoteProjectSentinelEdited: remoteFileEdited,
         exactAuthorizedModelRetained: pi.authorizedModel === model,
         verifiedProbeSelection: pi.provider === 'magpie' && pi.authorizedModel === 'codex/gpt-6.1-sol',
         workerHasNoModelEngine: (await runtime.enrollmentEnvironment.info?.(INSTANCE_ID))?.engines.length === 0,
-        leaseCount: runtime.pool.leases().length,
+        leaseState: lease?.state ?? 'missing',
         initialBindingGeneration: access.current?.generation ?? 0,
       });
       if (!accepted) process.exitCode = 1;

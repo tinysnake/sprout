@@ -284,7 +284,7 @@ class HostPiSession implements EngineSession {
       else if (operation === 'edit' && typeof input.path === 'string' && typeof input.oldText === 'string' && typeof input.newText === 'string' && tools.edit) result = await tools.edit(input.path, input.oldText, input.newText, operationId);
       else if (operation === 'patch' && typeof input.path === 'string' && Array.isArray(input.hunks) && tools.patch) result = await tools.patch(input.path, input.hunks as { before: string; after: string }[], operationId);
       else if (operation === 'command' && typeof input.executable === 'string' && Array.isArray(input.args) && tools.command) result = await tools.command(input.executable, input.args as string[], {
-        ...(typeof input.cwd === 'string' ? { cwd: input.cwd } : {}), ...(typeof input.timeoutMs === 'number' ? { timeoutMs: input.timeoutMs } : {}),
+        ...(typeof input.timeoutMs === 'number' ? { timeoutMs: input.timeoutMs } : {}),
       }, operationId ?? '', onProgress);
       else throw new Error('invalid remote operation');
     } catch {
