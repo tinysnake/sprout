@@ -83,6 +83,8 @@ function parseResponsibilities(value: unknown): readonly string[] | 'invalid' | 
   return value as readonly string[];
 }
 
+function parseMcpConfiguration(value: unknown, allowClear: false): import('../project/authority-model.ts').ProjectMcpConfiguration | undefined | 'invalid';
+function parseMcpConfiguration(value: unknown, allowClear: true): import('../project/authority-model.ts').ProjectMcpConfiguration | null | undefined | 'invalid';
 function parseMcpConfiguration(value: unknown, allowClear: boolean): import('../project/authority-model.ts').ProjectMcpConfiguration | null | undefined | 'invalid' {
   if (value === undefined) return undefined;
   if (value === null) return allowClear ? null : 'invalid';

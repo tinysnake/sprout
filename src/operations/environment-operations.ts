@@ -9,7 +9,7 @@ import type { RuntimeEnvironment, WorkerGatewayView } from '../runtime.ts';
 import type { EnvironmentCatalog } from '../environment/catalog.ts';
 import type { EnvironmentEnrollmentService } from '../environment/enrollment-service.ts';
 import type { RemoteOperationIdentityStore, RemoteOperationIdentity, RemoteOperationState } from './remote-operation-store.ts';
-import type { AttachWorkspaceBindingParams, WorkspaceFileOperationParams, InspectWorkspaceFileOperationParams, CancelWorkspaceFileOperationParams, InspectProjectMcpConfigurationParams, InspectProjectMcpConfigurationResult } from '../worker/protocol.ts';
+import type { AttachWorkspaceBindingParams, WorkspaceFileOperationParams, InspectWorkspaceFileOperationParams, CancelWorkspaceFileOperationParams, InspectProjectMcpConfigurationResult } from '../worker/protocol.ts';
 
 const MAX_SUPPORTED_READ_BYTES = 64 * 1024;
 const MAX_SUPPORTED_SEARCH_RESULTS = 100;

@@ -81,9 +81,10 @@ import {
   type WorkspaceBinding,
 } from '../project/access.ts';
 
-function safeProjectMcpConfiguration(value: ProjectMcpConfiguration): ProjectMcpConfiguration | undefined {
-  try { return sanitizeProjectMcpConfiguration(value); }
-  catch { return undefined; }
+function safeProjectMcpConfiguration(value: ProjectMcpConfiguration | undefined): { readonly mcpConfiguration?: ProjectMcpConfiguration } {
+  if (value === undefined) return {};
+  try { return { mcpConfiguration: sanitizeProjectMcpConfiguration(value) }; }
+  catch { return {}; }
 }
 
 /** Bound and redact one free-text Project field for the wire. */
@@ -1385,9 +1386,7 @@ export function toProjectAuthorityView(project: ProjectAuthority): ProjectAuthor
         rules: version.rules.map((rule) => sanitizeProjectText(rule)),
         wakePolicy: version.wakePolicy === 'wake-model-assisted' ? 'wake-model-assisted' : 'explicit-only',
         routingIntervalMs: version.routingIntervalMs,
-        ...(version.mcpConfiguration !== undefined ? {
-          mcpConfiguration: safeProjectMcpConfiguration(version.mcpConfiguration),
-        } : {}),
+        ...safeProjectMcpConfiguration(version.mcpConfiguration),
         memberships: version.memberships.map((membership) => ({
           memberId: sanitizeIdentifier(membership.memberId, { fallback: 'unknown-member', kind: 'generic' }),
           memberKind: membership.memberKind === 'human' ? 'human' : 'agent',
