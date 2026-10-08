@@ -18,6 +18,15 @@
       "timedOut": false,
       "sessionObserved": false,
       "interrupted": false,
+      "deniedOperation": [
+        "open"
+      ],
+      "pathClassMentioned": {
+        "runner": false,
+        "control": false,
+        "auth": false,
+        "executable": false
+      },
       "startupDiagnostics": {
         "unknown option": false,
         "error": false,
@@ -58,6 +67,15 @@
       "timedOut": false,
       "sessionObserved": false,
       "interrupted": false,
+      "deniedOperation": [
+        "open"
+      ],
+      "pathClassMentioned": {
+        "runner": false,
+        "control": false,
+        "auth": false,
+        "executable": false
+      },
       "startupDiagnostics": {
         "unknown option": false,
         "error": false,
@@ -98,6 +116,15 @@
       "timedOut": false,
       "sessionObserved": false,
       "interrupted": true,
+      "deniedOperation": [
+        "open"
+      ],
+      "pathClassMentioned": {
+        "runner": false,
+        "control": false,
+        "auth": false,
+        "executable": false
+      },
       "startupDiagnostics": {
         "unknown option": false,
         "error": false,
