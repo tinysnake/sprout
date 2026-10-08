@@ -87,6 +87,8 @@ try {
   rmSync(dir, { recursive: true, force: true });
 }
 
+if (process.env.SPROUT_TEST_DEBUG_TAP === '1') process.stdout.write(`${report}\n`);
+
 const lines = report.split('\n');
 const indentOf = (line: string): number => line.length - line.trimStart().length;
 
