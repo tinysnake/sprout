@@ -36,7 +36,7 @@ function report(facts: Record<string, unknown>): void {
 }
 
 async function availablePortInAssignedRange(): Promise<number> {
-  for (let port = 41010; port <= 41019; port++) {
+  for (let port = 41000; port <= 41009; port++) {
     const server = createServer();
     const available = await new Promise<boolean>((resolveProbe) => {
       server.once('error', () => resolveProbe(false));
