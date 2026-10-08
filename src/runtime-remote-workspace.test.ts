@@ -51,11 +51,6 @@ test('Host-run reads an authorized Project file through an enrolled Worker witho
       databasePath: join(directory, 'state.db'),
     }),
     projectRoot: '/synthetic/project-root',
-    environment: {
-      async adapters() { return new Map(); },
-      async contexts() { return { async prepare() { return { bootstrapInstructions: '' }; }, async recycle() {} }; },
-      async close() {},
-    },
     hostPi,
   });
 
@@ -126,11 +121,6 @@ test('composed Runtime fails an attached remote read after Worker disconnection 
       databasePath: join(directory, 'state.db'),
     }),
     projectRoot: '/synthetic/project-root',
-    environment: {
-      async adapters() { return new Map(); },
-      async contexts() { return { async prepare() { return { bootstrapInstructions: '' }; }, async recycle() {} }; },
-      async close() {},
-    },
   });
   try {
     const identity = loadOrCreateWorkerIdentity(keyPath);
@@ -179,11 +169,6 @@ test('composed Runtime blocks remote reads when the enrolled Worker lacks the fi
       databasePath: join(directory, 'state.db'),
     }),
     projectRoot: '/synthetic/project-root',
-    environment: {
-      async adapters() { return new Map(); },
-      async contexts() { return { async prepare() { return { bootstrapInstructions: '' }; }, async recycle() {} }; },
-      async close() {},
-    },
   });
   try {
     const identity = loadOrCreateWorkerIdentity(keyPath);
