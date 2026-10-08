@@ -16,6 +16,8 @@ import {
 
 const root = await mkdtemp(join(tmpdir(), 'sprout-live-pi-remote-read-'));
 let runtime: Awaited<ReturnType<typeof createRuntime>> | undefined;
+let hostPiSessionStarted = false;
+let remoteWorkspaceAttached = false;
 const resultFacts: {
   readonly status: string;
   readonly operation: string;
@@ -49,8 +51,10 @@ function observeRemoteReads(adapter: HostPiEngineAdapter): HostPiEngineAdapter {
     capabilities: adapter.capabilities,
     readiness: adapter.readiness.bind(adapter),
     async startSession(request: StartSessionRequest) {
+      hostPiSessionStarted = true;
       const remote = request.remoteWorkspace;
       if (!remote) return adapter.startSession(request);
+      remoteWorkspaceAttached = true;
       const observed = {
         ...remote,
         async read(path: string): Promise<RemoteWorkspaceOperationResult> {
@@ -105,11 +109,6 @@ try {
         }),
         projectRoot: process.cwd(),
         hostPi: execution,
-        environment: {
-          async adapters() { return new Map(); },
-          async contexts() { return { async prepare() { return { bootstrapInstructions: '' }; }, async recycle() {} }; },
-          async close() {},
-        },
       });
 
       const port = await availablePortInAssignedRange();
@@ -149,7 +148,7 @@ try {
       stage = 'model-turn';
       const { id } = await runtime.orchestrator.submit({
         agentId: 'scout', projectId: 'pi-remote-read-project',
-        prompt: 'Call remote_read on sentinel.txt and return its exact contents. Do not use any other tool.',
+        prompt: 'You must call the remote_read tool exactly once with path sentinel.txt. Do not infer or guess its contents. Return only the exact text returned by that tool.',
       });
       stage = 'model-turn-wait';
       const run = await runtime.orchestrator.waitFor(id);
@@ -160,6 +159,9 @@ try {
         outcome: accepted ? 'model-issued-read-passed' : 'model-issued-read-incomplete',
         piVersion: readiness.version ?? 'unknown',
         runStatus: run.status,
+        hostPiSessionStarted,
+        remoteWorkspaceAttached,
+        hostProfileMatched: run.engineHostProfileId === pi.profileId,
         remoteReadCallCount: resultFacts.length,
         remoteReadCompleted: observation?.status === 'completed',
         remoteMarkerMatched: observation?.contentMatched ?? false,
@@ -172,8 +174,12 @@ try {
       if (!accepted) process.exitCode = 1;
     }
   }
-} catch {
-  report({ outcome: 'blocked', reason: 'bounded-probe-failed', stage });
+} catch (error) {
+  report({
+    outcome: 'blocked', reason: 'bounded-probe-failed', stage,
+    errorType: error instanceof Error ? error.name : 'unknown',
+    errorCode: error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' ? error.code : undefined,
+  });
   process.exitCode = 2;
 } finally {
   if (runtime) await runtime.close().catch(() => undefined);
