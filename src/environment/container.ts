@@ -169,6 +169,7 @@ export function containerEnvironmentDefinition(options: {
     platform: 'container',
     capabilities: [
       { name: 'agent-run', requiresLease: true },
+      { name: 'project-mcp', requiresLease: true },
       { name: 'read-only-investigation', requiresLease: false },
     ],
   };

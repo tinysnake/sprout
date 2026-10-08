@@ -50,11 +50,9 @@ const HOST_RUN_UNAVAILABLE =
   'Host-run execution is unavailable because this host does not meet the isolated Pi conversation controls.';
 
 /** Construct the one immutable execution strategy for a Sprout process. */
-const HOST_RUN_TASK_REFUSAL = 'Task execution requires Environment-hosted mode because Tasks need an Environment workspace and lease.';
-
 export function createExecutionStrategy(mode: ExecutionMode, hostRunSupported = false): ExecutionStrategy {
   const supported = mode === 'environment-hosted' || hostRunSupported;
-  const tasksSupported = mode === 'environment-hosted';
+  const tasksSupported = supported;
   return Object.freeze({
     mode,
     admission: supported
@@ -62,7 +60,7 @@ export function createExecutionStrategy(mode: ExecutionMode, hostRunSupported = 
       : Object.freeze({ available: false, refusal: HOST_RUN_UNAVAILABLE }),
     taskAdmission: tasksSupported
       ? Object.freeze({ available: true })
-      : Object.freeze({ available: false, refusal: HOST_RUN_TASK_REFUSAL }),
+      : Object.freeze({ available: false, refusal: HOST_RUN_UNAVAILABLE }),
   });
 }
 

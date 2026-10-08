@@ -176,6 +176,29 @@ export interface RemoteWorkspaceOperationResult {
   readonly failure?: string;
 }
 
+export interface ProjectMcpToolDeclaration {
+  readonly name: string;
+  readonly description: string;
+  readonly inputSchema: Readonly<Record<string, unknown>>;
+}
+
+/** Core-authorized Project MCP bridge. Tool names map to fixed Worker origins. */
+export interface RemoteProjectMcpTools {
+  readonly binding: RemoteWorkspaceTools['binding'];
+  readonly tools: readonly ProjectMcpToolDeclaration[];
+  call(name: string, arguments_: Readonly<Record<string, unknown>>): Promise<{ readonly status: 'completed' | 'failed' | 'unsupported'; readonly text?: string; readonly reason?: string }>;
+  close(): Promise<'stopped' | 'uncertain'>;
+}
+
+export class RemoteProjectMcpStartupError extends Error {
+  readonly reason: 'missing-dependency' | 'invalid-configuration' | 'unsupported-configuration' | 'no-tools' | 'worker-refused';
+  constructor(reason: 'missing-dependency' | 'invalid-configuration' | 'unsupported-configuration' | 'no-tools' | 'worker-refused') {
+    super(`Project MCP startup failed (${reason})`);
+    this.name = 'RemoteProjectMcpStartupError';
+    this.reason = reason;
+  }
+}
+
 /** Engine-facing typed operations. Authorization and target selection live above the Engine port. */
 export interface RemoteWorkspaceTools {
   readonly binding: {
@@ -195,6 +218,8 @@ export interface RemoteWorkspaceTools {
 export interface StartSessionRequest {
   /** An opaque, core-authorized read-only Project workspace capability for Host-run tools. */
   readonly remoteWorkspace?: RemoteWorkspaceTools;
+  /** Origin-bound MCP tools backed by the containing run's active Environment lease. */
+  readonly remoteProjectMcp?: RemoteProjectMcpTools;
   /** Worker-local process environment overlay. Never serialize into instructions or files. */
   readonly sessionEnvironment?: Readonly<Record<string, string>>;
   /** Session-bound capability for the current Task group; identity and scope are Core-resolved. */

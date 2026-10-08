@@ -121,6 +121,10 @@ export class ProductionProjectService implements ProjectManagementService {
     });
   }
 
+  inspectProjectMcpConfiguration(id: string, environmentInstanceId: string) {
+    return this.#ports.access.inspectProjectMcpConfiguration(id, environmentInstanceId);
+  }
+
   archiveProject(id: string) {
     return this.#ports.projects.archiveProject(id, { reason: 'Project archived by the Human.' });
   }

@@ -6,6 +6,7 @@ import {
   sanitizeMembershipText,
   sanitizeProjectDisplayName,
   sanitizeProjectGoal,
+  sanitizeProjectMcpConfiguration,
   sanitizeProjectId,
   sanitizeProjectRules,
   sanitizeRoutingIntervalMs,
@@ -13,6 +14,7 @@ import {
   type ProjectAuthority,
   type ProjectContentVersion,
   type ProjectMembership,
+  type ProjectMcpConfiguration,
   type WakePolicy,
 } from './authority-model.ts';
 import type { ProjectAuthorityStore } from './authority-store.ts';
@@ -143,6 +145,7 @@ export interface CreateProjectInput {
   readonly rules?: readonly string[];
   readonly wakePolicy?: string;
   readonly routingIntervalMs?: number;
+  readonly mcpConfiguration?: ProjectMcpConfiguration;
   /**
    * Agent memberships to create atomically with the Project. The local
    * Human's membership is always created with it (ADR-0008).
@@ -167,6 +170,8 @@ export interface UpdateProjectContentInput {
   readonly rules?: readonly string[];
   readonly wakePolicy?: string;
   readonly routingIntervalMs?: number;
+  /** `undefined` keeps the current selection; `null` explicitly clears it. */
+  readonly mcpConfiguration?: ProjectMcpConfiguration | null;
   /** The sanitized operator reason recorded on the new version. */
   readonly reason?: string;
 }
@@ -297,6 +302,9 @@ export class ProjectService {
       routingIntervalMs: input.routingIntervalMs === undefined
         ? sanitizeRoutingIntervalMs(this.#template.routingIntervalMs)
         : sanitizeRoutingIntervalMs(input.routingIntervalMs),
+      ...(input.mcpConfiguration !== undefined
+        ? { mcpConfiguration: sanitizeProjectMcpConfiguration(input.mcpConfiguration) }
+        : {}),
       memberships,
     };
 
@@ -387,6 +395,11 @@ export class ProjectService {
     this.#assertEditable(project);
     const now = this.#clock();
     const current = currentProjectContent(project);
+    const mcpConfiguration = input.mcpConfiguration === undefined
+      ? current.mcpConfiguration
+      : input.mcpConfiguration === null
+        ? undefined
+        : sanitizeProjectMcpConfiguration(input.mcpConfiguration);
     const next: ProjectAuthority = {
       ...project,
       ...(input.displayName !== undefined ? { displayName: sanitizeProjectDisplayName(input.displayName) } : {}),
@@ -407,6 +420,7 @@ export class ProjectService {
             routingIntervalMs: input.routingIntervalMs === undefined
               ? current.routingIntervalMs
               : sanitizeRoutingIntervalMs(input.routingIntervalMs),
+            ...(mcpConfiguration !== undefined ? { mcpConfiguration } : {}),
             memberships: current.memberships,
           },
         ],
@@ -660,6 +674,7 @@ export class ProjectService {
             rules: current.rules,
             wakePolicy: overrides.wakePolicy ?? current.wakePolicy,
             routingIntervalMs: current.routingIntervalMs,
+            ...(current.mcpConfiguration !== undefined ? { mcpConfiguration: current.mcpConfiguration } : {}),
             memberships: overrides.memberships,
           },
         ],

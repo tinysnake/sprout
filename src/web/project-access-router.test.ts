@@ -113,6 +113,7 @@ async function accessApi(options: {
     auth,
     routers: [createProjectRouter({ projects, access, environmentOperations: {
       bindingReadiness: async () => options.bindingReadiness ?? [],
+      inspectMcpConfiguration: async (_projectId, environmentInstanceId) => ({ environmentInstanceId, status: 'not-selected', servers: [] }),
     } })],
   });
   const { port } = await api.listen(0);

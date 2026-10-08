@@ -34,6 +34,14 @@ import {
   type WorkerInfo,
   type WorkerReadinessProbeParams,
   type WorkerReadinessProbeResult,
+  type InspectProjectMcpConfigurationParams,
+  type InspectProjectMcpConfigurationResult,
+  type StartProjectMcpParams,
+  type StartProjectMcpResult,
+  type CallProjectMcpToolParams,
+  type CallProjectMcpToolResult,
+  type StopProjectMcpParams,
+  type StopProjectMcpResult,
 } from './protocol.ts';
 import { sanitizeEngineTurnResult, WORKER_DIAGNOSTICS } from './diagnostics.ts';
 
@@ -272,6 +280,22 @@ export class WorkerContextClient {
 
   executeWorkspaceFileOperation(input: WorkspaceFileOperationParams): Promise<import('../engine/port.ts').RemoteWorkspaceOperationResult> {
     return sanitizedRequest(this.#transport.request(WORKER_METHODS.workspaceFileOperation, input));
+  }
+
+  inspectProjectMcpConfiguration(input: InspectProjectMcpConfigurationParams): Promise<InspectProjectMcpConfigurationResult> {
+    return sanitizedRequest(this.#transport.request(WORKER_METHODS.inspectProjectMcpConfiguration, input));
+  }
+
+  startProjectMcp(input: StartProjectMcpParams): Promise<StartProjectMcpResult> {
+    return sanitizedRequest(this.#transport.request(WORKER_METHODS.startProjectMcp, input));
+  }
+
+  callProjectMcpTool(input: CallProjectMcpToolParams): Promise<CallProjectMcpToolResult> {
+    return sanitizedRequest(this.#transport.request(WORKER_METHODS.callProjectMcpTool, input));
+  }
+
+  stopProjectMcp(input: StopProjectMcpParams): Promise<StopProjectMcpResult> {
+    return sanitizedRequest(this.#transport.request(WORKER_METHODS.stopProjectMcp, input));
   }
 
   inspectWorkspaceFileOperation(input: InspectWorkspaceFileOperationParams): Promise<InspectWorkspaceFileOperationResult> {

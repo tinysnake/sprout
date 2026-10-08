@@ -103,7 +103,7 @@ import type { Task } from './task/model.ts';
 import type { TaskStore } from './task/store.ts';
 import type { WorkerInfo, WorkerReadinessProbeResult } from './worker/protocol.ts';
 import type { ValidateWorkspaceParams, ValidateWorkspaceResult } from './worker/protocol.ts';
-import type { AttachWorkspaceBindingParams, WorkspaceFileOperationParams, InspectWorkspaceFileOperationParams, CancelWorkspaceFileOperationParams, InspectWorkspaceFileOperationResult, CancelWorkspaceFileOperationResult } from './worker/protocol.ts';
+import type { AttachWorkspaceBindingParams, WorkspaceFileOperationParams, InspectWorkspaceFileOperationParams, CancelWorkspaceFileOperationParams, InspectWorkspaceFileOperationResult, CancelWorkspaceFileOperationResult, InspectProjectMcpConfigurationParams, InspectProjectMcpConfigurationResult } from './worker/protocol.ts';
 import { createAgentTaskGroupMessageSender } from './collaboration/agent-task-group.ts';
 import { createRunApi, type RunApi } from './web/api.ts';
 import { createEnvironmentRouter } from './web/environment-router.ts';
@@ -264,6 +264,12 @@ export interface RuntimeEnvironment {
   attachWorkspaceBinding?(environmentInstanceId: string, input: AttachWorkspaceBindingParams): Promise<{ readonly attached: true }>;
   /** Typed read-only Workspace operations on the already accepted Worker. */
   executeWorkspaceFileOperation?(environmentInstanceId: string, input: WorkspaceFileOperationParams): Promise<import('./engine/port.ts').RemoteWorkspaceOperationResult>;
+  /** Inspect a Project-selected MCP manifest on the Worker without returning its contents. */
+  inspectProjectMcpConfiguration?(environmentInstanceId: string, input: InspectProjectMcpConfigurationParams): Promise<InspectProjectMcpConfigurationResult>;
+  /** Start, call, and stop selected Project MCP tools only on the bound Worker. */
+  startProjectMcp?(environmentInstanceId: string, input: import('./worker/protocol.ts').StartProjectMcpParams): Promise<import('./worker/protocol.ts').StartProjectMcpResult>;
+  callProjectMcpTool?(environmentInstanceId: string, input: import('./worker/protocol.ts').CallProjectMcpToolParams): Promise<import('./worker/protocol.ts').CallProjectMcpToolResult>;
+  stopProjectMcp?(environmentInstanceId: string, input: import('./worker/protocol.ts').StopProjectMcpParams): Promise<import('./worker/protocol.ts').StopProjectMcpResult>;
   inspectWorkspaceFileOperation?(environmentInstanceId: string, input: InspectWorkspaceFileOperationParams): Promise<InspectWorkspaceFileOperationResult>;
   cancelWorkspaceFileOperation?(environmentInstanceId: string, input: CancelWorkspaceFileOperationParams): Promise<CancelWorkspaceFileOperationResult>;
   /** The authenticated Worker epoch that currently owns one instance. */
@@ -1168,6 +1174,15 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         try { return await environmentOperations.attach(projectId, agentId); }
         catch { return undefined; }
       },
+      projectMcpSelected: async (projectId) => {
+        const project = await projectService.get(projectId);
+        const content = project?.content.versions.find(version => version.version === project.content.currentVersion);
+        return project?.status === 'active' && content?.mcpConfiguration?.format === 'claude-code-mcp-json-v1';
+      },
+      remoteProjectMcp: (projectId, agentId, scope) => {
+        if (!environmentOperations) throw new Error('Project MCP operations are unavailable');
+        return environmentOperations.attachProjectMcpTools(projectId, agentId, scope);
+      },
       ...(hostPi !== undefined ? { hostPi } : {}),
       executionPlacementForEnvironment,
       agents,
@@ -1500,6 +1515,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           definitions: [configuredDefinition],
           instances: [configuredInstance],
           eligibleInstanceIds: [configuredInstance.id],
+          capabilityEligibleInstanceIds: {
+            'project-mcp': configuredDefinition.capabilities.some(capability => capability.name === 'project-mcp') ? [configuredInstance.id] : [],
+          },
         });
         void noteRunReconnectRetry(acceptedInstanceId).catch(() => {
           process.stderr.write(
@@ -1512,6 +1530,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         definitions: environmentCatalog.entries().map((entry) => entry.definition),
         instances: environmentCatalog.entries().map((entry) => entry.instance),
         eligibleInstanceIds: environmentCatalog.eligibleInstanceIds(),
+        capabilityEligibleInstanceIds: {
+          'project-mcp': environmentCatalog.projectMcpEligibleInstanceIds(),
+          ...(executionStrategy.mode === 'host-run' ? { 'agent-run': environmentCatalog.hostRunTaskEligibleInstanceIds() } : {}),
+        },
       });
       void noteRunReconnectRetry(acceptedInstanceId).catch(() => {
         process.stderr.write(
@@ -1603,7 +1625,11 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       gateway: workerGateway,
       catalog: environmentCatalog,
       enrollments,
+      pool,
       store: durableStores.remoteWorkspaceOperations ?? new MemoryRemoteOperationIdentityStore(),
+      onUncertainMcp: async (scope) => {
+        await recovery.open({ leaseId: scope.leaseId, cause: 'cleanup-failed', hadActiveRun: true, runId: scope.runId });
+      },
     });
     switchableEnvironment?.setTarget(enrollmentEnvironment);
     /**
@@ -1629,6 +1655,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     const channelLosses = new Map<string, Promise<void>>();
     workerGateway.onAccept((acceptance) => {
       readinessWorkflow.reserveAccepted(acceptance);
+      void environmentOperations.reconcileProjectMcpProcesses(acceptance.enrollment.environmentInstanceId).catch(() => undefined);
       // Invalidate an in-flight source snapshot before publishing the accepted
       // epoch synchronously, then schedule the store-backed refresh that may
       // replace this projection. The bump above aborts any refresh already in
@@ -2459,6 +2486,12 @@ class EnrollmentEnvironmentDelegate implements RuntimeEnvironment {
     const target = this.#require();
     if (target.attachWorkspaceBinding === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
     return target.attachWorkspaceBinding(environmentInstanceId, input);
+  }
+
+  inspectProjectMcpConfiguration(environmentInstanceId: string, input: import('./worker/protocol.ts').InspectProjectMcpConfigurationParams) {
+    const target = this.#require();
+    if (target.inspectProjectMcpConfiguration === undefined) return Promise.reject(new Error('remote Project MCP inspection is unavailable'));
+    return target.inspectProjectMcpConfiguration(environmentInstanceId, input);
   }
 
   executeWorkspaceFileOperation(environmentInstanceId: string, input: import('./worker/protocol.ts').WorkspaceFileOperationParams) {

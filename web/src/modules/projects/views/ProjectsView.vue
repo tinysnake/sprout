@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import type { ProjectAuthorityView, ProjectEnvironmentAccessView, ProjectEnvironmentCreationInput, ProjectMembershipView, WorkspaceSelectionInput } from '../../../adapters/project-api.js';
+import type { ProjectAuthorityView, ProjectEnvironmentAccessView, ProjectEnvironmentCreationInput, ProjectMembershipView, ProjectMcpInspectionView, WorkspaceSelectionInput } from '../../../adapters/project-api.js';
 import { BrowserRequestError } from '../../../transport/browser-transport.js';
 import { useAnnouncer } from '../../../primitives/announcer.js';
 import { useShellConnection } from '../../../shell/use-shell-connection.js';
@@ -56,6 +56,8 @@ const projectName = ref('');
 const projectGoal = ref('');
 const projectRules = ref('');
 const projectCompletionGuidance = ref('');
+const mcpConfigurationEnabled = ref(false);
+const mcpInspections = ref<Record<string, ProjectMcpInspectionView>>({});
 const wakePolicy = ref('explicit-only');
 const routingIntervalSeconds = ref(30);
 const selectedCreateAgentIds = ref<string[]>([]);
@@ -167,6 +169,7 @@ async function loadSelected(id: string, generation = loadGeneration) {
     const snapshot = await currentService.loadOverview(id);
     if (generation !== loadGeneration || id !== selectedProjectId.value) return;
     overview.value = snapshot;
+    mcpInspections.value = {};
   } catch {
     if (generation !== loadGeneration) return;
     overview.value = undefined;
@@ -294,6 +297,7 @@ function openDialog(kind: DialogKind, memberId = '', environmentId = '') {
     projectGoal.value = '';
     projectRules.value = '';
     projectCompletionGuidance.value = '';
+    mcpConfigurationEnabled.value = false;
     wakePolicy.value = 'explicit-only';
     routingIntervalSeconds.value = 30;
     selectedCreateAgentIds.value = [];
@@ -305,6 +309,7 @@ function openDialog(kind: DialogKind, memberId = '', environmentId = '') {
     projectGoal.value = content.goal;
     projectRules.value = content.rules.join('\n');
     projectCompletionGuidance.value = content.completionGuidance;
+    mcpConfigurationEnabled.value = content.mcpConfiguration !== undefined;
     wakePolicy.value = content.wakePolicy;
     routingIntervalSeconds.value = content.routingIntervalMs / 1000;
   } else if (kind === 'add-member') {
@@ -322,6 +327,41 @@ function openDialog(kind: DialogKind, memberId = '', environmentId = '') {
     workspacePath.value = selectedAccess?.current?.path ?? '';
   }
   dialog.value = kind;
+}
+
+function mcpInspectionDetail(inspection: ProjectMcpInspectionView): string {
+  switch (inspection.status) {
+    case 'not-selected': return 'Select the supported Project MCP format before inspection.';
+    case 'missing': return 'Add a .mcp.json file to the bound Project workspace.';
+    case 'invalid': return 'Check the .mcp.json syntax and workspace file permissions, then inspect again.';
+    case 'unsupported': return 'Use mcpServers with stdio entries containing command and optional args or env fields.';
+    case 'valid': return `Configuration syntax is valid${inspection.servers.length ? `; ${inspection.servers.length} stdio server${inspection.servers.length === 1 ? '' : 's'} declared` : '; no servers declared'}. Server dependencies and tool availability are checked only during an authorized run; readiness has not been observed yet.`;
+    case 'blocked':
+      switch (inspection.reason) {
+        case 'worker-offline': return 'Reconnect the approved Environment Worker, then inspect again.';
+        case 'stale-epoch': return 'The Worker connection changed. Retry inspection against the current connection.';
+        case 'capability-denied': return 'Approve the required remote workspace capability for this Worker.';
+        case 'workspace-unbound': return 'Bind an authorized Project workspace to this Environment.';
+        case 'access-ended': return 'Restore active Project access to this Environment before inspecting.';
+        case 'project-denied': return 'Confirm this Project is active and the Agent has Project membership.';
+        case 'lease-required': return 'An active Environment lease is required for this operation.';
+        case 'unsupported': return 'Update the Environment Worker to a version that supports Project MCP inspection.';
+        default: return 'The Worker refused inspection. Check approval, capability permission, and the workspace binding.';
+      }
+  }
+}
+
+async function inspectMcpConfiguration(environmentInstanceId: string) {
+  const projectId = currentProject.value?.id;
+  const currentService = service.value;
+  if (!projectId || !currentService || !currentContent.value?.mcpConfiguration) return;
+  actionError.value = '';
+  try {
+    const result = await currentService.inspectProjectMcpConfiguration(projectId, environmentInstanceId);
+    if (selectedProjectId.value === projectId) mcpInspections.value = { ...mcpInspections.value, [environmentInstanceId]: result };
+  } catch {
+    actionError.value = 'The selected Project MCP configuration could not be inspected. No configuration contents were returned.';
+  }
 }
 
 async function openAddEnvironmentDialog() {
@@ -405,6 +445,7 @@ async function submitProject() {
         rules,
         wakePolicy: wakePolicy.value,
         routingIntervalMs: intervalMs,
+        ...(mcpConfigurationEnabled.value ? { mcpConfiguration: { format: 'claude-code-mcp-json-v1' as const } } : {}),
         agentMemberships: selectedCreateAgentIds.value.map((agentId) => ({ agentId })),
         environmentAssignments,
       }));
@@ -428,6 +469,7 @@ async function submitProject() {
     rules: parseRules(projectRules.value),
     wakePolicy: wakePolicy.value,
     routingIntervalMs: intervalMs,
+    mcpConfiguration: mcpConfigurationEnabled.value ? { format: 'claude-code-mcp-json-v1' } : null,
   }), 'Project identity and contract updated as a new version.');
   if (saved) dialog.value = null;
 }
@@ -575,6 +617,8 @@ const addMemberExhausted = computed(() => dialog.value === 'add-member' && unass
                   <h3 class="text-[10px] font-bold uppercase tracking-wider text-[var(--text-muted)]">Wake Routing Policy</h3>
                   <p class="mt-1 text-xs text-[var(--text-primary)]">{{ currentContent.wakePolicy === 'wake-model-assisted' ? `Wake-model-assisted · ${Math.round(currentContent.routingIntervalMs / 1000)}s bounded window` : 'Explicit-only · no model evaluation for unaddressed messages' }}</p>
                   <p class="mt-1 text-[10px] text-[var(--text-muted)]">Policy changes affect future incoming messages only.</p>
+                  <p class="mt-2 text-xs text-[var(--text-primary)]">Project MCP configuration · {{ currentContent.mcpConfiguration ? 'Human-selected .mcp.json format' : 'not selected' }}</p>
+                  <p class="mt-1 text-[10px] text-[var(--text-muted)]">Only the selected format is inspected on an authorized Environment Worker; repository files alone grant no authority.</p>
                 </div>
                 <div class="flex flex-wrap gap-2">
                   <Button v-if="!projectArchived" variant="secondary" size="sm" class="min-h-[44px]" :disabled="controlsDisabled" @click="openDialog('edit')">Change wake policy</Button>
@@ -627,6 +671,13 @@ const addMemberExhausted = computed(() => dialog.value === 'add-member' && unass
                     <div class="flex flex-wrap items-center gap-1.5"><Icon name="environments" :size="14" class="text-[var(--accent-primary)]" /><strong class="break-words text-xs text-[var(--text-primary)]">{{ environmentFor(entry.environmentInstanceId)?.displayName ?? UNKNOWN_ENVIRONMENT_LABEL }}</strong><Badge :variant="entry.status === 'active' ? environmentNoticeVariant(entry.environmentInstanceId) : 'secondary'">{{ entry.status === 'active' ? environmentFor(entry.environmentInstanceId)?.trafficLightReason ?? 'Active access' : 'Access ended' }}</Badge></div>
                     <p class="mt-1 break-all font-mono text-[11px] text-[var(--text-secondary)]">{{ entry.current ? entry.current.kind === 'relative' ? entry.current.path : 'Worker-managed default workspace' : 'No current workspace binding' }}</p>
                     <p class="mt-1 text-[10px] text-[var(--text-muted)]">{{ environmentFor(entry.environmentInstanceId)?.platform ?? 'Environment status unavailable' }} · Workspace files stay on the Environment host.</p>
+                    <div v-if="currentContent.mcpConfiguration && entry.status === 'active'" class="mt-2 border-t border-[var(--border-subtle)] pt-2">
+                      <Button variant="secondary" size="sm" class="min-h-[40px]" :disabled="controlsDisabled" @click="inspectMcpConfiguration(entry.environmentInstanceId)">Inspect selected MCP configuration</Button>
+                      <p v-if="mcpInspections[entry.environmentInstanceId]" class="mt-1 text-[10px] text-[var(--text-secondary)]" :data-mcp-inspection="mcpInspections[entry.environmentInstanceId]?.status">
+                        {{ mcpInspectionDetail(mcpInspections[entry.environmentInstanceId]!) }}
+                        <span v-if="mcpInspections[entry.environmentInstanceId]?.servers.length"> · {{ mcpInspections[entry.environmentInstanceId]?.servers.map(server => server.name).join(', ') }}</span>
+                      </p>
+                    </div>
                     <p class="mt-1 text-[10px]" :data-binding-readiness="bindingReadinessFor(entry)?.status ?? 'unknown'" :class="bindingReadinessFor(entry)?.status === 'ready' ? 'text-[var(--green-ready)]' : 'text-[var(--yellow-attention)]'">Remote workspace {{ bindingReadinessFor(entry)?.status === 'ready' ? 'ready' : bindingReadinessFor(entry)?.status === 'blocked' ? `blocked · ${bindingReadinessReason(entry)}` : 'readiness not observed' }} · independent of engine readiness</p>
                   </div>
                   <div v-if="entry.status === 'active' && !projectArchived" class="flex shrink-0 flex-wrap gap-1">
@@ -656,6 +707,10 @@ const addMemberExhausted = computed(() => dialog.value === 'add-member' && unass
         <label class="flex flex-col gap-1 font-semibold">Wake Routing Policy<select v-model="wakePolicy" class="project-wake-policy min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-[var(--text-primary)]"><option value="explicit-only">Explicit-only</option><option value="wake-model-assisted">Wake-model-assisted</option></select></label>
         <label class="flex flex-col gap-1 font-semibold">Routing Interval (seconds)<input v-model.number="routingIntervalSeconds" type="number" min="1" max="3600" step="0.1" class="project-routing-interval-input min-h-[44px] rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] px-3 text-[var(--text-primary)]" /><span class="font-normal text-[var(--text-muted)]">Used as the bounded wake window when wake-model-assisted routing is selected.</span></label>
         <label v-if="dialog === 'edit'" class="flex flex-col gap-1 font-semibold">Completion Guidance<textarea v-model="projectCompletionGuidance" rows="3" class="project-completion-guidance-input rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-[var(--text-primary)]" /></label>
+        <label class="flex min-h-[44px] items-start gap-2 rounded border border-[var(--border-subtle)] p-3 font-semibold">
+          <input v-model="mcpConfigurationEnabled" type="checkbox" class="mt-0.5 min-h-5 min-w-5" />
+          <span>Select Project stdio MCP configuration <span class="mt-1 block font-normal text-[var(--text-muted)]">Use the supported format from the bound workspace root’s .mcp.json. The Worker returns sanitized server names only; repository files alone grant no authority.</span></span>
+        </label>
         <fieldset v-if="dialog === 'create'" class="rounded border border-[var(--border-subtle)] p-3">
           <legend class="px-1 font-bold">Project Agents</legend>
           <p v-if="isLoadingCreationOptions" class="py-2 text-[var(--text-muted)]" aria-busy="true">Loading active Agents…</p>

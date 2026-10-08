@@ -17,7 +17,7 @@ import {
   type EngineTurnResult,
   type StartSessionRequest,
   type RemoteWorkspaceTools,
-  type RemoteWorkspaceOperationResult,
+  type RemoteProjectMcpTools,
 } from './port.ts';
 
 const PI_VERSION = '1.0.4';
@@ -77,6 +77,7 @@ export interface HostPiLaunchInput extends HostPiProbeInput {
   readonly effort: string;
   readonly instructions?: string;
   readonly remoteWorkspace?: RemoteWorkspaceTools;
+  readonly remoteProjectMcp?: RemoteProjectMcpTools;
 }
 
 export function hostEngineProfileId(runnerRoot: string): string {
@@ -187,6 +188,7 @@ export class HostPiEngineAdapter implements EngineAdapter {
         effort: request.effort ?? 'medium',
         ...(request.instructions !== undefined ? { instructions: request.instructions } : {}),
         ...(request.remoteWorkspace !== undefined ? { remoteWorkspace: request.remoteWorkspace } : {}),
+      ...(request.remoteProjectMcp !== undefined ? { remoteProjectMcp: request.remoteProjectMcp } : {}),
       };
       child = (this.#options.spawnProcess ?? spawnHostPi)(input);
       return await waitForReady(child, input, this.#options.clock ?? Date.now);
@@ -203,6 +205,7 @@ class HostPiSession implements EngineSession {
   readonly #child: ChildProcess;
   readonly #clock: () => number;
   readonly #remoteWorkspace: RemoteWorkspaceTools | undefined;
+  readonly #remoteProjectMcp: RemoteProjectMcpTools | undefined;
   readonly #turnFacts: Record<string, unknown>[] = [];
   #turnState = newPiTurnState();
   #queue: EventQueue | undefined;
@@ -210,12 +213,13 @@ class HostPiSession implements EngineSession {
   #closed = false;
   #buffer = '';
 
-  constructor(child: ChildProcess, sessionId: string, clock: () => number, remoteWorkspace?: RemoteWorkspaceTools) {
+  constructor(child: ChildProcess, sessionId: string, clock: () => number, remoteWorkspace?: RemoteWorkspaceTools, remoteProjectMcp?: RemoteProjectMcpTools) {
     this.#child = child;
     this.sessionId = sessionId;
     this.engineSessionKey = sessionId;
     this.#clock = clock;
     this.#remoteWorkspace = remoteWorkspace;
+    this.#remoteProjectMcp = remoteProjectMcp;
     child.stdout?.on('data', chunk => this.#onData(chunk.toString()));
     child.stderr?.on('data', () => undefined);
     child.on('exit', () => {
@@ -272,16 +276,15 @@ class HostPiSession implements EngineSession {
   async #remoteCall(callId: string, operation: unknown, args: unknown): Promise<void> {
     const tools = this.#remoteWorkspace;
     const input = typeof args === 'object' && args !== null ? args as Record<string, unknown> : {};
-    let result: RemoteWorkspaceOperationResult;
+    let result: unknown;
     try {
-      if (!tools) throw new Error('remote workspace is unavailable');
-      if (operation === 'read' && typeof input.path === 'string') result = await tools.read(input.path);
-      else if (operation === 'search' && typeof input.query === 'string') result = await tools.search(input.query, typeof input.path === 'string' ? input.path : undefined);
-      else throw new Error('invalid remote operation');
+      if (operation === 'read' && tools && typeof input.path === 'string') result = await tools.read(input.path);
+      else if (operation === 'search' && tools && typeof input.query === 'string') result = await tools.search(input.query, typeof input.path === 'string' ? input.path : undefined);
+      else if (operation === 'mcp' && this.#remoteProjectMcp && typeof input.name === 'string' && typeof input.arguments === 'object' && input.arguments !== null && !Array.isArray(input.arguments)) {
+        result = await this.#remoteProjectMcp.call(input.name, input.arguments as Record<string, unknown>);
+      } else throw new Error('invalid remote operation');
     } catch {
-      result = { operationId: 'unavailable', projectId: tools?.binding.projectId ?? '', environmentInstanceId: tools?.binding.environmentInstanceId ?? '',
-        bindingId: tools?.binding.bindingId ?? '', generation: tools?.binding.generation ?? 0, connectionEpoch: tools?.binding.connectionEpoch ?? 0,
-        workspaceId: tools?.binding.workspaceId ?? '', operation: operation === 'search' ? 'search' : 'read', status: 'failed', failure: 'remote-operation-blocked' };
+      result = { status: 'failed', reason: 'remote-operation-blocked' };
     }
     this.#child.stdin?.write(`${JSON.stringify({ op: 'remote-result', callId, result })}\n`);
   }
@@ -359,7 +362,7 @@ async function waitForReady(child: ChildProcess, input: HostPiLaunchInput, clock
         if (message.kind === 'ready' && message.sessionId === input.sessionId) {
           settled = true;
           clearTimeout(timer);
-          resolve(new HostPiSession(child, input.sessionId, clock, input.remoteWorkspace));
+          resolve(new HostPiSession(child, input.sessionId, clock, input.remoteWorkspace, input.remoteProjectMcp));
         } else if (message.kind === 'failure') {
           const stage = FAILURE_STAGES.has(String(message.stage)) ? String(message.stage) : 'runner';
           const code = FAILURE_CODES.has(String(message.code)) ? String(message.code) : 'other';

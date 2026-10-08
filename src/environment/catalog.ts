@@ -125,6 +125,10 @@ export interface EnvironmentCatalogEntry {
   readonly readiness: AssembledReadiness;
   readonly currentEpoch: number | undefined;
   readonly eligible: boolean;
+  /** May supervise Project MCP under its separate explicit permission and lease. */
+  readonly projectMcpEligible: boolean;
+  /** May host a Task context for a Host-run Pi execution without Worker model-engine readiness. */
+  readonly hostRunTaskEligible: boolean;
 }
 
 /** The platform-specific definition id an enrolled instance declares. */
@@ -150,6 +154,7 @@ export function enrolledEnvironmentDefinition(platform: EnvironmentPlatform): En
     platform,
     capabilities: [
       { name: 'agent-run', requiresLease: true },
+      { name: 'project-mcp', requiresLease: true },
       { name: 'read-only-investigation', requiresLease: false },
     ],
   };
@@ -261,6 +266,12 @@ export function projectCatalogEntry(input: EnvironmentCatalogInput): Environment
     connectionReady &&
     protocolCompatible &&
     requiredReadinessEstablished;
+  const projectMcpEligible = enrollment.status === 'approved' && platform !== 'unknown' &&
+    enrollment.capabilityPermissions['project-mcp'] === true && input.currentEpoch !== undefined &&
+    workSafety !== 'recovery' && workSafety !== 'reconciling';
+  const hostRunTaskEligible = enrollment.status === 'approved' && platform !== 'unknown' &&
+    enrollment.capabilityPermissions['agent-run'] === true && input.currentEpoch !== undefined &&
+    workSafety !== 'recovery' && workSafety !== 'reconciling';
   return {
     instanceId: enrollment.environmentInstanceId,
     enrollmentId: enrollment.id,
@@ -275,6 +286,8 @@ export function projectCatalogEntry(input: EnvironmentCatalogInput): Environment
     readiness,
     currentEpoch: input.currentEpoch,
     eligible,
+    projectMcpEligible,
+    hostRunTaskEligible,
   };
 }
 
@@ -438,6 +451,16 @@ export class EnvironmentCatalog {
   /** Every catalog instance id, eligible or not, for inspection. */
   instanceIds(): readonly string[] {
     return [...this.#entries.keys()];
+  }
+
+  /** Eligible Worker instances for Host-run Tasks whose separate local Pi profile owns inference. */
+  hostRunTaskEligibleInstanceIds(): readonly string[] {
+    return this.entries().filter(entry => entry.hostRunTaskEligible).map(entry => entry.instanceId);
+  }
+
+  /** The eligible instance ids whose explicit Project MCP grant can acquire a lease without model-engine readiness. */
+  projectMcpEligibleInstanceIds(): readonly string[] {
+    return this.entries().filter(entry => entry.projectMcpEligible).map(entry => entry.instanceId);
   }
 
   /** The eligible instance ids, in deterministic order. */

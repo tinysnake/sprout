@@ -18,6 +18,24 @@ import type { BrowserTransport, BrowserTransportState } from '../transport/brows
  * and the adapter never accepts one as input.
  */
 
+export interface ProjectMcpConfigurationSelection {
+  readonly format: 'claude-code-mcp-json-v1';
+}
+
+export interface ProjectMcpServerDescriptor {
+  readonly name: string;
+  readonly transport: 'stdio';
+}
+
+export interface ProjectMcpInspectionView {
+  readonly environmentInstanceId: string;
+  readonly bindingId?: string;
+  readonly generation?: number;
+  readonly status: 'not-selected' | 'blocked' | 'valid' | 'missing' | 'invalid' | 'unsupported';
+  readonly reason?: string;
+  readonly servers: readonly ProjectMcpServerDescriptor[];
+}
+
 export interface ProjectMembershipView {
   readonly memberId: string;
   readonly memberKind: string;
@@ -37,6 +55,7 @@ export interface ProjectContentVersionView {
   readonly rules: readonly string[];
   readonly wakePolicy: string;
   readonly routingIntervalMs: number;
+  readonly mcpConfiguration?: ProjectMcpConfigurationSelection;
   readonly memberships: readonly ProjectMembershipView[];
 }
 
@@ -101,6 +120,7 @@ export interface ProjectBrowserAdapter {
     readonly rules?: readonly string[];
     readonly wakePolicy?: string;
     readonly routingIntervalMs?: number;
+    readonly mcpConfiguration?: ProjectMcpConfigurationSelection;
     readonly agentMemberships?: readonly AgentMembershipInput[];
     readonly environmentAssignments?: readonly ProjectEnvironmentCreationInput[];
     readonly reason?: string;
@@ -114,6 +134,7 @@ export interface ProjectBrowserAdapter {
     readonly rules?: readonly string[];
     readonly wakePolicy?: string;
     readonly routingIntervalMs?: number;
+    readonly mcpConfiguration?: ProjectMcpConfigurationSelection | null;
     readonly reason?: string;
   }): Promise<ProjectAuthorityView>;
   /** Update one active Agent membership as a new content version. */
@@ -272,6 +293,8 @@ export interface ProjectAccessBrowserAdapter {
     environmentInstanceId: string,
     input: { readonly workspace: WorkspaceSelectionInput; readonly reason?: string },
   ): Promise<ProjectEnvironmentAccessView>;
+  /** Inspect the selected configuration on one authorized Environment Worker. */
+  inspectProjectMcpConfiguration(projectId: string, environmentInstanceId: string): Promise<ProjectMcpInspectionView>;
   /** End access non-destructively. */
   endProjectAccess(
     projectId: string,
@@ -309,6 +332,12 @@ export function createProjectAccessBrowserAdapter(
         jsonCommand(input),
       );
       return response.access;
+    },
+    async inspectProjectMcpConfiguration(projectId, environmentInstanceId) {
+      const response = await transport.request<{ readonly inspection: ProjectMcpInspectionView }>(
+        `/api/projects/${encodeURIComponent(projectId)}/access/${encodeURIComponent(environmentInstanceId)}/mcp-configuration`,
+      );
+      return response.inspection;
     },
     async endProjectAccess(projectId, environmentInstanceId, input) {
       const response = await transport.request<{ readonly access: ProjectEnvironmentAccessView }>(
