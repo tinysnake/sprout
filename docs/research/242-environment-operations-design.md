@@ -1,0 +1,43 @@
+# Ticket #242: Environment operations design
+
+Status: implementation plan for #242. This note records the chosen interface and acceptance mapping; it is not implementation or production evidence.
+
+## Existing seam and decisions
+
+#241 added `EnvironmentOperations` as the shared authority and routing module for typed Project workspace reads. It validates Project membership, current Project access, Worker enrollment and permission, binding generation, and connection epoch, then calls the enrolled Worker. The Worker owns path containment and file access. Host Pi receives only the `remote_read` and `remote_search` tools; its local built-in tools are excluded.
+
+The current read route is deliberately lease-free under `read-only-investigation`. Its binding selection sorts active Project bindings and takes the first usable one. Mutating work cannot reuse that selection behavior after a conflict: one remote Environment and binding must be fixed for the run, and conflict or loss must stop the operation without trying another target. The current operation identity store is durable in Core, but Worker execution state is in memory; the Worker RPC returns one result envelope, and an accepted cancel currently does not prove termination. Those are the principal gaps.
+
+Keep one deep `EnvironmentOperations` module behind the Runtime and Worker seams. Host Pi gets a small set of typed callbacks; it does not select an Environment, acquire/release leases, retry operations, or call a local shell. The module owns current authority checks, pinned operation identity, idempotency, inspection, cancellation requests, and bounded result validation. The Worker owns file and process execution, descendant supervision, and its durable operation journal. Runtime's existing run orchestration remains responsible for the run lifecycle and run-held lease facts.
+
+A mutating operation acquires the run-held lease lazily, immediately before its first side effect. This preserves lease-free conversation and read-only investigation. The lease is tied to the admitted run and the already pinned Environment. A conflict reports its holder and whether recovery is required; it never triggers a search for another Environment. The lease remains held across the whole run's coherent sequence and is extended while the run remains active. If it cannot be extended, refuse new operations and move it to recovery. Normal release follows confirmed operation settlement and successful cleanup of the temporary Run context. Unknown remote settlement marks the lease recovering and preserves that context.
+
+The Worker creates a temporary Run context separately from the persistent Project workspace. Mutations apply to the authorized Project workspace; temporary command and patch staging data belongs in the Run context. Recycle only the Run context after all remote work is known settled. A possibly live process keeps both the context and lease protected. The Project workspace is never recycled by run cleanup.
+
+The existing `remote_workspace_operations` identity store will become the Core-side durable record for typed reads, edits, patches, commands, inspections, and cancellation requests. The Worker also needs durable deduplication by operation identity and payload fingerprint so a response loss or Worker restart cannot turn a retry into a second mutation. Forward Pi's SDK tool-call identity through the runner (replacing its current process-local sequence) and combine it with the durable run identity and pinned binding; reject reuse with a different payload. A response loss returns an inspectable unknown outcome and never triggers automatic replay.
+
+Command output travels as bounded, sequenced progress and a bounded final result over the authenticated Worker connection. The current request/response-only operation RPC needs an operation-scoped progress path. Cancellation is persisted as a request; `accepted` is not a terminal result. Worker-observed process and descendant termination establishes settlement. If termination cannot be established, report recovery-required and keep the lease. A Host Pi process exit alone is not evidence that a remote command stopped.
+
+## Acceptance mapping
+
+1. **Remote-only edit, patch, and command.** Add typed operations to the Worker protocol and Host Pi tool catalog. The Worker resolves every file path within the pinned Project workspace, rejects traversal and host-absolute paths, applies edits/patches on the Worker, and runs bounded commands there. Tests use same-name Sprout-host and Worker sentinels: the local sentinel must be unreadable and unchanged, while the remote Project contains the requested change and command result.
+
+2. **Run-held lease and fixed target.** Pin one authorized Project binding and Worker epoch for the run. Acquire its `agent-run` lease immediately before the first mutation; reuse it for subsequent operations and release only after every operation has settled and Run context cleanup succeeds. Surface holder/recovery conflicts and never substitute another Environment. Exercise contention with a second run.
+
+3. **Durable identity and inspection.** Persist the Core operation identity and fingerprint before sending the Worker request. Persist Worker deduplication and outcome state across Worker restart. `inspect(operationId)` returns the authoritative known result or an explicit unknown/not-found outcome. Same identity with a different fingerprint is refused; an uncertain mutation is inspected, never replayed.
+
+4. **Bounded streaming and cancellation.** Stream bounded output chunks with monotonically increasing sequence numbers and enforce total byte, duration, and result limits. Persist cancellation requests separately from settlement. Inspect after cancellation; if descendants or process state are unknown, return recovery-required and protect the lease and Run context. Worker/host process loss never fabricates remote-stop proof.
+
+5. **Authority and lifecycle refusals.** Before each operation, recheck active Project membership/access, the exact binding generation, approved enrollment and capability permission, and the pinned current connection epoch. Transport loss, revocation, epoch change, or timeout refuses new operations with no Sprout-host shell and no alternate Environment. Recycle Run context separately from the persistent Project workspace, and retain it with a recovering lease when settlement is uncertain.
+
+6. **Chat interruption and projections.** Preserve the existing Human-only Chat interrupt authority and run outcome. Interruption may request Worker cancellation, but it does not claim lease release until Worker settlement and context cleanup are proven. Project/Chat projections show operation status and a held or recovering lease separately from the interrupted run; outputs and diagnostics stay bounded and sanitized.
+
+7. **Runtime/Worker evidence and Pi journey.** Add Runtime and Worker tests for lease contention, patch origin, command streaming, response loss, cancellation uncertainty, revocation/epoch refusal, and cleanup ordering. Extend the bounded Pi probe to make a real edit or patch and run a remote Project test command, with same-name host sentinels. Report scripted fixture, protocol, and model-issued evidence separately. A local Worker fixture is not evidence of an enrolled remote deployment.
+
+## Documentation and evidence to update
+
+Update the domain glossary for the temporary Run context and remote operation outcomes; amend the lease and enrollment/epoch decisions only where implementation extends them; update Chat/Run projections touched by operation and recovery status. Preserve ADR-0005's rule that incomplete work is not reassigned, ADR-0006 Human authority for interruption/recovery, and ADR-0012's rule that a replacement Worker epoch does not prove the prior Worker stopped. Preserve ADR-0013's separation of readiness from real model-issued work.
+
+#241's final review accepted the real Pi-issued remote read and required fixed allowlists for error classifications after finding that arbitrary provider error codes could leak into diagnostics. Keep that sanitization discipline for command failures; never record raw command logs as operational diagnostics. The #241 probe is model-issued against a local Worker fixture, not an enrolled remote deployment.
+
+Reference check before implementation: `docs/references.md` names AionUi as the engine process/streaming reference and Paperclip as the Project workspace versus temporary execution-area reference. The existing Worker and Environment lease seams take precedence where those designs differ; no reference code is assumed copied.
