@@ -110,3 +110,49 @@ test('Host-run reads an authorized Project file through an enrolled Worker witho
     await runtime.close();
   }
 });
+
+test('composed Runtime blocks remote reads when the enrolled Worker lacks the file capability permission', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-remote-denied-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const keyPath = join(directory, 'worker-key.pem');
+  const runtime = await createRuntime({
+    configuration: hostConfiguration({
+      executionMode: 'host-run', environmentSource: 'enrollment',
+      databasePath: join(directory, 'state.db'),
+    }),
+    projectRoot: '/synthetic/project-root',
+    environment: {
+      async adapters() { return new Map(); },
+      async contexts() { return { async prepare() { return { bootstrapInstructions: '' }; }, async recycle() {} }; },
+      async close() {},
+    },
+  });
+  try {
+    const identity = loadOrCreateWorkerIdentity(keyPath);
+    const enrollment = await runtime.enrollments.requestEnrollment({
+      environmentInstanceId: INSTANCE_ID, displayName: 'Denied file Worker',
+      publicKey: workerPublicKey(identity.privateKey), platform: 'macos', protocolVersion: '3.0',
+      capabilityRequests: ['read-only-investigation'], engineFacts: [],
+    });
+    await runtime.enrollments.approve(enrollment.enrollment.id, {
+      capabilityPermissions: { 'read-only-investigation': false },
+    });
+    await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, join(directory, 'worker-workspaces'));
+    await runtime.projectService.create({ id: 'denied-read-project', displayName: 'Denied read Project' });
+    await runtime.projectService.addMembership('denied-read-project', { agentId: 'scout' });
+    await runtime.projectAccess.grant({
+      projectId: 'denied-read-project', environmentInstanceId: INSTANCE_ID,
+      selection: { kind: 'relative', path: 'repos/denied' },
+    });
+
+    const readiness = await runtime.environmentOperations.bindingReadiness('denied-read-project');
+    assert.equal(readiness[0]?.status, 'blocked');
+    assert.equal(readiness[0]?.reason, 'capability-denied');
+    await assert.rejects(
+      runtime.environmentOperations.attach('denied-read-project', 'scout'),
+      (error: unknown) => error instanceof Error && 'reason' in error && error.reason === 'capability-denied',
+    );
+  } finally {
+    await runtime.close();
+  }
+});
