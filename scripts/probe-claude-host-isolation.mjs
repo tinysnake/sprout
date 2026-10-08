@@ -62,7 +62,7 @@ if (process.argv[2] === '--auth') {
     const bridgeProfile = fileIsolationProfile({ runtimeRoots, readRoots: [dirname(script)], network: true });
     const bridgePolicy = join(control, 'bridge.sb'); writeFileSync(bridgePolicy, bridgeProfile);
     facts.boot = {};
-    try { facts.boot.cliVersionUnderProfile = execFileSync('/usr/bin/sandbox-exec', ['-p', profile, cli, '--version'], { encoding: 'utf8', timeout: 5_000, env: { HOME: control, PATH: '/usr/bin:/bin', CLAUDE_CODE_TMPDIR: control } }).trim() === version; } catch { facts.boot.cliVersionUnderProfile = false; }
+    try { facts.boot.cliVersionUnderProfile = execFileSync('/usr/bin/sandbox-exec', ['-p', profile, cli, '--version'], { encoding: 'utf8', timeout: 5_000, cwd: fixture.host, env: { HOME: control, PATH: '/usr/bin:/bin', CLAUDE_CODE_TMPDIR: control } }).trim() === version; } catch { facts.boot.cliVersionUnderProfile = false; }
     try { facts.boot.authHelperUnderProfile = execFileSync('/usr/bin/sandbox-exec', ['-p', profile, process.execPath, script, '--auth', nativeSettings], { encoding: 'utf8', timeout: 5_000, env: { HOME: control, PATH: '/usr/bin:/bin' } }).trim() === (settings.env.ANTHROPIC_API_KEY ?? settings.env.ANTHROPIC_AUTH_TOKEN); } catch { facts.boot.authHelperUnderProfile = false; }
     const explicitSettings = join(control, 'explicit-settings.json');
     const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
@@ -95,8 +95,30 @@ if (process.argv[2] === '--auth') {
       } catch { response.writeHead(500).end('{}'); }
     });
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(41020, '127.0.0.1', resolve); });
+    facts.protocol = { initialized: false, catalog: null, calls: [] };
+    const bridge = spawn('/usr/bin/sandbox-exec', ['-p', bridgeProfile, process.execPath, script, '--bridge', 'http://127.0.0.1:41020'], { cwd: control, env: { HOME: control, PATH: '/usr/bin:/bin' }, stdio: ['pipe','pipe','pipe'], detached: true });
+    children.add(bridge); bridge.stderr.resume();
+    let rpcId = 0; const pending = new Map();
+    createInterface({ input: bridge.stdout }).on('line', line => { try { const reply = JSON.parse(line); pending.get(reply.id)?.(reply); pending.delete(reply.id); } catch {} });
+    const rpc = (method, params) => new Promise((resolve, reject) => { const id = ++rpcId; const timer = setTimeout(() => { pending.delete(id); reject(new Error('bridge-protocol-timeout')); }, 5_000); pending.set(id, reply => { clearTimeout(timer); resolve(reply); }); bridge.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n'); });
+    try {
+      const init = await rpc('initialize', { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'disposable-probe', version: '250.1' } });
+      facts.protocol.initialized = init.result?.serverInfo?.name === 'disposable-origin-bridge';
+      const list = await rpc('tools/list', {}); facts.protocol.catalog = list.result?.tools?.map(t => tools.some(expected => expected.name === t.name) ? t.name : 'unexpected-tool');
+      for (const [name, args, target] of [['remote_read',{path:'origin.txt'},'origin'],['remote_write',{path:'effect.txt',content:'REMOTE_SCRIPTED_EFFECT'},'effect'],['remote_read',{path:join(fixture.outside,'sentinel.txt')},'host-sentinel'],['remote_write',{path:nativeSettings,content:'DENIED'},'auth'],['remote_read',{path:'escape-link'},'symlink']]) {
+        const reply = await rpc('tools/call', { name, arguments: args });
+        const value = JSON.parse(reply.result.content[0].text);
+        facts.protocol.calls.push({ name, target, ok: value.ok, remoteMarker: value.value === 'REMOTE_ORIGIN' });
+      }
+    } catch { facts.protocol.failed = true; }
+    finally { kill(bridge); children.delete(bridge); }
+    facts.scriptedCalls = facts.calls.splice(0);
+    await origin.call('write', {path:'effect.txt',content:'REMOTE_UNCHANGED'});
     const mcpConfig = join(control, 'mcp.json');
     const diagnosticEmpty = process.env.CLAUDE_PROBE_EMPTY_CATALOG === '1';
+    const nativeOnly = process.env.CLAUDE_PROBE_NATIVE_ONLY === '1';
+    if (nativeOnly && !diagnosticEmpty) throw new Error('unisolated-work-refused');
+    facts.nativeIsolation = !nativeOnly;
     facts.diagnosticEmptyCatalog = diagnosticEmpty;
     writeFileSync(mcpConfig, JSON.stringify({ mcpServers: { origin: { command: '/usr/bin/sandbox-exec', args: ['-p', bridgeProfile, process.execPath, script, '--bridge', 'http://127.0.0.1:41020'], env: { HOME: control, PATH: '/usr/bin:/bin' } } } }));
     if (diagnosticEmpty) writeFileSync(mcpConfig, '{"mcpServers":{}}');
@@ -108,7 +130,7 @@ if (process.argv[2] === '--auth') {
       if (Date.now() - started > 140_000) { facts.gaps.push('A subsequent session probe could not run within the overall deadline.'); return; }
       const fact = { types: {}, toolUses: [], catalog: null, mcp: [], result: null, usage: null, exitCode: null, signal: null, timedOut: false, sessionObserved: false, interrupted: interrupt };
       facts.turns.push(fact);
-      const child = spawn('/usr/bin/sandbox-exec', ['-p', profile, cli, ...baseArgs, ...extra, prompt], { cwd: fixture.host, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true }); children.add(child);
+      const child = spawn(nativeOnly ? cli : '/usr/bin/sandbox-exec', [...(nativeOnly ? [] : ['-p', profile, cli]), ...baseArgs, ...extra, prompt], { cwd: fixture.host, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true }); children.add(child);
       let diagnostics = '';
       const classify = chunk => {
         diagnostics = (diagnostics + chunk.toString()).slice(-32_768);

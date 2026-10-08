@@ -118,6 +118,7 @@
     "cliVersionUnderProfile": false,
     "authHelperUnderProfile": true
   },
+  "diagnosticEmptyCatalog": true,
   "final": {
     "hostOriginUnchanged": true,
     "hostEffectUnchanged": true,
