@@ -102,6 +102,7 @@ import type { Task } from './task/model.ts';
 import type { TaskStore } from './task/store.ts';
 import type { WorkerInfo, WorkerReadinessProbeResult } from './worker/protocol.ts';
 import type { ValidateWorkspaceParams, ValidateWorkspaceResult } from './worker/protocol.ts';
+import type { AttachWorkspaceBindingParams, WorkspaceFileOperationParams, InspectWorkspaceFileOperationParams, CancelWorkspaceFileOperationParams, InspectWorkspaceFileOperationResult, CancelWorkspaceFileOperationResult } from './worker/protocol.ts';
 import { createAgentTaskGroupMessageSender } from './collaboration/agent-task-group.ts';
 import { createRunApi, type RunApi } from './web/api.ts';
 import { createEnvironmentRouter } from './web/environment-router.ts';
@@ -254,6 +255,14 @@ export interface RuntimeEnvironment {
     environmentInstanceId: string,
     input: ValidateWorkspaceParams,
   ): Promise<ValidateWorkspaceResult>;
+  /** Bind one authorized Project workspace on the current authenticated Worker. */
+  attachWorkspaceBinding?(environmentInstanceId: string, input: AttachWorkspaceBindingParams): Promise<{ readonly attached: true }>;
+  /** Typed read-only Workspace operations on the already accepted Worker. */
+  executeWorkspaceFileOperation?(environmentInstanceId: string, input: WorkspaceFileOperationParams): Promise<import('./engine/port.ts').RemoteWorkspaceOperationResult>;
+  inspectWorkspaceFileOperation?(environmentInstanceId: string, input: InspectWorkspaceFileOperationParams): Promise<InspectWorkspaceFileOperationResult>;
+  cancelWorkspaceFileOperation?(environmentInstanceId: string, input: CancelWorkspaceFileOperationParams): Promise<CancelWorkspaceFileOperationResult>;
+  /** The authenticated Worker epoch that currently owns one instance. */
+  connectionEpoch?(environmentInstanceId: string): number | undefined;
   /**
    * The neutral Worker facts one environment instance reported on `worker/info`,
    * when it is connected (optional: readiness is an additive observation #87).
@@ -2402,6 +2411,34 @@ class EnrollmentEnvironmentDelegate implements RuntimeEnvironment {
       return Promise.reject(new Error('the enrollment environment cannot validate Project workspaces'));
     }
     return target.validateWorkspace(environmentInstanceId, input);
+  }
+
+  attachWorkspaceBinding(environmentInstanceId: string, input: import('./worker/protocol.ts').AttachWorkspaceBindingParams) {
+    const target = this.#require();
+    if (target.attachWorkspaceBinding === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
+    return target.attachWorkspaceBinding(environmentInstanceId, input);
+  }
+
+  executeWorkspaceFileOperation(environmentInstanceId: string, input: import('./worker/protocol.ts').WorkspaceFileOperationParams) {
+    const target = this.#require();
+    if (target.executeWorkspaceFileOperation === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
+    return target.executeWorkspaceFileOperation(environmentInstanceId, input);
+  }
+
+  inspectWorkspaceFileOperation(environmentInstanceId: string, input: import('./worker/protocol.ts').InspectWorkspaceFileOperationParams) {
+    const target = this.#require();
+    if (target.inspectWorkspaceFileOperation === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
+    return target.inspectWorkspaceFileOperation(environmentInstanceId, input);
+  }
+
+  cancelWorkspaceFileOperation(environmentInstanceId: string, input: import('./worker/protocol.ts').CancelWorkspaceFileOperationParams) {
+    const target = this.#require();
+    if (target.cancelWorkspaceFileOperation === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
+    return target.cancelWorkspaceFileOperation(environmentInstanceId, input);
+  }
+
+  connectionEpoch(environmentInstanceId: string): number | undefined {
+    return this.#target?.connectionEpoch?.(environmentInstanceId);
   }
 
   info(environmentInstanceId: string): Promise<WorkerInfo | undefined> {

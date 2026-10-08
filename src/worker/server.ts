@@ -32,6 +32,7 @@ import {
 } from './protocol.ts';
 import { createAgentTaskGroupMessageBridge } from './agent-task-group-bridge.ts';
 import { WorkerWorkspace } from './workspace.ts';
+import { WorkerWorkspaceFiles } from './workspace-file-operations.ts';
 import type { WorkerRecoveryJournal } from './recovery-journal.ts';
 import {
   contractDeliveryDiagnostic,
@@ -117,6 +118,7 @@ export class EnvironmentWorker {
   readonly #transport: JsonRpcTransport;
   readonly #sessions = new Map<string, LiveSession>();
   readonly #workspace: WorkerWorkspace | undefined;
+  readonly #workspaceFiles: WorkerWorkspaceFiles | undefined;
   #counter = 0;
   #closed = false;
   #ownedEngineSession = false;
@@ -125,6 +127,7 @@ export class EnvironmentWorker {
   constructor(options: EnvironmentWorkerOptions) {
     this.#options = options;
     this.#workspace = options.workspaceRoot === undefined ? undefined : new WorkerWorkspace(options.workspaceRoot);
+    this.#workspaceFiles = this.#workspace === undefined ? undefined : new WorkerWorkspaceFiles(this.#workspace, options.environmentInstanceId);
     this.#transport = new LineJsonRpcTransport({
       input: options.input,
       output: options.output,
@@ -194,6 +197,19 @@ export class EnvironmentWorker {
         case WORKER_METHODS.validateWorkspace:
           this.#transport.respond(id, await this.#validateWorkspace(params as ValidateWorkspaceParams));
           return;
+        case WORKER_METHODS.attachWorkspaceBinding:
+          await this.#requireWorkspaceFiles().attach(params as import('./protocol.ts').AttachWorkspaceBindingParams);
+          this.#transport.respond(id, { attached: true });
+          return;
+        case WORKER_METHODS.workspaceFileOperation:
+          this.#transport.respond(id, await this.#requireWorkspaceFiles().execute(params as import('./protocol.ts').WorkspaceFileOperationParams));
+          return;
+        case WORKER_METHODS.inspectWorkspaceFileOperation:
+          this.#transport.respond(id, this.#requireWorkspaceFiles().inspect(params as import('./protocol.ts').InspectWorkspaceFileOperationParams));
+          return;
+        case WORKER_METHODS.cancelWorkspaceFileOperation:
+          this.#transport.respond(id, this.#requireWorkspaceFiles().cancel(params as import('./protocol.ts').CancelWorkspaceFileOperationParams));
+          return;
         default:
           this.#transport.respondError(id, -32_601, WORKER_DIAGNOSTICS.methodUnsupported);
       }
@@ -226,6 +242,10 @@ export class EnvironmentWorker {
         supportsInterrupt: engine.capabilities.supportsInterrupt,
         standingInstructions: engine.capabilities.standingInstructions,
       })),
+      ...(this.#workspaceFiles !== undefined ? { workspaceOperations: {
+        version: 1 as const, operations: ['read', 'search'] as const,
+        maxReadBytes: 64 * 1024, maxSearchResults: 100,
+      } } : {}),
       ...(this.#readiness !== undefined
         ? { readiness: this.#readiness }
         : this.#options.readiness !== undefined
@@ -373,6 +393,11 @@ export class EnvironmentWorker {
 
   #validateWorkspace(params: ValidateWorkspaceParams): Promise<ValidateWorkspaceResult> {
     return this.#requireWorkspace().validateWorkspace(params);
+  }
+
+  #requireWorkspaceFiles(): WorkerWorkspaceFiles {
+    if (!this.#workspaceFiles) throw new Error('worker has no configured Project workspace operations');
+    return this.#workspaceFiles;
   }
 
   #requireWorkspace(): WorkerWorkspace {

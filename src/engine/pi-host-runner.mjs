@@ -183,6 +183,13 @@ async function probe(config) {
 async function openSession(config, input) {
   let stage = 'runtime-open';
   let session;
+  const remotePending = new Map();
+  let remoteCallSequence = 0;
+  const remoteCall = (operation, args) => new Promise((resolve) => {
+    const callId = `${config.sessionId}-${++remoteCallSequence}`;
+    remotePending.set(callId, resolve);
+    line({ kind: 'remote-call', callId, operation, args });
+  });
   try {
     const loaded = await createRuntime(config);
     if (!loaded.modelPresent || !loaded.authConfigured || loaded.model === undefined) {
@@ -199,6 +206,28 @@ async function openSession(config, input) {
     const manager = sessionPath === undefined
       ? loaded.sdk.SessionManager.create(config.agentRoot, sessionDir, { id: config.sessionId })
       : loaded.sdk.SessionManager.open(sessionPath, sessionDir, config.agentRoot);
+    const remoteAvailable = typeof config.remoteWorkspace?.binding?.projectId === 'string';
+    const customTools = remoteAvailable ? [
+      {
+        name: 'remote_read', label: 'Read remote file', description: 'Read a bounded text file from the authorized remote Project workspace.',
+        parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false },
+        annotations: { readOnlyHint: true },
+        execute: async (_id, args) => {
+          const result = await remoteCall('read', args);
+          return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result, isError: result.status !== 'completed' };
+        },
+      },
+      {
+        name: 'remote_search', label: 'Search remote files', description: 'Search bounded text files in the authorized remote Project workspace.',
+        parameters: { type: 'object', properties: { query: { type: 'string' }, path: { type: 'string' } }, required: ['query'], additionalProperties: false },
+        annotations: { readOnlyHint: true },
+        execute: async (_id, args) => {
+          const result = await remoteCall('search', args);
+          return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result, isError: result.status !== 'completed' };
+        },
+      },
+    ] : [];
+    const remoteToolNames = customTools.map((tool) => tool.name);
     const loader = emptyLoader(loaded.sdk, config);
     stage = 'session-create';
     ({ session } = await loaded.sdk.createAgentSession({
@@ -207,15 +236,17 @@ async function openSession(config, input) {
       modelRuntime: loaded.runtime,
       model: loaded.model,
       thinkingLevel: config.effort,
-      noTools: 'all',
-      tools: [],
+      noTools: remoteAvailable ? 'builtin' : 'all',
+      tools: remoteToolNames,
+      customTools,
       resourceLoader: loader,
       sessionManager: manager,
       settingsManager: loaded.sdk.SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),
     }));
     const selected = session.model;
     if (selected?.provider !== config.provider || selected?.id !== config.model ||
-        session.getActiveToolNames().length !== 0 || session.getCallableToolNames().length !== 0) {
+        JSON.stringify(session.getActiveToolNames().sort()) !== JSON.stringify(remoteToolNames.slice().sort()) ||
+        JSON.stringify(session.getCallableToolNames().sort()) !== JSON.stringify(remoteToolNames.slice().sort())) {
       line({ kind: 'failure', stage: 'session-controls', code: 'control-violation' });
       session.dispose();
       return;
@@ -247,6 +278,13 @@ async function openSession(config, input) {
         line({ kind: 'pi-event', event: { type: 'agent_settled' } });
         return;
       }
+      if (update?.type === 'tool_execution_start') {
+        if (!remoteToolNames.includes(update.toolName)) {
+          session.abort();
+          line({ kind: 'failure', stage: 'session-controls', code: 'control-violation' });
+        }
+        return;
+      }
       if (event.type === 'tool_execution_start' || event.type === 'bash_execution_update') {
         session.abort();
         line({ kind: 'failure', stage: 'session-controls', code: 'control-violation' });
@@ -257,6 +295,11 @@ async function openSession(config, input) {
     input.on('line', async (raw) => {
       let command;
       try { command = JSON.parse(raw); } catch { return; }
+      if (command?.op === 'remote-result' && typeof command.callId === 'string') {
+        const resolve = remotePending.get(command.callId);
+        if (resolve) { remotePending.delete(command.callId); resolve(command.result); }
+        return;
+      }
       if (command?.op === 'prompt' && !settled && typeof command.prompt === 'string') {
         stage = 'turn';
         try {

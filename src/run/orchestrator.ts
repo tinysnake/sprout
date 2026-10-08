@@ -134,6 +134,8 @@ export interface RunOrchestratorOptions {
   readonly requirements?: () => Promise<ReadinessRequirementScope | undefined>;
   /** One immutable process strategy shared with Task and Runtime admission. */
   readonly executionStrategy?: ExecutionStrategy;
+  /** Core-owned Host-run workspace operation attachment; never a model target selector. */
+  readonly remoteWorkspace?: (projectId: string, agentId: string) => Promise<import('../engine/port.ts').RemoteWorkspaceTools | undefined>;
   /**
    * The durable Project workspace binding for one (Project, Environment), when
    * the build wires Project access (#93, ADR-0008).
@@ -255,6 +257,7 @@ export class RunOrchestrator {
     | undefined;
   readonly #requirements: (() => Promise<ReadinessRequirementScope | undefined>) | undefined;
   readonly #executionStrategy: ExecutionStrategy;
+  readonly #remoteWorkspace: RunOrchestratorOptions['remoteWorkspace'];
 
   readonly #runs = new Map<string, AgentRun>();
   readonly #sessions = new Map<string, EngineSession>();
@@ -290,6 +293,7 @@ export class RunOrchestrator {
     this.#workspaceBinding = options.workspaceBinding;
     this.#requirements = options.requirements;
     this.#executionStrategy = options.executionStrategy ?? createExecutionStrategy('environment-hosted');
+    this.#remoteWorkspace = options.remoteWorkspace;
   }
 
   /**
@@ -628,15 +632,16 @@ export class RunOrchestrator {
         workingDirectory,
       };
       const stored = this.#sessionKeys ? await this.#sessionKeys.get(identity) : undefined;
+      const remoteWorkspace = await this.#remoteWorkspace?.(initial.projectId ?? '', agent.id);
       let attempt = await this.#runSession(
         host, agent, option, assembled.prompt, prepared, stored?.key, assembled.instructions,
-        workingDirectory, undefined, undefined, undefined,
+        workingDirectory, undefined, undefined, undefined, remoteWorkspace,
       );
       if (stored !== undefined && !attempt.ok && attempt.resumeRefused) {
         if (this.#sessionKeys) await this.#sessionKeys.delete(identity);
         attempt = await this.#runSession(
           host, agent, option, assembled.prompt, prepared, undefined, assembled.instructions,
-          workingDirectory, undefined, undefined, undefined,
+          workingDirectory, undefined, undefined, undefined, remoteWorkspace,
         );
       }
       if (!attempt.ok) {
@@ -1193,12 +1198,14 @@ export class RunOrchestrator {
     projectWorkspaceId: string | undefined,
     projectWorkspaceKind: 'default' | 'relative' | undefined,
     projectWorkspacePath: string | undefined,
+    remoteWorkspace?: import('../engine/port.ts').RemoteWorkspaceTools,
   ): Promise<SessionAttempt> {
     let session: EngineSession;
     try {
       session = await adapter.startSession({
         agentId: agent.id,
         runId: running.id,
+        ...(remoteWorkspace !== undefined ? { remoteWorkspace } : {}),
         ...(this.#taskGroupPosts !== undefined && running.projectId !== undefined && running.taskId !== undefined ? {
           postTaskGroupMessage: async (input: import('../engine/port.ts').AgentTaskGroupMessageInput) => {
             const assertActive = () => {

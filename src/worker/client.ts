@@ -25,6 +25,12 @@ import {
   type TurnSettledParams,
   type ValidateWorkspaceParams,
   type ValidateWorkspaceResult,
+  type AttachWorkspaceBindingParams,
+  type WorkspaceFileOperationParams,
+  type InspectWorkspaceFileOperationParams,
+  type CancelWorkspaceFileOperationParams,
+  type InspectWorkspaceFileOperationResult,
+  type CancelWorkspaceFileOperationResult,
   type WorkerInfo,
   type WorkerReadinessProbeParams,
   type WorkerReadinessProbeResult,
@@ -258,6 +264,22 @@ export class WorkerContextClient {
 
   validateWorkspace(input: ValidateWorkspaceParams): Promise<ValidateWorkspaceResult> {
     return sanitizedRequest(this.#transport.request(WORKER_METHODS.validateWorkspace, input));
+  }
+
+  attachWorkspaceBinding(input: AttachWorkspaceBindingParams): Promise<{ readonly attached: true }> {
+    return sanitizedRequest(this.#transport.request(WORKER_METHODS.attachWorkspaceBinding, input));
+  }
+
+  executeWorkspaceFileOperation(input: WorkspaceFileOperationParams): Promise<import('../engine/port.ts').RemoteWorkspaceOperationResult> {
+    return sanitizedRequest(this.#transport.request(WORKER_METHODS.workspaceFileOperation, input));
+  }
+
+  inspectWorkspaceFileOperation(input: InspectWorkspaceFileOperationParams): Promise<InspectWorkspaceFileOperationResult> {
+    return sanitizedRequest(this.#transport.request(WORKER_METHODS.inspectWorkspaceFileOperation, input));
+  }
+
+  cancelWorkspaceFileOperation(input: CancelWorkspaceFileOperationParams): Promise<CancelWorkspaceFileOperationResult> {
+    return sanitizedRequest(this.#transport.request(WORKER_METHODS.cancelWorkspaceFileOperation, input));
   }
 }
 

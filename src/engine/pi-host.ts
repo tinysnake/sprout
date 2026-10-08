@@ -15,6 +15,8 @@ import {
   type EngineTurn,
   type EngineTurnResult,
   type StartSessionRequest,
+  type RemoteWorkspaceTools,
+  type RemoteWorkspaceOperationResult,
 } from './port.ts';
 
 const PI_VERSION = '1.0.4';
@@ -73,6 +75,7 @@ export interface HostPiLaunchInput extends HostPiProbeInput {
   readonly resumeSessionKey?: string;
   readonly effort: string;
   readonly instructions?: string;
+  readonly remoteWorkspace?: RemoteWorkspaceTools;
 }
 
 export function hostEngineProfileId(runnerRoot: string): string {
@@ -182,6 +185,7 @@ export class HostPiEngineAdapter implements EngineAdapter {
         ...(request.resumeSessionKey !== undefined ? { resumeSessionKey: request.resumeSessionKey } : {}),
         effort: request.effort ?? 'medium',
         ...(request.instructions !== undefined ? { instructions: request.instructions } : {}),
+        ...(request.remoteWorkspace !== undefined ? { remoteWorkspace: request.remoteWorkspace } : {}),
       };
       child = (this.#options.spawnProcess ?? spawnHostPi)(input);
       return await waitForReady(child, input, this.#options.clock ?? Date.now);
@@ -197,17 +201,19 @@ class HostPiSession implements EngineSession {
   readonly engineSessionKey: string;
   readonly #child: ChildProcess;
   readonly #clock: () => number;
+  readonly #remoteWorkspace: RemoteWorkspaceTools | undefined;
   #turnState = newPiTurnState();
   #queue: EventQueue | undefined;
   #finish: ((result: EngineTurnResult) => void) | undefined;
   #closed = false;
   #buffer = '';
 
-  constructor(child: ChildProcess, sessionId: string, clock: () => number) {
+  constructor(child: ChildProcess, sessionId: string, clock: () => number, remoteWorkspace?: RemoteWorkspaceTools) {
     this.#child = child;
     this.sessionId = sessionId;
     this.engineSessionKey = sessionId;
     this.#clock = clock;
+    this.#remoteWorkspace = remoteWorkspace;
     child.stdout?.on('data', chunk => this.#onData(chunk.toString()));
     child.stderr?.on('data', () => undefined);
     child.on('exit', () => {
@@ -256,6 +262,23 @@ class HostPiSession implements EngineSession {
     killProcessGroup(this.#child);
   }
 
+  async #remoteCall(callId: string, operation: unknown, args: unknown): Promise<void> {
+    const tools = this.#remoteWorkspace;
+    const input = typeof args === 'object' && args !== null ? args as Record<string, unknown> : {};
+    let result: RemoteWorkspaceOperationResult;
+    try {
+      if (!tools) throw new Error('remote workspace is unavailable');
+      if (operation === 'read' && typeof input.path === 'string') result = await tools.read(input.path);
+      else if (operation === 'search' && typeof input.query === 'string') result = await tools.search(input.query, typeof input.path === 'string' ? input.path : undefined);
+      else throw new Error('invalid remote operation');
+    } catch {
+      result = { operationId: 'unavailable', projectId: tools?.binding.projectId ?? '', environmentInstanceId: tools?.binding.environmentInstanceId ?? '',
+        bindingId: tools?.binding.bindingId ?? '', generation: tools?.binding.generation ?? 0, connectionEpoch: tools?.binding.connectionEpoch ?? 0,
+        workspaceId: tools?.binding.workspaceId ?? '', operation: operation === 'search' ? 'search' : 'read', status: 'failed', failure: 'remote-operation-blocked' };
+    }
+    this.#child.stdin?.write(`${JSON.stringify({ op: 'remote-result', callId, result })}\\n`);
+  }
+
   #onData(chunk: string): void {
     this.#buffer += chunk;
     let newline = this.#buffer.indexOf('\n');
@@ -269,6 +292,8 @@ class HostPiSession implements EngineSession {
             const outcome = mapPiEvent(message.event, this.#turnState);
             for (const event of outcome.events) this.#queue?.push(event);
             if (outcome.finish) this.#finish?.(outcome.finish);
+          } else if (message.kind === 'remote-call' && typeof message.callId === 'string') {
+            void this.#remoteCall(message.callId, message.operation, message.args);
           } else if (message.kind === 'failure') {
             const stage = FAILURE_STAGES.has(String(message.stage)) ? String(message.stage) : 'runner';
             const code = FAILURE_CODES.has(String(message.code)) ? String(message.code) : 'other';
@@ -319,7 +344,7 @@ async function waitForReady(child: ChildProcess, input: HostPiLaunchInput, clock
         if (message.kind === 'ready' && message.sessionId === input.sessionId) {
           settled = true;
           clearTimeout(timer);
-          resolve(new HostPiSession(child, input.sessionId, clock));
+          resolve(new HostPiSession(child, input.sessionId, clock, input.remoteWorkspace));
         } else if (message.kind === 'failure') {
           const stage = FAILURE_STAGES.has(String(message.stage)) ? String(message.stage) : 'runner';
           const code = FAILURE_CODES.has(String(message.code)) ? String(message.code) : 'other';

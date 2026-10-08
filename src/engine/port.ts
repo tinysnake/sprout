@@ -159,7 +159,42 @@ export interface AgentTaskGroupMessageResult {
   readonly wakes: readonly { readonly agentId: string; readonly reason: string; readonly status: string; readonly detail?: string }[];
 }
 
+export interface RemoteWorkspaceOperationResult {
+  readonly operationId: string;
+  readonly projectId: string;
+  readonly environmentInstanceId: string;
+  readonly bindingId: string;
+  readonly generation: number;
+  readonly connectionEpoch: number;
+  readonly workspaceId: string;
+  readonly operation: 'read' | 'search';
+  readonly status: 'completed' | 'failed' | 'cancelled';
+  readonly path?: string;
+  readonly content?: string;
+  readonly matches?: readonly { readonly path: string; readonly line: number; readonly text: string }[];
+  readonly truncated?: boolean;
+  readonly failure?: string;
+}
+
+/** Engine-facing typed operations. Authorization and target selection live above the Engine port. */
+export interface RemoteWorkspaceTools {
+  readonly binding: {
+    readonly projectId: string;
+    readonly environmentInstanceId: string;
+    readonly bindingId: string;
+    readonly generation: number;
+    readonly connectionEpoch: number;
+    readonly workspaceId: string;
+  };
+  read(path: string): Promise<RemoteWorkspaceOperationResult>;
+  search(query: string, path?: string): Promise<RemoteWorkspaceOperationResult>;
+  inspect(operationId: string): Promise<{ readonly status: string }>;
+  cancel(operationId: string): Promise<{ readonly accepted: boolean; readonly status: string }>;
+}
+
 export interface StartSessionRequest {
+  /** An opaque, core-authorized read-only Project workspace capability for Host-run tools. */
+  readonly remoteWorkspace?: RemoteWorkspaceTools;
   /** Worker-local process environment overlay. Never serialize into instructions or files. */
   readonly sessionEnvironment?: Readonly<Record<string, string>>;
   /** Session-bound capability for the current Task group; identity and scope are Core-resolved. */
