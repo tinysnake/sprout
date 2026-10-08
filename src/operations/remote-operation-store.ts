@@ -14,22 +14,33 @@ export interface RemoteOperationIdentity {
   readonly state: RemoteOperationState;
   readonly updatedAt: number;
 }
+export type RemoteOperationClaim = 'claimed' | 'same-identity' | 'conflicting-identity';
 export interface RemoteOperationIdentityStore {
+  /** Atomically reserve a durable operation ID before any Worker dispatch. */
+  claim(row: RemoteOperationIdentity): Promise<RemoteOperationClaim>;
   save(row: RemoteOperationIdentity): Promise<void>;
   get(operationId: string): Promise<RemoteOperationIdentity | undefined>;
 }
 
 export class MemoryRemoteOperationIdentityStore implements RemoteOperationIdentityStore {
-  readonly #rows = new Map<string, RemoteOperationIdentity>();
+  async claim(row: RemoteOperationIdentity): Promise<RemoteOperationClaim> {
+    const prior = this.#rows.get(row.operationId);
+    if (prior) return prior.fingerprint === row.fingerprint ? 'same-identity' : 'conflicting-identity';
+    this.#rows.set(row.operationId, { ...row });
+    return 'claimed';
+  }
   async save(row: RemoteOperationIdentity): Promise<void> {
     const prior = this.#rows.get(row.operationId);
     if (prior && prior.fingerprint !== row.fingerprint) throw new Error('remote operation identity conflict');
-    if (prior && prior.state !== 'running' && row.state === 'running') return;
+    if (prior && isTerminal(prior.state)) return;
     this.#rows.set(row.operationId, { ...row });
   }
   async get(id: string): Promise<RemoteOperationIdentity | undefined> { const row = this.#rows.get(id); return row ? { ...row } : undefined; }
 }
 
+function isTerminal(state: RemoteOperationState): boolean {
+  return state === 'completed' || state === 'failed' || state === 'cancelled';
+}
 export class SqliteRemoteOperationIdentityStore implements RemoteOperationIdentityStore {
   readonly #db: DatabaseSync;
   constructor(db: DatabaseSync) {
@@ -41,13 +52,23 @@ export class SqliteRemoteOperationIdentityStore implements RemoteOperationIdenti
       state TEXT NOT NULL, updated_at INTEGER NOT NULL
     );`);
   }
+  async claim(row: RemoteOperationIdentity): Promise<RemoteOperationClaim> {
+    const inserted = this.#db.prepare(`INSERT INTO remote_workspace_operations
+      (operation_id,fingerprint,project_id,environment_instance_id,binding_id,generation,connection_epoch,workspace_id,operation,state,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(operation_id) DO NOTHING`)
+      .run(row.operationId,row.fingerprint,row.projectId,row.environmentInstanceId,row.bindingId,row.generation,row.connectionEpoch,row.workspaceId,row.operation,row.state,row.updatedAt);
+    if (Number(inserted.changes) === 1) return 'claimed';
+    const prior = await this.get(row.operationId);
+    if (!prior) throw new Error('remote operation identity claim could not be inspected');
+    return prior.fingerprint === row.fingerprint ? 'same-identity' : 'conflicting-identity';
+  }
   async save(row: RemoteOperationIdentity): Promise<void> {
     const prior = await this.get(row.operationId);
     if (prior && prior.fingerprint !== row.fingerprint) throw new Error('remote operation identity conflict');
     this.#db.prepare(`INSERT INTO remote_workspace_operations
       (operation_id,fingerprint,project_id,environment_instance_id,binding_id,generation,connection_epoch,workspace_id,operation,state,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(operation_id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at
-      WHERE fingerprint=excluded.fingerprint AND (remote_workspace_operations.state='running' OR excluded.state!='running')`)
+      WHERE fingerprint=excluded.fingerprint AND (remote_workspace_operations.state IN ('running','unknown','cancel-requested','recovery-required'))`)
       .run(row.operationId,row.fingerprint,row.projectId,row.environmentInstanceId,row.bindingId,row.generation,row.connectionEpoch,row.workspaceId,row.operation,row.state,row.updatedAt);
   }
   async get(id: string): Promise<RemoteOperationIdentity | undefined> {

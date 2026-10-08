@@ -62,7 +62,7 @@ export class EnvironmentOperations {
   readonly #enrollments: EnvironmentOperationsEnrollments;
   readonly #store: RemoteOperationIdentityStore;
   readonly #clock: () => number;
-  readonly #pool: Pick<EnvironmentPool, 'requiresLease' | 'acquireLeaseRevalidated' | 'extendLease' | 'markRecovering' | 'releaseLease'> | undefined;
+  readonly #pool: Pick<EnvironmentPool, 'requiresLeaseForBoundOperation' | 'acquireBoundOperationLeaseRevalidated' | 'extendLease' | 'markRecovering' | 'releaseLease'> | undefined;
   readonly #leaseTtlMs: number;
 
   constructor(options: {
@@ -73,7 +73,7 @@ export class EnvironmentOperations {
     readonly catalog: EnvironmentOperationsCatalog;
     readonly enrollments: EnvironmentOperationsEnrollments;
     readonly store: RemoteOperationIdentityStore;
-    readonly pool?: Pick<EnvironmentPool, 'requiresLease' | 'acquireLeaseRevalidated' | 'extendLease' | 'markRecovering' | 'releaseLease'>;
+    readonly pool?: Pick<EnvironmentPool, 'requiresLeaseForBoundOperation' | 'acquireBoundOperationLeaseRevalidated' | 'extendLease' | 'markRecovering' | 'releaseLease'>;
     readonly leaseTtlMs?: number;
     readonly clock?: () => number;
   }) {
@@ -167,7 +167,7 @@ export class EnvironmentOperations {
     const acquireMutationLease = async (): Promise<{ readonly acquired?: EnvironmentLease; readonly conflict?: { readonly holderId: string; readonly state: 'active' | 'recovering' }; readonly failure?: string }> => {
       if (runId === undefined) return { failure: 'run-required' };
       if (this.#pool === undefined) return { failure: 'lease-pool-unavailable' };
-      if (this.#pool.requiresLease(access.environmentInstanceId, MUTATION_CAPABILITY) !== true) return { failure: 'lease-capability-unavailable' };
+      if (this.#pool.requiresLeaseForBoundOperation(access.environmentInstanceId, MUTATION_CAPABILITY) !== true) return { failure: 'lease-capability-unavailable' };
       const prior = mutationLease;
       if (prior !== undefined) {
         const extended = this.#pool.extendLease(prior.id, this.#leaseTtlMs);
@@ -179,7 +179,7 @@ export class EnvironmentOperations {
         mutationLease = extended;
         return { acquired: extended };
       }
-      const result = await this.#pool.acquireLeaseRevalidated({
+      const result = await this.#pool.acquireBoundOperationLeaseRevalidated({
         instanceId: access.environmentInstanceId, capability: MUTATION_CAPABILITY,
         holderId: agentId, runId, ttlMs: this.#leaseTtlMs,
       });

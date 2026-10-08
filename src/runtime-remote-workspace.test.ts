@@ -266,8 +266,7 @@ test('Host-run edits and patches only through the enrolled Worker with one run-h
       capabilityPermissions: { 'agent-run': true, 'read-only-investigation': true },
     });
     await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, workerRoot);
-    assert.equal(runtime.pool.requiresLease(INSTANCE_ID, 'agent-run'), true,
-      runtime.environmentCatalog.entry(INSTANCE_ID)?.readiness.summary.reason ?? 'agent-run lease capability is unavailable');
+    assert.equal(runtime.pool.requiresLeaseForBoundOperation(INSTANCE_ID, 'agent-run'), true);
     await runtime.projectService.create({ id: 'remote-mutation-project', displayName: 'Remote mutation Project' });
     await runtime.projectService.addMembership('remote-mutation-project', { agentId: 'scout' });
     const access = await runtime.projectAccess.grant({
@@ -295,7 +294,7 @@ test('Host-run edits and patches only through the enrolled Worker with one run-h
     const sameIdentity = await capturedTools!.edit!('src/target.txt', 'REMOTE_SENTINEL', 'REMOTE_EDITED', 'sdk-edit-1');
     assert.equal(sameIdentity.failure, 'operation-outcome-inspection-required');
 
-    const holder = await runtime.pool.acquireLeaseRevalidated({
+    const holder = await runtime.pool.acquireBoundOperationLeaseRevalidated({
       instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'other-agent', runId: 'other-run', ttlMs: 60_000,
     });
     assert.equal(holder.ok, true);
