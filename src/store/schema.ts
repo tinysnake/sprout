@@ -25,13 +25,13 @@ import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 30;
+export const CURRENT_SCHEMA_VERSION = 31;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 30;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 31;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -1316,6 +1316,65 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
       }
       if (!columns.some((column) => column.name === 'origin_message_id')) {
         db.exec('ALTER TABLE project_events ADD COLUMN origin_message_id TEXT;');
+      }
+    },
+  },
+  {
+    fromVersion: 30,
+    toVersion: 31,
+    name: 'record_execution_placement_and_scope',
+    migrate(db) {
+      const exists = (name: string): boolean => db.prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+      ).get(name) !== undefined;
+      const columns = (table: string): Set<string> => new Set((db.prepare(
+        `PRAGMA table_info(${table})`,
+      ).all() as unknown as readonly { name: string }[]).map((column) => column.name));
+
+      if (exists('agent_runs')) {
+        const names = columns('agent_runs');
+        if (!names.has('execution_placement')) db.exec('ALTER TABLE agent_runs ADD COLUMN execution_placement TEXT;');
+        if (!names.has('session_key_scope')) db.exec('ALTER TABLE agent_runs ADD COLUMN session_key_scope TEXT;');
+        db.exec(`UPDATE agent_runs SET execution_placement = CASE
+          WHEN environment_instance_id IS NULL OR environment_instance_id = ''
+            THEN json_object('mode', 'environment-hosted')
+          ELSE json_object('mode', 'environment-hosted', 'engineHost', json_object(
+            'kind', 'environment', 'id', environment_instance_id,
+            'profile', json_object('platform', 'unknown', 'boundary', 'unknown')))
+          END WHERE execution_placement IS NULL;`);
+      }
+
+      if (exists('tasks')) {
+        const names = columns('tasks');
+        if (!names.has('execution_placement')) db.exec('ALTER TABLE tasks ADD COLUMN execution_placement TEXT;');
+        if (names.has('environment_instance_id')) {
+          db.exec(`UPDATE tasks SET execution_placement = json_object(
+            'mode', 'environment-hosted', 'engineHost', json_object(
+              'kind', 'environment', 'id', environment_instance_id,
+              'profile', json_object('platform', 'unknown', 'boundary', 'unknown')))
+            WHERE environment_instance_id IS NOT NULL AND execution_placement IS NULL;`);
+        }
+      }
+
+      if (exists('agent_session_keys')) {
+        const names = columns('agent_session_keys');
+        // The path-bearing legacy table is converted by SqliteSessionKeyStore,
+        // where each row can be hashed before the raw directory is discarded.
+        if (names.has('working_directory_id')) {
+          const legacySlots = !names.has('execution_mode');
+          if (!names.has('execution_mode')) db.exec("ALTER TABLE agent_session_keys ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'environment-hosted';");
+          if (!names.has('engine_host_kind')) db.exec("ALTER TABLE agent_session_keys ADD COLUMN engine_host_kind TEXT NOT NULL DEFAULT 'environment';");
+          if (!names.has('engine_host_id')) db.exec('ALTER TABLE agent_session_keys ADD COLUMN engine_host_id TEXT;');
+          if (!names.has('engine_host_platform')) db.exec("ALTER TABLE agent_session_keys ADD COLUMN engine_host_platform TEXT NOT NULL DEFAULT 'unknown';");
+          if (!names.has('engine_host_boundary')) db.exec("ALTER TABLE agent_session_keys ADD COLUMN engine_host_boundary TEXT NOT NULL DEFAULT 'unknown';");
+          if (!names.has('scope_kind')) db.exec("ALTER TABLE agent_session_keys ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'conversation';");
+          if (!names.has('scope_id')) db.exec("ALTER TABLE agent_session_keys ADD COLUMN scope_id TEXT NOT NULL DEFAULT 'legacy-unscoped';");
+          db.exec('UPDATE agent_session_keys SET engine_host_id = environment_instance_id WHERE engine_host_id IS NULL;');
+          if (legacySlots) db.exec(`UPDATE agent_session_keys SET slot = json_array(
+            agent_id, engine, environment_instance_id, execution_mode, engine_host_kind,
+            engine_host_id, engine_host_platform, engine_host_boundary, working_directory_id,
+            scope_kind, scope_id)`);
+        }
       }
     },
   },

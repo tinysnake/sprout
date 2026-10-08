@@ -19,6 +19,14 @@ import { serializeTaskControlDocument, isEndedTaskStatus, type Task, type TaskAc
 import type { TaskStore } from './store.ts';
 import { buildTaskContext } from './context.ts';
 import type { TaskContextMaterialization } from '../worker/protocol.ts';
+import { createExecutionStrategy, executionModeAdmissionRefusal, type ExecutionStrategy } from '../execution-mode.ts';
+import {
+  engineHostProfileForPlatform,
+  environmentEngineHost,
+  legacyEnvironmentPlacement,
+  requireMatchingExecutionMode,
+  type ExecutionPlacement,
+} from '../execution-placement.ts';
 
 export type TaskRecoveryAction = 'resume' | 'discard';
 
@@ -139,6 +147,8 @@ export interface TaskEnvironmentLifecycleOptions {
   readonly ids?: IdFactory;
   readonly clock?: { now(): number };
   readonly leaseTtlMs?: number;
+  readonly executionStrategy?: ExecutionStrategy;
+  readonly executionPlacementForEnvironment?: (environmentInstanceId: string) => ExecutionPlacement;
   /**
    * Told when a Task entered recovery (#88).
    *
@@ -184,6 +194,8 @@ export class TaskEnvironmentLifecycle {
   readonly #ids: IdFactory;
   readonly #clock: { now(): number };
   readonly #leaseTtlMs: number;
+  readonly #executionStrategy: ExecutionStrategy;
+  readonly #executionPlacementForEnvironment: (environmentInstanceId: string) => ExecutionPlacement;
   readonly #onRecovery: NonNullable<TaskEnvironmentLifecycleOptions['onRecovery']> | undefined;
   readonly #forceReleaseLease: NonNullable<TaskEnvironmentLifecycleOptions['forceReleaseLease']> | undefined;
   readonly #faults: NonNullable<TaskEnvironmentLifecycleOptions['faults']> | undefined;
@@ -201,6 +213,14 @@ export class TaskEnvironmentLifecycle {
     this.#ids = options.ids ?? createIdFactory();
     this.#clock = options.clock ?? { now: () => Date.now() };
     this.#leaseTtlMs = options.leaseTtlMs ?? 300_000;
+    this.#executionStrategy = options.executionStrategy ?? createExecutionStrategy('environment-hosted');
+    this.#executionPlacementForEnvironment = options.executionPlacementForEnvironment ?? ((environmentInstanceId) => {
+      const platform = this.#pool.definition(environmentInstanceId)?.platform ?? 'unknown';
+      return {
+        mode: this.#executionStrategy.mode,
+        engineHost: environmentEngineHost(environmentInstanceId, engineHostProfileForPlatform(platform)),
+      };
+    });
     this.#onRecovery = options.onRecovery;
     this.#forceReleaseLease = options.forceReleaseLease;
     this.#faults = options.faults;
@@ -229,6 +249,7 @@ export class TaskEnvironmentLifecycle {
     readonly contextAgentId: string;
     readonly consumeProposal: () => void;
   }): Promise<Task> {
+    this.#requireExecutionModeAvailable();
     if (await this.#store.get(task.id)) throw new Error(`task ${task.id} already exists`);
     const project = this.#projects.get(task.projectId);
     if (!project || !project.availableEnvironmentInstanceIds.includes(input.environmentInstanceId)) {
@@ -240,6 +261,7 @@ export class TaskEnvironmentLifecycle {
     const contextAgent = await this.#resolveAgent(input.contextAgentId);
     if (!contextAgent) throw new Error(`unknown agent: ${input.contextAgentId}`);
     await this.#pool.revalidateTaskLease(input.environmentInstanceId);
+    const executionPlacement = this.#executionPlacementForEnvironment(input.environmentInstanceId);
     const acquired = this.#pool.reserveTaskLease({
       instanceId: input.environmentInstanceId, capability: contextAgent.capability, holderId: task.id,
       taskId: task.id, ttlMs: this.#leaseTtlMs,
@@ -249,6 +271,7 @@ export class TaskEnvironmentLifecycle {
       ...task,
       ...(task.admission?.lead.memberKind === 'agent' ? { assignedAgentId: task.admission.lead.memberId } : {}),
       environmentInstanceId: input.environmentInstanceId,
+      executionPlacement,
       environmentLeaseId: acquired.lease.id,
       environmentLifecycleState: 'beginning',
       status: 'in-progress',
@@ -289,6 +312,7 @@ export class TaskEnvironmentLifecycle {
     }
 
     if (task.environmentLifecycleState === undefined) {
+      this.#requireExecutionModeAvailable();
       const agentId = options.agentId ?? task.assignedAgentId;
       if (!agentId) throw new Error(`task ${taskId} has no assigned agent; assign one or name an agent to begin`);
       const agent = await this.#resolveAgent(agentId);
@@ -302,6 +326,7 @@ export class TaskEnvironmentLifecycle {
         ...(options.selection !== undefined ? { environmentPreference: options.selection } : task.environmentPreference !== undefined ? { environmentPreference: task.environmentPreference } : {}),
       }, this.#pool);
       if (!resolution.ok) throw new Error(`no available environment for capability: ${agent.capability}`);
+      const executionPlacement = this.#executionPlacementForEnvironment(resolution.instanceId);
       // Reserve only in memory. The following store operation commits the
       // beginning intent and this Task lease in one SQLite transaction, so no
       // durable state can expose a live lease with no owning Task binding.
@@ -315,6 +340,7 @@ export class TaskEnvironmentLifecycle {
       // blocking if the process dies before, during, or after that call.
       task = {
         ...task, assignedAgentId: agentId, environmentInstanceId: resolution.instanceId,
+        executionPlacement,
         environmentLeaseId: acquired.lease.id, environmentLifecycleState: 'beginning',
         updatedAt: this.#clock.now(),
       };
@@ -326,6 +352,10 @@ export class TaskEnvironmentLifecycle {
       }
       this.#faults?.afterBeginningCommit?.();
       this.#pool.adoptLease(acquired.lease);
+    }
+    if (task.environmentLifecycleState === 'beginning') {
+      this.#requireTaskMode(task);
+      this.#requireExecutionModeAvailable();
     }
     try {
       await this.#prepare(task, task.assignedAgentId!);
@@ -359,6 +389,8 @@ export class TaskEnvironmentLifecycle {
     readonly contentVersion: number;
   }): Promise<{ readonly task: Task; readonly runId: string }> {
     const task = await this.#require(taskId);
+    this.#requireTaskMode(task);
+    this.#requireExecutionModeAvailable();
     if (isEndedTaskStatus(task.status)) throw new Error(`task ${taskId} is ${task.status} and cannot be advanced`);
     if (task.environmentLifecycleState === 'running') throw new TaskAdvanceConflictError(`task ${taskId} already has an active run`);
     if (task.pauseState !== undefined) throw new Error(`task ${taskId} is paused and cannot admit a run`);
@@ -475,6 +507,8 @@ export class TaskEnvironmentLifecycle {
   async reopen(taskId: string, actor: TaskActor, reason: string): Promise<Task> {
     const task = await this.#require(taskId);
     this.#assertHuman(task, actor);
+    this.#requireTaskMode(task);
+    this.#requireExecutionModeAvailable();
     if (!isEndedTaskStatus(task.status)) throw new Error(`Task ${taskId} has active intent and cannot be reopened`);
     return this.#restoreTaskContext(task, actor, reason, 'reopened');
   }
@@ -483,6 +517,8 @@ export class TaskEnvironmentLifecycle {
   async resumeStopped(taskId: string, actor: TaskActor, reason: string): Promise<Task> {
     const task = await this.#require(taskId);
     this.#assertHuman(task, actor);
+    this.#requireTaskMode(task);
+    this.#requireExecutionModeAvailable();
     if (task.status !== 'stopped' || task.forcedRelease === undefined) {
       throw new Error(`Task ${taskId} is not a Force Released stopped Task`);
     }
@@ -491,6 +527,8 @@ export class TaskEnvironmentLifecycle {
 
   async #restoreTaskContext(task: Task, actor: TaskActor, reason: string, action: 'reopened' | 'resumed'): Promise<Task> {
     const taskId = task.id;
+    this.#requireTaskMode(task);
+    this.#requireExecutionModeAvailable();
     if (task.activeRunId !== undefined || task.environmentLifecycleState === 'recovery') {
       throw new Error(`Task ${taskId} has active or unresolved Environment work and cannot be restored`);
     }
@@ -576,6 +614,10 @@ export class TaskEnvironmentLifecycle {
     const task = await this.#require(taskId);
     if (task.admission !== undefined) this.#assertHuman(task, actor);
     if (action === 'discard' && task.environmentLifecycleState === 'discarded') return task;
+    if (action === 'resume' && task.recoveryState !== 'ending') {
+      this.#requireTaskMode(task);
+      this.#requireExecutionModeAvailable();
+    }
     if (task.environmentLifecycleState !== 'recovery') throw new TaskRecoveryRefusal('not-awaiting-recovery', `task ${taskId} is not awaiting recovery`);
     if (task.recoveryState === 'ending') {
       if (!task.environmentLeaseId || !this.#pool.resumeTaskLease(task.environmentLeaseId, this.#leaseTtlMs)) throw new TaskRecoveryRefusal('lease-cannot-resume', `task ${taskId} lease cannot resume`);
@@ -774,6 +816,8 @@ export class TaskEnvironmentLifecycle {
   async resumePause(taskId: string, actor: TaskActor, reason: string): Promise<Task> {
     const task = await this.#require(taskId);
     this.#assertHuman(task, actor);
+    this.#requireTaskMode(task);
+    this.#requireExecutionModeAvailable();
     if (task.pauseState === 'retry-required') throw new Error(`task ${taskId} Pause must be retried or explicitly cancelled before resume`);
     if (task.pauseState === undefined) throw new Error(`task ${taskId} is not paused`);
     if (task.activeRunId !== undefined || !['idle', 'blocked', 'awaiting-validation'].includes(task.environmentLifecycleState ?? '')) {
@@ -873,6 +917,10 @@ export class TaskEnvironmentLifecycle {
     const task = await this.#require(taskId);
     this.#assertHuman(task, actor);
     if (input.decision !== 'accept' && input.decision !== 'correct') throw new Error('invalid validation decision');
+    if (input.decision === 'correct') {
+      this.#requireTaskMode(task);
+      this.#requireExecutionModeAvailable();
+    }
     const claim = task.completionClaims?.find(item => item.id === input.claimId);
     if (task.pendingCompletionClaimId !== input.claimId || claim === undefined
       || task.environmentLifecycleState !== 'awaiting-validation' || task.activeRunId !== undefined) {
@@ -1207,6 +1255,18 @@ export class TaskEnvironmentLifecycle {
       || task.admission.lead.memberKind !== 'agent' || task.admission.lead.memberId !== actor.memberId) {
       throw new Error('Task lead authority is required');
     }
+  }
+
+  #requireExecutionModeAvailable(): void {
+    const refusal = executionModeAdmissionRefusal(this.#executionStrategy);
+    if (refusal !== undefined) throw new Error(refusal);
+  }
+
+  #requireTaskMode(task: Task): void {
+    const placement = task.executionPlacement ?? (task.environmentInstanceId !== undefined
+      ? legacyEnvironmentPlacement(task.environmentInstanceId)
+      : undefined);
+    requireMatchingExecutionMode(placement, this.#executionStrategy.mode);
   }
 
   #assertActiveTaskLease(task: Task): void {

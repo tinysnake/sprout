@@ -22,6 +22,14 @@ import type { AgentRun, AgentRunStatus, RunFailureClass, RunObserver, RunWorkspa
 import type { RunReplaySnapshot, RunStore } from './store.ts';
 import type { SessionKeyIdentity, SessionKeyStore } from './session-key-store.ts';
 import type { TaskContextProvider, TaskRunObserver } from './task-link.ts';
+import {
+  engineHostProfileForPlatform,
+  environmentEngineHost,
+  executionModeMismatchReason,
+  isEngineHostedPlacement,
+  type ExecutionPlacement,
+  type SessionKeyScope,
+} from '../execution-placement.ts';
 
 /** Three total attempts; two retries use 200/400 ms exponential delays plus up to 100 ms jitter (800 ms total maximum). */
 const ENGINE_RETRY_MAX_ATTEMPTS = 3;
@@ -134,6 +142,7 @@ export interface RunOrchestratorOptions {
   readonly requirements?: () => Promise<ReadinessRequirementScope | undefined>;
   /** One immutable process strategy shared with Task and Runtime admission. */
   readonly executionStrategy?: ExecutionStrategy;
+  readonly executionPlacementForEnvironment?: (environmentInstanceId: string) => ExecutionPlacement;
   /**
    * The durable Project workspace binding for one (Project, Environment), when
    * the build wires Project access (#93, ADR-0008).
@@ -169,6 +178,8 @@ export interface SubmitRunRequest {
    * Task's run sequence. Absent means a one-round run.
    */
   readonly taskId?: string;
+  /** Server-authorized scope that owns native continuation. */
+  readonly sessionKeyScope?: SessionKeyScope;
   /**
    * An explicit environment selection, taking priority over project matching.
    *
@@ -255,6 +266,7 @@ export class RunOrchestrator {
     | undefined;
   readonly #requirements: (() => Promise<ReadinessRequirementScope | undefined>) | undefined;
   readonly #executionStrategy: ExecutionStrategy;
+  readonly #executionPlacementForEnvironment: (environmentInstanceId: string) => ExecutionPlacement;
 
   readonly #runs = new Map<string, AgentRun>();
   readonly #sessions = new Map<string, EngineSession>();
@@ -290,6 +302,17 @@ export class RunOrchestrator {
     this.#workspaceBinding = options.workspaceBinding;
     this.#requirements = options.requirements;
     this.#executionStrategy = options.executionStrategy ?? createExecutionStrategy('environment-hosted');
+    this.#executionPlacementForEnvironment = options.executionPlacementForEnvironment ?? ((environmentInstanceId) => {
+      const platform = this.#pool.definition(environmentInstanceId)?.platform ?? 'unknown';
+      return {
+        mode: this.#executionStrategy.mode,
+        engineHost: environmentEngineHost(environmentInstanceId, engineHostProfileForPlatform(platform)),
+      };
+    });
+  }
+
+  get processExecutionMode(): ExecutionStrategy['mode'] {
+    return this.#executionStrategy.mode;
   }
 
   /**
@@ -309,6 +332,8 @@ export class RunOrchestrator {
       status: 'queued',
       events: [],
       ...(request.taskId !== undefined ? { taskId: request.taskId } : {}),
+      ...(request.sessionKeyScope !== undefined ? { sessionKeyScope: request.sessionKeyScope } : {}),
+      executionPlacement: { mode: this.#executionStrategy.mode },
       // The caller's Project scope is recorded from the first line of the
       // run's life, so a pre-admission failure (`no available environment`)
       // still names the Project whose Environments were absent — the durable
@@ -319,6 +344,23 @@ export class RunOrchestrator {
       ...(request.retryOfRunId !== undefined ? { retryOfRunId: request.retryOfRunId } : {}),
       createdAt: this.#clock.now(),
     };
+
+    let taskExecutionPlacement: ExecutionPlacement | undefined;
+    if (request.taskId !== undefined && this.#tasks?.executionPlacement !== undefined) {
+      try {
+        taskExecutionPlacement = await this.#tasks.executionPlacement({ taskId: request.taskId });
+      } catch (error) {
+        await this.settleTaskRun(await this.#finish(run, 'failed', {
+          status: 'failed', message: error instanceof Error ? error.message : String(error),
+        }, 'admission'));
+        return { id: run.id };
+      }
+      const mismatch = executionModeMismatchReason(taskExecutionPlacement, this.#executionStrategy.mode);
+      if (mismatch !== undefined) {
+        await this.settleTaskRun(await this.#finish(run, 'failed', { status: 'failed', message: mismatch }, 'admission'));
+        return { id: run.id };
+      }
+    }
 
     const refusal = executionModeAdmissionRefusal(this.#executionStrategy);
     if (refusal !== undefined) {
@@ -472,6 +514,7 @@ export class RunOrchestrator {
       ...taskRun,
       environmentInstanceId: resolution.instanceId,
       projectId: resolution.projectId,
+      executionPlacement: taskExecutionPlacement ?? this.#executionPlacementForEnvironment(resolution.instanceId),
       workOption: admittedOption.option,
       configurationVersion: admittedOption.configurationVersion,
       ...(workspaceBinding !== undefined ? { workspaceBinding } : {}),
@@ -1041,21 +1084,30 @@ export class RunOrchestrator {
         prepared = await this.#advance(running, { handOff: assembled.handOff });
       }
 
-      // The continuation slot is `(agent, engine, environment instance, working
-      // directory)`. All four must match for a stored key to be reusable: the key
-      // belongs to one engine, lives in one environment's engine store, and (for
-      // Pi and opencode, #19) is coupled to the directory it was created in.
-      // Resolve it inside the lease guard: an absent instance directory and agent
-      // fallback is an explicit failed run, not a rejected promise that leaks a lease.
-      const identity: SessionKeyIdentity = {
-        agentId: agent.id,
-        engine: option.engine,
-        environmentInstanceId: initial.environmentInstanceId,
-        executionMode: initial.executionMode ?? 'environment-hosted',
-        ...(initial.engineHostProfileId !== undefined ? { engineHostProfileId: initial.engineHostProfileId } : {}),
-        workingDirectory,
-      };
-      const stored = this.#sessionKeys ? await this.#sessionKeys.get(identity) : undefined;
+      // The continuation slot includes Agent, engine, immutable placement and
+      // host profile, work Environment, actual working directory, and the
+      // authorized Conversation, Routing batch, or Task scope. Without an
+      // authorized scope the run receives no stored key. Resolve it inside the
+      // lease guard: an absent instance directory and agent fallback is an explicit failed run, not a
+      // rejected promise that leaks a lease.
+      const placement = initial.executionPlacement;
+      const scope: SessionKeyScope | undefined = initial.taskId !== undefined
+        ? { kind: 'task', id: initial.taskId }
+        : initial.sessionKeyScope;
+      const identity: SessionKeyIdentity | undefined = placement !== undefined &&
+        isEngineHostedPlacement(placement) && scope !== undefined
+        ? {
+            agentId: agent.id,
+            engine: option.engine,
+            environmentInstanceId: initial.environmentInstanceId,
+            executionPlacement: placement,
+            scope,
+            workingDirectory,
+          }
+        : undefined;
+      const stored = this.#sessionKeys && identity !== undefined
+        ? await this.#sessionKeys.get(identity)
+        : undefined;
 
       let attempt = await this.#runSession(
         adapter,
@@ -1082,7 +1134,7 @@ export class RunOrchestrator {
       // hide a real engine problem and would discard a key that may still be
       // good, so it is reported instead.
       if (stored !== undefined && !attempt.ok && attempt.resumeRefused) {
-        if (this.#sessionKeys) await this.#sessionKeys.delete(identity);
+        if (this.#sessionKeys && identity !== undefined) await this.#sessionKeys.delete(identity);
         attempt = await this.#runSession(
           adapter,
           agent,
@@ -1152,7 +1204,7 @@ export class RunOrchestrator {
       // Persist the key the run actually used, not the one it was handed. A
       // run that degraded to a fresh session stores the fresh key, so the next
       // run continues *that* session rather than re-offering the refused one.
-      if (this.#sessionKeys && attempt.result.status === 'completed') {
+      if (this.#sessionKeys && identity !== undefined && attempt.result.status === 'completed') {
         const key = attempt.engineSessionKey;
         if (key !== undefined && key !== '') {
           await this.#sessionKeys.save({ ...identity, key, updatedAt: this.#clock.now() });

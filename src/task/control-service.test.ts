@@ -79,7 +79,17 @@ async function scenario(options: { readonly worker?: TaskContextWorker; readonly
 }
 
 test('Host-run refuses Task resume and recovery resume without releasing its Environment lease', async () => {
-  const s = await scenario({ executionStrategy: createExecutionStrategy('host-run') });
+  const strategy = createExecutionStrategy('host-run');
+  const s = await scenario({ executionStrategy: strategy });
+  const admitted = await s.tasks.get(s.taskId);
+  assert.ok(admitted);
+  await s.store.save({
+    ...admitted,
+    executionPlacement: {
+      mode: 'host-run',
+      engineHost: { kind: 'sprout', id: 'sprout-test', profile: { platform: 'macos', boundary: 'shared-host' } },
+    },
+  });
   const before = s.pool.leases();
   assert.equal(before.length, 1);
   assert.equal(before[0]?.state, 'active');

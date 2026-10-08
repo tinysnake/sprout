@@ -18,6 +18,11 @@ const identity: SessionKeyIdentity = {
   agentId: 'agent-scout',
   engine: 'pi',
   environmentInstanceId: 'mac-mini-1',
+  executionPlacement: {
+    mode: 'environment-hosted',
+    engineHost: { kind: 'environment', id: 'mac-mini-1', profile: { platform: 'macos', boundary: 'shared-host' } },
+  },
+  scope: { kind: 'conversation', id: 'project-channel' },
   workingDirectory: '/srv/work',
 };
 
@@ -48,8 +53,8 @@ test('a stored key round-trips through SQLite across a restart', async () => {
     agentId: identity.agentId,
     engine: identity.engine,
     environmentInstanceId: identity.environmentInstanceId,
-    executionMode: 'environment-hosted',
-    engineHostProfileId: identity.environmentInstanceId,
+    executionPlacement: identity.executionPlacement,
+    scope: identity.scope,
     workingDirectoryId: workingDirectoryId(identity.workingDirectory),
     key: 'sess-persisted',
     updatedAt: 1_000,
@@ -96,6 +101,40 @@ test('two slots that differ only by working directory never collide', async () =
 
   assert.equal((await store.get({ ...identity, workingDirectory: '/srv/one' }))?.key, 'k-one');
   assert.equal((await store.get({ ...identity, workingDirectory: '/srv/two' }))?.key, 'k-two');
+});
+
+test('execution mode, host profile, and authorized scope partition continuation slots', async () => {
+  const store = new InMemorySessionKeyStore();
+  await store.save(record({ key: 'private-session' }));
+  const hostRun = {
+    ...identity,
+    executionPlacement: {
+      mode: 'host-run' as const,
+      engineHost: {
+        kind: 'sprout' as const,
+        id: 'sprout-test',
+        profile: { platform: 'macos' as const, boundary: 'shared-host' as const },
+      },
+    },
+  };
+  const containerProfile = {
+    ...identity,
+    executionPlacement: {
+      ...identity.executionPlacement!,
+      engineHost: {
+        ...identity.executionPlacement!.engineHost,
+        profile: { platform: 'macos' as const, boundary: 'container' as const },
+      },
+    },
+  };
+  const otherConversation = { ...identity, scope: { kind: 'conversation' as const, id: 'another-channel' } };
+  const routingBatch = { ...identity, scope: { kind: 'routing-batch' as const, id: 'batch-1' } };
+  const taskScope = { ...identity, scope: { kind: 'task' as const, id: 'task-1' } };
+  assert.equal((await store.get(hostRun))?.key, undefined);
+  assert.equal((await store.get(containerProfile))?.key, undefined);
+  assert.equal((await store.get(otherConversation))?.key, undefined);
+  assert.equal((await store.get(routingBatch))?.key, undefined);
+  assert.equal((await store.get(taskScope))?.key, undefined);
 });
 
 test('a working directory containing the slot delimiter does not collide', () => {
@@ -174,7 +213,16 @@ test('opening a legacy session-key table removes verbatim working directories', 
   );
 
   const store = new SqliteSessionKeyStore({ db });
-  const restored = await store.get({ ...identity, workingDirectory: rawWorkingDirectory });
+  const restored = await store.get({
+    ...identity,
+    environmentInstanceId: 'mac-mini-1',
+    executionPlacement: {
+      mode: 'environment-hosted',
+      engineHost: { kind: 'environment', id: 'mac-mini-1', profile: { platform: 'unknown', boundary: 'unknown' } },
+    },
+    scope: { kind: 'conversation', id: 'legacy-unscoped' },
+    workingDirectory: rawWorkingDirectory,
+  });
   const rows = db.prepare('SELECT * FROM agent_session_keys').all();
   store.close();
   db.close();

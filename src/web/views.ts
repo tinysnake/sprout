@@ -38,6 +38,8 @@ import { sanitizeObservedReadiness } from '../environment/readiness-observation.
 import type { AgentRun, TokenUsage } from '../run/model.ts';
 import type { Agent, AgentWorkOption } from '../agent/model.ts';
 import type { Task, TaskRunLink, TaskStatus, TaskWithRuns } from '../task/model.ts';
+import type { ExecutionMode } from '../execution-mode.ts';
+import { executionModeMismatchReason, legacyEnvironmentPlacement, runExecutionModeMismatchReason } from '../execution-placement.ts';
 import { normalizeEnrollment, type EnvironmentEnrollment } from '../environment/enrollment.ts';
 import type { EnvironmentRecoveryRecord, ForceReleaseRecord } from '../environment/recovery.ts';
 import {
@@ -106,6 +108,9 @@ export interface RunView {
    * its Task without giving the client any Task domain logic.
    */
   readonly taskId?: string;
+  readonly executionPlacement?: AgentRun['executionPlacement'];
+  readonly processExecutionMode?: ExecutionMode;
+  readonly executionModeMismatchReason?: string;
   /**
    * Whether a cross-environment hand-off was attached to this run's input.
    *
@@ -174,8 +179,11 @@ export function summarizeRunHistory(runs: readonly RunView[]): RunHistoryTotals 
   };
 }
 
-export function toRunView(run: AgentRun): RunView {
+export function toRunView(run: AgentRun, processExecutionMode?: ExecutionMode): RunView {
   const workspaceBinding = toRunWorkspaceBindingAttribution(run);
+  const modeMismatch = processExecutionMode !== undefined
+    ? runExecutionModeMismatchReason(run.executionPlacement, processExecutionMode)
+    : undefined;
   return {
     id: run.id,
     agentId: run.agentId,
@@ -184,6 +192,9 @@ export function toRunView(run: AgentRun): RunView {
     executionMode: run.executionMode ?? 'environment-hosted',
     events: run.events,
     ...(run.taskId !== undefined ? { taskId: run.taskId } : {}),
+    ...(run.executionPlacement !== undefined ? { executionPlacement: run.executionPlacement } : {}),
+    ...(processExecutionMode !== undefined ? { processExecutionMode } : {}),
+    ...(modeMismatch !== undefined ? { executionModeMismatchReason: modeMismatch } : {}),
     handOffAttached: run.handOff !== undefined,
     ...(toRunWorkOptionAttribution(run) !== undefined ? { workOption: toRunWorkOptionAttribution(run)! } : {}),
     ...(workspaceBinding !== undefined ? { workspaceBinding } : {}),
@@ -552,6 +563,9 @@ export interface TaskView {
   readonly endDisposition?: Task['endDisposition'];
   readonly forcedRelease?: Task['forcedRelease'];
   readonly environmentInstanceId?: string;
+  readonly executionPlacement?: Task['executionPlacement'];
+  readonly processExecutionMode?: ExecutionMode;
+  readonly executionModeMismatchReason?: string;
   readonly environmentLeaseId?: string;
   readonly environmentLifecycleState?: string;
   /** A safe, operator-facing projection of the Worker-owned Task context. */
@@ -563,7 +577,13 @@ export interface TaskView {
   readonly completedAt?: number;
 }
 
-export function toTaskView(task: Task): TaskView {
+export function toTaskView(task: Task, processExecutionMode?: ExecutionMode): TaskView {
+  const placement = task.executionPlacement ?? (task.environmentInstanceId !== undefined
+    ? legacyEnvironmentPlacement(task.environmentInstanceId)
+    : undefined);
+  const modeMismatch = processExecutionMode !== undefined
+    ? executionModeMismatchReason(placement, processExecutionMode)
+    : undefined;
   return {
     id: task.id,
     projectId: task.projectId,
@@ -585,6 +605,9 @@ export function toTaskView(task: Task): TaskView {
     ...(task.endDisposition !== undefined ? { endDisposition: task.endDisposition } : {}),
     ...(task.forcedRelease !== undefined ? { forcedRelease: task.forcedRelease } : {}),
     ...(task.environmentInstanceId !== undefined ? { environmentInstanceId: task.environmentInstanceId } : {}),
+    ...(task.executionPlacement !== undefined ? { executionPlacement: task.executionPlacement } : {}),
+    ...(processExecutionMode !== undefined ? { processExecutionMode } : {}),
+    ...(modeMismatch !== undefined ? { executionModeMismatchReason: modeMismatch } : {}),
     ...(task.environmentLeaseId !== undefined ? { environmentLeaseId: task.environmentLeaseId } : {}),
     ...(task.environmentLifecycleState !== undefined ? { environmentLifecycleState: task.environmentLifecycleState } : {}),
     taskContextState: toTaskContextState(task),
@@ -640,8 +663,8 @@ export interface TaskRunLinkView {
   };
 }
 
-export function toTaskWithRunsView(found: TaskWithRuns): TaskWithRunsView {
-  return { task: toTaskView(found.task), runs: found.runs.map(toTaskRunLinkView) };
+export function toTaskWithRunsView(found: TaskWithRuns, processExecutionMode?: ExecutionMode): TaskWithRunsView {
+  return { task: toTaskView(found.task, processExecutionMode), runs: found.runs.map(toTaskRunLinkView) };
 }
 
 export function toTaskRunLinkView(link: TaskRunLink): TaskRunLinkView {

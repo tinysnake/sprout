@@ -17,6 +17,8 @@ Operator Settings reports the server's effective mode and a non-inference Host P
 - Host readiness is scoped to the Sprout Engine profile and remains independent from Environment readiness. A Project's Environment access cannot authorize a host model or host filesystem access.
 - Host-run Messages keep the shared RunOrchestrator, Project membership checks, event streaming, reply projection, usage recording, and interruption lifecycle. Environment enrollment, leases, and recovery remain unchanged for Environment-hosted runs.
 - Tasks continue to require Environment-hosted mode; Host-run does not create Task context or a Task lease.
+- A Settings read is a non-inference observation of the current process configuration. It may refresh the local Host Pi readiness observation, but does not start an engine, submit a run, perform a model turn, or request an Environment Worker readiness probe.
+- Placement work keeps the one Runtime admission seam and preserves Environment enrollment, Project authority, leases, and recovery guarantees. ADR-0017 records the selected mode and actual engine host/profile on admitted Runs and begun Tasks so a restart cannot silently relabel unfinished work.
 
 **Rejected alternatives**
 

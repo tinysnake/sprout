@@ -40,7 +40,8 @@ import {
   type EnvironmentEnrollmentServiceOptions,
 } from './environment/enrollment-service.ts';
 import type { EnvironmentSource, HostConfiguration } from './host-config.ts';
-import { createExecutionStrategy, type ExecutionStrategy } from './execution-mode.ts';
+import { createExecutionStrategy, executionModeAdmissionRefusal, type ExecutionStrategy } from './execution-mode.ts';
+import { engineHostProfileForPlatform, environmentEngineHost } from './execution-placement.ts';
 import type { Project } from './project/model.ts';
 import { ProjectRegistry } from './project/registry.ts';
 import { workspaceFor } from './project/resolve.ts';
@@ -1060,6 +1061,15 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         ? { eligibleInstanceIds: [configuredInstance.id] }
         : { eligibleInstanceIds: [] }),
     });
+    const executionPlacementForEnvironment = (environmentInstanceId: string) => {
+      const refusal = executionModeAdmissionRefusal(executionStrategy);
+      if (refusal !== undefined) throw new Error(refusal);
+      const platform = pool.definition(environmentInstanceId)?.platform ?? 'unknown';
+      return {
+        mode: executionStrategy.mode,
+        engineHost: environmentEngineHost(environmentInstanceId, engineHostProfileForPlatform(platform)),
+      } as const;
+    };
     // A durable authority, readiness, or recovery change schedules an
     // asynchronous catalog re-projection (E2). The scheduled function is replaced
     // once `refreshEnvironmentCatalog` exists below; the indirection lets the
@@ -1138,6 +1148,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       engines: (requestedInstanceId) => runtimeEnvironment.adapters(requestedInstanceId),
       executionStrategy,
       ...(hostPi !== undefined ? { hostPi } : {}),
+      executionPlacementForEnvironment,
       agents,
       resolveAgent,
       // Observed engine facts (#87) per instance, so run admission can take the
@@ -1187,6 +1198,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       sessionKeys: stores.sessionKeys,
       tasks: {
         prompt: (input) => tasks.prompt(input),
+        executionPlacement: (input) => tasks.executionPlacement(input),
         link: (input) => tasks.link(input),
       },
       onTaskRunSettled: (input) => tasks.onRunSettled(input),
@@ -1220,6 +1232,8 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         sync: syncTaskGroup,
         withTaskGroupLock: (taskId, action) => conversationScopes.withTaskGroupLock(taskId, action),
       },
+      executionStrategy,
+      executionPlacementForEnvironment,
       leaseTtlMs,
       // Every Task entry into recovery opens the durable recovery record that
       // protects its lease (#88). The callback only records; the lifecycle keeps
@@ -1963,6 +1977,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
 
     const api = createRunApi({
       orchestrator,
+      executionMode: executionStrategy.mode,
       agents,
       // The project channel is served over the same core: delivery, wake dispatch,
       // and projected replies all go through the one coordinator above, governed
@@ -2007,9 +2022,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         createChatRunRouter({ collaboration, scopes: conversationScopes, runs: orchestrator }),
         createTaskProposalRouter({ proposals: taskProposals }),
         createUsageRouter({ usage: usageService }),
-        createTaskAdmissionRouter({ admissions: taskAdmissions }),
+        createTaskAdmissionRouter({ admissions: taskAdmissions, processExecutionMode: executionStrategy.mode }),
         createTaskControlRouter({
           controls: taskControls,
+          processExecutionMode: executionStrategy.mode,
           end: async (taskId, input) => {
             const task = await tasks.get(taskId);
             if (environmentSource === 'enrollment' && task?.environmentLeaseId !== undefined &&
@@ -2021,8 +2037,11 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
             return taskControls.endForHuman(taskId, input);
           },
           recover: async (taskId, input) => {
-            if (input.action === 'resume') taskControls.assertExecutionModeAvailable();
             const task = await tasks.get(taskId);
+            if (input.action === 'resume' && task !== undefined && task.recoveryState !== 'ending') {
+              taskControls.assertTaskMode(task);
+              taskControls.assertExecutionModeAvailable();
+            }
             if (environmentSource !== 'enrollment' || task?.environmentLeaseId === undefined ||
                 task.environmentLifecycleState !== 'recovery') {
               return taskControls.recoverForHuman(taskId, input);

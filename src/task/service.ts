@@ -38,6 +38,7 @@ import {
 } from './model.ts';
 import type { TaskFilter, TaskStore } from './store.ts';
 import type { TaskEnvironmentLifecycle, TaskRecoveryAction } from './environment-lifecycle.ts';
+import type { ExecutionPlacement } from '../execution-placement.ts';
 
 /** The slice of the run orchestrator the Task service uses. */
 export interface TaskRunner {
@@ -279,6 +280,10 @@ export class TaskService {
   ): Promise<readonly string[]> {
     if (!this.#lifecycle) throw new Error('Task environment lifecycle is not configured');
     return this.#lifecycle.forceRelease(taskId, input);
+  }
+
+  async executionPlacement(input: { readonly taskId: string }): Promise<ExecutionPlacement | undefined> {
+    return (await this.#require(input.taskId)).executionPlacement;
   }
 
   /**

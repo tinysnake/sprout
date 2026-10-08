@@ -1,6 +1,7 @@
 import type { AgentRunEvent, EngineTurnResult, TokenUsage, DetailedTokenDimensions } from '../engine/port.ts';
 import type { AgentWorkOption } from '../agent/model.ts';
 import type { WorkspaceSelectionKind } from '../project/access.ts';
+import type { ExecutionPlacement, SessionKeyScope } from '../execution-placement.ts';
 
 export type { TokenUsage, DetailedTokenDimensions } from '../engine/port.ts';
 
@@ -66,6 +67,10 @@ export interface AgentRun {
    * makes one wrap the other.
    */
   readonly taskId?: string;
+  /** Authorized continuation scope for a standalone run, when one exists. */
+  readonly sessionKeyScope?: SessionKeyScope;
+  /** The process mode and actual engine host/profile recorded at admission. */
+  readonly executionPlacement?: ExecutionPlacement;
   readonly status: AgentRunStatus;
   readonly events: readonly AgentRunEvent[];
   /**

@@ -6,11 +6,12 @@
  * key is engine-native and only the engine can make sense of it, so Sprout stores
  * it verbatim rather than deriving state from it.
  *
- * The lookup identity is `(agent, engine, environment instance, working
- * directory)`. All four are load-bearing: a key is issued by one engine, recorded
- * inside one environment's engine store, and (for Pi and `opencode`, per #19)
- * coupled to the working directory it was created in. A run whose identity
- * differs must not receive the old key. The raw directory is reduced to a
+ * The lookup identity is the Agent, engine, Environment instance, immutable
+ * execution mode, actual engine host/profile, working directory, and authorized
+ * Conversation, Routing batch, or Task scope. Every dimension is load-bearing:
+ * a key is issued
+ * by one engine, exists in one engine host's store, is tied to the working area,
+ * and belongs to one authorization context. The raw directory is reduced to a
  * stable digest before it enters a stored record or SQLite slot.
  *
  * This is a seam, not a detail of SQLite: the orchestrator never issues a query,
@@ -21,15 +22,15 @@
 import { createHash } from 'node:crypto';
 
 import { sanitizeIdentifier } from '../environment/privacy.ts';
+import { sessionKeyPlacementTuple, sessionKeyScopeTuple, legacyEnvironmentPlacement, legacySessionScope, type HostedExecutionPlacement, type SessionKeyScope } from '../execution-placement.ts';
 
 /** What identifies one continuation slot, independent of the key itself. */
 export interface SessionKeyIdentity {
   readonly agentId: string;
   readonly engine: string;
   readonly environmentInstanceId: string;
-  /** Execution mode and Engine host profile are independent continuation dimensions. */
-  readonly executionMode?: import('../execution-mode.ts').ExecutionMode;
-  readonly engineHostProfileId?: string;
+  readonly executionPlacement?: HostedExecutionPlacement;
+  readonly scope?: SessionKeyScope;
   /** The working directory the engine session was created in. */
   readonly workingDirectory: string;
 }
@@ -39,8 +40,8 @@ export interface StoredSessionKey {
   readonly agentId: string;
   readonly engine: string;
   readonly environmentInstanceId: string;
-  readonly executionMode: import('../execution-mode.ts').ExecutionMode;
-  readonly engineHostProfileId: string;
+  readonly executionPlacement: HostedExecutionPlacement;
+  readonly scope: SessionKeyScope;
   /** One-way runtime-derived identity for the working directory. */
   readonly workingDirectoryId: string;
   readonly key: string;
@@ -83,16 +84,20 @@ export function workingDirectoryId(workingDirectory: string): string {
  * containing the delimiter cannot collide with another slot.
  */
 export function sessionKeyId(identity: SessionKeyIdentity): string {
-  const executionMode = identity.executionMode ?? 'environment-hosted';
-  const engineHostProfileId = identity.engineHostProfileId ?? identity.environmentInstanceId;
   return JSON.stringify([
-    executionMode,
-    engineHostProfileId,
     identity.agentId,
     identity.engine,
     identity.environmentInstanceId,
+    ...sessionKeyPlacementTuple(normalizedExecutionPlacement(identity)),
     workingDirectoryId(identity.workingDirectory),
+    ...sessionKeyScopeTuple(identity.scope ?? legacySessionScope()),
   ]);
+}
+
+export function normalizedExecutionPlacement(identity: SessionKeyIdentity): HostedExecutionPlacement {
+  const placement = identity.executionPlacement ?? legacyEnvironmentPlacement(identity.environmentInstanceId);
+  if (placement.engineHost === undefined) throw new Error('session key identity requires a recorded engine host');
+  return placement as HostedExecutionPlacement;
 }
 
 export class InMemorySessionKeyStore implements SessionKeyStore {
@@ -109,8 +114,8 @@ export class InMemorySessionKeyStore implements SessionKeyStore {
       agentId: record.agentId,
       engine: record.engine,
       environmentInstanceId: record.environmentInstanceId,
-      executionMode: record.executionMode ?? 'environment-hosted',
-      engineHostProfileId: record.engineHostProfileId ?? record.environmentInstanceId,
+      executionPlacement: normalizedExecutionPlacement(record),
+      scope: record.scope ?? legacySessionScope(),
       workingDirectoryId: workingDirectoryId(record.workingDirectory),
       key: record.key,
       updatedAt: record.updatedAt,

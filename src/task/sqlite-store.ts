@@ -12,6 +12,7 @@ import type { TaskFilter, TaskStore } from './store.ts';
 import type { EnvironmentLease, TaskLeaseBinding } from '../environment/pool.ts';
 import { createTransactionCoordinator, type TransactionCoordinator } from '../store/transaction.ts';
 import { migrateOrInitializeDatabase } from '../store/schema.ts';
+import { normalizeLegacyTaskPlacement, parseExecutionPlacement } from '../execution-placement.ts';
 
 /**
  * SQLite-backed Task storage (ticket #28, ADR-0002).
@@ -82,6 +83,7 @@ export class SqliteTaskStore implements TaskStore {
         active_run_id TEXT,
         admission_document TEXT,
         control_document TEXT,
+        execution_placement TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         completed_at INTEGER
@@ -112,6 +114,7 @@ export class SqliteTaskStore implements TaskStore {
     this.#addColumnIfMissing('tasks', 'active_run_id', 'TEXT');
     this.#addColumnIfMissing('tasks', 'admission_document', 'TEXT');
     this.#addColumnIfMissing('tasks', 'control_document', 'TEXT');
+    this.#addColumnIfMissing('tasks', 'execution_placement', 'TEXT');
     this.#addColumnIfMissing('task_run_links', 'advance_actor', 'TEXT');
     this.#addColumnIfMissing('task_run_links', 'advance_reason', 'TEXT');
     this.#addColumnIfMissing('task_run_links', 'content_version', 'INTEGER');
@@ -128,8 +131,8 @@ export class SqliteTaskStore implements TaskStore {
       .prepare(
         `INSERT OR IGNORE INTO tasks
            (id, project_id, title, goal, constraints, status, assigned_agent_id,
-            environment_preference, blocker_reason, environment_instance_id, environment_lease_id, environment_lifecycle_state, recovery_state, active_run_id, admission_document, control_document, created_at, updated_at, completed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            environment_preference, blocker_reason, environment_instance_id, environment_lease_id, environment_lifecycle_state, recovery_state, active_run_id, admission_document, control_document, execution_placement, created_at, updated_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         task.id,
@@ -148,6 +151,7 @@ export class SqliteTaskStore implements TaskStore {
         task.activeRunId ?? null,
         task.admission !== undefined ? JSON.stringify(task.admission) : null,
         taskControlDocument(task),
+        task.executionPlacement !== undefined ? JSON.stringify(task.executionPlacement) : null,
         task.createdAt,
         task.updatedAt,
         task.completedAt ?? null,
@@ -195,7 +199,7 @@ export class SqliteTaskStore implements TaskStore {
     const changed = this.#db.prepare(
       `UPDATE tasks
           SET title = ?, goal = ?, constraints = ?, status = ?, assigned_agent_id = ?,
-              environment_preference = ?, blocker_reason = ?, environment_instance_id = ?, environment_lease_id = ?, environment_lifecycle_state = ?, recovery_state = ?, active_run_id = ?, admission_document = ?, control_document = ?, updated_at = ?, completed_at = ?
+              environment_preference = ?, blocker_reason = ?, environment_instance_id = ?, environment_lease_id = ?, environment_lifecycle_state = ?, recovery_state = ?, active_run_id = ?, admission_document = ?, control_document = ?, execution_placement = ?, updated_at = ?, completed_at = ?
         WHERE id = ?
           AND environment_lifecycle_state IS ?
           AND active_run_id IS ?
@@ -256,7 +260,7 @@ export class SqliteTaskStore implements TaskStore {
       const changed = this.#db.prepare(
         `UPDATE tasks SET title = ?, goal = ?, constraints = ?, status = ?, assigned_agent_id = ?,
          environment_preference = ?, blocker_reason = ?, environment_instance_id = ?, environment_lease_id = ?,
-         environment_lifecycle_state = ?, recovery_state = ?, active_run_id = ?, admission_document = ?, control_document = ?, updated_at = ?, completed_at = ?
+         environment_lifecycle_state = ?, recovery_state = ?, active_run_id = ?, admission_document = ?, control_document = ?, execution_placement = ?, updated_at = ?, completed_at = ?
          WHERE id = ? AND environment_lifecycle_state IS ? AND active_run_id IS ? AND (? IS NULL OR updated_at = ?) AND control_document IS ?`,
       ).run(...this.#taskValues(task), task.id, expected.environmentLifecycleState ?? null, expected.activeRunId ?? null,
         expected.updatedAt ?? null, expected.updatedAt ?? null, expected.controlDocument);
@@ -293,6 +297,7 @@ export class SqliteTaskStore implements TaskStore {
       task.environmentLifecycleState ?? null, task.recoveryState ?? null, task.activeRunId ?? null,
       task.admission !== undefined ? JSON.stringify(task.admission) : null,
       taskControlDocument(task),
+      task.executionPlacement !== undefined ? JSON.stringify(task.executionPlacement) : null,
       task.updatedAt, task.completedAt ?? null,
     ];
   }
@@ -301,20 +306,22 @@ export class SqliteTaskStore implements TaskStore {
     this.#db.prepare(`INSERT INTO tasks
       (id, project_id, title, goal, constraints, status, assigned_agent_id, environment_preference,
        blocker_reason, environment_instance_id, environment_lease_id, environment_lifecycle_state,
-       recovery_state, active_run_id, admission_document, control_document, created_at, updated_at, completed_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(task.id, task.projectId, task.title, task.goal, JSON.stringify(task.constraints), task.status,
+       recovery_state, active_run_id, admission_document, control_document, execution_placement, created_at, updated_at, completed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(task.id, task.projectId, task.title, task.goal, JSON.stringify(task.constraints), task.status,
         task.assignedAgentId ?? null, task.environmentPreference ? JSON.stringify(task.environmentPreference) : null,
         task.blockerReason ?? null, task.environmentInstanceId ?? null, task.environmentLeaseId ?? null,
         task.environmentLifecycleState ?? null, task.recoveryState ?? null, task.activeRunId ?? null,
-        task.admission !== undefined ? JSON.stringify(task.admission) : null, taskControlDocument(task), task.createdAt, task.updatedAt,
+        task.admission !== undefined ? JSON.stringify(task.admission) : null,
+        taskControlDocument(task),
+        task.executionPlacement !== undefined ? JSON.stringify(task.executionPlacement) : null,
+        task.createdAt, task.updatedAt,
         task.completedAt ?? null);
   }
 
   #saveTask(task: Task): void {
     this.#db.prepare(
       `UPDATE tasks SET title = ?, goal = ?, constraints = ?, status = ?, assigned_agent_id = ?,
-       environment_preference = ?, blocker_reason = ?, environment_instance_id = ?, environment_lease_id = ?, environment_lifecycle_state = ?, recovery_state = ?, active_run_id = ?, admission_document = ?, control_document = ?, updated_at = ?, completed_at = ? WHERE id = ?`,
+       environment_preference = ?, blocker_reason = ?, environment_instance_id = ?, environment_lease_id = ?, environment_lifecycle_state = ?, recovery_state = ?, active_run_id = ?, admission_document = ?, control_document = ?, execution_placement = ?, updated_at = ?, completed_at = ? WHERE id = ?`,
     ).run(...this.#taskValues(task), task.id);
   }
 
@@ -412,6 +419,7 @@ interface TaskRow {
   readonly active_run_id: string | null;
   readonly admission_document: string | null;
   readonly control_document: string | null;
+  readonly execution_placement: string | null;
   readonly created_at: number;
   readonly updated_at: number;
   readonly completed_at: number | null;
@@ -438,7 +446,8 @@ type TaskControlDocument = Pick<Task, 'blocker' | 'completionClaims' | 'pendingC
 const taskControlDocument = serializeTaskControlDocument;
 
 function toTask(row: TaskRow): Task {
-  return {
+  const executionPlacement = parseExecutionPlacement(row.execution_placement, row.environment_instance_id ?? undefined);
+  return normalizeLegacyTaskPlacement({
     id: row.id,
     projectId: row.project_id,
     title: row.title,
@@ -461,10 +470,11 @@ function toTask(row: TaskRow): Task {
     ...(row.active_run_id !== null ? { activeRunId: row.active_run_id } : {}),
     ...(row.admission_document !== null ? { admission: JSON.parse(row.admission_document) as NonNullable<Task['admission']> } : {}),
     ...(row.control_document !== null ? JSON.parse(row.control_document) as TaskControlDocument : {}),
+    ...(executionPlacement !== undefined ? { executionPlacement } : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     ...(row.completed_at !== null ? { completedAt: row.completed_at } : {}),
-  };
+  });
 }
 
 function toLink(row: TaskRunRow): TaskRunLink {

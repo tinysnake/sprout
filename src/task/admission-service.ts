@@ -9,10 +9,11 @@ import type { TaskProposalService } from './proposal-service.ts';
 import type { TaskProposalStore } from './proposal-store.ts';
 import { createExecutionStrategy, taskExecutionModeAdmissionRefusal, type ExecutionStrategy } from '../execution-mode.ts';
 import { TaskProposalError, type TaskProposalBeginInput } from './proposal-model.ts';
+import { executionModeMismatchReason, legacyEnvironmentPlacement } from '../execution-placement.ts';
 
 export type TaskAdmissionErrorCode = 'invalid-command' | 'lead-ineligible' | 'environment-ineligible'
   | 'no-compatible-agent' | 'task-not-admitted' | 'advance-forbidden' | 'target-ineligible'
-  | 'environment-recovering' | 'environment-unavailable' | 'execution-mode-unavailable';
+  | 'environment-recovering' | 'environment-unavailable' | 'execution-mode-unavailable' | 'execution-mode-mismatch';
 
 export class TaskAdmissionError extends Error {
   readonly code: TaskAdmissionErrorCode;
@@ -210,10 +211,17 @@ export class TaskAdmissionService {
     readonly reason?: string;
     readonly prompt?: string;
   }): Promise<{ readonly task: Task; readonly runId: string; readonly audit: TaskRunLink }> {
-    this.#requireExecutionMode();
     actor = actorSnapshot(actor);
     const task = await this.#tasks.get(taskId);
-    if (!task) throw new TaskAdmissionError('task-not-admitted', `unknown task: ${taskId}`);
+    if (!task) throw new TaskAdmissionError('task-not-admitted', `Task ${taskId} is unavailable`);
+    const mismatch = executionModeMismatchReason(
+      task.executionPlacement ?? (task.environmentInstanceId !== undefined
+        ? legacyEnvironmentPlacement(task.environmentInstanceId)
+        : undefined),
+      this.#executionStrategy.mode,
+    );
+    if (mismatch !== undefined) throw new TaskAdmissionError('execution-mode-mismatch', mismatch);
+    this.#requireExecutionMode();
     if (!task.admission) throw new TaskAdmissionError('task-not-admitted', 'Task advances require a Human-approved proposal');
     await this.#proposals.authorizeActor(task.projectId, actor);
     if (actor.memberKind === 'agent' && (task.admission.lead.memberKind !== 'agent' || task.admission.lead.memberId !== actor.memberId)) {

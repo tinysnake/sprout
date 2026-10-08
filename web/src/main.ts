@@ -32,6 +32,9 @@ interface RunView {
   readonly status: string;
   readonly executionMode?: 'environment-hosted' | 'host-run';
   readonly events: readonly RunEvent[];
+  readonly executionPlacement?: ExecutionPlacementView;
+  readonly processExecutionMode?: string;
+  readonly executionModeMismatchReason?: string;
   readonly failure?: string;
   readonly result?: { readonly status?: string; readonly text?: string; readonly message?: string };
   readonly tokenUsage?: {
@@ -41,6 +44,15 @@ interface RunView {
   };
   readonly createdAt: number;
   readonly completedAt?: number;
+}
+
+interface ExecutionPlacementView {
+  readonly mode: string;
+  readonly engineHost?: {
+    readonly kind: string;
+    readonly id: string;
+    readonly profile: { readonly platform: string; readonly boundary: string };
+  };
 }
 
 interface RunHistoryTotals {
@@ -79,6 +91,9 @@ interface TaskView {
   readonly status: string;
   readonly assignedAgentId?: string;
   readonly environmentInstanceId?: string;
+  readonly executionPlacement?: ExecutionPlacementView;
+  readonly processExecutionMode?: string;
+  readonly executionModeMismatchReason?: string;
   readonly environmentLeaseId?: string;
   readonly environmentLifecycleState?: string;
   readonly taskContextState: string;
@@ -573,6 +588,10 @@ function renderTaskCard(detail: TaskWithRunsView): HTMLElement {
   appendFact(facts, 'Activity', taskActivity(task));
   appendFact(facts, 'Default Agent', task.assignedAgentId ?? 'Unassigned');
   appendFact(facts, 'Environment', task.environmentInstanceId ?? 'Not selected');
+  appendFact(facts, 'Execution placement', formatExecutionPlacement(task.executionPlacement, task.processExecutionMode));
+  if (task.executionModeMismatchReason !== undefined) {
+    appendFact(facts, 'Continuation unavailable', task.executionModeMismatchReason);
+  }
   appendFact(facts, 'Task lease', lease);
   appendFact(facts, 'Task context', taskContextState(task));
   if (task.constraints.length > 0) appendFact(facts, 'Constraints', task.constraints.join(' · '));
@@ -993,6 +1012,15 @@ function render(run: RunView): void {
   const tokenUsage = element.querySelector<HTMLElement>('.token-usage');
   if (tokenUsage) tokenUsage.textContent = formatTokenUsage(run.tokenUsage);
 
+  const executionPlacement = element.querySelector<HTMLElement>('.execution-placement');
+  if (executionPlacement) {
+    executionPlacement.textContent = formatExecutionPlacement(
+      run.executionPlacement,
+      run.processExecutionMode,
+      run.executionModeMismatchReason,
+    );
+  }
+
   const stop = element.querySelector<HTMLButtonElement>('button.stop');
   if (stop) {
     stop.hidden = run.status !== 'running' && run.status !== 'queued';
@@ -1041,7 +1069,13 @@ function createRunElement(run: RunView): HTMLElement {
   const tokenUsageValue = document.createElement('dd');
   tokenUsageValue.className = 'token-usage';
   tokenUsage.append(tokenUsageLabel, tokenUsageValue);
-  metrics.append(duration, tokenUsage);
+  const executionPlacement = document.createElement('div');
+  const executionPlacementLabel = document.createElement('dt');
+  executionPlacementLabel.textContent = 'Execution placement';
+  const executionPlacementValue = document.createElement('dd');
+  executionPlacementValue.className = 'execution-placement';
+  executionPlacement.append(executionPlacementLabel, executionPlacementValue);
+  metrics.append(duration, tokenUsage, executionPlacement);
 
   const actions = document.createElement('div');
   actions.className = 'actions';
@@ -1072,6 +1106,19 @@ function formatDurationMs(milliseconds: number): string {
   const minutes = Math.floor(milliseconds / 60_000);
   const seconds = Math.floor((milliseconds % 60_000) / 1_000);
   return `${minutes}m ${seconds}s`;
+}
+
+function formatExecutionPlacement(
+  placement: ExecutionPlacementView | undefined,
+  processExecutionMode?: string,
+  mismatchReason?: string,
+): string {
+  const current = processExecutionMode === undefined ? '' : ` · Current Sprout mode: ${processExecutionMode}`;
+  const mismatch = mismatchReason === undefined ? '' : ` · ${mismatchReason}`;
+  if (placement === undefined) return `Not recorded${current}${mismatch}`;
+  const host = placement.engineHost;
+  if (host === undefined) return `${placement.mode} · host not admitted${current}${mismatch}`;
+  return `${placement.mode} · ${host.kind} ${host.id} (${host.profile.platform}, ${host.profile.boundary})${current}${mismatch}`;
 }
 
 function formatTokenUsage(tokenUsage: RunView['tokenUsage']): string {

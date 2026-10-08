@@ -78,6 +78,33 @@ const events: readonly AgentRunEvent[] = [{ type: 'message', text: 'done', final
 
 const completed = { status: 'completed', text: 'done' } as const;
 
+const testPlacement = {
+  mode: 'environment-hosted',
+  engineHost: {
+    kind: 'environment',
+    id: 'mac-mini-1',
+    profile: { platform: 'macos', boundary: 'shared-host' },
+  },
+} as const;
+const testScope = { kind: 'conversation', id: 'test-conversation' } as const;
+
+function continuationIdentity(input: {
+  readonly environmentInstanceId?: string;
+  readonly workingDirectory?: string;
+} = {}) {
+  const environmentInstanceId = input.environmentInstanceId ?? 'mac-mini-1';
+  return {
+    agentId: 'agent-scout',
+    engine: 'scripted',
+    environmentInstanceId,
+    executionPlacement: environmentInstanceId === 'mac-mini-1'
+      ? testPlacement
+      : { ...testPlacement, engineHost: { ...testPlacement.engineHost, id: environmentInstanceId } },
+    scope: testScope,
+    workingDirectory: input.workingDirectory ?? '/srv/work',
+  } as const;
+}
+
 
 function build(options: {
   agent?: Partial<AgentDefinition>;
@@ -131,6 +158,11 @@ function build(options: {
     leaseTtlMs: 60_000,
     clock: { now: () => 5_000 },
   });
+  const submitInContinuationScope = orchestrator.submit.bind(orchestrator);
+  orchestrator.submit = (request) => submitInContinuationScope({
+    ...request,
+    sessionKeyScope: request.sessionKeyScope ?? { kind: 'conversation', id: 'test-conversation' },
+  });
   return { orchestrator, adapter, sessionKeys, store, agent };
 }
 
@@ -161,14 +193,17 @@ test("the second run receives the first run's engine session key", async () => {
 test('a completed run persists its key under the full identity', async () => {
   const { orchestrator, sessionKeys } = build({});
   const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'one' });
-  await orchestrator.waitFor(id);
-
-  const stored = await sessionKeys.get({
-    agentId: 'agent-scout',
-    engine: 'scripted',
-    environmentInstanceId: 'mac-mini-1',
-    workingDirectory: '/srv/work',
+  const admitted = await orchestrator.waitFor(id);
+  assert.deepEqual(admitted.executionPlacement, {
+    mode: 'environment-hosted',
+    engineHost: {
+      kind: 'environment',
+      id: 'mac-mini-1',
+      profile: { platform: 'macos', boundary: 'shared-host' },
+    },
   });
+
+  const stored = await sessionKeys.get(continuationIdentity());
   assert.equal(stored?.key, 'scripted-key-1');
   assert.equal(stored?.updatedAt, 5_000);
 });
@@ -217,12 +252,7 @@ test('the stored key records the instance-resolved working directory, not the ag
   await orchestrator.waitFor(id);
 
   assert.equal(adapter.requests[0]?.workingDirectory, '/srv/instance');
-  const stored = await sessionKeys.get({
-    agentId: 'agent-scout',
-    engine: 'scripted',
-    environmentInstanceId: 'mac-mini-1',
-    workingDirectory: '/srv/instance',
-  });
+  const stored = await sessionKeys.get(continuationIdentity({ workingDirectory: '/srv/instance' }));
   assert.equal(stored?.key, 'scripted-key-1', 'the key is stored under the instance directory');
   const underFallback = await sessionKeys.get({
     agentId: 'agent-scout',
@@ -324,7 +354,7 @@ test('a key stored by a previous process is used after a restart', async () => {
 });
 
 
-test('a migrated SQLite session key resumes after the database is reopened', async () => {
+test('a migrated unscoped SQLite session key is retained but never crosses into an authorized conversation', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-session-key-migration-'));
   const filename = join(directory, 'sprout.db');
   const workingDirectory = '/srv/work';
@@ -380,9 +410,9 @@ test('a migrated SQLite session key resumes after the database is reopened', asy
       const run = await orchestrator.waitFor(id);
 
       assert.equal(run.status, 'completed');
-      assert.equal(adapter.requests[0]?.resumeSessionKey, legacyKey);
-      assert.equal(adapter.sessions[0]?.engineSessionKey, legacyKey);
-      assert.equal((await sessionKeys.get(identity))?.key, legacyKey);
+      assert.equal(adapter.requests[0]?.resumeSessionKey, undefined, 'legacy scope is unknown and cannot authorize continuation');
+      assert.equal(adapter.sessions[0]?.engineSessionKey, 'scripted-key-1');
+      assert.equal((await sessionKeys.get(identity))?.key, legacyKey, 'the historical key remains in its legacy scope');
       sessionKeys.close();
     } finally {
       reopenedDb.close();
@@ -398,10 +428,7 @@ test('an unknown stored key degrades to a fresh session instead of failing the r
   // that as a failed run: it forgets the refused key and retries once, fresh.
   const sessionKeys = new InMemorySessionKeyStore();
   await sessionKeys.save({
-    agentId: 'agent-scout',
-    engine: 'scripted',
-    environmentInstanceId: 'mac-mini-1',
-    workingDirectory: '/srv/work',
+    ...continuationIdentity(),
     key: 'stale-key',
     updatedAt: 1_000,
   });
@@ -420,12 +447,7 @@ test('an unknown stored key degrades to a fresh session instead of failing the r
   assert.equal(adapter.requests[0]?.resumeSessionKey, 'stale-key');
   assert.equal(adapter.requests[1]?.resumeSessionKey, undefined, 'the retry starts fresh');
   // The stale key is gone and the fresh key is what will continue next time.
-  const stored = await sessionKeys.get({
-    agentId: 'agent-scout',
-    engine: 'scripted',
-    environmentInstanceId: 'mac-mini-1',
-    workingDirectory: '/srv/work',
-  });
+  const stored = await sessionKeys.get(continuationIdentity());
   assert.equal(stored?.key, 'scripted-key-1');
 });
 
@@ -436,10 +458,7 @@ test('a stale key that fails the turn is also degraded to a fresh session', asyn
   // rejected session start. The core must treat both shapes the same.
   const sessionKeys = new InMemorySessionKeyStore();
   await sessionKeys.save({
-    agentId: 'agent-scout',
-    engine: 'scripted',
-    environmentInstanceId: 'mac-mini-1',
-    workingDirectory: '/srv/work',
+    ...continuationIdentity(),
     key: 'stale-key',
     updatedAt: 1_000,
   });
@@ -466,10 +485,7 @@ test('a mid-turn failure with a valid key is not retried and does not delete the
   // discard a perfectly good continuation key because of an unrelated failure.
   const sessionKeys = new InMemorySessionKeyStore();
   await sessionKeys.save({
-    agentId: 'agent-scout',
-    engine: 'scripted',
-    environmentInstanceId: 'mac-mini-1',
-    workingDirectory: '/srv/work',
+    ...continuationIdentity(),
     key: 'a-key',
     updatedAt: 1_000,
   });
@@ -497,12 +513,7 @@ test('a mid-turn failure with a valid key is not retried and does not delete the
     'the events the engine already emitted are kept',
   );
   // SK-001: the unrelated failure must not discard the key.
-  const stored = await sessionKeys.get({
-    agentId: 'agent-scout',
-    engine: 'scripted',
-    environmentInstanceId: 'mac-mini-1',
-    workingDirectory: '/srv/work',
-  });
+  const stored = await sessionKeys.get(continuationIdentity());
   assert.equal(stored?.key, 'a-key', 'a mid-turn failure does not delete a valid stored key');
 });
 
@@ -514,10 +525,7 @@ test('an initialization failure with a stored key is not retried fresh and keeps
   // throw away a continuation key the engine never refused.
   const sessionKeys = new InMemorySessionKeyStore();
   await sessionKeys.save({
-    agentId: 'agent-scout',
-    engine: 'scripted',
-    environmentInstanceId: 'mac-mini-1',
-    workingDirectory: '/srv/work',
+    ...continuationIdentity(),
     key: 'a-valid-key',
     updatedAt: 1_000,
   });
@@ -530,11 +538,6 @@ test('an initialization failure with a stored key is not retried fresh and keeps
   assert.match(run.failure ?? '', /codex binary missing/);
   assert.equal(adapter.requests.length, 1, 'the unrelated start failure was not retried');
   assert.equal(adapter.requests[0]?.resumeSessionKey, 'a-valid-key');
-  const stored = await sessionKeys.get({
-    agentId: 'agent-scout',
-    engine: 'scripted',
-    environmentInstanceId: 'mac-mini-1',
-    workingDirectory: '/srv/work',
-  });
+  const stored = await sessionKeys.get(continuationIdentity());
   assert.equal(stored?.key, 'a-valid-key', 'the key survives an unrelated start failure');
 });

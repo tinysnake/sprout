@@ -4,6 +4,7 @@ import type { Task } from '../task/model.ts';
 import { TaskProposalError } from '../task/proposal-model.ts';
 import { TaskPauseRetryRequired, TaskRecoveryRefusal, TaskTerminalMutationError } from '../task/environment-lifecycle.ts';
 import { toTaskView } from './views.ts';
+import type { ExecutionMode } from '../execution-mode.ts';
 import type { ApiRequestContext, ApiRouter } from './router.ts';
 
 function json(context: ApiRequestContext, status: number, body: unknown): boolean {
@@ -15,6 +16,7 @@ function json(context: ApiRequestContext, status: number, body: unknown): boolea
 /** Protected Human intervention and validation commands for begun Tasks. */
 export function createTaskControlRouter(options: {
   readonly controls: TaskControlService;
+  readonly processExecutionMode?: ExecutionMode;
   /** Route a completed end retry through Environment recovery when required. */
   readonly end?: (taskId: string, input: { reason: string }) => Promise<Task>;
   /** Resolve Environment proof and decision history together with the Task holder. */
@@ -106,7 +108,7 @@ export function createTaskControlRouter(options: {
             break;
         }
         if (task === undefined) return json(context, 400, { code: 'invalid-command', error: 'unsupported Task control' });
-        return json(context, 200, { task: toTaskView(task) });
+        return json(context, 200, { task: toTaskView(task, options.processExecutionMode) });
       } catch (error) {
         if (error instanceof TaskPauseRetryRequired) return json(context, 409, { code: 'pause-retry-required', error: error.message });
         if (error instanceof TaskTerminalMutationError) return json(context, 409, { code: error.code, error: error.message });
