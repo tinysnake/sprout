@@ -145,6 +145,10 @@ export interface RunOrchestratorOptions {
   readonly executionPlacementForEnvironment?: (environmentInstanceId: string) => ExecutionPlacement;
   /** Core-owned Host-run workspace operation attachment; never a model target selector. */
   readonly remoteWorkspace?: (projectId: string, agentId: string) => Promise<import('../engine/port.ts').RemoteWorkspaceTools | undefined>;
+  /** Project authority determines whether the selected MCP configuration is active. */
+  readonly projectMcpSelected?: (projectId: string) => Promise<boolean>;
+  /** Attaches MCP tools after the orchestrator has acquired their containing run lease. */
+  readonly remoteProjectMcp?: (projectId: string, agentId: string, scope: { readonly environmentInstanceId: string; readonly leaseId: string; readonly runId: string }) => Promise<import('../engine/port.ts').RemoteProjectMcpTools>;
   /**
    * The durable Project workspace binding for one (Project, Environment), when
    * the build wires Project access (#93, ADR-0008).
@@ -270,6 +274,8 @@ export class RunOrchestrator {
   readonly #executionStrategy: ExecutionStrategy;
   readonly #executionPlacementForEnvironment: (environmentInstanceId: string) => ExecutionPlacement;
   readonly #remoteWorkspace: RunOrchestratorOptions['remoteWorkspace'];
+  readonly #projectMcpSelected: RunOrchestratorOptions['projectMcpSelected'];
+  readonly #remoteProjectMcp: RunOrchestratorOptions['remoteProjectMcp'];
 
   readonly #runs = new Map<string, AgentRun>();
   readonly #sessions = new Map<string, EngineSession>();
@@ -306,6 +312,8 @@ export class RunOrchestrator {
     this.#requirements = options.requirements;
     this.#executionStrategy = options.executionStrategy ?? createExecutionStrategy('environment-hosted');
     this.#remoteWorkspace = options.remoteWorkspace;
+    this.#projectMcpSelected = options.projectMcpSelected;
+    this.#remoteProjectMcp = options.remoteProjectMcp;
     this.#executionPlacementForEnvironment = options.executionPlacementForEnvironment ?? ((environmentInstanceId) => {
       const platform = this.#pool.definition(environmentInstanceId)?.platform ?? 'unknown';
       return {
@@ -638,9 +646,25 @@ export class RunOrchestrator {
               : 'readiness is unknown';
       return refuse(`Host-run Pi admission failed for this Engine profile: ${reason}`);
     }
+    let mcpEnvironmentInstanceId: string | undefined;
+    let mcpLeaseId: string | undefined;
+    const mcpSelected = this.#projectMcpSelected !== undefined && await this.#projectMcpSelected(selectedProject.id);
+    if (mcpSelected) {
+      if (!this.#remoteProjectMcp) return refuse('Project MCP is selected but no Worker MCP bridge is configured');
+      const resolution = resolveEnvironmentInstance({ projects: [selectedProject], capability: 'project-mcp' }, this.#pool);
+      if (!resolution.ok) return refuse('Project MCP is selected but no authorized leased Environment is available');
+      const acquired = await this.#pool.acquireLeaseRevalidated({
+        instanceId: resolution.instanceId, capability: 'project-mcp', holderId: initial.id, runId: initial.id, ttlMs: this.#leaseTtlMs,
+      });
+      if (!acquired.ok) return refuse(`Project MCP Environment lease is unavailable (${acquired.reason})`);
+      mcpEnvironmentInstanceId = resolution.instanceId;
+      mcpLeaseId = acquired.lease.id;
+    }
     const recorded: AgentRun = {
       ...initial,
       projectId: selectedProject.id,
+      ...(mcpEnvironmentInstanceId !== undefined ? { environmentInstanceId: mcpEnvironmentInstanceId } : {}),
+      ...(mcpLeaseId !== undefined ? { leaseId: mcpLeaseId } : {}),
       executionMode: 'host-run',
       engineHostProfileId: host.profileId,
       executionPlacement: {
@@ -658,7 +682,12 @@ export class RunOrchestrator {
       configurationVersion: agent.configurationVersion ?? 1,
     };
     this.#runs.set(recorded.id, recorded);
-    await this.#store.save(recorded);
+    try {
+      await this.#store.save(recorded);
+    } catch (error) {
+      if (mcpLeaseId !== undefined) this.#pool.releaseLease(mcpLeaseId);
+      throw error;
+    }
     const settled = this.#executeHostRun(recorded, agent, host, option);
     this.#settled.set(recorded.id, settled);
     return { id: recorded.id };
@@ -670,9 +699,14 @@ export class RunOrchestrator {
     host: HostPiEngineAdapter,
     option: AgentWorkOption,
   ): Promise<AgentRun> {
-    if (this.#stopRequests.has(initial.id)) return this.#finish(initial, 'interrupted', { status: 'interrupted' });
+    if (this.#stopRequests.has(initial.id)) {
+      if (initial.leaseId !== undefined) this.#pool.releaseLease(initial.leaseId);
+      return this.#finish(initial, 'interrupted', { status: 'interrupted' });
+    }
     const running = await this.#advance(initial, { status: 'running' });
     let prepared = running;
+    let remoteProjectMcp: import('../engine/port.ts').RemoteProjectMcpTools | undefined;
+    let mcpMayHaveStarted = false;
     try {
       const assembled = await this.#assembleInput(initial, agent, running.id);
       if (assembled.handOff !== undefined) prepared = await this.#advance(running, { handOff: assembled.handOff });
@@ -693,16 +727,23 @@ export class RunOrchestrator {
       const stored = this.#sessionKeys && identity !== undefined
         ? await this.#sessionKeys.get(identity)
         : undefined;
+      if (initial.leaseId !== undefined && initial.environmentInstanceId) {
+        if (!this.#remoteProjectMcp) throw new Error('Project MCP Worker bridge is unavailable');
+        mcpMayHaveStarted = true;
+        remoteProjectMcp = await this.#remoteProjectMcp(initial.projectId ?? '', agent.id, {
+          environmentInstanceId: initial.environmentInstanceId, leaseId: initial.leaseId, runId: initial.id,
+        });
+      }
       const remoteWorkspace = await this.#remoteWorkspace?.(initial.projectId ?? '', agent.id);
       let attempt = await this.#runSession(
         host, agent, option, assembled.prompt, prepared, stored?.key, assembled.instructions,
-        workingDirectory, undefined, undefined, undefined, remoteWorkspace,
+        workingDirectory, undefined, undefined, undefined, remoteWorkspace, remoteProjectMcp,
       );
       if (stored !== undefined && !attempt.ok && attempt.resumeRefused) {
         if (this.#sessionKeys && identity !== undefined) await this.#sessionKeys.delete(identity);
         attempt = await this.#runSession(
           host, agent, option, assembled.prompt, prepared, undefined, assembled.instructions,
-          workingDirectory, undefined, undefined, undefined, remoteWorkspace,
+          workingDirectory, undefined, undefined, undefined, remoteWorkspace, remoteProjectMcp,
         );
       }
       if (!attempt.ok) {
@@ -718,6 +759,16 @@ export class RunOrchestrator {
       return this.#finish(prepared, 'failed', {
         status: 'failed', message: 'Host-run Pi execution failed',
       });
+    } finally {
+      if (initial.leaseId !== undefined) {
+        let stopCertain = !mcpMayHaveStarted;
+        if (remoteProjectMcp !== undefined) {
+          try { stopCertain = (await remoteProjectMcp.close()) === 'stopped'; }
+          catch { stopCertain = false; }
+        }
+        if (!stopCertain) this.#pool.markRecovering(initial.leaseId);
+        else if (this.#pool.getLease(initial.leaseId)?.state === 'active') this.#pool.releaseLease(initial.leaseId);
+      }
     }
   }
 
@@ -1269,6 +1320,7 @@ export class RunOrchestrator {
     projectWorkspaceKind: 'default' | 'relative' | undefined,
     projectWorkspacePath: string | undefined,
     remoteWorkspace?: import('../engine/port.ts').RemoteWorkspaceTools,
+    remoteProjectMcp?: import('../engine/port.ts').RemoteProjectMcpTools,
   ): Promise<SessionAttempt> {
     let session: EngineSession;
     try {
@@ -1276,6 +1328,7 @@ export class RunOrchestrator {
         agentId: agent.id,
         runId: running.id,
         ...(remoteWorkspace !== undefined ? { remoteWorkspace } : {}),
+        ...(remoteProjectMcp !== undefined ? { remoteProjectMcp } : {}),
         ...(this.#taskGroupPosts !== undefined && running.projectId !== undefined && running.taskId !== undefined ? {
           postTaskGroupMessage: async (input: import('../engine/port.ts').AgentTaskGroupMessageInput) => {
             const assertActive = () => {

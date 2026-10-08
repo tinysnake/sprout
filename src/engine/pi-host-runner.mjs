@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { registerHooks } from 'node:module';
 import { sessionEventDisposition } from './pi-runner-events.ts';
+import { buildProjectMcpTools } from './pi-host-tools.ts';
 import { safeErrorCode, safeErrorName, sanitizeStreamError, sanitizedPromptErrorFields } from './pi-error-facts.ts';
 
 const EXPECTED_PROVIDER_FILES = {
@@ -249,26 +250,31 @@ async function openSession(config, input) {
       ? loaded.sdk.SessionManager.create(config.agentRoot, sessionDir, { id: config.sessionId })
       : loaded.sdk.SessionManager.open(sessionPath, sessionDir, config.agentRoot);
     const remoteAvailable = typeof config.remoteWorkspace?.binding?.projectId === 'string';
-    const customTools = remoteAvailable ? [
-      {
-        name: 'remote_read', label: 'Read remote file', description: 'Read a bounded text file from the authorized remote Project workspace.',
-        parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false },
-        annotations: { readOnlyHint: true },
-        execute: async (_id, args) => {
-          const result = await remoteCall('read', args);
-          return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result, isError: result.status !== 'completed' };
+    const remoteMcpTools = buildProjectMcpTools(config.remoteProjectMcp?.tools ?? [], remoteCall);
+    const remoteMcpAvailable = remoteMcpTools.length > 0;
+    const customTools = [
+      ...(remoteAvailable ? [
+        {
+          name: 'remote_read', label: 'Read remote file', description: 'Read a bounded text file from the authorized remote Project workspace.',
+          parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false },
+          annotations: { readOnlyHint: true },
+          execute: async (_id, args) => {
+            const result = await remoteCall('read', args);
+            return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result, isError: result.status !== 'completed' };
+          },
         },
-      },
-      {
-        name: 'remote_search', label: 'Search remote files', description: 'Search bounded text files in the authorized remote Project workspace.',
-        parameters: { type: 'object', properties: { query: { type: 'string' }, path: { type: 'string' } }, required: ['query'], additionalProperties: false },
-        annotations: { readOnlyHint: true },
-        execute: async (_id, args) => {
-          const result = await remoteCall('search', args);
-          return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result, isError: result.status !== 'completed' };
+        {
+          name: 'remote_search', label: 'Search remote files', description: 'Search bounded text files in the authorized remote Project workspace.',
+          parameters: { type: 'object', properties: { query: { type: 'string' }, path: { type: 'string' } }, required: ['query'], additionalProperties: false },
+          annotations: { readOnlyHint: true },
+          execute: async (_id, args) => {
+            const result = await remoteCall('search', args);
+            return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result, isError: result.status !== 'completed' };
+          },
         },
-      },
-    ] : [];
+      ] : []),
+      ...remoteMcpTools,
+    ];
     const remoteToolNames = customTools.map((tool) => tool.name);
     const loader = emptyLoader(loaded.sdk, config);
     stage = 'session-create';
@@ -278,7 +284,7 @@ async function openSession(config, input) {
       modelRuntime: loaded.runtime,
       model: loaded.model,
       thinkingLevel: config.effort,
-      noTools: remoteAvailable ? 'builtin' : 'all',
+      noTools: remoteAvailable || remoteMcpAvailable ? 'builtin' : 'all',
       tools: remoteToolNames,
       customTools,
       resourceLoader: loader,

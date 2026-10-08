@@ -204,12 +204,13 @@ export interface RemoteWorkspaceTools {
   search(query: string, path?: string): Promise<RemoteWorkspaceOperationResult>;
   inspect(operationId: string): Promise<{ readonly status: string }>;
   cancel(operationId: string): Promise<{ readonly accepted: boolean; readonly status: string }>;
-  readonly mcp?: RemoteProjectMcpTools;
 }
 
 export interface StartSessionRequest {
   /** An opaque, core-authorized read-only Project workspace capability for Host-run tools. */
   readonly remoteWorkspace?: RemoteWorkspaceTools;
+  /** Origin-bound MCP tools backed by the containing run's active Environment lease. */
+  readonly remoteProjectMcp?: RemoteProjectMcpTools;
   /** Worker-local process environment overlay. Never serialize into instructions or files. */
   readonly sessionEnvironment?: Readonly<Record<string, string>>;
   /** Session-bound capability for the current Task group; identity and scope are Core-resolved. */

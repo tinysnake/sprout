@@ -1174,6 +1174,15 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         try { return await environmentOperations.attach(projectId, agentId); }
         catch { return undefined; }
       },
+      projectMcpSelected: async (projectId) => {
+        const project = await projectService.get(projectId);
+        const content = project?.content.versions.find(version => version.version === project.content.currentVersion);
+        return project?.status === 'active' && content?.mcpConfiguration?.format === 'claude-code-mcp-json-v1';
+      },
+      remoteProjectMcp: (projectId, agentId, scope) => {
+        if (!environmentOperations) throw new Error('Project MCP operations are unavailable');
+        return environmentOperations.attachProjectMcpTools(projectId, agentId, scope);
+      },
       ...(hostPi !== undefined ? { hostPi } : {}),
       executionPlacementForEnvironment,
       agents,
@@ -1609,6 +1618,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       gateway: workerGateway,
       catalog: environmentCatalog,
       enrollments,
+      pool,
       store: durableStores.remoteWorkspaceOperations ?? new MemoryRemoteOperationIdentityStore(),
     });
     switchableEnvironment?.setTarget(enrollmentEnvironment);

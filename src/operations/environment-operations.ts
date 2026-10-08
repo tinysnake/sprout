@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { RemoteWorkspaceOperationResult, RemoteWorkspaceTools, RemoteProjectMcpTools } from '../engine/port.ts';
 import type { ProjectAccessService } from '../project/access-service.ts';
 import { accessIsConsistent, sanitizeWorkspaceSelection } from '../project/access.ts';
-import { sanitizeIdentifier } from '../environment/privacy.ts';
+import { sanitizeIdentifier, sanitizeOperatorText } from '../environment/privacy.ts';
 import type { ProjectService } from '../project/authority-service.ts';
 import { PROJECT_MCP_CONFIGURATION_FORMAT } from '../project/authority-model.ts';
 import type { ProjectEnvironmentAccess, WorkspaceBinding } from '../project/access.ts';
@@ -11,7 +11,7 @@ import type { EnvironmentCatalog } from '../environment/catalog.ts';
 import type { EnvironmentEnrollmentService } from '../environment/enrollment-service.ts';
 import type { EnvironmentPool, EnvironmentLease } from '../environment/pool.ts';
 import type { RemoteOperationIdentityStore, RemoteOperationIdentity, RemoteOperationState } from './remote-operation-store.ts';
-import type { AttachWorkspaceBindingParams, InspectProjectMcpConfigurationParams, InspectProjectMcpConfigurationResult, StartProjectMcpParams, CallProjectMcpToolParams, StopProjectMcpParams, StartProjectMcpResult, CallProjectMcpToolResult, StopProjectMcpResult } from '../worker/protocol.ts';
+import type { AttachWorkspaceBindingParams, WorkspaceFileOperationParams, InspectWorkspaceFileOperationParams, CancelWorkspaceFileOperationParams, InspectProjectMcpConfigurationResult, StartProjectMcpParams, CallProjectMcpToolParams, StopProjectMcpParams, StartProjectMcpResult, CallProjectMcpToolResult } from '../worker/protocol.ts';
 
 const MAX_SUPPORTED_READ_BYTES = 64 * 1024;
 const MAX_SUPPORTED_SEARCH_RESULTS = 100;
@@ -172,7 +172,8 @@ export class EnvironmentOperations {
     scope: { readonly environmentInstanceId: string; readonly leaseId: string; readonly runId: string },
   ): Promise<RemoteProjectMcpTools> {
     const authority = await this.#assertProjectMcpAuthority(projectId, agentId, scope, false);
-    await this.#environment.attachWorkspaceBinding?.(scope.environmentInstanceId, authority.identity);
+    if (!this.#environment.attachWorkspaceBinding || !this.#environment.startProjectMcp) throw new RemoteWorkspaceUnavailableError('unsupported');
+    await this.#environment.attachWorkspaceBinding(scope.environmentInstanceId, authority.identity);
     const startInput: StartProjectMcpParams = {
       ...authority.identity,
       format: authority.format,
@@ -181,11 +182,11 @@ export class EnvironmentOperations {
       holderId: scope.runId,
       runId: scope.runId,
     };
-    const started = await this.#environment.startProjectMcp?.(scope.environmentInstanceId, startInput);
+    const started = await this.#environment.startProjectMcp(scope.environmentInstanceId, startInput);
     if (!started) throw new RemoteWorkspaceUnavailableError('unsupported');
     const catalog = safeMcpToolCatalog(started);
     if (started.status === 'blocked' || !catalog) throw new RemoteWorkspaceUnavailableError('worker-refused');
-    const toolOrigins = new Map(catalog.tools.map(row => [row.public.name, row.workerId]));
+    const toolOrigins = new Map(catalog.tools.map(row => [row.public.name, { workerId: row.workerId, schema: row.public.inputSchema }]));
     let closed = false;
     return {
       binding: {
@@ -196,14 +197,15 @@ export class EnvironmentOperations {
       tools: catalog.tools.map(row => row.public),
       call: async (name, arguments_) => {
         if (closed) return { status: 'failed', reason: 'worker-refused' };
-        const workerToolId = toolOrigins.get(name);
-        if (!workerToolId || !isRecord(arguments_)) return { status: 'failed', reason: 'unknown-tool' };
+        const origin = toolOrigins.get(name);
+        if (!origin || !isRecord(arguments_)) return { status: 'failed', reason: 'unknown-tool' };
+        if (!validMcpArguments(origin.schema, arguments_)) return { status: 'failed', reason: 'invalid-arguments' };
         const current = await this.#assertProjectMcpAuthority(projectId, agentId, scope, false);
         if (!sameMcpBinding(current.identity, authority.identity)) return { status: 'failed', reason: 'worker-refused' };
         const input: CallProjectMcpToolParams = {
           ...authority.identity,
           leaseId: scope.leaseId, holderKind: 'run', holderId: scope.runId, runId: scope.runId,
-          processId: started.processId!, toolId: workerToolId, arguments: arguments_,
+          processId: started.processId!, toolId: origin.workerId, arguments: arguments_,
         };
         const result = await this.#environment.callProjectMcpTool?.(scope.environmentInstanceId, input);
         return sanitizeMcpCallResult(result);
@@ -346,14 +348,9 @@ export class EnvironmentOperations {
     }
     const access = await this.#access.get(projectId, scope.environmentInstanceId);
     const binding = access?.current;
-    if (!access || access.status !== 'active' || !binding || !accessIsConsistent(access) || access.projectId !== projectId) {
+    if (!access || access.status !== 'active' || !binding || !accessIsConsistent(access) || access.projectId !== projectId ||
+        !validProjectBinding(access, binding)) {
       throw new RemoteWorkspaceUnavailableError('workspace-unbound');
-    }
-    const candidate = await this.#blockReason(projectId, undefined, access, binding);
-    if (candidate === 'capability-denied') {
-      // MCP has its own explicit capability grant; it does not inherit read-only-investigation.
-    } else if (candidate !== undefined && candidate !== 'lease-required') {
-      throw new RemoteWorkspaceUnavailableError(candidate);
     }
     const live = this.#gateway.liveFor(scope.environmentInstanceId);
     if (!live || live.enrollment.status !== 'approved') throw new RemoteWorkspaceUnavailableError('worker-offline');
@@ -453,6 +450,125 @@ function sanitizeMcpInspection(result: InspectProjectMcpConfigurationResult): Pi
   if (result.status !== 'valid' && servers.length !== 0) return undefined;
   return { status: result.status, servers };
 }
+
+function safeMcpToolCatalog(result: StartProjectMcpResult): { readonly processId?: string; readonly tools: readonly { readonly public: import('../engine/port.ts').ProjectMcpToolDeclaration; readonly workerId: string }[] } | undefined {
+  if (!result || !['ready', 'partial', 'blocked'].includes(result.status) || !Array.isArray(result.servers) || result.servers.length > 64 ||
+      (result.processId !== undefined && (typeof result.processId !== 'string' || result.processId.length < 1 || result.processId.length > 128))) return undefined;
+  const tools: { public: import('../engine/port.ts').ProjectMcpToolDeclaration; workerId: string }[] = [];
+  const names = new Set<string>();
+  for (const server of result.servers) {
+    if (!server || typeof server.name !== 'string' || !['ready', 'missing-dependency', 'invalid', 'unsupported'].includes(server.status) ||
+        !Array.isArray(server.tools) || server.tools.length > 128) return undefined;
+    if (server.status !== 'ready' && server.tools.length > 0) return undefined;
+    const safeServer = sanitizeIdentifier(server.name, { fallback: '', kind: 'generic', maxLength: 64 });
+    if (!safeServer || !Array.isArray(server.tools)) return undefined;
+    for (const tool of server.tools) {
+      if (!tool || tool.server !== server.name || typeof tool.id !== 'string' || tool.id.length < 1 || tool.id.length > 128 ||
+          typeof tool.name !== 'string' || sanitizeIdentifier(tool.name, { fallback: '', kind: 'generic', maxLength: 64 }) !== tool.name ||
+          typeof tool.description !== 'string' || typeof tool.inputSchema !== 'object' || tool.inputSchema === null || Array.isArray(tool.inputSchema) ||
+          !validMcpSchema(tool.inputSchema, 0)) return undefined;
+      const safeTool = sanitizeIdentifier(tool.name, { fallback: '', kind: 'generic', maxLength: 64 });
+      const name = sanitizeIdentifier(`mcp_${safeServer}_${safeTool}`, { fallback: '', kind: 'generic', maxLength: 128 });
+      if (!name || names.has(name)) return undefined;
+      names.add(name);
+      tools.push({
+        public: { name, description: sanitizeOperatorText(tool.description, { fallback: 'Project MCP tool.', maxLength: 1_000 }), inputSchema: tool.inputSchema },
+        workerId: tool.id,
+      });
+    }
+  }
+  if (tools.length > 128 || (tools.length > 0 && !result.processId)) return undefined;
+  return { ...(result.processId !== undefined ? { processId: result.processId } : {}), tools };
+}
+
+function validMcpSchema(schema: Readonly<Record<string, unknown>>, depth: number): boolean {
+  if (depth > 10 || Object.keys(schema).length > 32) return false;
+  const allowed = new Set(['type', 'description', 'properties', 'required', 'items', 'enum', 'additionalProperties', 'minimum', 'maximum', 'minLength', 'maxLength', 'minItems', 'maxItems']);
+  if (Object.keys(schema).some(key => !allowed.has(key)) || typeof schema.type !== 'string' ||
+      !['object', 'array', 'string', 'number', 'integer', 'boolean', 'null'].includes(schema.type)) return false;
+  if (schema.description !== undefined && typeof schema.description !== 'string') return false;
+  if (schema.enum !== undefined && (!Array.isArray(schema.enum) || schema.enum.length > 64 || schema.enum.some(item => item !== null && !['string', 'number', 'boolean'].includes(typeof item)))) return false;
+  if (schema.type === 'object') {
+    const properties = schema.properties ?? {};
+    if (!isRecord(properties) || Object.keys(properties).length > 64 || Object.entries(properties).some(([key, value]) =>
+      sanitizeIdentifier(key, { fallback: '', kind: 'generic', maxLength: 64 }) !== key || !isRecord(value) || !validMcpSchema(value, depth + 1))) return false;
+    if (schema.required !== undefined && (!Array.isArray(schema.required) || schema.required.length > 64 ||
+        schema.required.some(key => typeof key !== 'string' || !Object.hasOwn(properties, key)))) return false;
+    if (schema.additionalProperties !== undefined && schema.additionalProperties !== false) return false;
+  } else if (schema.type === 'array') {
+    if (!isRecord(schema.items) || !validMcpSchema(schema.items, depth + 1)) return false;
+  }
+  for (const key of ['minimum', 'maximum', 'minLength', 'maxLength', 'minItems', 'maxItems']) {
+    const value = schema[key];
+    if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1_000_000)) return false;
+  }
+  return JSON.stringify(schema).length <= 16_384;
+}
+
+function validMcpArguments(schema: Readonly<Record<string, unknown>>, value: Readonly<Record<string, unknown>>): boolean {
+  return validateMcpValue(schema, value, 0);
+}
+function validateMcpValue(schema: Readonly<Record<string, unknown>>, value: unknown, depth: number): boolean {
+  if (depth > 10) return false;
+  const type = schema.type;
+  const enumValues = schema.enum;
+  const enumOk = enumValues === undefined || (Array.isArray(enumValues) && enumValues.some(item => item === value));
+  if (!enumOk) return false;
+  if (type === 'object') {
+    if (!isRecord(value)) return false;
+    const properties = isRecord(schema.properties) ? schema.properties : {};
+    const required = Array.isArray(schema.required) ? schema.required : [];
+    if (required.some(key => typeof key !== 'string' || !Object.hasOwn(value, key))) return false;
+    if (schema.additionalProperties === false && Object.keys(value).some(key => !Object.hasOwn(properties, key))) return false;
+    return Object.entries(value).every(([key, item]) => !Object.hasOwn(properties, key) ||
+      (isRecord(properties[key]) && validateMcpValue(properties[key] as Record<string, unknown>, item, depth + 1)));
+  }
+  if (type === 'array') return Array.isArray(value) && value.length <= 10_000 &&
+    (typeof schema.minItems !== 'number' || value.length >= schema.minItems) &&
+    (typeof schema.maxItems !== 'number' || value.length <= schema.maxItems) && isRecord(schema.items) &&
+    value.every(item => validateMcpValue(schema.items as Record<string, unknown>, item, depth + 1));
+  if (type === 'string') return typeof value === 'string' && value.length <= 64 * 1024 &&
+    (typeof schema.minLength !== 'number' || value.length >= schema.minLength) &&
+    (typeof schema.maxLength !== 'number' || value.length <= schema.maxLength);
+  if (type === 'integer') return Number.isSafeInteger(value) &&
+    (typeof schema.minimum !== 'number' || (value as number) >= schema.minimum) &&
+    (typeof schema.maximum !== 'number' || (value as number) <= schema.maximum);
+  if (type === 'number') return typeof value === 'number' && Number.isFinite(value) &&
+    (typeof schema.minimum !== 'number' || value >= schema.minimum) &&
+    (typeof schema.maximum !== 'number' || value <= schema.maximum);
+  if (type === 'boolean') return typeof value === 'boolean';
+  return type === 'null' && value === null;
+}
+
+function sanitizeMcpCallResult(result: CallProjectMcpToolResult | undefined): { readonly status: 'completed' | 'failed' | 'unsupported'; readonly text?: string; readonly reason?: string } {
+  if (!result || !['completed', 'failed', 'unsupported'].includes(result.status) ||
+      (result.reason !== undefined && !['unknown-tool', 'invalid-arguments', 'server-error', 'invalid-result', 'timeout', 'worker-refused'].includes(result.reason)) ||
+      (result.text !== undefined && typeof result.text !== 'string')) return { status: 'failed', reason: 'worker-refused' };
+  const text = result.text === undefined ? undefined : sanitizeOperatorText(result.text, { fallback: 'MCP tool returned no text.', maxLength: 32_000 });
+  return { status: result.status, ...(text !== undefined ? { text } : {}), ...(result.reason !== undefined ? { reason: result.reason } : {}) };
+}
+
+function validProjectBinding(access: ProjectEnvironmentAccess, binding: WorkspaceBinding): boolean {
+  if (!Number.isSafeInteger(binding.generation) || binding.generation! < 1 || typeof binding.bindingId !== 'string' ||
+      !binding.bindingId || typeof binding.workspaceId !== 'string' || !binding.workspaceId.trim()) return false;
+  try {
+    const selection = sanitizeWorkspaceSelection({ kind: binding.kind, ...(binding.path !== undefined ? { path: binding.path } : {}) });
+    if (selection.kind !== binding.kind || selection.path !== binding.path) return false;
+  } catch { return false; }
+  const current = access.history.find(row => row.bindingId === binding.bindingId && row.unboundAt === undefined);
+  return current !== undefined && current.generation === binding.generation && current.workspaceId === binding.workspaceId &&
+    current.kind === binding.kind && current.path === binding.path;
+}
+
+function sameMcpLease(lease: EnvironmentLease | undefined, scope: { readonly environmentInstanceId: string; readonly leaseId: string; readonly runId: string }): boolean {
+  return lease !== undefined && lease.id === scope.leaseId && lease.instanceId === scope.environmentInstanceId && lease.capability === 'project-mcp' &&
+    (lease.holderKind ?? 'run') === 'run' && lease.holderId === scope.runId && (lease.runId === undefined || lease.runId === scope.runId) && lease.taskId === undefined;
+}
+function sameMcpBinding(a: AttachWorkspaceBindingParams, b: AttachWorkspaceBindingParams): boolean {
+  return a.projectId === b.projectId && a.environmentInstanceId === b.environmentInstanceId && a.bindingId === b.bindingId &&
+    a.generation === b.generation && a.connectionEpoch === b.connectionEpoch && a.workspaceId === b.workspaceId && a.kind === b.kind && a.path === b.path;
+}
+function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
 
 function hasAgent(project: Awaited<ReturnType<ProjectService['get']>> & {}, agentId: string): boolean {
   if (!project) return false;
