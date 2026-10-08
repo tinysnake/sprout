@@ -287,7 +287,7 @@ class HostPiSession implements EngineSession {
       this.#buffer = this.#buffer.slice(newline + 1);
       if (line) {
         try {
-          const message = JSON.parse(line) as { kind?: unknown; event?: unknown; stage?: unknown; code?: unknown; callId?: unknown; operation?: unknown; args?: unknown };
+          const message = JSON.parse(line) as { kind?: unknown; event?: unknown; stage?: unknown; code?: unknown; callId?: unknown; operation?: unknown; args?: unknown; facts?: unknown };
           if (message.kind === 'pi-event') {
             const outcome = mapPiEvent(message.event, this.#turnState);
             for (const event of outcome.events) this.#queue?.push(event);
