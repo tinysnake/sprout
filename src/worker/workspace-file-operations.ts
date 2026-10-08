@@ -128,7 +128,8 @@ export class WorkerWorkspaceFiles {
   }
 
   async #search(binding: BoundWorkspace, input: WorkspaceFileOperationParams, signal: AbortSignal): Promise<RemoteWorkspaceOperationResult> {
-    if (typeof input.query !== 'string' || input.query.length < 1 || input.query.length > 256) return failure(input, 'failed', 'invalid-path');
+    const query = input.query;
+    if (typeof query !== 'string' || query.length < 1 || query.length > 256) return failure(input, 'failed', 'invalid-path');
     const base = input.path === undefined ? binding.root : await containedDirectory(binding.root, safeRelative(input.path, true));
     const matches: { path: string; line: number; text: string }[] = [];
     let visitedFiles = 0;
@@ -161,7 +162,7 @@ export class WorkerWorkspaceFiles {
         const lines = content.split(/\r?\n/);
         for (let index = 0; index < lines.length && matches.length < MAX_SEARCH_RESULTS; index++) {
           const line = lines[index]!;
-          if (line.includes(input.query)) matches.push({ path: relative(binding.root, resolved).split(sep).join('/'), line: index + 1, text: line.slice(0, MAX_LINE_CHARS) });
+          if (line.includes(query)) matches.push({ path: relative(binding.root, resolved).split(sep).join('/'), line: index + 1, text: line.slice(0, MAX_LINE_CHARS) });
         }
       }
     };

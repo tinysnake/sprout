@@ -1,4 +1,4 @@
-import type { AgentRunEvent, EngineTurnResult, StandingInstructionsChannel, StreamingGranularity } from '../engine/port.ts';
+import type { AgentRunEvent, EngineTurnResult, RemoteWorkspaceOperationResult, StandingInstructionsChannel, StreamingGranularity } from '../engine/port.ts';
 
 /**
  * The core-to-worker protocol.
@@ -299,22 +299,7 @@ export interface WorkspaceFileOperationParams extends WorkspaceBindingIdentity {
   readonly query?: string;
 }
 
-export interface WorkspaceFileOperationResult {
-  readonly operationId: string;
-  readonly environmentInstanceId: string;
-  readonly projectId: string;
-  readonly bindingId: string;
-  readonly generation: number;
-  readonly connectionEpoch: number;
-  readonly workspaceId: string;
-  readonly operation: 'read' | 'search';
-  readonly status: 'completed' | 'failed' | 'cancelled';
-  readonly path?: string;
-  readonly content?: string;
-  readonly truncated?: boolean;
-  readonly matches?: readonly { readonly path: string; readonly line: number; readonly text: string }[];
-  readonly failure?: 'not-found' | 'invalid-path' | 'not-text' | 'too-large' | 'cancelled' | 'unsupported' | 'worker-unavailable' | 'remote-operation-blocked';
-}
+export type WorkspaceFileOperationResult = RemoteWorkspaceOperationResult;
 
 export interface InspectWorkspaceFileOperationParams extends WorkspaceBindingIdentity { readonly operationId: string }
 export interface InspectWorkspaceFileOperationResult {
