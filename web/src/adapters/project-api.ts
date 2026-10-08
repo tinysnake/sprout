@@ -218,6 +218,7 @@ export function createProjectBrowserAdapter(transport: BrowserTransport): Projec
  */
 export interface WorkspaceBindingView {
   readonly bindingId: string;
+  readonly generation?: number;
   readonly workspaceId: string;
   readonly kind: string;
   readonly path?: string;
@@ -238,6 +239,14 @@ export interface ProjectEnvironmentAccessView {
   readonly history: readonly WorkspaceBindingView[];
 }
 
+export interface ProjectWorkspaceBindingReadinessView {
+  readonly environmentInstanceId: string;
+  readonly bindingId?: string;
+  readonly generation?: number;
+  readonly status: 'ready' | 'blocked';
+  readonly reason?: 'project-denied' | 'access-ended' | 'workspace-unbound' | 'worker-offline' | 'stale-epoch' | 'unsupported' | 'capability-denied' | 'lease-required' | 'worker-refused';
+}
+
 /** A portable workspace selection: the Worker default or a relative location. */
 export type WorkspaceSelectionInput =
   | { readonly kind: 'default' }
@@ -246,6 +255,8 @@ export type WorkspaceSelectionInput =
 export interface ProjectAccessBrowserAdapter {
   /** One Project's Environment access and workspace binding history. */
   listProjectAccess(projectId: string): Promise<readonly ProjectEnvironmentAccessView[]>;
+  /** Current remote file readiness, separate from Environment engine readiness. */
+  listWorkspaceBindingReadiness?(projectId: string): Promise<readonly ProjectWorkspaceBindingReadinessView[]>;
   /** Grant access and record the current workspace; the Worker validates first. */
   grantProjectAccess(
     projectId: string,
@@ -278,6 +289,12 @@ export function createProjectAccessBrowserAdapter(
         readonly access: readonly ProjectEnvironmentAccessView[];
       }>(`/api/projects/${encodeURIComponent(projectId)}/access`);
       return response.access;
+    },
+    async listWorkspaceBindingReadiness(projectId) {
+      const response = await transport.request<{
+        readonly readiness: readonly ProjectWorkspaceBindingReadinessView[];
+      }>(`/api/projects/${encodeURIComponent(projectId)}/access/readiness`);
+      return response.readiness;
     },
     async grantProjectAccess(projectId, input) {
       const response = await transport.request<{ readonly access: ProjectEnvironmentAccessView }>(

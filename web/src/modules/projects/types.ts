@@ -8,6 +8,7 @@ import type {
   ProjectAuthorityView,
   ProjectBrowserAdapter,
   ProjectEnvironmentAccessView,
+  ProjectWorkspaceBindingReadinessView,
   ProjectEnvironmentCreationInput,
   WorkspaceSelectionInput,
 } from '../../adapters/project-api.js';
@@ -26,6 +27,7 @@ export interface ProjectOverviewData {
   readonly agents: readonly AgentInstance[];
   readonly environments: readonly EnvironmentInstance[];
   readonly access: readonly ProjectEnvironmentAccessView[];
+  readonly bindingReadiness: readonly ProjectWorkspaceBindingReadinessView[];
   readonly compatibility: readonly ProjectAgentEnvironmentCompatibility[];
 }
 

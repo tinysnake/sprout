@@ -95,6 +95,21 @@ export class EnvironmentOperations {
     return result;
   }
 
+  async bindingReadiness(projectId: string): Promise<readonly RemoteWorkspaceReadiness[]> {
+    const project = await this.#projects.get(projectId);
+    if (!project || project.status !== 'active') return [];
+    const rows = await this.#access.listForProject(projectId);
+    const result: RemoteWorkspaceReadiness[] = [];
+    for (const access of rows) {
+      const binding = access.current;
+      const reason = await this.#blockReason(projectId, undefined, access, binding);
+      result.push({ environmentInstanceId: access.environmentInstanceId,
+        ...(binding ? { bindingId: binding.bindingId, ...(binding.generation !== undefined ? { generation: binding.generation } : {}) } : {}),
+        status: reason ? 'blocked' : 'ready', ...(reason ? { reason } : {}) });
+    }
+    return result;
+  }
+
   async attach(projectId: string, agentId: string): Promise<RemoteWorkspaceTools> {
     const project = await this.#projects.get(projectId);
     if (!project || project.status !== 'active' || !hasAgent(project, agentId)) throw new RemoteWorkspaceUnavailableError('project-denied');
@@ -188,9 +203,9 @@ export class EnvironmentOperations {
     };
   }
 
-  async #blockReason(projectId: string, agentId: string, access: ProjectEnvironmentAccess, binding: WorkspaceBinding | undefined): Promise<RemoteWorkspaceBlock | undefined> {
+  async #blockReason(projectId: string, agentId: string | undefined, access: ProjectEnvironmentAccess, binding: WorkspaceBinding | undefined): Promise<RemoteWorkspaceBlock | undefined> {
     const project = await this.#projects.get(projectId);
-    if (!project || project.status !== 'active' || !hasAgent(project, agentId)) return 'project-denied';
+    if (!project || project.status !== 'active' || (agentId !== undefined && !hasAgent(project, agentId))) return 'project-denied';
     if (access.projectId !== projectId || access.environmentInstanceId === '' || !accessIsConsistent(access)) return 'workspace-unbound';
     if (access.status !== 'active') return 'access-ended';
     if (!binding || !Number.isSafeInteger(binding.generation) || binding.generation! < 1 ||

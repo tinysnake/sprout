@@ -2025,6 +2025,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           projects: projectService,
           legacyProjects: projects,
           access: projectAccessService,
+          environmentOperations,
           ...(projectCreationService !== undefined ? { creation: projectCreationService } : {}),
         }),
         // Conversation scopes and Working groups (#95), composed through the

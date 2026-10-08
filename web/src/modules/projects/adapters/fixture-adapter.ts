@@ -157,7 +157,7 @@ export class FixtureProjectService implements ProjectManagementService {
         }),
       ),
     );
-    return { project: copy(project), agents, environments, access, compatibility };
+    return { project: copy(project), agents, environments, access, bindingReadiness: [], compatibility };
   }
 
   async createProject(input: CreateProjectInput): Promise<ProjectAuthorityView> {

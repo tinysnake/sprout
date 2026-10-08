@@ -31,6 +31,7 @@ export class ProductionProjectService implements ProjectManagementService {
       this.#ports.agents.listAgents(),
       this.#ports.environments.listEnvironments(),
       this.#ports.access.listProjectAccess(projectId),
+      Promise.resolve(this.#ports.access.listWorkspaceBindingReadiness?.(projectId)).then(value => value ?? []).catch(() => []),
     ]);
     const memberships = currentMemberships(project.content.versions, project.content.currentVersion);
     const activeAgentIdsInAuthority = new Set(
@@ -68,7 +69,7 @@ export class ProductionProjectService implements ProjectManagementService {
       ),
     );
 
-    return { project, agents, environments, access, compatibility };
+    return { project, agents, environments, access, bindingReadiness, compatibility };
   }
 
   createProject(input: Parameters<ProjectManagementService['createProject']>[0]) {
