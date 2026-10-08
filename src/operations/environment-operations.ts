@@ -468,6 +468,7 @@ export class EnvironmentOperations {
       }, operationId, onProgress),
       settle: async outcome => {
         settlementRequested = true;
+        if (outcome === 'unknown' && mutationLease !== undefined) this.#pool?.markRecovering(mutationLease.id);
         if (leaseKeepalive !== undefined) clearInterval(leaseKeepalive);
         if (outcome === 'unknown') {
           const operationIds = new Set([...activeOperationIds, ...uncertainOperationIds]);

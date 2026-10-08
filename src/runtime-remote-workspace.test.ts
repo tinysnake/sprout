@@ -365,6 +365,7 @@ test('an interrupted Host run protects its lease until remote command settlement
   const model = 'provider/model-host';
   const localEngine = new ScriptedEngineAdapter({ turns: [] });
   let commandResult: Promise<RemoteWorkspaceOperationResult> | undefined;
+  let remoteTools: NonNullable<StartSessionRequest['remoteWorkspace']> | undefined;
   let runContext: import('./worker/protocol.ts').RunContextParams | undefined;
   let commandStarted!: () => void;
   const started = new Promise<void>(resolve => { commandStarted = resolve; });
@@ -379,6 +380,7 @@ test('an interrupted Host run protects its lease until remote command settlement
     },
     async startSession(request: StartSessionRequest) {
       const tools = request.remoteWorkspace!;
+      remoteTools = tools;
       return {
         sessionId: 'command-cancel-session', engineSessionKey: 'command-cancel-session',
         run() {
@@ -400,6 +402,7 @@ test('an interrupted Host run protects its lease until remote command settlement
         project: { ...project(), memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }] },
       },
       databasePath: join(directory, 'state.db'),
+      leaseTtlMs: 1_000,
     }), projectRoot: hostRoot, hostPi,
   });
   try {
@@ -426,21 +429,58 @@ test('an interrupted Host run protects its lease until remote command settlement
     await started;
 
     const actualCancel = runtime.enrollmentEnvironment.cancelWorkspaceFileOperation!.bind(runtime.enrollmentEnvironment);
+    const actualInspect = runtime.enrollmentEnvironment.inspectWorkspaceFileOperation!.bind(runtime.enrollmentEnvironment);
     let unresolvedCancel: Parameters<typeof actualCancel>[1] | undefined;
+    let cancelCallStarted!: () => void;
+    const cancelStarted = new Promise<void>(resolve => { cancelCallStarted = resolve; });
+    let resolveCancel!: (result: Awaited<ReturnType<typeof actualCancel>>) => void;
     runtime.enrollmentEnvironment.cancelWorkspaceFileOperation = async (_environmentInstanceId, input) => {
       unresolvedCancel = input;
-      return { accepted: true, status: 'cancel-requested' };
+      cancelCallStarted();
+      return await new Promise(resolve => { resolveCancel = resolve; });
     };
-    const interrupted = await runtime.orchestrator.interrupt(submitted.id);
-    assert.equal(interrupted.status, 'interrupted');
-    assert.ok(unresolvedCancel);
-    assert.equal(runtime.pool.leases()[0]?.state, 'recovering');
-    assert.equal(await runtime.enrollmentEnvironment.inspectRunContext(INSTANCE_ID, runContext!), 'present', 'unknown settlement preserves the temporary Run context');
+    let inspectCallStarted!: () => void;
+    const inspectStarted = new Promise<void>(resolve => { inspectCallStarted = resolve; });
+    let resolveInspect!: (result: Awaited<ReturnType<typeof actualInspect>>) => void;
+    runtime.enrollmentEnvironment.inspectWorkspaceFileOperation = async () => {
+      inspectCallStarted();
+      return await new Promise(resolve => { resolveInspect = resolve; });
+    };
+    const interrupting = runtime.orchestrator.interrupt(submitted.id);
+    const contenderInput = { instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'other-agent', runId: 'other-run', ttlMs: 1_000 };
+    try {
+      await cancelStarted;
+      await new Promise(resolve => setTimeout(resolve, 1_100));
+      assert.equal(runtime.pool.leases()[0]?.state, 'recovering', 'unknown settlement protects the lease before awaiting cancellation');
+      const whileCancelling = await runtime.pool.acquireBoundOperationLeaseRevalidated(contenderInput);
+      if (whileCancelling.ok) runtime.pool.releaseLease(whileCancelling.lease.id);
+      assert.equal(whileCancelling.ok, false, 'a second run cannot acquire the target after its original lease TTL');
+
+      resolveCancel({ accepted: false, status: 'running' });
+      await inspectStarted;
+      await new Promise(resolve => setTimeout(resolve, 1_100));
+      assert.equal(runtime.pool.leases()[0]?.state, 'recovering', 'a connected Worker that does not answer inspection remains protected');
+      const whileInspecting = await runtime.pool.acquireBoundOperationLeaseRevalidated(contenderInput);
+      if (whileInspecting.ok) runtime.pool.releaseLease(whileInspecting.lease.id);
+      assert.equal(whileInspecting.ok, false, 'inspection timeout does not free the pinned Environment');
+
+      resolveInspect({ status: 'unknown' });
+      const interrupted = await interrupting;
+      assert.equal(interrupted.status, 'interrupted', 'the Human-authorized interruption outcome is retained');
+      assert.equal(runtime.pool.leases()[0]?.state, 'recovering', 'unknown inspection leaves explicit recovery required');
+    } finally {
+      resolveCancel?.({ accepted: false, status: 'running' });
+      resolveInspect?.({ status: 'unknown' });
+    }
 
     runtime.enrollmentEnvironment.cancelWorkspaceFileOperation = actualCancel;
-    await actualCancel(INSTANCE_ID, unresolvedCancel!);
+    runtime.enrollmentEnvironment.inspectWorkspaceFileOperation = actualInspect;
+    assert.ok(unresolvedCancel);
+    assert.equal((await remoteTools!.cancel(unresolvedCancel.operationId)).accepted, true, 'explicit recovery requests cancellation');
     const result = await commandResult!;
     assert.equal(result.status, 'cancelled');
+    const recovered = await remoteTools!.inspect(unresolvedCancel.operationId);
+    assert.equal(recovered.status, 'cancelled', 'explicit Worker inspection confirms settlement before release');
     await waitFor(() => runtime.pool.leases()[0]?.state === 'released', 'confirmed command and Run context cleanup');
     assert.equal(await runtime.enrollmentEnvironment.inspectRunContext(INSTANCE_ID, runContext!), 'absent');
   } finally {
