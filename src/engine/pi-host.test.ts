@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 
 import { HostPiEngineAdapter, hostEngineProfileId, isolationProfile, type HostPiLaunchInput, type HostPiReadiness } from './pi-host.ts';
 import type { RemoteWorkspaceTools } from './port.ts';
+import { sanitizeStreamError, sanitizedProbeErrorFields, sanitizedPromptErrorFields } from './pi-error-facts.ts';
 
 function readiness(profileId: string, status: HostPiReadiness['status'] = 'ready'): HostPiReadiness {
   return {
@@ -204,6 +205,33 @@ test('Engine host profile identifiers are stable opaque local ids with private f
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('Pi probe catches and Host Pi turn facts omit unclassified thrown error codes', () => {
+  const sensitiveCodes = [
+    'https://api.example.invalid/v1?token=demo',
+    '/home/example/.config/provider/key',
+    'worker-id-7f5d3a',
+    'sk_test_0123456789abcdef',
+  ];
+  for (const code of sensitiveCodes) {
+    const error = Object.assign(new Error('synthetic provider failure'), { code });
+    const remoteProbeStdout = JSON.stringify({
+      outcome: 'blocked', reason: 'bounded-probe-failed', stage: 'model-turn',
+      ...sanitizedProbeErrorFields(error),
+    });
+    const hostTurnProbeStdout = JSON.stringify({
+      outcome: 'blocked', reason: 'bounded-baseline-failed',
+      ...sanitizedProbeErrorFields(error),
+    });
+    const turnFacts = [{ ...sanitizedPromptErrorFields(error), streamRejections: [sanitizeStreamError(error)] }];
+    for (const output of [remoteProbeStdout, hostTurnProbeStdout, JSON.stringify(turnFacts)]) {
+      assert.equal(output.includes(code), false, `unclassified error code stays out of diagnostics: ${code}`);
+    }
+  }
+  assert.deepEqual(sanitizedProbeErrorFields(Object.assign(new Error(), { code: 'ENOENT' })), {
+    errorType: 'Error', errorCode: 'missing',
+  });
 });
 
 void (undefined as ChildProcess | undefined);

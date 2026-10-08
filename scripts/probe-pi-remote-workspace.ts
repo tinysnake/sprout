@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { createProductionHostPiAdapter, type HostPiEngineAdapter } from '../src/engine/pi-host.ts';
 import type { RemoteWorkspaceOperationResult, StartSessionRequest } from '../src/engine/port.ts';
 import { loadOrCreateWorkerIdentity, workerPublicKey } from '../src/worker/enrollment-connector.ts';
+import { sanitizedProbeErrorFields } from '../src/engine/pi-error-facts.ts';
 import {
   connectRuntimeWorker,
   createRuntime,
@@ -227,8 +228,7 @@ try {
 } catch (error) {
   report({
     outcome: 'blocked', reason: 'bounded-probe-failed', stage,
-    errorType: error instanceof Error ? error.name : 'unknown',
-    errorCode: error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' ? error.code : undefined,
+    ...sanitizedProbeErrorFields(error),
   });
   process.exitCode = 2;
 } finally {

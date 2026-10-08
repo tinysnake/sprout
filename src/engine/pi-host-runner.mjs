@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { registerHooks } from 'node:module';
 import { sessionEventDisposition } from './pi-runner-events.ts';
+import { safeErrorCode, safeErrorName, sanitizeStreamError, sanitizedPromptErrorFields } from './pi-error-facts.ts';
 
 const EXPECTED_PROVIDER_FILES = {
   'provider.ts': '23e1afbbf69aea8404d600c029e94fa915c8fd81b3ab96e17e687365563c7e80',
@@ -14,13 +15,22 @@ const EXPECTED_PROVIDER_FILES = {
   'gateway.ts': 'fcf9c535364ab7b54713bf9079d0419018be639362306d66011e7843646443e8',
 };
 const self = fileURLToPath(import.meta.url);
+const SAFE_FAILURE_STAGES = new Set([
+  'request', 'sdk-import', 'sdk-version', 'provider-source', 'provider-identity',
+  'session-controls', 'runtime-open', 'model-readiness', 'resume', 'session-create', 'turn',
+]);
+const SAFE_FAILURE_CODES = new Set([
+  'invalid', 'other', 'missing', 'unsupported', 'not-ready', 'resume-refused', 'control-violation',
+]);
 
 function line(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
 function safeFailure(stage, code = 'other') {
-  line({ kind: 'failure', stage, code });
+  const safeStage = typeof stage === 'string' && SAFE_FAILURE_STAGES.has(stage) ? stage : 'runtime-open';
+  const safeCode = typeof code === 'string' && SAFE_FAILURE_CODES.has(code) ? code : 'other';
+  line({ kind: 'failure', stage: safeStage, code: safeCode });
 }
 
 function fileHash(path) {
@@ -37,36 +47,6 @@ function isDenied(path, flag) {
   }
 }
 
-function safeErrorName(error) {
-    const name = typeof error?.name === "string" ? error.name : "";
-    return /^[A-Za-z][A-Za-z0-9_ .-]{0,63}$/.test(name) ? name : "unknown";
-}
-
-function safeErrorCode(error) {
-    const code = typeof error?.code === "string" ? error.code : typeof error?.code === "number" ? String(error.code) : undefined;
-    return code !== undefined && /^[A-Za-z0-9_.:-]{1,64}$/.test(code) ? code : undefined;
-}
-
-function safeErrorStatus(error) {
-    return typeof error?.status === "number" && error.status >= 100 && error.status <= 599 ? error.status : undefined;
-}
-
-/** Sanitized provider-boundary error facts: identity fields only, never messages. */
-function sanitizeStreamError(error) {
-    const entry = { name: safeErrorName(error) };
-    const code = safeErrorCode(error);
-    const status = safeErrorStatus(error);
-    if (code !== undefined) entry.code = code;
-    if (status !== undefined) entry.status = status;
-    const cause = error?.cause;
-    if (cause && typeof cause === "object") {
-        const causeEntry = { name: safeErrorName(cause) };
-        const causeCode = safeErrorCode(cause);
-        if (causeCode !== undefined) causeEntry.code = causeCode;
-        entry.cause = causeEntry;
-    }
-    return entry;
-}
 
 async function createRuntime(config) {
   const packageVersion = JSON.parse(readFileSync(join(config.packageRoot, 'package.json'), 'utf8')).version;
@@ -360,8 +340,7 @@ async function openSession(config, input) {
           await session.prompt(command.prompt, { expandPromptTemplates: false, source: 'rpc' });
           turn.promptResolved = true;
         } catch (error) {
-          turn.promptErrorName = safeErrorName(error);
-          turn.promptErrorCode = safeErrorCode(error);
+          Object.assign(turn, sanitizedPromptErrorFields(error));
           const code = error?.code === 'ENOENT' ? 'missing' : 'other';
           line({ kind: 'failure', stage, code });
         } finally {

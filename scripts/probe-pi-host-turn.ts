@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { createProductionHostPiAdapter } from '../src/engine/pi-host.ts';
+import { sanitizedProbeErrorFields } from '../src/engine/pi-error-facts.ts';
 
 function report(facts: Record<string, unknown>): void {
   process.stdout.write(`${JSON.stringify(facts)}\n`);
@@ -82,8 +83,7 @@ try {
 } catch (error) {
   report({
     outcome: 'blocked', reason: 'bounded-baseline-failed',
-    errorType: error instanceof Error ? error.name : 'unknown',
-    errorCode: error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' ? error.code : undefined,
+    ...sanitizedProbeErrorFields(error),
   });
   process.exitCode = 2;
 } finally {
