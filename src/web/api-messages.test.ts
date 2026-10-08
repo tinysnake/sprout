@@ -533,9 +533,12 @@ test('an in-flight Agent direct post is refused after a Human wins the same deli
       code: 'agent-direct-message-forbidden',
     });
     const history = await context.collaboration.listMessages({ scopeId });
-    assert.equal(history.length, 1);
-    assert.equal(history[0]?.author.id, 'human-lead');
-    assert.equal(history[0]?.author.kind, 'human');
+    // The authorized Human post may already have its non-routing projected
+    // reply. Assert delivery-key ownership independently of that async reply.
+    const delivered = history.filter(message => message.deliveryKey === 'direct-race-key');
+    assert.equal(delivered.length, 1);
+    assert.equal(delivered[0]?.author.id, 'human-lead');
+    assert.equal(delivered[0]?.author.kind, 'human');
   } finally {
     releaseCoordinatorRead();
     await inFlightAgentPost?.catch(() => undefined);
