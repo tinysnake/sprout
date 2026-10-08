@@ -161,14 +161,10 @@ export class EnvironmentOperations {
       if (normalized.failure) return { operationId, projectId, environmentInstanceId: access.environmentInstanceId, bindingId: binding.bindingId,
         generation: binding.generation!, connectionEpoch: epoch, workspaceId: binding.workspaceId, operation, status: 'failed', failure: normalized.failure };
       const { path: workspacePath, ...bindingIdentity } = fixed;
-      const request: WorkspaceFileOperationParams = {
-        ...bindingIdentity,
-        ...(workspacePath !== undefined ? { workspacePath } : {}),
-        operationId,
-        operation,
-        ...(normalized.path !== undefined ? { path: normalized.path } : {}),
-        ...(normalized.query !== undefined ? { query: normalized.query } : {}),
-      };
+      const common = { ...bindingIdentity, ...(workspacePath !== undefined ? { workspacePath } : {}), operationId };
+      const request: WorkspaceFileOperationParams = operation === 'read'
+        ? { ...common, operation, path: normalized.path! }
+        : { ...common, operation, query: normalized.query!, ...(normalized.path !== undefined ? { path: normalized.path } : {}) };
       let result: RemoteWorkspaceOperationResult;
       try {
         if (!this.#environment.executeWorkspaceFileOperation) throw new Error('unsupported');

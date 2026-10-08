@@ -159,6 +159,8 @@ export interface AgentTaskGroupMessageResult {
   readonly wakes: readonly { readonly agentId: string; readonly reason: string; readonly status: string; readonly detail?: string }[];
 }
 
+export type RemoteWorkspaceOperationKind = 'read' | 'search' | 'edit' | 'patch';
+
 export interface RemoteWorkspaceOperationResult {
   readonly operationId: string;
   readonly projectId: string;
@@ -167,14 +169,16 @@ export interface RemoteWorkspaceOperationResult {
   readonly generation: number;
   readonly connectionEpoch: number;
   readonly workspaceId: string;
-  readonly operation: 'read' | 'search';
+  readonly operation: RemoteWorkspaceOperationKind;
   readonly status: 'completed' | 'failed' | 'cancelled';
   readonly path?: string;
   readonly content?: string;
   readonly matches?: readonly { readonly path: string; readonly line: number; readonly text: string }[];
+  readonly changedPaths?: readonly string[];
   readonly truncated?: boolean;
   readonly failure?: string;
 }
+
 
 /** Engine-facing typed operations. Authorization and target selection live above the Engine port. */
 export interface RemoteWorkspaceTools {
@@ -188,6 +192,8 @@ export interface RemoteWorkspaceTools {
   };
   read(path: string): Promise<RemoteWorkspaceOperationResult>;
   search(query: string, path?: string): Promise<RemoteWorkspaceOperationResult>;
+  edit?(path: string, oldText: string, newText: string): Promise<RemoteWorkspaceOperationResult>;
+  patch?(path: string, hunks: readonly { readonly before: string; readonly after: string }[]): Promise<RemoteWorkspaceOperationResult>;
   inspect(operationId: string): Promise<{ readonly status: string }>;
   cancel(operationId: string): Promise<{ readonly accepted: boolean; readonly status: string }>;
 }

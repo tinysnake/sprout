@@ -292,14 +292,16 @@ export interface WorkspaceBindingIdentity {
 
 export interface AttachWorkspaceBindingParams extends WorkspaceBindingIdentity {}
 
-export interface WorkspaceFileOperationParams extends Omit<WorkspaceBindingIdentity, 'path'> {
-  /** Binding selection path, separate from the file path being read or searched. */
+export type WorkspaceFileOperationParams = Omit<WorkspaceBindingIdentity, 'path'> & {
+  /** Binding selection path, separate from the file path being read, searched, or changed. */
   readonly workspacePath?: string;
   readonly operationId: string;
-  readonly operation: 'read' | 'search';
-  readonly path?: string;
-  readonly query?: string;
-}
+} & (
+  | { readonly operation: 'read'; readonly path: string }
+  | { readonly operation: 'search'; readonly path?: string; readonly query: string }
+  | { readonly operation: 'edit'; readonly path: string; readonly oldText: string; readonly newText: string }
+  | { readonly operation: 'patch'; readonly path: string; readonly hunks: readonly { readonly before: string; readonly after: string }[] }
+);
 
 export type WorkspaceFileOperationResult = RemoteWorkspaceOperationResult;
 
