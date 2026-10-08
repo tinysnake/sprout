@@ -5,6 +5,7 @@ import { createInterface } from 'node:readline';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { registerHooks } from 'node:module';
+import { sessionEventDisposition } from './pi-runner-events.ts';
 
 const EXPECTED_PROVIDER_FILES = {
   'provider.ts': '23e1afbbf69aea8404d600c029e94fa915c8fd81b3ab96e17e687365563c7e80',
@@ -65,46 +66,6 @@ function sanitizeStreamError(error) {
         entry.cause = causeEntry;
     }
     return entry;
-}
-
-/** Bounded model-authored tool arguments for the parent event stream. */
-function sanitizeToolArgs(args) {
-  if (args === undefined || args === null) return {};
-  try {
-    const json = JSON.stringify(args);
-    if (typeof json === 'string' && json.length <= 2048) return JSON.parse(json);
-  } catch { /* Unserializable arguments degrade to an empty object. */ }
-  return {};
-}
-
-function sanitizeUsage(raw) {
-  if (typeof raw !== 'object' || raw === null) return undefined;
-  const usage = raw;
-  const numeric = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
-  const result = {};
-  for (const key of ['input', 'output', 'totalTokens', 'cacheRead', 'cacheWrite', 'reasoning']) {
-    const value = numeric(usage[key]);
-    if (value !== undefined) result[key] = value;
-  }
-  if (typeof usage.cost === 'object' && usage.cost !== null) {
-    const cost = {};
-    for (const key of ['input', 'output', 'cacheRead', 'cacheWrite', 'total']) {
-      const value = numeric(usage.cost[key]);
-      if (value !== undefined) cost[key] = value;
-    }
-    result.cost = cost;
-  }
-  return result;
-}
-
-function sanitizeAssistantContent(content) {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return [];
-  return content.flatMap((part) =>
-    typeof part?.text === 'string' && (part.type === 'text' || part.type === undefined)
-      ? [{ type: 'text', text: part.text }]
-      : [],
-  );
 }
 
 async function createRuntime(config) {
@@ -357,47 +318,16 @@ async function openSession(config, input) {
     session.subscribe((event) => {
       const eventType = typeof event?.type === 'string' ? event.type : 'unknown';
       rawEventTypes[eventType] = (rawEventTypes[eventType] ?? 0) + 1;
-      if (event.type === 'message_update') {
-        const update = event.assistantMessageEvent;
-        if (update?.type === 'text_delta' && typeof update.delta === 'string') {
-          line({ kind: 'pi-event', event: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: update.delta } } });
-        }
-        return;
-      }
-      if (event.type === 'message_end') {
-        const message = event.message;
-        if (message?.role === 'assistant') {
-          line({ kind: 'pi-event', event: { type: 'message_end', message: {
-            role: 'assistant',
-            content: sanitizeAssistantContent(message.content),
-            ...(message.stopReason === 'error' ? { stopReason: 'error' } : {}),
-            ...(sanitizeUsage(message.usage) !== undefined ? { usage: sanitizeUsage(message.usage) } : {}),
-          } } });
-        }
-        return;
-      }
-      if (event.type === 'agent_settled' && !settled) {
+      const disposition = sessionEventDisposition(event, { settled, remoteToolNames });
+      if (disposition.action === 'settle') {
         settled = true;
         line({ kind: 'pi-event', event: { type: 'agent_settled' } });
-        return;
+      } else if (disposition.action === 'pi-event') {
+        line({ kind: 'pi-event', event: disposition.event });
+      } else if (disposition.action === 'violation') {
+        session.abort();
+        line({ kind: 'failure', stage: 'session-controls', code: 'control-violation' });
       }
-      if (event.type === 'tool_execution_start' || event.type === 'tool_execution_update' ||
-          event.type === 'tool_execution_end' || event.type === 'bash_execution_update') {
-        // Only the authorized remote workspace tools may execute in this
-        // session; every other tool path is a control violation. Tool events
-        // are top-level session events, never assistant-message events.
-        if (typeof event.toolName !== 'string' || !remoteToolNames.includes(event.toolName)) {
-          session.abort();
-          line({ kind: 'failure', stage: 'session-controls', code: 'control-violation' });
-          return;
-        }
-        if (event.type === 'tool_execution_start') {
-          line({ kind: 'pi-event', event: { type: 'tool_execution_start', toolName: event.toolName, args: sanitizeToolArgs(event.args) } });
-        }
-        return;
-      }
-      // Session framing events (agent_start, message_start, queue updates, …)
-      // carry no run progress; they are counted in turn facts only.
     });
     line({ kind: 'ready', sessionId: config.sessionId });
 
