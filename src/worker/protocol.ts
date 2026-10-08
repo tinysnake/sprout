@@ -49,6 +49,8 @@ export const WORKER_METHODS = {
 export const WORKER_NOTIFICATIONS = {
   /** Wake core to pull the durable journal; contains no Worker-supplied facts. */
   recoveryChanged: 'recovery/changed',
+  /** Sequenced bounded output from an authorized remote Project command. */
+  workspaceOperationProgress: 'workspace/file-operation/progress',
   /** One run event, in order, for a turn in flight. */
   event: 'turn/event',
   /** A turn's terminal result. Always sent after that turn's events. */
@@ -168,11 +170,13 @@ export interface WorkerEngineDescription {
 }
 
 export interface WorkerWorkspaceOperations {
-  readonly version: 1 | 2;
-  readonly operations: readonly ('read' | 'search' | 'edit' | 'patch')[];
+  readonly version: 1 | 2 | 3;
+  readonly operations: readonly ('read' | 'search' | 'edit' | 'patch' | 'command')[];
   readonly maxReadBytes: number;
   readonly maxSearchResults: number;
   readonly maxMutationBytes?: number;
+  readonly maxCommandOutputBytes?: number;
+  readonly maxCommandDurationMs?: number;
 }
 
 export interface WorkerInfo {
@@ -302,19 +306,31 @@ export type WorkspaceFileOperationParams = Omit<WorkspaceBindingIdentity, 'path'
   | { readonly operation: 'search'; readonly path?: string; readonly query: string }
   | { readonly operation: 'edit'; readonly path: string; readonly oldText: string; readonly newText: string }
   | { readonly operation: 'patch'; readonly path: string; readonly hunks: readonly { readonly before: string; readonly after: string }[] }
+  | { readonly operation: 'command'; readonly executable: string; readonly args: readonly string[]; readonly cwd?: string; readonly timeoutMs?: number }
 );
 
-export type WorkspaceFileOperationResult = RemoteWorkspaceOperationResult;
+export interface WorkspaceCommandProgress {
+  readonly operationId: string;
+  readonly projectId: string;
+  readonly environmentInstanceId: string;
+  readonly bindingId: string;
+  readonly generation: number;
+  readonly connectionEpoch: number;
+  readonly workspaceId: string;
+  readonly sequence: number;
+  readonly stream: 'stdout' | 'stderr';
+  readonly text: string;
+}
 
 export interface InspectWorkspaceFileOperationParams extends WorkspaceBindingIdentity { readonly operationId: string }
 export interface InspectWorkspaceFileOperationResult {
-  readonly status: 'not-found' | 'running' | 'completed' | 'failed' | 'cancelled' | 'unknown' | 'recovery-required';
+  readonly status: 'not-found' | 'running' | 'cancel-requested' | 'completed' | 'failed' | 'cancelled' | 'unknown' | 'recovery-required';
   readonly result?: WorkspaceFileOperationResult;
 }
 export interface CancelWorkspaceFileOperationParams extends InspectWorkspaceFileOperationParams {}
 export interface CancelWorkspaceFileOperationResult {
   readonly accepted: boolean;
-  readonly status: 'not-found' | 'running' | 'completed' | 'failed' | 'cancelled' | 'unknown' | 'recovery-required';
+  readonly status: 'not-found' | 'running' | 'cancel-requested' | 'completed' | 'failed' | 'cancelled' | 'unknown' | 'recovery-required';
 }
 
 export interface StartSessionResult {

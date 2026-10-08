@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, open, lstat, realpath, readdir, stat, readFile, rename, unlink } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 import { join, relative, resolve, sep } from 'node:path';
 import type { WorkerWorkspace } from './workspace.ts';
 import type {
@@ -7,6 +9,7 @@ import type {
   InspectWorkspaceFileOperationParams,
   WorkspaceBindingIdentity,
   WorkspaceFileOperationParams,
+  WorkspaceCommandProgress,
   CancelWorkspaceFileOperationResult,
   InspectWorkspaceFileOperationResult,
 } from './protocol.ts';
@@ -20,6 +23,10 @@ const MAX_LINE_CHARS = 300;
 const MAX_MUTATION_FILE_BYTES = 1024 * 1024;
 const MAX_MUTATION_TEXT_BYTES = 256 * 1024;
 const MAX_PATCH_HUNKS = 32;
+const MAX_COMMAND_OUTPUT_BYTES = 32 * 1024;
+const MAX_COMMAND_CHUNK_BYTES = 1_024;
+const MAX_COMMAND_DURATION_MS = 120_000;
+const COMMAND_EXECUTABLES = new Set(['node', 'npm']);
 
 interface BoundWorkspace extends WorkspaceBindingIdentity { readonly root: string }
 interface OperationState {
@@ -27,6 +34,7 @@ interface OperationState {
   readonly fingerprint: string;
   status: InspectWorkspaceFileOperationResult['status'];
   result?: RemoteWorkspaceOperationResult;
+  cancelProcess?: () => void;
 }
 interface DurableMutationRecord {
   readonly operationId: string;
@@ -42,11 +50,16 @@ export class WorkerWorkspaceFiles {
   readonly #bindings = new Map<string, BoundWorkspace>();
   readonly #operations = new Map<string, OperationState>();
   readonly #journalDirectory: string;
+  readonly #onProgress: ((progress: WorkspaceCommandProgress) => void) | undefined;
+  readonly #processControl: WorkspaceCommandProcessControl;
 
-  constructor(workspace: WorkerWorkspace, environmentInstanceId: string) {
+  constructor(workspace: WorkerWorkspace, environmentInstanceId: string, onProgress?: (progress: WorkspaceCommandProgress) => void,
+    processControl: WorkspaceCommandProcessControl = {}) {
     this.#workspace = workspace;
     this.#environmentInstanceId = environmentInstanceId;
     this.#journalDirectory = workspace.operationJournalDirectory();
+    this.#onProgress = onProgress;
+    this.#processControl = processControl;
   }
 
   async attach(input: WorkspaceBindingIdentity): Promise<void> {
@@ -71,8 +84,8 @@ export class WorkerWorkspaceFiles {
   async execute(input: WorkspaceFileOperationParams): Promise<RemoteWorkspaceOperationResult> {
     const binding = this.#requireBinding({ ...input, ...(input.workspacePath !== undefined ? { path: input.workspacePath } : {}) });
     if (typeof input.operationId !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(input.operationId)) throw new Error('invalid operation identity');
-    const fingerprint = createHash('sha256').update(JSON.stringify([input.projectId, input.environmentInstanceId, input.bindingId, input.generation, input.connectionEpoch, input.workspaceId, input.kind, input.workspacePath ?? '', input.operation, input.path ?? '', input.operation === 'search' ? input.query : '', input.operation === 'edit' ? [input.oldText, input.newText] : input.operation === 'patch' ? input.hunks : []])).digest('hex');
-    const mutating = input.operation === 'edit' || input.operation === 'patch';
+    const fingerprint = createHash('sha256').update(JSON.stringify([input.projectId, input.environmentInstanceId, input.bindingId, input.generation, input.connectionEpoch, input.workspaceId, input.kind, input.workspacePath ?? '', input.operation, input.path ?? '', input.operation === 'search' ? input.query : '', input.operation === 'edit' ? [input.oldText, input.newText] : input.operation === 'patch' ? input.hunks : input.operation === 'command' ? [input.executable, input.args, input.cwd ?? '', input.timeoutMs ?? 0] : []])).digest('hex');
+    const mutating = input.operation === 'edit' || input.operation === 'patch' || input.operation === 'command';
     let prior = this.#operations.get(input.operationId);
     if (prior) {
       if (prior.fingerprint !== fingerprint) return failure(input, 'failed', 'operation-identity-conflict');
@@ -103,7 +116,9 @@ export class WorkerWorkspaceFiles {
           ? await this.#search(binding, input, state.controller.signal)
           : input.operation === 'edit'
             ? await this.#edit(binding, input)
-            : await this.#patch(binding, input);
+            : input.operation === 'patch'
+              ? await this.#patch(binding, input)
+              : await this.#command(binding, input, state);
       state.result = result;
       state.status = result.status;
       if (mutating) {
@@ -134,7 +149,7 @@ export class WorkerWorkspaceFiles {
     if (state) return { status: state.status, ...(state.result ? { result: state.result } : {}) };
     const durable = await this.#readMutation(input.operationId);
     if (!durable) return { status: 'not-found' };
-    if (durable.status === 'running') return { status: 'unknown' };
+    if (durable.status === 'running' || durable.status === 'cancel-requested') return { status: 'unknown' };
     return { status: durable.status, ...(durable.result ? { result: durable.result } : {}) };
   }
 

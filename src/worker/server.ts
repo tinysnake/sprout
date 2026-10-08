@@ -127,7 +127,6 @@ export class EnvironmentWorker {
   constructor(options: EnvironmentWorkerOptions) {
     this.#options = options;
     this.#workspace = options.workspaceRoot === undefined ? undefined : new WorkerWorkspace(options.workspaceRoot);
-    this.#workspaceFiles = this.#workspace === undefined ? undefined : new WorkerWorkspaceFiles(this.#workspace, options.environmentInstanceId);
     this.#transport = new LineJsonRpcTransport({
       input: options.input,
       output: options.output,
@@ -135,6 +134,8 @@ export class EnvironmentWorker {
         void this.shutdown();
       },
     });
+    this.#workspaceFiles = this.#workspace === undefined ? undefined : new WorkerWorkspaceFiles(this.#workspace, options.environmentInstanceId,
+      progress => this.#transport.notify(WORKER_NOTIFICATIONS.workspaceOperationProgress, progress));
     this.#serve();
   }
 
@@ -243,8 +244,9 @@ export class EnvironmentWorker {
         standingInstructions: engine.capabilities.standingInstructions,
       })),
       ...(this.#workspaceFiles !== undefined ? { workspaceOperations: {
-        version: 2 as const, operations: ['read', 'search', 'edit', 'patch'] as const,
+        version: 3 as const, operations: ['read', 'search', 'edit', 'patch', 'command'] as const,
         maxReadBytes: 64 * 1024, maxSearchResults: 100, maxMutationBytes: 1024 * 1024,
+        maxCommandOutputBytes: 32 * 1024, maxCommandDurationMs: 120_000,
       } } : {}),
       ...(this.#readiness !== undefined
         ? { readiness: this.#readiness }

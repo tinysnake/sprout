@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { RemoteWorkspaceOperationResult, RemoteWorkspaceTools } from '../engine/port.ts';
+import type { RemoteWorkspaceOperationResult, RemoteWorkspaceTools, RemoteWorkspaceProgress } from '../engine/port.ts';
 import type { ProjectAccessService } from '../project/access-service.ts';
 import { accessIsConsistent, sanitizeWorkspaceSelection } from '../project/access.ts';
 import type { ProjectService } from '../project/authority-service.ts';
@@ -212,10 +212,11 @@ export class EnvironmentOperations {
       return { acquired: result.lease };
     };
 
-    const execute = async (operation: 'read' | 'search' | 'edit' | 'patch', input: {
+    const execute = async (operation: 'read' | 'search' | 'edit' | 'patch' | 'command', input: {
       readonly path?: string; readonly query?: string; readonly oldText?: string; readonly newText?: string;
       readonly hunks?: readonly { readonly before: string; readonly after: string }[];
-    }, requestedOperationId?: string): Promise<RemoteWorkspaceOperationResult> => {
+      readonly executable?: string; readonly args?: readonly string[]; readonly cwd?: string; readonly timeoutMs?: number;
+    }, requestedOperationId?: string, onProgress?: (progress: RemoteWorkspaceProgress) => void): Promise<RemoteWorkspaceOperationResult> => {
       const operationId = stableOperationId(runId, requestedOperationId);
       const normalized = normalizeOperationInput(operation, input);
       const fingerprint = createHash('sha256').update(JSON.stringify([fixed, operation, normalized])).digest('hex');
@@ -239,7 +240,7 @@ export class EnvironmentOperations {
         await this.#store.save(row);
         return operationResult(fixed, operationId, operation, 'failed', normalized.failure);
       }
-      const mutating = operation === 'edit' || operation === 'patch';
+      const mutating = operation === 'edit' || operation === 'patch' || operation === 'command';
       if (mutating) {
         try {
           await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed, MUTATION_CAPABILITY);
@@ -248,7 +249,11 @@ export class EnvironmentOperations {
         }
         const capability = this.#catalog.entry(access.environmentInstanceId)?.definition.capabilities.find(c => c.name === MUTATION_CAPABILITY);
         const info = await this.#environment.info?.(access.environmentInstanceId);
-        const supported = info?.workspaceOperations?.version === 2 && info.workspaceOperations.operations.includes(operation);
+        const supported = operation === 'command'
+          ? info?.workspaceOperations?.version === 3 && info.workspaceOperations.operations.includes('command')
+          : info?.workspaceOperations?.version === 2 || info?.workspaceOperations?.version === 3
+            ? info.workspaceOperations.operations.includes(operation)
+            : false;
         if (!capability || capability.requiresLease !== true || !supported || runId === undefined || this.#pool === undefined) {
           return operationResult(fixed, operationId, operation, 'failed', 'lease-required');
         }

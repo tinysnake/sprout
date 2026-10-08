@@ -39,6 +39,7 @@ import type {
   CancelWorkspaceFileOperationParams,
   InspectWorkspaceFileOperationResult,
   CancelWorkspaceFileOperationResult,
+  WorkspaceCommandProgress,
   WorkerInfo,
   WorkerReadinessProbeResult,
 } from './protocol.ts';
@@ -215,7 +216,7 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
 
   async attachWorkspaceBinding(environmentInstanceId: string, input: AttachWorkspaceBindingParams): Promise<{ readonly attached: true }> {
     const connection = await this.#connection(environmentInstanceId);
-    if (!connection || (connection.info.workspaceOperations?.version !== 1 && connection.info.workspaceOperations?.version !== 2) ||
+    if (!connection || ![1, 2, 3].includes(connection.info.workspaceOperations?.version ?? 0) ||
       !connection.info.workspaceOperations.operations.includes('read') ||
       !connection.info.workspaceOperations.operations.includes('search')) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
     const currentEpoch = this.connectionEpoch(environmentInstanceId);
@@ -223,10 +224,11 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
     return connection.contexts.attachWorkspaceBinding(input);
   }
 
-  async executeWorkspaceFileOperation(environmentInstanceId: string, input: WorkspaceFileOperationParams): Promise<import('../engine/port.ts').RemoteWorkspaceOperationResult> {
+  async executeWorkspaceFileOperation(environmentInstanceId: string, input: WorkspaceFileOperationParams,
+    onProgress?: (progress: WorkspaceCommandProgress) => void): Promise<import('../engine/port.ts').RemoteWorkspaceOperationResult> {
     const connection = await this.#connection(environmentInstanceId);
     if (!connection || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
-    const result = await connection.contexts.executeWorkspaceFileOperation(input);
+    const result = await connection.contexts.executeWorkspaceFileOperation(input, onProgress);
     if (this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error('stale Worker epoch');
     return result;
   }

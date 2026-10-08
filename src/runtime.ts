@@ -263,7 +263,8 @@ export interface RuntimeEnvironment {
   /** Bind one authorized Project workspace on the current authenticated Worker. */
   attachWorkspaceBinding?(environmentInstanceId: string, input: AttachWorkspaceBindingParams): Promise<{ readonly attached: true }>;
   /** Typed read-only Workspace operations on the already accepted Worker. */
-  executeWorkspaceFileOperation?(environmentInstanceId: string, input: WorkspaceFileOperationParams): Promise<import('./engine/port.ts').RemoteWorkspaceOperationResult>;
+  executeWorkspaceFileOperation?(environmentInstanceId: string, input: WorkspaceFileOperationParams,
+    onProgress?: (progress: import('./worker/protocol.ts').WorkspaceCommandProgress) => void): Promise<import('./engine/port.ts').RemoteWorkspaceOperationResult>;
   inspectWorkspaceFileOperation?(environmentInstanceId: string, input: InspectWorkspaceFileOperationParams): Promise<InspectWorkspaceFileOperationResult>;
   cancelWorkspaceFileOperation?(environmentInstanceId: string, input: CancelWorkspaceFileOperationParams): Promise<CancelWorkspaceFileOperationResult>;
   /** The authenticated Worker epoch that currently owns one instance. */
