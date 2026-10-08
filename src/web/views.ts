@@ -1423,6 +1423,8 @@ export function toProjectAuthorityView(project: ProjectAuthority): ProjectAuthor
  */
 export interface WorkspaceBindingView {
   readonly bindingId: string;
+  /** Monotonic per Project and Environment access relationship. */
+  readonly generation?: number;
   readonly workspaceId: string;
   readonly kind: string;
   /** Worker-root-relative location, when the workspace named one. */
@@ -1454,6 +1456,7 @@ function toWorkspaceBindingView(binding: WorkspaceBinding): WorkspaceBindingView
   const path = binding.path !== undefined ? sanitizeWorkspacePath(binding.path) : undefined;
   return {
     bindingId: sanitizeIdentifier(binding.bindingId, { fallback: 'unknown-binding', kind: 'generic' }),
+    ...(Number.isSafeInteger(binding.generation) && binding.generation! > 0 ? { generation: binding.generation } : {}),
     workspaceId: sanitizeIdentifier(binding.workspaceId, { fallback: 'unknown-workspace', kind: 'digest' }),
     kind: binding.kind === 'relative' ? 'relative' : 'default',
     ...(path !== undefined

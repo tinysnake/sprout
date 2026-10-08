@@ -26,11 +26,12 @@ export class ProductionProjectService implements ProjectManagementService {
   }
 
   async loadOverview(projectId: string): Promise<ProjectOverviewData> {
-    const [project, agents, environments, access] = await Promise.all([
+    const [project, agents, environments, access, bindingReadiness] = await Promise.all([
       this.#ports.projects.getProject(projectId),
       this.#ports.agents.listAgents(),
       this.#ports.environments.listEnvironments(),
       this.#ports.access.listProjectAccess(projectId),
+      Promise.resolve(this.#ports.access.listWorkspaceBindingReadiness?.(projectId)).then(value => value ?? []).catch(() => []),
     ]);
     const memberships = currentMemberships(project.content.versions, project.content.currentVersion);
     const activeAgentIdsInAuthority = new Set(
@@ -68,7 +69,7 @@ export class ProductionProjectService implements ProjectManagementService {
       ),
     );
 
-    return { project, agents, environments, access, compatibility };
+    return { project, agents, environments, access, bindingReadiness, compatibility };
   }
 
   createProject(input: Parameters<ProjectManagementService['createProject']>[0]) {

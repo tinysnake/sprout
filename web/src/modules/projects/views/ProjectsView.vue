@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import type { ProjectAuthorityView, ProjectEnvironmentCreationInput, ProjectMembershipView, WorkspaceSelectionInput } from '../../../adapters/project-api.js';
+import type { ProjectAuthorityView, ProjectEnvironmentAccessView, ProjectEnvironmentCreationInput, ProjectMembershipView, WorkspaceSelectionInput } from '../../../adapters/project-api.js';
 import { BrowserRequestError } from '../../../transport/browser-transport.js';
 import { useAnnouncer } from '../../../primitives/announcer.js';
 import { useShellConnection } from '../../../shell/use-shell-connection.js';
@@ -105,6 +105,25 @@ const UNKNOWN_ENVIRONMENT_LABEL = 'unknown-environment';
 const environmentFor = (id: string) => overview.value?.environments.find(
   (environment) => environment.environmentInstanceId === id || environment.id === id,
 );
+const bindingReadinessFor = (entry: ProjectEnvironmentAccessView) => overview.value?.bindingReadiness.find(
+  (readiness) => readiness.environmentInstanceId === entry.environmentInstanceId && entry.current !== undefined &&
+    readiness.bindingId === entry.current.bindingId,
+);
+const bindingReadinessReason = (entry: ProjectEnvironmentAccessView) => {
+  const reason = bindingReadinessFor(entry)?.reason;
+  if (reason === undefined) return 'unavailable';
+  return ({
+    'project-denied': 'Project access unavailable',
+    'access-ended': 'Project Environment access ended',
+    'workspace-unbound': 'Workspace binding unavailable',
+    'worker-offline': 'Worker offline',
+    'stale-epoch': 'Worker connection changed',
+    unsupported: 'Remote file operations unsupported',
+    'capability-denied': 'Remote file capability not authorized',
+    'lease-required': 'Environment lease required',
+    'worker-refused': 'Worker refused the binding',
+  } as const)[reason];
+};
 function environmentNoticeVariant(environmentInstanceId: string): 'success' | 'warning' | 'danger' | 'secondary' {
   const severity = environmentFor(environmentInstanceId)?.trafficLight;
   if (severity === 'green') return 'success';
@@ -608,6 +627,7 @@ const addMemberExhausted = computed(() => dialog.value === 'add-member' && unass
                     <div class="flex flex-wrap items-center gap-1.5"><Icon name="environments" :size="14" class="text-[var(--accent-primary)]" /><strong class="break-words text-xs text-[var(--text-primary)]">{{ environmentFor(entry.environmentInstanceId)?.displayName ?? UNKNOWN_ENVIRONMENT_LABEL }}</strong><Badge :variant="entry.status === 'active' ? environmentNoticeVariant(entry.environmentInstanceId) : 'secondary'">{{ entry.status === 'active' ? environmentFor(entry.environmentInstanceId)?.trafficLightReason ?? 'Active access' : 'Access ended' }}</Badge></div>
                     <p class="mt-1 break-all font-mono text-[11px] text-[var(--text-secondary)]">{{ entry.current ? entry.current.kind === 'relative' ? entry.current.path : 'Worker-managed default workspace' : 'No current workspace binding' }}</p>
                     <p class="mt-1 text-[10px] text-[var(--text-muted)]">{{ environmentFor(entry.environmentInstanceId)?.platform ?? 'Environment status unavailable' }} · Workspace files stay on the Environment host.</p>
+                    <p class="mt-1 text-[10px]" :data-binding-readiness="bindingReadinessFor(entry)?.status ?? 'unknown'" :class="bindingReadinessFor(entry)?.status === 'ready' ? 'text-[var(--green-ready)]' : 'text-[var(--yellow-attention)]'">Remote workspace {{ bindingReadinessFor(entry)?.status === 'ready' ? 'ready' : bindingReadinessFor(entry)?.status === 'blocked' ? `blocked · ${bindingReadinessReason(entry)}` : 'readiness not observed' }} · independent of engine readiness</p>
                   </div>
                   <div v-if="entry.status === 'active' && !projectArchived" class="flex shrink-0 flex-wrap gap-1">
                     <Button variant="secondary" size="sm" class="min-h-[44px]" :disabled="controlsDisabled" @click="openDialog('edit-workspace', '', entry.environmentInstanceId)">Change workspace</Button>

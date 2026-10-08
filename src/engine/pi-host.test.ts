@@ -9,6 +9,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { HostPiEngineAdapter, hostEngineProfileId, isolationProfile, type HostPiLaunchInput, type HostPiReadiness } from './pi-host.ts';
+import type { RemoteWorkspaceTools } from './port.ts';
+import { sanitizeStreamError, sanitizedProbeErrorFields, sanitizedPromptErrorFields } from './pi-error-facts.ts';
 
 function readiness(profileId: string, status: HostPiReadiness['status'] = 'ready'): HostPiReadiness {
   return {
@@ -81,6 +83,64 @@ test('Host Pi streams the exact selected model response and versioned provider u
   await session.close();
 });
 
+test('Host Pi records sanitized turn facts and forwards them to the workspace observer', async () => {
+  const observedFacts: Record<string, unknown>[] = [];
+  const child = (input: HostPiLaunchInput): ChildProcess => {
+    const fake = fakeChild(input);
+    const stdout = fake.stdout as PassThrough;
+    const stdin = fake.stdin as PassThrough;
+    // Replace the default prompt output: boundary facts precede the terminal
+    // settle so the test observes them deterministically once the turn ends.
+    // (fakeChild already emits the ready line.)
+    stdin.removeAllListeners('data');
+    stdin.on('data', chunk => {
+      const raw = chunk.toString().trim();
+      let command: { op?: string } | undefined;
+      try { command = JSON.parse(raw) as { op?: string }; } catch { return; }
+      if (command?.op !== 'prompt') return;
+      queueMicrotask(() => {
+        stdout.write(`${JSON.stringify({ kind: 'turn-facts', facts: { promptResolved: true, fetchAttempts: 1, streamCalls: 1 } })}\n`);
+        stdout.write(`${JSON.stringify({ kind: 'provider-request-facts', facts: { toolCount: 2, toolNames: ['remote_read', 'remote_search'], toolChoice: 'auto', remoteReadPresent: true } })}\n`);
+        stdout.write(`${JSON.stringify({ kind: 'pi-event', event: { type: 'agent_settled' } })}\n`);
+      });
+    });
+    return fake;
+  };
+  const adapter = new HostPiEngineAdapter({
+    profileId: 'profile-local-facts',
+    provider: 'provider-a',
+    model: 'provider-a/model-a',
+    probeProcess: async input => readiness(input.profileId),
+    spawnProcess: child,
+  });
+  const remoteWorkspace: RemoteWorkspaceTools & {
+    observeProviderRequestFacts(facts: Record<string, unknown>): void;
+  } = {
+    binding: { projectId: 'project-a', environmentInstanceId: 'env-a', bindingId: 'binding-a', generation: 1, connectionEpoch: 1, workspaceId: 'workspace-a' },
+    read: async () => { throw new Error('not exercised'); },
+    search: async () => { throw new Error('not exercised'); },
+    inspect: async () => ({ status: 'failed' }),
+    cancel: async () => ({ accepted: false, status: 'failed' }),
+    observeProviderRequestFacts(facts: Record<string, unknown>) { observedFacts.push(facts); },
+  };
+  const session = await adapter.startSession({
+    agentId: 'agent-a', runId: 'run-facts', workingDirectory: 'opaque',
+    model: 'provider-a/model-a', effort: 'medium',
+    remoteWorkspace,
+  });
+  const turn = session.run('Hello Pi');
+  for await (const event of turn.events) void event;
+  const result = await turn.completion;
+  assert.equal(result.status, 'completed');
+  const turnFacts = (session as unknown as { turnFacts(): readonly Record<string, unknown>[] }).turnFacts();
+  assert.deepEqual(turnFacts, [
+    { promptResolved: true, fetchAttempts: 1, streamCalls: 1 },
+    { toolCount: 2, toolNames: ['remote_read', 'remote_search'], toolChoice: 'auto', remoteReadPresent: true },
+  ]);
+  assert.deepEqual(observedFacts, turnFacts);
+  await session.close();
+});
+
 test('Host Pi refuses a different model, unsupported effort, or unready profile before launch', async () => {
   let launches = 0;
   const adapter = new HostPiEngineAdapter({
@@ -145,6 +205,33 @@ test('Engine host profile identifiers are stable opaque local ids with private f
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('Pi probe catches and Host Pi turn facts omit unclassified thrown error codes', () => {
+  const sensitiveCodes = [
+    'https://api.example.invalid/v1?token=demo',
+    '/home/example/.config/provider/key',
+    'worker-id-7f5d3a',
+    'sk_test_0123456789abcdef',
+  ];
+  for (const code of sensitiveCodes) {
+    const error = Object.assign(new Error('synthetic provider failure'), { code });
+    const remoteProbeStdout = JSON.stringify({
+      outcome: 'blocked', reason: 'bounded-probe-failed', stage: 'model-turn',
+      ...sanitizedProbeErrorFields(error),
+    });
+    const hostTurnProbeStdout = JSON.stringify({
+      outcome: 'blocked', reason: 'bounded-baseline-failed',
+      ...sanitizedProbeErrorFields(error),
+    });
+    const turnFacts = [{ ...sanitizedPromptErrorFields(error), streamRejections: [sanitizeStreamError(error)] }];
+    for (const output of [remoteProbeStdout, hostTurnProbeStdout, JSON.stringify(turnFacts)]) {
+      assert.equal(output.includes(code), false, `unclassified error code stays out of diagnostics: ${code}`);
+    }
+  }
+  assert.deepEqual(sanitizedProbeErrorFields(Object.assign(new Error(), { code: 'ENOENT' })), {
+    errorType: 'Error', errorCode: 'missing',
+  });
 });
 
 void (undefined as ChildProcess | undefined);

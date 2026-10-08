@@ -77,6 +77,7 @@ const overview = {
   agents: [{ id: 'agent-a', displayName: 'Project Agent', status: 'active' }, { id: 'agent-b', displayName: 'Other Project Agent', status: 'active' }],
   environments: [{ id: 'env-a', environmentInstanceId: 'instance-a', displayName: 'Ready Environment', enrollmentStatus: 'approved', trafficLight: 'green', workSafety: 'clear', connectionState: 'online', protocolCompatibility: 'compatible', capabilityPermissions: { 'agent-run': true } }],
   access: [{ projectId, environmentInstanceId: 'instance-a', status: 'active', startedAt: time, updatedAt: time, current: { bindingId: 'binding-a', workspaceId: 'workspace-a', kind: 'default', boundAt: time }, history: [] }],
+  bindingReadiness: [],
   compatibility: [{ agentId: 'agent-a', environmentInstanceId: 'instance-a', available: true }, { agentId: 'agent-b', environmentInstanceId: 'instance-a', available: true }],
 } as unknown as ProjectOverviewData;
 

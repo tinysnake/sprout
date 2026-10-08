@@ -48,6 +48,13 @@ async function accessApi(options: {
   readonly accessible?: boolean;
   readonly activeWork?: () => boolean;
   readonly workerError?: string;
+  readonly bindingReadiness?: readonly {
+    readonly environmentInstanceId: string;
+    readonly bindingId?: string;
+    readonly generation?: number;
+    readonly status: 'ready' | 'blocked';
+    readonly reason?: 'project-denied' | 'access-ended' | 'workspace-unbound' | 'worker-offline' | 'stale-epoch' | 'unsupported' | 'capability-denied' | 'lease-required' | 'worker-refused';
+  }[];
 } = {}): Promise<AccessRuntime> {
   const pool = new EnvironmentPool({ definitions: [definition], instances: [instance] });
   const orchestrator = new RunOrchestrator({
@@ -104,7 +111,9 @@ async function accessApi(options: {
       { id: 'agent-scout', name: 'Scout', engine: 'scripted', capability: 'agent-run', workingDirectory: '/tmp' },
     ]),
     auth,
-    routers: [createProjectRouter({ projects, access })],
+    routers: [createProjectRouter({ projects, access, environmentOperations: {
+      bindingReadiness: async () => options.bindingReadiness ?? [],
+    } })],
   });
   const { port } = await api.listen(0);
   const base = `http://127.0.0.1:${port}`;
@@ -130,6 +139,24 @@ function command(runtime: AccessRuntime, path: string, body: unknown): Promise<R
     body: JSON.stringify(body),
   });
 }
+
+test('binding readiness is projected separately from Environment engine readiness', async () => {
+  const runtime = await accessApi({ bindingReadiness: [
+    { environmentInstanceId: 'mac-mini-1', bindingId: 'binding-current', generation: 3, status: 'blocked', reason: 'worker-offline' },
+  ] });
+  try {
+    const response = await get(runtime, '/api/projects/project-sprout/access/readiness');
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as { readiness: readonly Record<string, unknown>[] };
+    assert.deepEqual(body.readiness, [{
+      environmentInstanceId: 'mac-mini-1', bindingId: 'binding-current', generation: 3,
+      status: 'blocked', reason: 'worker-offline',
+    }]);
+    assert.equal(Object.hasOwn(body.readiness[0]!, 'engines'), false);
+  } finally {
+    await runtime.api.close();
+  }
+});
 
 test('granting access is one authenticated action that records the validated workspace', async () => {
   const runtime = await accessApi();

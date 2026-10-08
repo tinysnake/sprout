@@ -664,6 +664,53 @@ test('Project Overview loads authority states and completes create-to-ready-to-a
   }
 });
 
+test('Project Overview shows remote binding blocks independently from Environment engine readiness', async () => {
+  const { dom, vite, cleanup } = await setupProductionDom();
+  let app: { unmount(): void } | undefined;
+  try {
+    const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('./main.ts');
+    const options = await deterministicAppOptions(vite);
+    const fixtureService = options.projectService;
+    options.projectService = new Proxy(fixtureService, {
+      get(target, property) {
+        if (property === 'loadOverview') {
+          return async (projectId: string) => {
+            const snapshot = await target.loadOverview(projectId);
+            const binding = snapshot.access.find(entry => entry.environmentInstanceId === 'inst-ready')?.current;
+            return {
+              ...snapshot,
+              bindingReadiness: [{
+                environmentInstanceId: 'inst-ready',
+                ...(binding !== undefined ? { bindingId: binding.bindingId } : {}),
+                ...(binding?.generation !== undefined ? { generation: binding.generation } : {}),
+                status: 'blocked' as const, reason: 'worker-offline' as const,
+              }],
+            };
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const mounted = createSproutApp(options);
+    app = mounted.app;
+    await mounted.router.push('/project/overview');
+    await mounted.router.isReady();
+    app.mount(dom.window.document.getElementById('app')!);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const doc = dom.window.document;
+    assert.equal(doc.querySelector('.projects-overview-view [data-state]')?.getAttribute('data-state'), 'ready', 'Environment/Agent prerequisites remain ready');
+    const binding = doc.querySelector('[data-binding-readiness="blocked"]');
+    assert.ok(binding);
+    assert.match(binding.textContent ?? '', /Remote workspace blocked · Worker offline/);
+    assert.match(binding.textContent ?? '', /independent of engine readiness/);
+  } finally {
+    app?.unmount();
+    await cleanup();
+  }
+});
+
 test('Project Overview hides project identity details in the zero-Project header', async () => {
   const { dom, vite, cleanup } = await setupProductionDom();
   let app: { unmount(): void } | undefined;

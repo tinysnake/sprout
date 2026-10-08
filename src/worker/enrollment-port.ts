@@ -33,6 +33,12 @@ import type { EngineAdapter } from '../engine/port.ts';
 import type {
   ValidateWorkspaceParams,
   ValidateWorkspaceResult,
+  AttachWorkspaceBindingParams,
+  WorkspaceFileOperationParams,
+  InspectWorkspaceFileOperationParams,
+  CancelWorkspaceFileOperationParams,
+  InspectWorkspaceFileOperationResult,
+  CancelWorkspaceFileOperationResult,
   WorkerInfo,
   WorkerReadinessProbeResult,
 } from './protocol.ts';
@@ -205,6 +211,40 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
       throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
     }
     return connection.contexts.validateWorkspace(input);
+  }
+
+  async attachWorkspaceBinding(environmentInstanceId: string, input: AttachWorkspaceBindingParams): Promise<{ readonly attached: true }> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || connection.info.workspaceOperations?.version !== 1 ||
+      !connection.info.workspaceOperations.operations.includes('read') ||
+      !connection.info.workspaceOperations.operations.includes('search')) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    const currentEpoch = this.connectionEpoch(environmentInstanceId);
+    if (currentEpoch !== input.connectionEpoch) throw new Error('stale Worker epoch');
+    return connection.contexts.attachWorkspaceBinding(input);
+  }
+
+  async executeWorkspaceFileOperation(environmentInstanceId: string, input: WorkspaceFileOperationParams): Promise<import('../engine/port.ts').RemoteWorkspaceOperationResult> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    const result = await connection.contexts.executeWorkspaceFileOperation(input);
+    if (this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error('stale Worker epoch');
+    return result;
+  }
+
+  async inspectWorkspaceFileOperation(environmentInstanceId: string, input: InspectWorkspaceFileOperationParams): Promise<InspectWorkspaceFileOperationResult> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    return connection.contexts.inspectWorkspaceFileOperation(input);
+  }
+
+  async cancelWorkspaceFileOperation(environmentInstanceId: string, input: CancelWorkspaceFileOperationParams): Promise<CancelWorkspaceFileOperationResult> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    return connection.contexts.cancelWorkspaceFileOperation(input);
+  }
+
+  connectionEpoch(environmentInstanceId: string): number | undefined {
+    return this.#gateway.liveFor(environmentInstanceId)?.epoch.epoch;
   }
 
   /**

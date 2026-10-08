@@ -5,6 +5,8 @@ import { createInterface } from 'node:readline';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { registerHooks } from 'node:module';
+import { sessionEventDisposition } from './pi-runner-events.ts';
+import { safeErrorCode, safeErrorName, sanitizeStreamError, sanitizedPromptErrorFields } from './pi-error-facts.ts';
 
 const EXPECTED_PROVIDER_FILES = {
   'provider.ts': '23e1afbbf69aea8404d600c029e94fa915c8fd81b3ab96e17e687365563c7e80',
@@ -13,13 +15,22 @@ const EXPECTED_PROVIDER_FILES = {
   'gateway.ts': 'fcf9c535364ab7b54713bf9079d0419018be639362306d66011e7843646443e8',
 };
 const self = fileURLToPath(import.meta.url);
+const SAFE_FAILURE_STAGES = new Set([
+  'request', 'sdk-import', 'sdk-version', 'provider-source', 'provider-identity',
+  'session-controls', 'runtime-open', 'model-readiness', 'resume', 'session-create', 'turn',
+]);
+const SAFE_FAILURE_CODES = new Set([
+  'invalid', 'other', 'missing', 'unsupported', 'not-ready', 'resume-refused', 'control-violation',
+]);
 
 function line(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
 function safeFailure(stage, code = 'other') {
-  line({ kind: 'failure', stage, code });
+  const safeStage = typeof stage === 'string' && SAFE_FAILURE_STAGES.has(stage) ? stage : 'runtime-open';
+  const safeCode = typeof code === 'string' && SAFE_FAILURE_CODES.has(code) ? code : 'other';
+  line({ kind: 'failure', stage: safeStage, code: safeCode });
 }
 
 function fileHash(path) {
@@ -36,35 +47,6 @@ function isDenied(path, flag) {
   }
 }
 
-function sanitizeUsage(raw) {
-  if (typeof raw !== 'object' || raw === null) return undefined;
-  const usage = raw;
-  const numeric = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
-  const result = {};
-  for (const key of ['input', 'output', 'totalTokens', 'cacheRead', 'cacheWrite', 'reasoning']) {
-    const value = numeric(usage[key]);
-    if (value !== undefined) result[key] = value;
-  }
-  if (typeof usage.cost === 'object' && usage.cost !== null) {
-    const cost = {};
-    for (const key of ['input', 'output', 'cacheRead', 'cacheWrite', 'total']) {
-      const value = numeric(usage.cost[key]);
-      if (value !== undefined) cost[key] = value;
-    }
-    result.cost = cost;
-  }
-  return result;
-}
-
-function sanitizeAssistantContent(content) {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return [];
-  return content.flatMap((part) =>
-    typeof part?.text === 'string' && (part.type === 'text' || part.type === undefined)
-      ? [{ type: 'text', text: part.text }]
-      : [],
-  );
-}
 
 async function createRuntime(config) {
   const packageVersion = JSON.parse(readFileSync(join(config.packageRoot, 'package.json'), 'utf8')).version;
@@ -115,6 +97,42 @@ async function createRuntime(config) {
   const modelPresent = model?.provider === config.provider && model?.id === config.model;
   const authConfigured = runtime.hasConfiguredAuth(config.provider);
   return { sdk, runtime, model: modelPresent ? model : undefined, modelPresent, authConfigured, packageVersion };
+}
+
+async function readFetchBody(input, init) {
+  if (typeof init?.body === 'string') return init.body;
+  if (init?.body instanceof Uint8Array) return new TextDecoder().decode(init.body);
+  if (init?.body instanceof ArrayBuffer) return new TextDecoder().decode(init.body);
+  if (typeof Request !== 'undefined' && input instanceof Request) return input.clone().text();
+  return undefined;
+}
+
+function summarizeFetchBody(body) {
+  if (typeof body !== 'string') return { toolCount: null, toolNames: [], toolChoice: 'unknown', remoteReadPresent: null };
+  let request;
+  try { request = JSON.parse(body); } catch {
+    return { toolCount: null, toolNames: [], toolChoice: 'unknown', remoteReadPresent: null };
+  }
+  if (typeof request !== 'object' || request === null || Array.isArray(request)) {
+    return { toolCount: null, toolNames: [], toolChoice: 'unknown', remoteReadPresent: null };
+  }
+  const tools = Array.isArray(request.tools) ? request.tools
+    : Array.isArray(request.functions) ? request.functions : [];
+  const toolNames = tools.flatMap((tool) => {
+    const name = tool?.function?.name ?? tool?.name;
+    return typeof name === 'string' ? [name] : [];
+  });
+  const rawChoice = request.tool_choice;
+  let toolChoice = 'unspecified';
+  if (typeof rawChoice === 'string' && ['auto', 'none', 'required'].includes(rawChoice)) {
+    toolChoice = rawChoice;
+  } else if (rawChoice && typeof rawChoice === 'object') {
+    const name = rawChoice.function?.name;
+    if (rawChoice.type === 'function' && typeof name === 'string') toolChoice = { type: 'function', name };
+    else if (['auto', 'none', 'required'].includes(rawChoice.type)) toolChoice = rawChoice.type;
+    else toolChoice = 'other';
+  }
+  return { toolCount: tools.length, toolNames, toolChoice, remoteReadPresent: toolNames.includes('remote_read') };
 }
 
 function emptyLoader(sdk, config) {
@@ -183,8 +201,39 @@ async function probe(config) {
 async function openSession(config, input) {
   let stage = 'runtime-open';
   let session;
+  const remotePending = new Map();
+  let remoteCallSequence = 0;
+  const turnTelemetry = { streamCalls: 0, streamRejections: [] };
+  let rawEventTypes = {};
+  const remoteCall = (operation, args) => new Promise((resolve) => {
+    const callId = `${config.sessionId}-${++remoteCallSequence}`;
+    remotePending.set(callId, resolve);
+    line({ kind: 'remote-call', callId, operation, args });
+  });
   try {
     const loaded = await createRuntime(config);
+    // Provider-boundary probe: count every hand-off to the model transport and
+    // capture sanitized rejection identity (name/code/status only).
+    for (const method of ["streamSimple", "stream"]) {
+      const original = loaded.runtime[method];
+      if (typeof original !== "function") continue;
+      loaded.runtime[method] = function (...args) {
+        turnTelemetry.streamCalls += 1;
+        try {
+          const result = original.apply(this, args);
+          if (result && typeof result.then === "function") {
+            return result.then(undefined, (error) => {
+              turnTelemetry.streamRejections.push(sanitizeStreamError(error));
+              throw error;
+            });
+          }
+          return result;
+        } catch (error) {
+          turnTelemetry.streamRejections.push(sanitizeStreamError(error));
+          throw error;
+        }
+      };
+    }
     if (!loaded.modelPresent || !loaded.authConfigured || loaded.model === undefined) {
       line({ kind: 'failure', stage: 'model-readiness', code: 'not-ready' });
       return;
@@ -199,6 +248,28 @@ async function openSession(config, input) {
     const manager = sessionPath === undefined
       ? loaded.sdk.SessionManager.create(config.agentRoot, sessionDir, { id: config.sessionId })
       : loaded.sdk.SessionManager.open(sessionPath, sessionDir, config.agentRoot);
+    const remoteAvailable = typeof config.remoteWorkspace?.binding?.projectId === 'string';
+    const customTools = remoteAvailable ? [
+      {
+        name: 'remote_read', label: 'Read remote file', description: 'Read a bounded text file from the authorized remote Project workspace.',
+        parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false },
+        annotations: { readOnlyHint: true },
+        execute: async (_id, args) => {
+          const result = await remoteCall('read', args);
+          return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result, isError: result.status !== 'completed' };
+        },
+      },
+      {
+        name: 'remote_search', label: 'Search remote files', description: 'Search bounded text files in the authorized remote Project workspace.',
+        parameters: { type: 'object', properties: { query: { type: 'string' }, path: { type: 'string' } }, required: ['query'], additionalProperties: false },
+        annotations: { readOnlyHint: true },
+        execute: async (_id, args) => {
+          const result = await remoteCall('search', args);
+          return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result, isError: result.status !== 'completed' };
+        },
+      },
+    ] : [];
+    const remoteToolNames = customTools.map((tool) => tool.name);
     const loader = emptyLoader(loaded.sdk, config);
     stage = 'session-create';
     ({ session } = await loaded.sdk.createAgentSession({
@@ -207,15 +278,17 @@ async function openSession(config, input) {
       modelRuntime: loaded.runtime,
       model: loaded.model,
       thinkingLevel: config.effort,
-      noTools: 'all',
-      tools: [],
+      noTools: remoteAvailable ? 'builtin' : 'all',
+      tools: remoteToolNames,
+      customTools,
       resourceLoader: loader,
       sessionManager: manager,
       settingsManager: loaded.sdk.SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),
     }));
     const selected = session.model;
     if (selected?.provider !== config.provider || selected?.id !== config.model ||
-        session.getActiveToolNames().length !== 0 || session.getCallableToolNames().length !== 0) {
+        JSON.stringify(session.getActiveToolNames().sort()) !== JSON.stringify(remoteToolNames.slice().sort()) ||
+        JSON.stringify(session.getCallableToolNames().sort()) !== JSON.stringify(remoteToolNames.slice().sort())) {
       line({ kind: 'failure', stage: 'session-controls', code: 'control-violation' });
       session.dispose();
       return;
@@ -223,31 +296,15 @@ async function openSession(config, input) {
 
     let settled = false;
     session.subscribe((event) => {
-      if (event.type === 'message_update') {
-        const update = event.assistantMessageEvent;
-        if (update?.type === 'text_delta' && typeof update.delta === 'string') {
-          line({ kind: 'pi-event', event: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: update.delta } } });
-        }
-        return;
-      }
-      if (event.type === 'message_end') {
-        const message = event.message;
-        if (message?.role === 'assistant') {
-          line({ kind: 'pi-event', event: { type: 'message_end', message: {
-            role: 'assistant',
-            content: sanitizeAssistantContent(message.content),
-            ...(message.stopReason === 'error' ? { stopReason: 'error' } : {}),
-            ...(sanitizeUsage(message.usage) !== undefined ? { usage: sanitizeUsage(message.usage) } : {}),
-          } } });
-        }
-        return;
-      }
-      if (event.type === 'agent_settled' && !settled) {
+      const eventType = typeof event?.type === 'string' ? event.type : 'unknown';
+      rawEventTypes[eventType] = (rawEventTypes[eventType] ?? 0) + 1;
+      const disposition = sessionEventDisposition(event, { settled, remoteToolNames });
+      if (disposition.action === 'settle') {
         settled = true;
         line({ kind: 'pi-event', event: { type: 'agent_settled' } });
-        return;
-      }
-      if (event.type === 'tool_execution_start' || event.type === 'bash_execution_update') {
+      } else if (disposition.action === 'pi-event') {
+        line({ kind: 'pi-event', event: disposition.event });
+      } else if (disposition.action === 'violation') {
         session.abort();
         line({ kind: 'failure', stage: 'session-controls', code: 'control-violation' });
       }
@@ -257,13 +314,46 @@ async function openSession(config, input) {
     input.on('line', async (raw) => {
       let command;
       try { command = JSON.parse(raw); } catch { return; }
+      if (command?.op === 'remote-result' && typeof command.callId === 'string') {
+        const resolve = remotePending.get(command.callId);
+        if (resolve) { remotePending.delete(command.callId); resolve(command.result); }
+        return;
+      }
       if (command?.op === 'prompt' && !settled && typeof command.prompt === 'string') {
         stage = 'turn';
+        rawEventTypes = {};
+        turnTelemetry.streamCalls = 0;
+        turnTelemetry.streamRejections.length = 0;
+        const turn = { fetchAttempts: 0, promptResolved: false, promptErrorName: undefined, promptErrorCode: undefined };
+        const originalFetch = globalThis.fetch;
+        const observedFetch = async function (input, init) {
+          turn.fetchAttempts += 1;
+          if (config.remoteWorkspace) {
+            let body;
+            try { body = await readFetchBody(input, init); } catch { /* Keep observation failures out of the request path. */ }
+            line({ kind: 'provider-request-facts', facts: summarizeFetchBody(body) });
+          }
+          return originalFetch.call(this, input, init);
+        };
+        globalThis.fetch = observedFetch;
         try {
           await session.prompt(command.prompt, { expandPromptTemplates: false, source: 'rpc' });
+          turn.promptResolved = true;
         } catch (error) {
+          Object.assign(turn, sanitizedPromptErrorFields(error));
           const code = error?.code === 'ENOENT' ? 'missing' : 'other';
           line({ kind: 'failure', stage, code });
+        } finally {
+          if (globalThis.fetch === observedFetch) globalThis.fetch = originalFetch;
+          line({ kind: 'turn-facts', facts: {
+            promptResolved: turn.promptResolved,
+            ...(turn.promptErrorName !== undefined ? { promptErrorName: turn.promptErrorName } : {}),
+            ...(turn.promptErrorCode !== undefined ? { promptErrorCode: turn.promptErrorCode } : {}),
+            fetchAttempts: turn.fetchAttempts,
+            streamCalls: turnTelemetry.streamCalls,
+            streamRejections: [...turnTelemetry.streamRejections],
+            rawEventTypes: { ...rawEventTypes },
+          } });
         }
         return;
       }

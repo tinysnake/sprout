@@ -125,6 +125,12 @@ export interface PreparedProjectCreationAccess {
   publish(): void;
 }
 
+function nextBindingGeneration(history: readonly WorkspaceBinding[]): number {
+  const previous = history.reduce((maximum, binding) =>
+    Math.max(maximum, Number.isSafeInteger(binding.generation) ? binding.generation! : 0), history.length);
+  return previous + 1;
+}
+
 export class ProjectAccessService {
   readonly #store: ProjectAccessStore;
   readonly #projects: ProjectService;
@@ -214,7 +220,7 @@ export class ProjectAccessService {
     }
     const validated = await this.#validate(input.projectId, input.environmentInstanceId, selection);
     const now = this.#clock();
-    const binding = this.#newBinding(validated, now);
+    const binding = this.#newBinding(validated, now, 1);
     const access: ProjectEnvironmentAccess = {
       projectId: input.projectId,
       environmentInstanceId: input.environmentInstanceId,
@@ -261,7 +267,7 @@ export class ProjectAccessService {
     }
     const validated = await this.#validate(project.id, input.environmentInstanceId, selection);
     const now = this.#clock();
-    const binding = this.#newBinding(validated, now);
+    const binding = this.#newBinding(validated, now, nextBindingGeneration(existing?.history ?? []));
     const history = [...(existing?.history ?? []), binding];
     const reactivated: ProjectEnvironmentAccess = {
       projectId: project.id,
@@ -302,7 +308,7 @@ export class ProjectAccessService {
       fallback: DEFAULT_CHANGE_WORKSPACE_REASON,
       maxLength: 320,
     });
-    const binding = this.#newBinding(validated, now);
+    const binding = this.#newBinding(validated, now, nextBindingGeneration(access.history));
     // Match the open binding by its invariant, never by object identity: a
     // durable store (SQLite) returns the current binding and its history entry
     // as distinct parsed objects, so reference equality would silently fail to
@@ -423,9 +429,10 @@ export class ProjectAccessService {
     };
   }
 
-  #newBinding(validated: ValidatedWorkspace, at: number): WorkspaceBinding {
+  #newBinding(validated: ValidatedWorkspace, at: number, generation: number): WorkspaceBinding {
     return {
       bindingId: this.#createBindingId(),
+      generation,
       workspaceId: validated.workspaceId,
       kind: validated.kind,
       ...(validated.path !== undefined ? { path: validated.path } : {}),

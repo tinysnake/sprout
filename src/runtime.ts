@@ -103,6 +103,7 @@ import type { Task } from './task/model.ts';
 import type { TaskStore } from './task/store.ts';
 import type { WorkerInfo, WorkerReadinessProbeResult } from './worker/protocol.ts';
 import type { ValidateWorkspaceParams, ValidateWorkspaceResult } from './worker/protocol.ts';
+import type { AttachWorkspaceBindingParams, WorkspaceFileOperationParams, InspectWorkspaceFileOperationParams, CancelWorkspaceFileOperationParams, InspectWorkspaceFileOperationResult, CancelWorkspaceFileOperationResult } from './worker/protocol.ts';
 import { createAgentTaskGroupMessageSender } from './collaboration/agent-task-group.ts';
 import { createRunApi, type RunApi } from './web/api.ts';
 import { createEnvironmentRouter } from './web/environment-router.ts';
@@ -122,6 +123,8 @@ import { WorkerGateway } from './worker/gateway.ts';
 import { effectiveWorkOptions } from './agent/model.ts';
 import { readinessRequirements } from './environment/readiness.ts';
 import { EnvironmentReadinessWorkflow } from './environment/readiness-workflow.ts';
+import { EnvironmentOperations } from './operations/environment-operations.ts';
+import { MemoryRemoteOperationIdentityStore, type RemoteOperationIdentityStore } from './operations/remote-operation-store.ts';
 import { EnrollmentWorkerPort } from './worker/enrollment-port.ts';
 import type { UsageStore } from './usage/store.ts';
 import { InMemoryUsageStore } from './usage/store.ts';
@@ -174,6 +177,8 @@ export type { TaskContextWorker };
  */
 export interface RuntimeStores {
   readonly operations?: OperationalStore;
+  /** Durable identities for bounded remote Project file operations. */
+  readonly remoteWorkspaceOperations?: RemoteOperationIdentityStore;
   readonly schemaVersion?: number;
   readonly runs: RunStore;
   /** The bounded reconnect-retry gate, trigger, and per-run rows (#181). */
@@ -212,7 +217,7 @@ export interface RuntimeStores {
 }
 
 /** Application-visible stores cannot reserve or commit Worker observations. */
-export type RuntimeStoreViews = Omit<RuntimeStores, 'environmentReadiness'> & {
+export type RuntimeStoreViews = Omit<RuntimeStores, 'environmentReadiness' | 'remoteWorkspaceOperations'> & {
   readonly environmentReadiness: Pick<EnvironmentReadinessStore,
     'getReadiness' | 'getCurrentObservation' | 'listObservations' | 'listProbes' | 'getReceipt' | 'getObservation' | 'getAttempt'>;
 };
@@ -255,6 +260,14 @@ export interface RuntimeEnvironment {
     environmentInstanceId: string,
     input: ValidateWorkspaceParams,
   ): Promise<ValidateWorkspaceResult>;
+  /** Bind one authorized Project workspace on the current authenticated Worker. */
+  attachWorkspaceBinding?(environmentInstanceId: string, input: AttachWorkspaceBindingParams): Promise<{ readonly attached: true }>;
+  /** Typed read-only Workspace operations on the already accepted Worker. */
+  executeWorkspaceFileOperation?(environmentInstanceId: string, input: WorkspaceFileOperationParams): Promise<import('./engine/port.ts').RemoteWorkspaceOperationResult>;
+  inspectWorkspaceFileOperation?(environmentInstanceId: string, input: InspectWorkspaceFileOperationParams): Promise<InspectWorkspaceFileOperationResult>;
+  cancelWorkspaceFileOperation?(environmentInstanceId: string, input: CancelWorkspaceFileOperationParams): Promise<CancelWorkspaceFileOperationResult>;
+  /** The authenticated Worker epoch that currently owns one instance. */
+  connectionEpoch?(environmentInstanceId: string): number | undefined;
   /**
    * The neutral Worker facts one environment instance reported on `worker/info`,
    * when it is connected (optional: readiness is an additive observation #87).
@@ -337,6 +350,8 @@ export interface SproutRuntime {
   readonly projectService: ProjectService;
   /** The Project Environment access and workspace capability (#93). */
   readonly projectAccess: ProjectAccessService;
+  /** Authorized, bounded read-only operations on enrolled Project workspaces. */
+  readonly environmentOperations: EnvironmentOperations;
   /** The Project conversation scopes, Working groups, and Task groups (#95, #210). */
   readonly conversationScopes: ConversationScopeService;
   /** The truthful Usage and cost observation capability (#105). */
@@ -1102,6 +1117,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
      */
     let tasks: TaskService;
     let taskLifecycle: TaskEnvironmentLifecycle;
+    let environmentOperations: EnvironmentOperations | undefined;
 
     /**
      * The Environment reconciliation and recovery capability (#88).
@@ -1147,6 +1163,11 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       // (ADR-0003), and so execution follows the leased instance (F1, #18).
       engines: (requestedInstanceId) => runtimeEnvironment.adapters(requestedInstanceId),
       executionStrategy,
+      remoteWorkspace: async (projectId, agentId) => {
+        if (!environmentOperations) return undefined;
+        try { return await environmentOperations.attach(projectId, agentId); }
+        catch { return undefined; }
+      },
       ...(hostPi !== undefined ? { hostPi } : {}),
       executionPlacementForEnvironment,
       agents,
@@ -1574,6 +1595,15 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     const enrollmentEnvironment = new EnrollmentWorkerPort({
       gateway: workerGateway,
       ...(options.onWorkerLog !== undefined ? { onLog: options.onWorkerLog } : {}),
+    });
+    environmentOperations = new EnvironmentOperations({
+      projects: projectService,
+      access: projectAccessService,
+      environment: enrollmentEnvironment,
+      gateway: workerGateway,
+      catalog: environmentCatalog,
+      enrollments,
+      store: durableStores.remoteWorkspaceOperations ?? new MemoryRemoteOperationIdentityStore(),
     });
     switchableEnvironment?.setTarget(enrollmentEnvironment);
     /**
@@ -2010,6 +2040,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           projects: projectService,
           legacyProjects: projects,
           access: projectAccessService,
+          environmentOperations,
           ...(projectCreationService !== undefined ? { creation: projectCreationService } : {}),
         }),
         // Conversation scopes and Working groups (#95), composed through the
@@ -2172,6 +2203,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       agentService,
       projectService,
       projectAccess: projectAccessService,
+      environmentOperations,
       conversationScopes,
       taskProposals,
       usage: usageService,
@@ -2421,6 +2453,34 @@ class EnrollmentEnvironmentDelegate implements RuntimeEnvironment {
       return Promise.reject(new Error('the enrollment environment cannot validate Project workspaces'));
     }
     return target.validateWorkspace(environmentInstanceId, input);
+  }
+
+  attachWorkspaceBinding(environmentInstanceId: string, input: import('./worker/protocol.ts').AttachWorkspaceBindingParams) {
+    const target = this.#require();
+    if (target.attachWorkspaceBinding === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
+    return target.attachWorkspaceBinding(environmentInstanceId, input);
+  }
+
+  executeWorkspaceFileOperation(environmentInstanceId: string, input: import('./worker/protocol.ts').WorkspaceFileOperationParams) {
+    const target = this.#require();
+    if (target.executeWorkspaceFileOperation === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
+    return target.executeWorkspaceFileOperation(environmentInstanceId, input);
+  }
+
+  inspectWorkspaceFileOperation(environmentInstanceId: string, input: import('./worker/protocol.ts').InspectWorkspaceFileOperationParams) {
+    const target = this.#require();
+    if (target.inspectWorkspaceFileOperation === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
+    return target.inspectWorkspaceFileOperation(environmentInstanceId, input);
+  }
+
+  cancelWorkspaceFileOperation(environmentInstanceId: string, input: import('./worker/protocol.ts').CancelWorkspaceFileOperationParams) {
+    const target = this.#require();
+    if (target.cancelWorkspaceFileOperation === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
+    return target.cancelWorkspaceFileOperation(environmentInstanceId, input);
+  }
+
+  connectionEpoch(environmentInstanceId: string): number | undefined {
+    return this.#target?.connectionEpoch?.(environmentInstanceId);
   }
 
   info(environmentInstanceId: string): Promise<WorkerInfo | undefined> {

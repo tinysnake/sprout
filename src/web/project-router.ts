@@ -7,6 +7,7 @@ import type { ProjectAccessService } from '../project/access-service.ts';
 import type { ProjectCreationService, ProjectEnvironmentCreation } from '../project/creation-service.ts';
 import { ProjectCreationConflictError } from '../project/creation-store.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
+import type { EnvironmentOperations } from '../operations/environment-operations.ts';
 import {
   toProjectAuthorityView,
   toProjectEnvironmentAccessView,
@@ -43,6 +44,8 @@ export interface ProjectRouterOptions {
    * the binding safety guards have exactly one implementation.
    */
   readonly access?: ProjectAccessService;
+  /** Current Project workspace binding readiness, independent of engine health. */
+  readonly environmentOperations?: Pick<EnvironmentOperations, 'bindingReadiness'>;
   /** Atomic Project + selected Environment/workspace creation boundary. */
   readonly creation?: ProjectCreationService;
   /**
@@ -137,7 +140,7 @@ function projectFailure(context: ApiRequestContext, error: unknown): boolean {
 }
 
 export function createProjectRouter(options: ProjectRouterOptions): ApiRouter {
-  const { projects, access, creation, legacyProjects } = options;
+  const { projects, access, creation, legacyProjects, environmentOperations } = options;
 
   /**
    * The merged composer-compatible listing: legacy configured Projects plus
@@ -439,6 +442,21 @@ export function createProjectRouter(options: ProjectRouterOptions): ApiRouter {
         } catch (error) {
           return projectFailure(context, error);
         }
+      }
+
+      // GET /api/projects/:id/access/readiness — live Worker binding facts,
+      // projected independently from Environment engine readiness.
+      if (
+        method === 'GET' &&
+        segments.length === 5 &&
+        segments[0] === 'api' &&
+        segments[1] === 'projects' &&
+        segments[3] === 'access' &&
+        segments[4] === 'readiness'
+      ) {
+        if (environmentOperations === undefined) return json(context, 404, { error: 'unknown route' });
+        const readiness = await environmentOperations.bindingReadiness(segments[2] ?? '');
+        return json(context, 200, { readiness });
       }
 
       // GET /api/projects/:id/access — list one Project's Environment access

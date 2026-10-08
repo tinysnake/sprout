@@ -1,4 +1,4 @@
-import type { AgentRunEvent, EngineTurnResult, StandingInstructionsChannel, StreamingGranularity } from '../engine/port.ts';
+import type { AgentRunEvent, EngineTurnResult, RemoteWorkspaceOperationResult, StandingInstructionsChannel, StreamingGranularity } from '../engine/port.ts';
 
 /**
  * The core-to-worker protocol.
@@ -35,6 +35,12 @@ export const WORKER_METHODS = {
   inspectTaskContext: 'context/inspect',
   /** Validate or prepare one Project workspace selection (#93). */
   validateWorkspace: 'workspace/validate',
+  /** Attach one already-authorized, generation-fenced Project workspace. */
+  attachWorkspaceBinding: 'workspace/binding/attach',
+  /** Execute, inspect, or cancel a bounded remote file operation. */
+  workspaceFileOperation: 'workspace/file-operation',
+  inspectWorkspaceFileOperation: 'workspace/file-operation/inspect',
+  cancelWorkspaceFileOperation: 'workspace/file-operation/cancel',
   recoverySnapshot: 'recovery/snapshot',
   recoveryAcknowledge: 'recovery/acknowledge',
   recoveryAcknowledgeContext: 'recovery/ack-context',
@@ -161,11 +167,20 @@ export interface WorkerEngineDescription {
   readonly standingInstructions: StandingInstructionsChannel;
 }
 
+export interface WorkerWorkspaceOperations {
+  readonly version: 1;
+  readonly operations: readonly ('read' | 'search')[];
+  readonly maxReadBytes: number;
+  readonly maxSearchResults: number;
+}
+
 export interface WorkerInfo {
   readonly pid: number;
   /** The environment instance this worker serves. */
   readonly environmentInstanceId: string;
   readonly engines: readonly WorkerEngineDescription[];
+  /** File capabilities measured by the Worker, independent of engine readiness. */
+  readonly workspaceOperations?: WorkerWorkspaceOperations;
   /** Neutral protocol and engine readiness, when this Worker can report it. */
   readonly readiness?: WorkerReadinessFacts;
 }
@@ -262,6 +277,41 @@ export interface ValidateWorkspaceResult {
   readonly kind: 'default' | 'relative';
   /** Worker-root-relative location, when the selection named one. */
   readonly path?: string;
+}
+
+export interface WorkspaceBindingIdentity {
+  readonly projectId: string;
+  readonly environmentInstanceId: string;
+  readonly bindingId: string;
+  readonly generation: number;
+  readonly connectionEpoch: number;
+  readonly workspaceId: string;
+  readonly kind: 'default' | 'relative';
+  readonly path?: string;
+}
+
+export interface AttachWorkspaceBindingParams extends WorkspaceBindingIdentity {}
+
+export interface WorkspaceFileOperationParams extends Omit<WorkspaceBindingIdentity, 'path'> {
+  /** Binding selection path, separate from the file path being read or searched. */
+  readonly workspacePath?: string;
+  readonly operationId: string;
+  readonly operation: 'read' | 'search';
+  readonly path?: string;
+  readonly query?: string;
+}
+
+export type WorkspaceFileOperationResult = RemoteWorkspaceOperationResult;
+
+export interface InspectWorkspaceFileOperationParams extends WorkspaceBindingIdentity { readonly operationId: string }
+export interface InspectWorkspaceFileOperationResult {
+  readonly status: 'not-found' | 'running' | 'completed' | 'failed' | 'cancelled';
+  readonly result?: WorkspaceFileOperationResult;
+}
+export interface CancelWorkspaceFileOperationParams extends InspectWorkspaceFileOperationParams {}
+export interface CancelWorkspaceFileOperationResult {
+  readonly accepted: boolean;
+  readonly status: 'not-found' | 'running' | 'completed' | 'failed' | 'cancelled';
 }
 
 export interface StartSessionResult {
