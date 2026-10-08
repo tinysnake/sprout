@@ -122,6 +122,8 @@ import { WorkerGateway } from './worker/gateway.ts';
 import { effectiveWorkOptions } from './agent/model.ts';
 import { readinessRequirements } from './environment/readiness.ts';
 import { EnvironmentReadinessWorkflow } from './environment/readiness-workflow.ts';
+import { EnvironmentOperations } from './operations/environment-operations.ts';
+import { MemoryRemoteOperationIdentityStore, type RemoteOperationIdentityStore } from './operations/remote-operation-store.ts';
 import { EnrollmentWorkerPort } from './worker/enrollment-port.ts';
 import type { UsageStore } from './usage/store.ts';
 import { InMemoryUsageStore } from './usage/store.ts';
@@ -174,6 +176,8 @@ export type { TaskContextWorker };
  */
 export interface RuntimeStores {
   readonly operations?: OperationalStore;
+  /** Durable identities for bounded remote Project file operations. */
+  readonly remoteWorkspaceOperations?: RemoteOperationIdentityStore;
   readonly schemaVersion?: number;
   readonly runs: RunStore;
   /** The bounded reconnect-retry gate, trigger, and per-run rows (#181). */
@@ -212,7 +216,7 @@ export interface RuntimeStores {
 }
 
 /** Application-visible stores cannot reserve or commit Worker observations. */
-export type RuntimeStoreViews = Omit<RuntimeStores, 'environmentReadiness'> & {
+export type RuntimeStoreViews = Omit<RuntimeStores, 'environmentReadiness' | 'remoteWorkspaceOperations'> & {
   readonly environmentReadiness: Pick<EnvironmentReadinessStore,
     'getReadiness' | 'getCurrentObservation' | 'listObservations' | 'listProbes' | 'getReceipt' | 'getObservation' | 'getAttempt'>;
 };
@@ -345,6 +349,8 @@ export interface SproutRuntime {
   readonly projectService: ProjectService;
   /** The Project Environment access and workspace capability (#93). */
   readonly projectAccess: ProjectAccessService;
+  /** Authorized, bounded read-only operations on enrolled Project workspaces. */
+  readonly environmentOperations: EnvironmentOperations;
   /** The Project conversation scopes, Working groups, and Task groups (#95, #210). */
   readonly conversationScopes: ConversationScopeService;
   /** The truthful Usage and cost observation capability (#105). */
@@ -1101,6 +1107,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
      */
     let tasks: TaskService;
     let taskLifecycle: TaskEnvironmentLifecycle;
+    let environmentOperations: EnvironmentOperations | undefined;
 
     /**
      * The Environment reconciliation and recovery capability (#88).
@@ -1146,6 +1153,11 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       // (ADR-0003), and so execution follows the leased instance (F1, #18).
       engines: (requestedInstanceId) => runtimeEnvironment.adapters(requestedInstanceId),
       executionStrategy,
+      remoteWorkspace: async (projectId, agentId) => {
+        if (!environmentOperations) return undefined;
+        try { return await environmentOperations.attach(projectId, agentId); }
+        catch { return undefined; }
+      },
       ...(hostPi !== undefined ? { hostPi } : {}),
       agents,
       resolveAgent,
@@ -1569,6 +1581,14 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     const enrollmentEnvironment = new EnrollmentWorkerPort({
       gateway: workerGateway,
       ...(options.onWorkerLog !== undefined ? { onLog: options.onWorkerLog } : {}),
+    });
+    environmentOperations = new EnvironmentOperations({
+      projects: projectService,
+      access: projectAccessService,
+      environment: enrollmentEnvironment,
+      gateway: workerGateway,
+      catalog: environmentCatalog,
+      store: durableStores.remoteWorkspaceOperations ?? new MemoryRemoteOperationIdentityStore(),
     });
     switchableEnvironment?.setTarget(enrollmentEnvironment);
     /**
@@ -2162,6 +2182,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       agentService,
       projectService,
       projectAccess: projectAccessService,
+      environmentOperations,
       conversationScopes,
       taskProposals,
       usage: usageService,

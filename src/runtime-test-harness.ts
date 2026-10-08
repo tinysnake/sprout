@@ -8,6 +8,7 @@ import { workerReadinessProbeFixture } from './worker/readiness-fixture.ts';
 
 import type { AgentDefinition } from './agent/registry.ts';
 import { InMemoryCollaborationStore } from './collaboration/store.ts';
+import { MemoryRemoteOperationIdentityStore } from './operations/remote-operation-store.ts';
 import type { EngineAdapter } from './engine/port.ts';
 import { ScriptedEngineAdapter, type ScriptedTurn } from './engine/scripted.ts';
 import { ADMISSION_CAPABILITY } from './environment/catalog.ts';
@@ -242,6 +243,7 @@ export function inMemoryStores(): MemoryStores {
     agentIdentities: new InMemoryAgentStore(),
     projectAuthorities: new InMemoryProjectAuthorityStore(),
     projectAccess: new InMemoryProjectAccessStore(),
+    remoteWorkspaceOperations: new MemoryRemoteOperationIdentityStore(),
     conversationScopes: new InMemoryConversationScopeStore(),
     taskProposals: new InMemoryTaskProposalStore(),
     runsStore: runs,
