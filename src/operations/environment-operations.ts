@@ -5,10 +5,11 @@ import type { ProjectService } from '../project/authority-service.ts';
 import type { ProjectEnvironmentAccess, WorkspaceBinding } from '../project/access.ts';
 import type { RuntimeEnvironment, WorkerGatewayView } from '../runtime.ts';
 import type { EnvironmentCatalog } from '../environment/catalog.ts';
+import type { EnvironmentEnrollmentService } from '../environment/enrollment-service.ts';
 import type { RemoteOperationIdentityStore, RemoteOperationIdentity, RemoteOperationState } from './remote-operation-store.ts';
 import type { AttachWorkspaceBindingParams, WorkspaceFileOperationParams, InspectWorkspaceFileOperationParams, CancelWorkspaceFileOperationParams } from '../worker/protocol.ts';
 
-export type RemoteWorkspaceBlock = 'project-denied' | 'access-ended' | 'workspace-unbound' | 'worker-offline' | 'stale-epoch' | 'unsupported' | 'lease-required' | 'worker-refused';
+export type RemoteWorkspaceBlock = 'project-denied' | 'access-ended' | 'workspace-unbound' | 'worker-offline' | 'stale-epoch' | 'unsupported' | 'capability-denied' | 'lease-required' | 'worker-refused';
 export interface RemoteWorkspaceReadiness {
   readonly environmentInstanceId: string;
   readonly bindingId?: string;
@@ -41,6 +42,7 @@ type EnvironmentOperationsPort = Pick<RuntimeEnvironment,
   'inspectWorkspaceFileOperation' | 'cancelWorkspaceFileOperation'>;
 type EnvironmentOperationsGateway = Pick<WorkerGatewayView, 'liveFor' | 'currentConnectionEpoch' | 'isCurrentConnection'>;
 type EnvironmentOperationsCatalog = Pick<EnvironmentCatalog, 'entry'>;
+type EnvironmentOperationsEnrollments = Pick<EnvironmentEnrollmentService, 'get'>;
 
 export class EnvironmentOperations {
   readonly #projects: Pick<ProjectService, 'get'>;
@@ -49,7 +51,8 @@ export class EnvironmentOperations {
     'info' | 'connectionEpoch' | 'attachWorkspaceBinding' | 'executeWorkspaceFileOperation' |
     'inspectWorkspaceFileOperation' | 'cancelWorkspaceFileOperation'>;
   readonly #gateway: Pick<WorkerGatewayView, 'liveFor' | 'currentConnectionEpoch' | 'isCurrentConnection'>;
-  readonly #catalog: Pick<EnvironmentCatalog, 'entry'>;
+  readonly #catalog: EnvironmentOperationsCatalog;
+  readonly #enrollments: EnvironmentOperationsEnrollments;
   readonly #store: RemoteOperationIdentityStore;
   readonly #clock: () => number;
 
@@ -59,6 +62,7 @@ export class EnvironmentOperations {
     readonly environment: EnvironmentOperationsPort;
     readonly gateway: EnvironmentOperationsGateway;
     readonly catalog: EnvironmentOperationsCatalog;
+    readonly enrollments: EnvironmentOperationsEnrollments;
     readonly store: RemoteOperationIdentityStore;
     readonly clock?: () => number;
   }) {
@@ -67,6 +71,7 @@ export class EnvironmentOperations {
     this.#environment = options.environment;
     this.#gateway = options.gateway;
     this.#catalog = options.catalog;
+    this.#enrollments = options.enrollments;
     this.#store = options.store;
     this.#clock = options.clock ?? Date.now;
   }
@@ -183,8 +188,11 @@ export class EnvironmentOperations {
     if (!binding || !Number.isSafeInteger(binding.generation) || binding.generation! < 1) return 'workspace-unbound';
     const live = this.#gateway.liveFor(access.environmentInstanceId);
     if (!live || live.enrollment.status !== 'approved') return 'worker-offline';
+    const enrollment = await this.#enrollments.get(live.enrollment.id);
+    if (!enrollment || enrollment.environmentInstanceId !== access.environmentInstanceId || enrollment.status !== 'approved') return 'worker-offline';
+    if (enrollment.capabilityPermissions['read-only-investigation'] !== true) return 'capability-denied';
     const epoch = live.epoch.epoch;
-    if (epoch !== this.#gateway.currentConnectionEpoch(live.enrollment.id) || !this.#gateway.isCurrentConnection(live.enrollment.id, live.epoch.connectionId) || this.#environment.connectionEpoch?.(access.environmentInstanceId) !== epoch) return 'stale-epoch';
+    if (epoch !== this.#gateway.currentConnectionEpoch(enrollment.id) || !this.#gateway.isCurrentConnection(enrollment.id, live.epoch.connectionId) || this.#environment.connectionEpoch?.(access.environmentInstanceId) !== epoch) return 'stale-epoch';
     const info = await this.#environment.info?.(access.environmentInstanceId);
     if (!info || info.environmentInstanceId !== access.environmentInstanceId || info.workspaceOperations?.version !== 1 ||
       !info.workspaceOperations.operations.includes('read') || !info.workspaceOperations.operations.includes('search')) return 'unsupported';
@@ -192,7 +200,7 @@ export class EnvironmentOperations {
     if (!capability) return 'unsupported';
     // Only this explicit catalog grant authorizes the read/search allowlist lease-free.
     // If the capability ever requires a lease, this Message activation has no lease authority.
-    if (capability.requiresLease) return 'lease-required';
+    if (capability.requiresLease !== false) return 'lease-required';
     return undefined;
   }
 
@@ -202,9 +210,13 @@ export class EnvironmentOperations {
     const current = await this.#access.get(projectId, environmentInstanceId);
     if (!current || current.status !== 'active' || current.current?.bindingId !== identity.bindingId || current.current.generation !== identity.generation || current.current.workspaceId !== identity.workspaceId || current.current.kind !== identity.kind || current.current.path !== identity.path) throw new RemoteWorkspaceUnavailableError('access-ended');
     const live = this.#gateway.liveFor(environmentInstanceId);
-    if (!live || live.enrollment.status !== 'approved' || live.epoch.epoch !== identity.connectionEpoch ||
-      this.#gateway.currentConnectionEpoch(live.enrollment.id) !== identity.connectionEpoch ||
-      !this.#gateway.isCurrentConnection(live.enrollment.id, live.epoch.connectionId) ||
+    if (!live) throw new RemoteWorkspaceUnavailableError('worker-offline');
+    const enrollment = await this.#enrollments.get(live.enrollment.id);
+    if (!enrollment || enrollment.environmentInstanceId !== environmentInstanceId || enrollment.status !== 'approved') throw new RemoteWorkspaceUnavailableError('worker-offline');
+    if (enrollment.capabilityPermissions['read-only-investigation'] !== true) throw new RemoteWorkspaceUnavailableError('capability-denied');
+    if (live.epoch.epoch !== identity.connectionEpoch ||
+      this.#gateway.currentConnectionEpoch(enrollment.id) !== identity.connectionEpoch ||
+      !this.#gateway.isCurrentConnection(enrollment.id, live.epoch.connectionId) ||
       this.#environment.connectionEpoch?.(environmentInstanceId) !== identity.connectionEpoch) throw new RemoteWorkspaceUnavailableError('stale-epoch');
   }
 
