@@ -29,10 +29,11 @@ test('the Project production composition joins durable Project, Agent, Environme
         current: { bindingId: 'binding-a', workspaceId: 'workspace-a', kind: 'relative', path: 'repos/sprout', boundAt: 10 },
         history: [{ bindingId: 'binding-a', workspaceId: 'workspace-a', kind: 'relative', path: 'repos/sprout', boundAt: 10 }],
       }];
+    async listWorkspaceBindingReadiness(id: string) {
+      calls.push(`binding-readiness:${id}`);
+      return [{ environmentInstanceId: 'inst-ready', bindingId: 'binding-a', generation: 7, status: 'blocked' as const, reason: 'worker-offline' as const }];
     },
   } as unknown as ProjectAccessBrowserAdapter;
-  const service = new ProductionProjectService({
-    projects: projectPort,
     access: accessPort,
     agents: agentService,
     environments: new FixtureEnvironmentService(envRows),
@@ -45,7 +46,10 @@ test('the Project production composition joins durable Project, Agent, Environme
   assert.equal(overview.environments.some((environment) => environment.id === 'env-ready' && environment.environmentInstanceId === 'inst-ready'), true);
   assert.equal(overview.access[0]?.current?.path, 'repos/sprout');
   assert.equal(overview.compatibility[0]?.available, true);
-  assert.deepEqual(calls, ['projects:list', `project:${project.id}`, `access:${project.id}`]);
+  assert.deepEqual(overview.bindingReadiness[0], {
+    environmentInstanceId: 'inst-ready', bindingId: 'binding-a', generation: 7, status: 'blocked', reason: 'worker-offline',
+  });
+  assert.deepEqual(calls, ['projects:list', `project:${project.id}`, `access:${project.id}`, `binding-readiness:${project.id}`]);
 });
 
 test('an unobserved per-Environment compatibility result stays unknown', async () => {
