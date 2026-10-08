@@ -58,7 +58,7 @@ if (process.argv[2] === '--auth') {
     const syntheticProject = join(fixture.outside, 'other-project.txt'); writeFileSync(syntheticProject, 'OTHER_PROJECT_UNCHANGED');
     const syntheticHistory = join(fixture.outside, 'agent-history.txt'); writeFileSync(syntheticHistory, 'AGENT_HISTORY_UNCHANGED');
     symlinkSync(join(fixture.outside, 'sentinel.txt'), join(fixture.remote, 'escape-link'));
-    const profile = fileIsolationProfile({ runtimeRoots: [...runtimeRoots, dirname(cli)], readRoots: [control, fixture.host, dirname(script)], writeRoots: [control], readFiles: [nativeSettings], network: true });
+    const profile = fileIsolationProfile({ runtimeRoots: [...runtimeRoots, dirname(cli)], readRoots: [control, fixture.host, dirname(script)], writeRoots: [control], readFiles: [nativeSettings], network: true }) + '\n(allow file-write* (literal "/dev/null"))';
     const bridgeProfile = fileIsolationProfile({ runtimeRoots, readRoots: [dirname(script)], network: true });
     const bridgePolicy = join(control, 'bridge.sb'); writeFileSync(bridgePolicy, bridgeProfile);
     facts.boot = {};

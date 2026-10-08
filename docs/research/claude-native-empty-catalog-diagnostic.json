@@ -1,0 +1,443 @@
+{
+  "ticket": 250,
+  "base": "1d88fb0f",
+  "evidenceTier": "model-issued (Claude Code CLI pinned at 2.1.294, non-Claude backend via local gateway)",
+  "platform": "macOS",
+  "cli": "2.1.294",
+  "fixture": "separate local sandbox origin; not an enrolled remote deployment",
+  "turns": [
+    {
+      "types": {
+        "system": 14,
+        "assistant": 2,
+        "result": 1
+      },
+      "toolUses": [],
+      "catalog": [],
+      "mcp": [],
+      "result": "success",
+      "usage": {
+        "input_tokens": 89,
+        "output_tokens": 36,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0
+      },
+      "exitCode": 0,
+      "signal": null,
+      "timedOut": false,
+      "sessionObserved": true,
+      "interrupted": false,
+      "deniedOperation": [],
+      "deniedPathPrefixes": [
+        "/private/var/folders"
+      ],
+      "systemPathMentioned": [
+        "/var"
+      ],
+      "pathClassMentioned": {
+        "runner": true,
+        "control": false,
+        "auth": false,
+        "executable": false
+      },
+      "startupDiagnostics": {
+        "unknown option": false,
+        "error": true,
+        "permission denied": false,
+        "operation not permitted": false,
+        "apiKeyHelper": true,
+        "authentication": false,
+        "EACCES": false,
+        "EPERM": false,
+        "ENOENT": false,
+        "--tools": false,
+        "--bare": false,
+        "--setting-sources": false,
+        "--permission-prompts": false,
+        "--disallowedTools": false,
+        "--mcp-config": false,
+        "--model": false,
+        "--print": false,
+        "--output-format": false,
+        "--no-chrome": false,
+        "bwrap": false,
+        "sandbox": false,
+        "Unable": false,
+        "Cannot": false,
+        "not allowed": false,
+        "requires": false
+      },
+      "isError": false,
+      "permissionDenials": 0,
+      "authHelperInvoked": true
+    },
+    {
+      "types": {
+        "system": 64,
+        "assistant": 2,
+        "result": 1
+      },
+      "toolUses": [],
+      "catalog": [],
+      "mcp": [],
+      "result": "success",
+      "usage": {
+        "input_tokens": 53,
+        "output_tokens": 256,
+        "cache_read_input_tokens": 64,
+        "cache_creation_input_tokens": 0
+      },
+      "exitCode": 0,
+      "signal": null,
+      "timedOut": false,
+      "sessionObserved": true,
+      "interrupted": false,
+      "deniedOperation": [],
+      "deniedPathPrefixes": [
+        "/private/var/folders"
+      ],
+      "systemPathMentioned": [
+        "/var"
+      ],
+      "pathClassMentioned": {
+        "runner": true,
+        "control": false,
+        "auth": false,
+        "executable": false
+      },
+      "startupDiagnostics": {
+        "unknown option": false,
+        "error": true,
+        "permission denied": false,
+        "operation not permitted": false,
+        "apiKeyHelper": true,
+        "authentication": false,
+        "EACCES": false,
+        "EPERM": false,
+        "ENOENT": false,
+        "--tools": false,
+        "--bare": false,
+        "--setting-sources": false,
+        "--permission-prompts": false,
+        "--disallowedTools": false,
+        "--mcp-config": false,
+        "--model": false,
+        "--print": false,
+        "--output-format": false,
+        "--no-chrome": false,
+        "bwrap": false,
+        "sandbox": false,
+        "Unable": false,
+        "Cannot": false,
+        "not allowed": false,
+        "requires": false
+      },
+      "isError": false,
+      "permissionDenials": 0,
+      "authHelperInvoked": true
+    },
+    {
+      "types": {
+        "system": 33,
+        "assistant": 2,
+        "result": 1
+      },
+      "toolUses": [],
+      "catalog": [],
+      "mcp": [],
+      "result": "success",
+      "usage": {
+        "input_tokens": 93,
+        "output_tokens": 215,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0
+      },
+      "exitCode": 0,
+      "signal": null,
+      "timedOut": false,
+      "sessionObserved": true,
+      "interrupted": false,
+      "deniedOperation": [],
+      "deniedPathPrefixes": [
+        "/private/var/folders"
+      ],
+      "systemPathMentioned": [
+        "/var"
+      ],
+      "pathClassMentioned": {
+        "runner": true,
+        "control": false,
+        "auth": false,
+        "executable": false
+      },
+      "startupDiagnostics": {
+        "unknown option": false,
+        "error": true,
+        "permission denied": false,
+        "operation not permitted": false,
+        "apiKeyHelper": true,
+        "authentication": false,
+        "EACCES": false,
+        "EPERM": false,
+        "ENOENT": false,
+        "--tools": false,
+        "--bare": false,
+        "--setting-sources": false,
+        "--permission-prompts": false,
+        "--disallowedTools": false,
+        "--mcp-config": false,
+        "--model": false,
+        "--print": false,
+        "--output-format": false,
+        "--no-chrome": false,
+        "bwrap": false,
+        "sandbox": false,
+        "Unable": false,
+        "Cannot": true,
+        "not allowed": false,
+        "requires": false
+      },
+      "isError": false,
+      "permissionDenials": 0,
+      "authHelperInvoked": true
+    },
+    {
+      "types": {
+        "system": 2
+      },
+      "toolUses": [],
+      "catalog": [],
+      "mcp": [],
+      "result": null,
+      "usage": null,
+      "exitCode": 0,
+      "signal": null,
+      "timedOut": false,
+      "sessionObserved": true,
+      "interrupted": true,
+      "deniedOperation": [],
+      "deniedPathPrefixes": [
+        "/private/var/folders"
+      ],
+      "systemPathMentioned": [
+        "/var"
+      ],
+      "pathClassMentioned": {
+        "runner": true,
+        "control": false,
+        "auth": false,
+        "executable": false
+      },
+      "startupDiagnostics": {
+        "unknown option": false,
+        "error": false,
+        "permission denied": false,
+        "operation not permitted": false,
+        "apiKeyHelper": true,
+        "authentication": false,
+        "EACCES": false,
+        "EPERM": false,
+        "ENOENT": false,
+        "--tools": false,
+        "--bare": false,
+        "--setting-sources": false,
+        "--permission-prompts": false,
+        "--disallowedTools": false,
+        "--mcp-config": false,
+        "--model": false,
+        "--print": false,
+        "--output-format": false,
+        "--no-chrome": false,
+        "bwrap": false,
+        "sandbox": false,
+        "Unable": false,
+        "Cannot": false,
+        "not allowed": false,
+        "requires": false
+      },
+      "interruptSent": true,
+      "authHelperInvoked": true
+    }
+  ],
+  "calls": [],
+  "negatives": {
+    "origin_host": {
+      "id": 1,
+      "ok": true,
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "origin_project": {
+      "id": 2,
+      "ok": true,
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "origin_history": {
+      "id": 3,
+      "ok": true,
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "origin_auth": {
+      "id": 4,
+      "ok": true,
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "engine_host": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "bridge_host": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "engine_project": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "bridge_project": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "engine_history": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "bridge_history": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "engine_remote": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "bridge_remote": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "engine_auth": {
+      "readDenied": false,
+      "writeDenied": true
+    },
+    "bridge_auth": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "traversal": {
+      "id": 5,
+      "ok": false,
+      "reason": "path-or-content-denied"
+    },
+    "symlink": {
+      "id": 6,
+      "ok": false,
+      "reason": "path-or-content-denied"
+    },
+    "nested": {
+      "id": 7,
+      "ok": false,
+      "reason": "unsupported-operation"
+    },
+    "shell": {
+      "id": 8,
+      "ok": false,
+      "reason": "unsupported-operation"
+    }
+  },
+  "gaps": [
+    "Real Claude model behavior is unexercised.",
+    "E7 root-turn attribution race (upstream Claude issue #55 in #226) cannot be confirmed or refuted on this backend; open evidence gap.",
+    "Windows, enrolled cross-host deployment, production cancellation/fencing and authentication refresh unexercised."
+  ],
+  "boot": {
+    "cliVersionUnderProfile": true,
+    "authHelperUnderProfile": true
+  },
+  "protocol": {
+    "initialized": true,
+    "catalog": [
+      "remote_read",
+      "remote_write"
+    ],
+    "calls": [
+      {
+        "name": "remote_read",
+        "target": "origin",
+        "ok": true,
+        "remoteMarker": true
+      },
+      {
+        "name": "remote_write",
+        "target": "effect",
+        "ok": true,
+        "remoteMarker": false
+      },
+      {
+        "name": "remote_read",
+        "target": "host-sentinel",
+        "ok": false,
+        "remoteMarker": false
+      },
+      {
+        "name": "remote_write",
+        "target": "auth",
+        "ok": false,
+        "remoteMarker": false
+      },
+      {
+        "name": "remote_read",
+        "target": "symlink",
+        "ok": false,
+        "remoteMarker": false
+      }
+    ]
+  },
+  "scriptedCalls": [
+    {
+      "op": "read",
+      "target": "origin",
+      "ok": true,
+      "remoteMarker": true,
+      "remoteEffect": false
+    },
+    {
+      "op": "write",
+      "target": "effect",
+      "ok": true,
+      "remoteMarker": false,
+      "remoteEffect": false
+    },
+    {
+      "op": "read",
+      "target": "host-sentinel",
+      "ok": false,
+      "remoteMarker": false,
+      "remoteEffect": false
+    },
+    {
+      "op": "write",
+      "target": "auth",
+      "ok": false,
+      "remoteMarker": false,
+      "remoteEffect": false
+    },
+    {
+      "op": "read",
+      "target": "symlink",
+      "ok": false,
+      "remoteMarker": false,
+      "remoteEffect": false
+    }
+  ],
+  "nativeIsolation": false,
+  "diagnosticEmptyCatalog": true,
+  "final": {
+    "hostOriginUnchanged": true,
+    "hostEffectUnchanged": true,
+    "hostSentinelUnchanged": true,
+    "remoteEffect": false,
+    "ambientMarkerAbsent": true
+  }
+}
