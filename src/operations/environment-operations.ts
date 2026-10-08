@@ -136,20 +136,23 @@ export class EnvironmentOperations {
     const fixed = { ...identity };
     const execute = async (operation: 'read' | 'search', path: string | undefined, query: string | undefined): Promise<RemoteWorkspaceOperationResult> => {
       await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed);
+      const normalized = normalizeOperationInput(operation, path, query);
       const operationId = randomUUID();
-      const fingerprint = createHash('sha256').update(JSON.stringify([fixed, operation, path ?? '', query ?? ''])).digest('hex');
+      const fingerprint = createHash('sha256').update(JSON.stringify([fixed, operation, normalized.path ?? '', normalized.query ?? '', normalized.failure ?? ''])).digest('hex');
       const row: RemoteOperationIdentity = { operationId, fingerprint, projectId, environmentInstanceId: access.environmentInstanceId,
         bindingId: binding.bindingId, generation: binding.generation!, connectionEpoch: epoch, workspaceId: binding.workspaceId,
-        operation, state: 'running', updatedAt: this.#clock() };
+        operation, state: normalized.failure ? 'failed' : 'running', updatedAt: this.#clock() };
       await this.#store.save(row);
+      if (normalized.failure) return { operationId, projectId, environmentInstanceId: access.environmentInstanceId, bindingId: binding.bindingId,
+        generation: binding.generation!, connectionEpoch: epoch, workspaceId: binding.workspaceId, operation, status: 'failed', failure: normalized.failure };
       const request: WorkspaceFileOperationParams = { ...fixed, operationId, operation,
-        ...(path !== undefined ? { path } : {}), ...(query !== undefined ? { query } : {}) };
+        ...(normalized.path !== undefined ? { path: normalized.path } : {}), ...(normalized.query !== undefined ? { query: normalized.query } : {}) };
       let result: RemoteWorkspaceOperationResult;
       try {
         if (!this.#environment.executeWorkspaceFileOperation) throw new Error('unsupported');
         result = await this.#environment.executeWorkspaceFileOperation(access.environmentInstanceId, request);
         await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed);
-        if (!sameOrigin(result, fixed, operationId, operation)) throw new Error('remote operation identity mismatch');
+        if (!isBoundedRemoteResult(result, fixed, operationId, operation)) throw new Error('remote operation identity or bounds invalid');
       } catch {
         await this.#saveState(row, 'failed');
         return { operationId, projectId, environmentInstanceId: access.environmentInstanceId, bindingId: binding.bindingId,
@@ -248,6 +251,43 @@ function hasAgent(project: Awaited<ReturnType<ProjectService['get']>> & {}, agen
   const version = project.content.versions.find(v => v.version === project.content.currentVersion);
   return version?.memberships.some(m => m.memberId === agentId && m.memberKind === 'agent' && m.endedAt === undefined) ?? false;
 }
+function normalizeOperationInput(operation: 'read' | 'search', path: string | undefined, query: string | undefined): { readonly path?: string; readonly query?: string; readonly failure?: string } {
+  const normalizedPath = path === undefined ? undefined : normalizeRelativePath(path);
+  if (path !== undefined && normalizedPath === undefined) return { failure: 'invalid-path' };
+  if (operation === 'read' && normalizedPath === undefined) return { failure: 'invalid-path' };
+  if (operation === 'search' && (typeof query !== 'string' || query.length < 1 || query.length > 256)) return { failure: 'invalid-path' };
+  return { ...(normalizedPath !== undefined ? { path: normalizedPath } : {}), ...(query !== undefined ? { query } : {}) };
+}
+
+function normalizeRelativePath(value: string): string | undefined {
+  if (value.length > 1_024 || Buffer.byteLength(value, 'utf8') > 4_096) return undefined;
+  const normalized = value.replace(/\\/g, '/');
+  if (!normalized || normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized) || normalized.split('/').some(part => !part || part === '.' || part === '..')) return undefined;
+  return normalized;
+}
+
+function isBoundedRemoteResult(result: RemoteWorkspaceOperationResult, identity: AttachWorkspaceBindingParams, operationId: string, operation: 'read' | 'search'): boolean {
+  if (!sameOrigin(result, identity, operationId, operation) ||
+    !['completed', 'failed', 'cancelled'].includes(result.status) ||
+    (result.truncated !== undefined && typeof result.truncated !== 'boolean')) return false;
+  if (result.status !== 'completed') {
+    return result.content === undefined && result.matches === undefined &&
+      (result.path === undefined || normalizeRelativePath(result.path) === result.path) &&
+      (result.failure === undefined || (typeof result.failure === 'string' && result.failure.length <= 64));
+  }
+  if (result.failure !== undefined) return false;
+  if (operation === 'read') {
+    return typeof result.path === 'string' && normalizeRelativePath(result.path) === result.path &&
+      typeof result.content === 'string' && Buffer.byteLength(result.content, 'utf8') <= MAX_SUPPORTED_READ_BYTES && result.matches === undefined;
+  }
+  if (result.content !== undefined || !Array.isArray(result.matches) || result.matches.length > MAX_SUPPORTED_SEARCH_RESULTS) return false;
+  if (result.path !== undefined && normalizeRelativePath(result.path) !== result.path) return false;
+  return result.matches.every(match => match !== null && typeof match === 'object' &&
+    typeof match.path === 'string' && normalizeRelativePath(match.path) === match.path &&
+    Number.isSafeInteger(match.line) && match.line > 0 && typeof match.text === 'string' && match.text.length <= 300 &&
+    Buffer.byteLength(match.text, 'utf8') <= 1_200);
+}
+
 function sameOrigin(result: RemoteWorkspaceOperationResult, identity: AttachWorkspaceBindingParams, operationId: string, operation: 'read' | 'search'): boolean {
   return result.operationId === operationId && result.projectId === identity.projectId && result.environmentInstanceId === identity.environmentInstanceId &&
     result.bindingId === identity.bindingId && result.generation === identity.generation && result.connectionEpoch === identity.connectionEpoch &&
