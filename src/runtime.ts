@@ -1532,6 +1532,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         eligibleInstanceIds: environmentCatalog.eligibleInstanceIds(),
         capabilityEligibleInstanceIds: {
           'project-mcp': environmentCatalog.projectMcpEligibleInstanceIds(),
+          ...(executionStrategy.mode === 'host-run' ? { 'agent-run': environmentCatalog.hostRunTaskEligibleInstanceIds() } : {}),
         },
       });
       void noteRunReconnectRetry(acceptedInstanceId).catch(() => {
@@ -1626,6 +1627,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       enrollments,
       pool,
       store: durableStores.remoteWorkspaceOperations ?? new MemoryRemoteOperationIdentityStore(),
+      onUncertainMcp: async (scope) => {
+        await recovery.open({ leaseId: scope.leaseId, cause: 'cleanup-failed', hadActiveRun: true, runId: scope.runId });
+      },
     });
     switchableEnvironment?.setTarget(enrollmentEnvironment);
     /**
@@ -1651,6 +1655,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     const channelLosses = new Map<string, Promise<void>>();
     workerGateway.onAccept((acceptance) => {
       readinessWorkflow.reserveAccepted(acceptance);
+      void environmentOperations.reconcileProjectMcpProcesses(acceptance.enrollment.environmentInstanceId).catch(() => undefined);
       // Invalidate an in-flight source snapshot before publishing the accepted
       // epoch synchronously, then schedule the store-backed refresh that may
       // replace this projection. The bump above aborts any refresh already in

@@ -46,6 +46,8 @@ interface ProjectMcpProcess {
   readonly binding: Binding;
   readonly lease: LeaseScope;
   readonly servers: readonly McpServerProcess[];
+  readonly catalog: StartProjectMcpResult;
+  readonly operations: Map<string, { readonly fingerprint: string; readonly result: CallProjectMcpToolResult }>;
 }
 interface ManifestServer { readonly name: string; readonly command: string; readonly args: readonly string[]; readonly env: Readonly<Record<string, string>> }
 
@@ -81,12 +83,18 @@ export class WorkerProjectMcp {
   async start(input: StartProjectMcpParams): Promise<StartProjectMcpResult> {
     const binding = this.#requireBinding(input);
     const lease = validLease(input);
-    if (!lease || input.format !== FORMAT) return { status: 'blocked', reason: 'unsupported', servers: [] };
+    const processId = input.processId;
+    if (!/^[0-9a-f-]{36}$/i.test(processId)) return { processId, status: 'blocked', reason: 'worker-refused', servers: [] };
+    if (!lease || input.format !== FORMAT) return { processId, status: 'blocked', reason: 'unsupported', servers: [] };
+    const existing = this.#processes.get(processId);
+    if (existing) {
+      if (!sameBinding(existing.binding, binding) || !sameLease(existing.lease, lease)) throw new Error('MCP process identity conflict');
+      return existing.catalog;
+    }
     const manifest = await readManifest(binding.root);
-    if (manifest.status !== 'valid') return { status: 'blocked', reason: manifest.status, servers: [] };
-    if (manifest.servers.length === 0) return { status: 'ready', servers: [] };
+    if (manifest.status !== 'valid') return { processId, status: 'blocked', reason: manifest.status, servers: [] };
+    if (manifest.servers.length === 0) return { processId, status: 'ready', servers: [] };
 
-    const processId = randomUUID();
     const servers: McpServerProcess[] = [];
     const publicServers: StartProjectMcpResult['servers'][number][] = [];
     let totalTools = 0;
@@ -127,55 +135,71 @@ export class WorkerProjectMcp {
         });
       }
     }
-    const process: ProjectMcpProcess = { id: processId, binding, lease, servers };
-    if (servers.length > 0) this.#processes.set(processId, process);
     const ready = publicServers.filter(server => server.status === 'ready').length;
     const available = publicServers.some(server => server.status === 'ready' || server.tools.length > 0);
-    return {
+    const catalog: StartProjectMcpResult = {
+      processId,
       status: ready === publicServers.length ? 'ready' : available ? 'partial' : 'blocked',
-      ...(servers.length > 0 ? { processId } : {}),
       ...(!available ? { reason: publicServers.some(server => server.status === 'missing-dependency') ? 'missing' as const : 'unsupported' as const } : {}),
       servers: publicServers,
     };
+    this.#processes.set(processId, { id: processId, binding, lease, servers, catalog, operations: new Map() });
+    return catalog;
   }
 
   async call(input: CallProjectMcpToolParams): Promise<CallProjectMcpToolResult> {
     const binding = this.#requireBinding(input);
     const process = this.#processes.get(input.processId);
     const lease = validLease(input);
-    if (!process || !lease || !sameBinding(process.binding, binding) || !sameLease(process.lease, lease)) {
-      return { status: 'failed', reason: 'worker-refused' };
+    const result = (status: CallProjectMcpToolResult['status'], reason?: CallProjectMcpToolResult['reason'], text?: string): CallProjectMcpToolResult => ({
+      processId: input.processId, operationId: input.operationId, status,
+      ...(reason !== undefined ? { reason } : {}), ...(text !== undefined ? { text } : {}),
+    });
+    if (!/^[0-9a-f-]{36}$/i.test(input.operationId) || !process || !lease || !sameBinding(process.binding, binding) || !sameLease(process.lease, lease)) {
+      return result('failed', 'worker-refused');
     }
     const origin = process.servers.flatMap(server => [...server.tools.values()].map(tool => ({ server, tool })))
       .find(entry => entry.tool.declaration.id === input.toolId);
-    if (!origin) return { status: 'failed', reason: 'unknown-tool' };
-    if (!validateArguments(origin.tool.schema, input.arguments)) return { status: 'failed', reason: 'invalid-arguments' };
+    if (!origin) return result('failed', 'unknown-tool');
+    if (!validateArguments(origin.tool.schema, input.arguments)) return result('failed', 'invalid-arguments');
+    const fingerprint = createHash('sha256').update(JSON.stringify([input.toolId, input.arguments])).digest('hex');
+    const prior = process.operations.get(input.operationId);
+    if (prior) return prior.fingerprint === fingerprint ? prior.result : result('failed', 'worker-refused');
+    if (process.operations.size >= 256) return result('failed', 'worker-refused');
+    const remember = (value: CallProjectMcpToolResult): CallProjectMcpToolResult => {
+      process.operations.set(input.operationId, { fingerprint, result: value });
+      return value;
+    };
     try {
       const response = await origin.server.client.callTool(origin.tool.rawName, input.arguments);
-      if (!response || !Array.isArray(response.content) || response.content.length > 128) return { status: 'unsupported', reason: 'invalid-result' };
-      const text = response.content.map((item) => {
-        if (!isRecord(item) || item.type !== 'text' || typeof item.text !== 'string') throw new InvalidToolResultError();
-        return redactSensitiveText(item.text);
-      }).join('\n').slice(0, MAX_RESULT_CHARS);
-      return response.isError === true
-        ? { status: 'failed', reason: 'server-error', text }
-        : { status: 'completed', text };
+      if (!response || !Array.isArray(response.content) || response.content.length > 128) return remember(result('unsupported', 'invalid-result'));
+      let remaining = MAX_RESULT_CHARS;
+      const chunks: string[] = [];
+      for (const item of response.content) {
+        if (!isRecord(item) || item.type !== 'text' || typeof item.text !== 'string') return remember(result('unsupported', 'invalid-result'));
+        if (remaining <= 0) break;
+        const sanitized = redactSensitiveText(item.text).slice(0, remaining);
+        chunks.push(sanitized);
+        remaining -= sanitized.length;
+      }
+      const text = chunks.join('\n');
+      return remember(response.isError === true ? result('failed', 'server-error', text) : result('completed', undefined, text));
     } catch (error) {
-      if (error instanceof InvalidToolResultError) return { status: 'unsupported', reason: 'invalid-result' };
-      return { status: 'failed', reason: error instanceof McpTimeoutError ? 'timeout' : 'server-error' };
+      return remember(result('failed', error instanceof McpTimeoutError ? 'timeout' : 'server-error'));
     }
   }
 
   async stop(input: StopProjectMcpParams): Promise<StopProjectMcpResult> {
+    const response = (status: StopProjectMcpResult['status']): StopProjectMcpResult => ({ processId: input.processId, status });
+    const process = this.#processes.get(input.processId);
+    if (!process) return response('not-found');
     const binding = this.#requireBinding(input);
     const lease = validLease(input);
-    const process = this.#processes.get(input.processId);
-    if (!process) return { status: 'not-found' };
     if (!lease || !sameBinding(process.binding, binding) || !sameLease(process.lease, lease)) throw new Error('MCP process authority refused');
     let stopped = true;
     for (const server of process.servers) stopped = await server.client.close() && stopped;
     if (stopped) this.#processes.delete(process.id);
-    return { status: stopped ? 'stopped' : 'uncertain' };
+    return response(stopped ? 'stopped' : 'uncertain');
   }
 
   async shutdown(): Promise<boolean> {
@@ -337,7 +361,6 @@ class StdioMcpClient {
 
 class SpawnMissingError extends Error {}
 class McpTimeoutError extends Error {}
-class InvalidToolResultError extends Error {}
 
 async function readManifest(root: string): Promise<{ readonly status: 'valid'; readonly servers: readonly ManifestServer[] } | { readonly status: 'missing' | 'invalid' | 'unsupported' }> {
   try {
@@ -465,7 +488,7 @@ function validEnvironment(value: unknown): value is Record<string, string> {
 }
 function validLease(input: ProjectMcpLeaseIdentity): LeaseScope | undefined {
   if (!input.leaseId || input.leaseId.length > 128 || !input.runId || input.runId.length > 128 || !input.holderId || input.holderId.length > 128) return undefined;
-  if (input.holderKind === 'run') return input.holderId === input.runId && input.taskId === undefined ? input : undefined;
+  if (input.holderKind === 'run') return input.taskId === undefined ? input : undefined;
   if (input.holderKind === 'task') return input.taskId !== undefined && input.holderId === input.taskId ? input : undefined;
   return undefined;
 }

@@ -57,7 +57,7 @@ test('configured Host-run Pi executes a Message without Environment readiness or
   });
   try {
     assert.equal(runtime.executionStrategy.admission.available, true);
-    assert.equal(runtime.executionStrategy.taskAdmission.available, false);
+    assert.equal(runtime.executionStrategy.taskAdmission.available, true);
     assert.deepEqual(await runtime.hostPiReadiness(), await hostPi.readiness());
 
     const { id } = await runtime.orchestrator.submit({ agentId: 'scout', projectId: PROJECT_ID, prompt: 'Say hello.' });

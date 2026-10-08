@@ -1,3 +1,7 @@
+---
+Status: superseded in part by ADR-0018
+---
+
 # Execution placement is durable for Runs and begun Tasks
 
 ADR-0016 selects one immutable execution mode per Sprout process, but process configuration alone cannot explain where previously admitted work ran after a restart or a later mode change. We decided to persist each admitted Agent run's execution mode and actual engine host/profile, and to capture the same placement when a Task begins; every nested run retains that Task placement. Legacy records are interpreted as Environment-hosted with an unknown historical profile, without consulting the current process mode.

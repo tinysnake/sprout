@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { ScriptedEngineAdapter } from './engine/scripted.ts';
 import type { HostPiEngineAdapter } from './engine/pi-host.ts';
 import type { RemoteWorkspaceOperationResult, StartSessionRequest } from './engine/port.ts';
@@ -209,7 +210,7 @@ test('composed Runtime blocks remote reads when the enrolled Worker lacks the fi
   }
 });
 
-test('Host-run calls typed Project MCP tools under its active Environment lease and refuses a recovering lease', async (t) => {
+test('Host-run Task calls typed Project MCP tools under its Task-held Environment lease and protects uncertainty', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-project-mcp-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const workerRoot = join(directory, 'worker-workspaces');
@@ -218,6 +219,10 @@ test('Host-run calls typed Project MCP tools under its active Environment lease 
   const runtimeProject = { ...project(), memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }] };
   const localEngine = new ScriptedEngineAdapter({ turns: [scriptedTurn('Project MCP tool completed.')] });
   const observed: unknown[] = [];
+  let closeWorkerConnection: (() => void) | undefined;
+  let taskId: string | undefined;
+  let taskLeaseId: string | undefined;
+  let taskRunId: string | undefined;
   const hostPi = {
     id: 'pi', profileId: 'profile-runtime-project-mcp', authorizedModel: model,
     capabilities: localEngine.capabilities,
@@ -230,15 +235,16 @@ test('Host-run calls typed Project MCP tools under its active Environment lease 
       assert.ok(mcp, 'Runtime supplies its lease-bound Project MCP tools');
       assert.equal(mcp.tools.length, 1);
       assert.equal(mcp.tools[0]?.inputSchema.type, 'object');
-      const lease = runtime.pool.leases().find(row => row.capability === 'project-mcp');
+      const lease = runtime.pool.leases().find(row => row.capability === 'agent-run');
       assert.ok(lease);
       assert.equal(lease.state, 'active');
-      assert.equal(lease.holderKind, 'run');
+      assert.equal(lease.holderKind, 'task');
       observed.push(await mcp.call(mcp.tools[0]!.name, { text: 'hello from Pi' }));
-      runtime.pool.markRecovering(lease.id);
-      await assert.rejects(mcp.call(mcp.tools[0]!.name, { text: 'stale call' }), /lease-required/);
       assert.deepEqual(await mcp.call('mcp_unrelated_tool', { text: 'wrong origin' }), { status: 'failed', reason: 'unknown-tool' });
       observed.push(await mcp.call(mcp.tools[0]!.name, { text: 12 } as unknown as Record<string, unknown>));
+      closeWorkerConnection?.();
+      await waitFor(() => runtime.workerGateway.liveFor(INSTANCE_ID) === undefined, 'Worker disconnection before MCP stop');
+      assert.deepEqual(await mcp.call(mcp.tools[0]!.name, { text: 'stale call' }), { status: 'failed', reason: 'worker-refused' });
       return localEngine.startSession(request);
     },
   } as unknown as HostPiEngineAdapter;
@@ -261,10 +267,11 @@ test('Host-run calls typed Project MCP tools under its active Environment lease 
     const identity = loadOrCreateWorkerIdentity(keyPath);
     const enrollment = await runtime.enrollments.requestEnrollment({
       environmentInstanceId: INSTANCE_ID, displayName: 'Project MCP Worker', publicKey: workerPublicKey(identity.privateKey),
-      platform: 'macos', protocolVersion: '3.0', capabilityRequests: ['project-mcp'], engineFacts: [],
+      platform: 'macos', protocolVersion: '3.0', capabilityRequests: ['agent-run', 'project-mcp'], engineFacts: [],
     });
-    await runtime.enrollments.approve(enrollment.enrollment.id, { capabilityPermissions: { 'project-mcp': true } });
-    await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, workerRoot);
+    await runtime.enrollments.approve(enrollment.enrollment.id, { capabilityPermissions: { 'agent-run': true, 'project-mcp': true } });
+    const connection = await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, workerRoot);
+    closeWorkerConnection = () => connection.close();
     const projectId = 'remote-mcp-project';
     await runtime.projectService.create({ id: projectId, displayName: 'Remote MCP Project' });
     await runtime.projectService.addMembership(projectId, { agentId: 'scout' });
@@ -290,15 +297,41 @@ test('Host-run calls typed Project MCP tools under its active Environment lease 
     writeFileSync(join(workerRoot, 'repos', 'remote-mcp', '.mcp.json'), JSON.stringify({ mcpServers: {
       'fixture-server': { command: process.execPath, args: ['--input-type=module', '-e', serverScript] },
     } }));
-    const { id } = await runtime.orchestrator.submit({ agentId: 'scout', projectId, prompt: 'Use the Project MCP echo tool.' });
-    const run = await runtime.orchestrator.waitFor(id);
+    const task = await runtime.tasks.create({ projectId, title: 'Remote MCP Task', goal: 'Use the remote Project MCP tool', assignedAgentId: 'scout' });
+    taskId = task.id;
+    const begun = await runtime.tasks.begin(task.id);
+    taskLeaseId = begun.environmentLeaseId;
+    assert.equal(begun.environmentInstanceId, INSTANCE_ID);
+    const advanced = await runtime.tasks.advance(task.id, { prompt: 'Use the Project MCP echo tool.' });
+    taskRunId = advanced.runId;
+    const run = await runtime.orchestrator.waitFor(advanced.runId);
     assert.equal(run.status, 'completed', run.failure ?? 'run did not complete');
     assert.deepEqual(observed, [
       { status: 'completed', text: 'hello from Pi' },
       { status: 'failed', reason: 'invalid-arguments' },
-    ]);
-    assert.equal(runtime.pool.leases().find(row => row.capability === 'project-mcp')?.state, 'recovering');
+    ], `observed MCP results: ${JSON.stringify(observed)}`);
+    assert.equal(runtime.pool.leases().some(row => row.capability === 'project-mcp'), false, 'MCP reuses the Task-held lease instead of acquiring another lease');
+    assert.equal(runtime.pool.leases().find(row => row.capability === 'agent-run')?.state, 'recovering');
+    assert.ok(taskLeaseId);
+    assert.ok(await runtime.recovery.forLease(taskLeaseId), 'uncertain MCP stop opens shared Environment recovery');
   } finally {
     await runtime.close();
+  }
+  if (taskId && taskLeaseId && taskRunId) {
+    const database = new DatabaseSync(join(directory, 'state.db'));
+    try {
+      const processRow = database.prepare('SELECT process_id, state, holder_kind, holder_id, task_id, run_id FROM remote_project_mcp_processes LIMIT 1').get() as Record<string, unknown> | undefined;
+      const operationRow = database.prepare('SELECT state, process_id, tool_id FROM remote_project_mcp_operations LIMIT 1').get() as Record<string, unknown> | undefined;
+      assert.equal(processRow?.state, 'uncertain');
+      assert.equal(processRow?.holder_kind, 'task');
+      assert.equal(processRow?.holder_id, taskId);
+      assert.equal(processRow?.task_id, taskId);
+      assert.equal(processRow?.run_id, taskRunId);
+      assert.equal(operationRow?.state, 'completed');
+      assert.equal(operationRow?.process_id, processRow?.process_id);
+      assert.equal(typeof operationRow?.tool_id, 'string');
+    } finally {
+      database.close();
+    }
   }
 });

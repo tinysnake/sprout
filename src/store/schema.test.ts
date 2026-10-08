@@ -24,13 +24,30 @@ function withTempDir<T>(fn: (dir: string) => Promise<T> | T): Promise<T> {
 
 
 test('schema constants declare supported version range', () => {
-  assert.equal(CURRENT_SCHEMA_VERSION, 31);
+  assert.equal(CURRENT_SCHEMA_VERSION, 32);
   assert.equal(MIN_SUPPORTED_SCHEMA_VERSION, 0);
-  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 31);
+  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 32);
   assert.deepEqual(SUPPORTED_SCHEMA_RANGE, {
     min: 0,
-    max: 31,
-    current: 31,
+    max: 32,
+    current: 32,
+  });
+});
+
+test('v31 migration adds durable MCP process and operation identities', async () => {
+  await withTempDir((dir) => {
+    const path = join(dir, 'version-31.db');
+    const db = new DatabaseSync(path);
+    try {
+      db.exec('CREATE TABLE prior_schema_fact(value TEXT); PRAGMA user_version = 31;');
+      migrateOrInitializeDatabase(db, { filename: path, createSafetyCopy: () => undefined });
+      assert.equal(getSchemaVersion(db), 32);
+      assert.ok((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'remote_project_mcp_processes'").get()));
+      assert.ok((db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'remote_project_mcp_operations'").get()));
+      assert.ok((db.prepare('PRAGMA table_info(remote_project_mcp_processes)').all() as { name: string }[]).some(column => column.name === 'task_id'));
+    } finally {
+      db.close();
+    }
   });
 });
 
@@ -63,7 +80,7 @@ test('v28 migration preserves Project events and adds durable conversation origi
     legacy.close();
 
     const store = new SqliteStore({ filename: path });
-    assert.equal(store.schemaVersion, 31);
+    assert.equal(store.schemaVersion, 32);
     const messageColumns = store.db.prepare('PRAGMA table_info(collaboration_messages)').all() as unknown as readonly { name: string }[];
     assert.ok(messageColumns.some((column) => column.name === 'message_kind'));
     assert.equal((store.db.prepare("SELECT message_kind FROM collaboration_messages WHERE id = 'legacy-message'").get() as { message_kind: string }).message_kind, 'status');

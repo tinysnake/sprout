@@ -69,8 +69,12 @@ test('Worker launches a selected stdio MCP server in the bound workspace, valida
     'fixture-server': { command: process.execPath, args: ['--input-type=module', '-e', serverScript], env: { MCP_FIXTURE_PRIVATE: 'private-config-value' } },
   } }));
   const lease = { leaseId: 'lease-mcp-1', holderKind: 'run' as const, holderId: 'run-mcp-1', runId: 'run-mcp-1' };
-  const started = await connection.contexts.startProjectMcp({ ...binding, ...lease, format: 'claude-code-mcp-json-v1' });
+  const processId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const startInput = { ...binding, ...lease, processId, format: 'claude-code-mcp-json-v1' as const };
+  const started = await connection.contexts.startProjectMcp(startInput);
   assert.equal(started.status, 'ready');
+  assert.equal(started.processId, processId);
+  assert.deepEqual(await connection.contexts.startProjectMcp(startInput), started, 'retry with the durable process id reuses the supervised process');
   assert.equal(started.servers.length, 1);
   assert.equal(started.servers[0]?.name, 'fixture-server');
   assert.deepEqual(started.servers[0]?.tools.map(tool => ({ name: tool.name, server: tool.server })), [{ name: 'echo', server: 'fixture-server' }]);
@@ -79,18 +83,24 @@ test('Worker launches a selected stdio MCP server in the bound workspace, valida
   assert.equal(JSON.stringify(started).includes(workerRoot), false);
   assert.equal(await readFile(join(workerRoot, 'repo', 'mcp-worker-location.txt'), 'utf8'), 'launched-in-bound-workspace');
   assert.equal(await readFile(join(hostRoot, 'mcp-worker-location.txt')).catch(() => ''), '', 'the configured host-side directory was not used');
-  const processId = started.processId;
   const toolId = started.servers[0]?.tools[0]?.id;
   assert.ok(processId);
   assert.ok(toolId);
-  const call = await connection.contexts.callProjectMcpTool({ ...binding, ...lease, processId, toolId, arguments: { text: 'hello from Project tool' } });
-  assert.deepEqual(call, { status: 'completed', text: 'hello from Project tool' });
-  const invalid = await connection.contexts.callProjectMcpTool({ ...binding, ...lease, processId, toolId, arguments: { text: 12 } });
-  assert.deepEqual(invalid, { status: 'failed', reason: 'invalid-arguments' });
-  const wrongLease = await connection.contexts.callProjectMcpTool({ ...binding, ...lease, leaseId: 'lease-other', processId, toolId, arguments: { text: 'must not route' } });
-  assert.deepEqual(wrongLease, { status: 'failed', reason: 'worker-refused' });
+  const operationId = '11111111-1111-4111-8111-111111111111';
+  const callInput = { ...binding, ...lease, processId, operationId, toolId, arguments: { text: 'hello from Project tool' } };
+  const call = await connection.contexts.callProjectMcpTool(callInput);
+  assert.deepEqual(call, { processId, operationId, status: 'completed', text: 'hello from Project tool' });
+  assert.deepEqual(await connection.contexts.callProjectMcpTool(callInput), call, 'retry with the same operation identity returns the bounded result without another call');
+  assert.deepEqual(await connection.contexts.callProjectMcpTool({ ...callInput, arguments: { text: 'different arguments' } }),
+    { processId, operationId, status: 'failed', reason: 'worker-refused' });
+  const invalidOperationId = '22222222-2222-4222-8222-222222222222';
+  const invalid = await connection.contexts.callProjectMcpTool({ ...binding, ...lease, processId, operationId: invalidOperationId, toolId, arguments: { text: 12 } });
+  assert.deepEqual(invalid, { processId, operationId: invalidOperationId, status: 'failed', reason: 'invalid-arguments' });
+  const wrongOperationId = '33333333-3333-4333-8333-333333333333';
+  const wrongLease = await connection.contexts.callProjectMcpTool({ ...binding, ...lease, leaseId: 'lease-other', processId, operationId: wrongOperationId, toolId, arguments: { text: 'must not route' } });
+  assert.deepEqual(wrongLease, { processId, operationId: wrongOperationId, status: 'failed', reason: 'worker-refused' });
   const stopped = await connection.contexts.stopProjectMcp({ ...binding, ...lease, processId });
-  assert.deepEqual(stopped, { status: 'stopped' });
+  assert.deepEqual(stopped, { processId, status: 'stopped' });
 });
 
 test('Worker file reads return the same-name remote sentinel and deny traversal, another Project, and host paths', async (t) => {

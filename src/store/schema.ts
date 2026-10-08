@@ -25,13 +25,13 @@ import { sanitizeEnvironmentCatalogRecord } from '../environment/catalog-privacy
  */
 
 /** The current schema version of Sprout durable storage. */
-export const CURRENT_SCHEMA_VERSION = 31;
+export const CURRENT_SCHEMA_VERSION = 32;
 
 /** The minimum schema version this Sprout build can open or forward-migrate from. */
 export const MIN_SUPPORTED_SCHEMA_VERSION = 0;
 
 /** The maximum schema version this Sprout build can open. */
-export const MAX_SUPPORTED_SCHEMA_VERSION = 31;
+export const MAX_SUPPORTED_SCHEMA_VERSION = 32;
 
 /** The documented supported schema range. */
 export interface SchemaVersionRange {
@@ -1386,6 +1386,28 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
             scope_kind, scope_id)`);
         }
       }
+    },
+  },
+  {
+    fromVersion: 31,
+    toVersion: 32,
+    name: 'durable_project_mcp_processes_and_operations',
+    migrate(db) {
+      db.exec(`CREATE TABLE IF NOT EXISTS remote_project_mcp_processes (
+        process_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, project_id TEXT NOT NULL,
+        environment_instance_id TEXT NOT NULL, binding_id TEXT NOT NULL, generation INTEGER NOT NULL,
+        connection_epoch INTEGER NOT NULL, workspace_id TEXT NOT NULL, workspace_kind TEXT NOT NULL, workspace_path TEXT,
+        lease_id TEXT NOT NULL, holder_kind TEXT NOT NULL, holder_id TEXT NOT NULL, run_id TEXT NOT NULL, task_id TEXT,
+        state TEXT NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS remote_project_mcp_operations (
+        operation_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, process_id TEXT NOT NULL,
+        tool_id TEXT NOT NULL, project_id TEXT NOT NULL, environment_instance_id TEXT NOT NULL,
+        binding_id TEXT NOT NULL, generation INTEGER NOT NULL, connection_epoch INTEGER NOT NULL,
+        workspace_id TEXT NOT NULL, workspace_kind TEXT NOT NULL, workspace_path TEXT, lease_id TEXT NOT NULL,
+        holder_kind TEXT NOT NULL, holder_id TEXT NOT NULL, run_id TEXT NOT NULL, task_id TEXT,
+        state TEXT NOT NULL, updated_at INTEGER NOT NULL
+      );`);
     },
   },
 ];

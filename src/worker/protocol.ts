@@ -320,6 +320,7 @@ export interface ProjectMcpLeaseIdentity {
 }
 
 export interface StartProjectMcpParams extends WorkspaceBindingIdentity, ProjectMcpLeaseIdentity {
+  readonly processId: string;
   readonly format: 'claude-code-mcp-json-v1';
 }
 
@@ -339,18 +340,21 @@ export interface ProjectMcpServerStatus {
 
 export interface StartProjectMcpResult {
   readonly status: 'ready' | 'partial' | 'blocked';
-  readonly processId?: string;
+  readonly processId: string;
   readonly reason?: 'not-selected' | 'missing' | 'invalid' | 'unsupported' | 'worker-refused';
   readonly servers: readonly ProjectMcpServerStatus[];
 }
 
 export interface CallProjectMcpToolParams extends WorkspaceBindingIdentity, ProjectMcpLeaseIdentity {
   readonly processId: string;
+  readonly operationId: string;
   readonly toolId: string;
   readonly arguments: Readonly<Record<string, unknown>>;
 }
 
 export interface CallProjectMcpToolResult {
+  readonly processId: string;
+  readonly operationId: string;
   readonly status: 'completed' | 'failed' | 'unsupported';
   readonly text?: string;
   readonly reason?: 'unknown-tool' | 'invalid-arguments' | 'server-error' | 'invalid-result' | 'timeout' | 'worker-refused';
@@ -361,6 +365,7 @@ export interface StopProjectMcpParams extends WorkspaceBindingIdentity, ProjectM
 }
 
 export interface StopProjectMcpResult {
+  readonly processId: string;
   readonly status: 'stopped' | 'uncertain' | 'not-found';
 }
 

@@ -1,3 +1,7 @@
+---
+Status: superseded in part by ADR-0018
+---
+
 # Sprout selects one immutable execution mode at startup
 
 Ticket #225 retains Environment-hosted execution while adding Host-run placement. Ticket #240 completes the bounded Message-to-reply journey for Pi on the Sprout host. Both choices belong to one Sprout process and must be settled before that process accepts work. A browser setting, stored preference, or live mode switch could make Settings disagree with the Runtime graph and could admit work through a placement that was not active when authority was checked.

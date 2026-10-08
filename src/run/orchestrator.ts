@@ -148,7 +148,11 @@ export interface RunOrchestratorOptions {
   /** Project authority determines whether the selected MCP configuration is active. */
   readonly projectMcpSelected?: (projectId: string) => Promise<boolean>;
   /** Attaches MCP tools after the orchestrator has acquired their containing run lease. */
-  readonly remoteProjectMcp?: (projectId: string, agentId: string, scope: { readonly environmentInstanceId: string; readonly leaseId: string; readonly runId: string }) => Promise<import('../engine/port.ts').RemoteProjectMcpTools>;
+  readonly remoteProjectMcp?: (projectId: string, agentId: string, scope: {
+    readonly environmentInstanceId: string; readonly leaseId: string; readonly runId: string;
+    readonly holderKind: 'run' | 'task'; readonly holderId: string; readonly taskId?: string;
+    readonly leaseCapability: 'project-mcp' | 'agent-run';
+  }) => Promise<import('../engine/port.ts').RemoteProjectMcpTools>;
   /**
    * The durable Project workspace binding for one (Project, Environment), when
    * the build wires Project access (#93, ADR-0008).
@@ -394,10 +398,6 @@ export class RunOrchestrator {
       return { id: run.id };
     }
 
-    if (this.#executionStrategy.mode === 'host-run') {
-      return this.#submitHostRun(run, agent, request);
-    }
-
     // A Task run's prompt is assembled from the Task's goal, constraints, and
     // prior run summaries (#28). A submission that names a Task this process
     // cannot assemble context for is refused explicitly, never run context-free.
@@ -425,6 +425,10 @@ export class RunOrchestrator {
       }
     }
     const taskRun: AgentRun = { ...run, prompt };
+
+    if (this.#executionStrategy.mode === 'host-run') {
+      return this.#submitHostRun(taskRun, agent, request);
+    }
 
     // Task runs are created exclusively by TaskEnvironmentLifecycle. A partial
     // binding used to fall through to the normal one-round lease path, inventing
@@ -606,14 +610,18 @@ export class RunOrchestrator {
     request: SubmitRunRequest,
   ): Promise<{ id: string }> {
     const refuse = async (message: string): Promise<{ id: string }> => {
-      await this.#finish(initial, 'failed', { status: 'failed', message }, 'admission');
+      await this.settleTaskRun(await this.#finish(initial, 'failed', { status: 'failed', message }, 'admission'));
       return { id: initial.id };
     };
-    if (request.taskId !== undefined || request.environmentInstanceId !== undefined ||
-        request.environmentLeaseId !== undefined || request.environmentPreference !== undefined ||
-        request.projectWorkspaceId !== undefined || request.projectWorkspacePath !== undefined ||
-        request.taskBootstrapInstructions !== undefined) {
-      return refuse('Host-run Pi accepts one-round Message conversations without Environment or Task bindings');
+    const taskBound = request.taskId !== undefined;
+    if (taskBound) {
+      if (request.environmentInstanceId === undefined || request.environmentLeaseId === undefined || request.projectId === undefined) {
+        return refuse(`task run ${request.taskId} requires lifecycle lease, Environment, and Project bindings`);
+      }
+    } else if (request.environmentInstanceId !== undefined || request.environmentLeaseId !== undefined ||
+        request.environmentPreference !== undefined || request.projectWorkspaceId !== undefined ||
+        request.projectWorkspacePath !== undefined || request.taskBootstrapInstructions !== undefined) {
+      return refuse('Host-run Pi accepts one-round Message conversations or Task runs with lifecycle-owned Environment bindings');
     }
     const projects = this.#projects?.forAgent(agent.id) ?? [];
     const selectedProject = request.projectId === undefined
@@ -646,19 +654,31 @@ export class RunOrchestrator {
               : 'readiness is unknown';
       return refuse(`Host-run Pi admission failed for this Engine profile: ${reason}`);
     }
-    let mcpEnvironmentInstanceId: string | undefined;
-    let mcpLeaseId: string | undefined;
+    let mcpEnvironmentInstanceId: string | undefined = taskBound ? request.environmentInstanceId : undefined;
+    let mcpLeaseId: string | undefined = taskBound ? request.environmentLeaseId : undefined;
+    if (taskBound) {
+      const taskLease = mcpLeaseId === undefined ? undefined : this.#pool.getLease(mcpLeaseId);
+      if (!taskLease || taskLease.state !== 'active' || taskLease.instanceId !== mcpEnvironmentInstanceId ||
+          taskLease.capability !== 'agent-run' || taskLease.holderKind !== 'task' || taskLease.holderId !== request.taskId || taskLease.taskId !== request.taskId) {
+        return refuse('Task Environment lease is not active for this Task');
+      }
+    }
     const mcpSelected = this.#projectMcpSelected !== undefined && await this.#projectMcpSelected(selectedProject.id);
     if (mcpSelected) {
       if (!this.#remoteProjectMcp) return refuse('Project MCP is selected but no Worker MCP bridge is configured');
-      const resolution = resolveEnvironmentInstance({ projects: [selectedProject], capability: 'project-mcp' }, this.#pool);
-      if (!resolution.ok) return refuse('Project MCP is selected but no authorized leased Environment is available');
-      const acquired = await this.#pool.acquireLeaseRevalidated({
-        instanceId: resolution.instanceId, capability: 'project-mcp', holderId: initial.id, runId: initial.id, ttlMs: this.#leaseTtlMs,
-      });
-      if (!acquired.ok) return refuse(`Project MCP Environment lease is unavailable (${acquired.reason})`);
-      mcpEnvironmentInstanceId = resolution.instanceId;
-      mcpLeaseId = acquired.lease.id;
+      if (taskBound) {
+        const resolution = resolveEnvironmentInstance({ projects: [selectedProject], capability: 'project-mcp', environmentPreference: { kind: 'instance', id: mcpEnvironmentInstanceId! } }, this.#pool);
+        if (!resolution.ok || resolution.instanceId !== mcpEnvironmentInstanceId) return refuse('Project MCP is not authorized for the Task Environment');
+      } else {
+        const resolution = resolveEnvironmentInstance({ projects: [selectedProject], capability: 'project-mcp' }, this.#pool);
+        if (!resolution.ok) return refuse('Project MCP is selected but no authorized leased Environment is available');
+        const acquired = await this.#pool.acquireLeaseRevalidated({
+          instanceId: resolution.instanceId, capability: 'project-mcp', holderId: initial.id, runId: initial.id, ttlMs: this.#leaseTtlMs,
+        });
+        if (!acquired.ok) return refuse(`Project MCP Environment lease is unavailable (${acquired.reason})`);
+        mcpEnvironmentInstanceId = resolution.instanceId;
+        mcpLeaseId = acquired.lease.id;
+      }
     }
     const recorded: AgentRun = {
       ...initial,
@@ -685,10 +705,10 @@ export class RunOrchestrator {
     try {
       await this.#store.save(recorded);
     } catch (error) {
-      if (mcpLeaseId !== undefined) this.#pool.releaseLease(mcpLeaseId);
+      if (mcpLeaseId !== undefined && !taskBound) this.#pool.releaseLease(mcpLeaseId);
       throw error;
     }
-    const settled = this.#executeHostRun(recorded, agent, host, option);
+    const settled = this.#executeHostRun(recorded, agent, host, option, request.taskBootstrapInstructions, mcpSelected).then((run) => this.settleTaskRun(run));
     this.#settled.set(recorded.id, settled);
     return { id: recorded.id };
   }
@@ -698,9 +718,11 @@ export class RunOrchestrator {
     agent: AgentDefinition,
     host: HostPiEngineAdapter,
     option: AgentWorkOption,
+    taskBootstrapInstructions: string | undefined,
+    useProjectMcp: boolean,
   ): Promise<AgentRun> {
     if (this.#stopRequests.has(initial.id)) {
-      if (initial.leaseId !== undefined) this.#pool.releaseLease(initial.leaseId);
+      if (initial.leaseId !== undefined && initial.taskId === undefined) this.#pool.releaseLease(initial.leaseId);
       return this.#finish(initial, 'interrupted', { status: 'interrupted' });
     }
     const running = await this.#advance(initial, { status: 'running' });
@@ -709,6 +731,7 @@ export class RunOrchestrator {
     let mcpMayHaveStarted = false;
     try {
       const assembled = await this.#assembleInput(initial, agent, running.id);
+      const instructions = appendBootstrap(assembled.instructions, taskBootstrapInstructions);
       if (assembled.handOff !== undefined) prepared = await this.#advance(running, { handOff: assembled.handOff });
       const workingDirectory = `host-profile:${host.profileId}:agent:${agent.id}`;
       const placement = initial.executionPlacement;
@@ -727,22 +750,27 @@ export class RunOrchestrator {
       const stored = this.#sessionKeys && identity !== undefined
         ? await this.#sessionKeys.get(identity)
         : undefined;
-      if (initial.leaseId !== undefined && initial.environmentInstanceId) {
+      if (useProjectMcp && initial.leaseId !== undefined && initial.environmentInstanceId) {
         if (!this.#remoteProjectMcp) throw new Error('Project MCP Worker bridge is unavailable');
+        const lease = this.#pool.getLease(initial.leaseId);
+        if (!lease) throw new Error('Project MCP lease is unavailable');
+        mcpMayHaveStarted = true;
         remoteProjectMcp = await this.#remoteProjectMcp(initial.projectId ?? '', agent.id, {
           environmentInstanceId: initial.environmentInstanceId, leaseId: initial.leaseId, runId: initial.id,
+          holderKind: lease.holderKind ?? 'run', holderId: lease.holderId,
+          ...(lease.taskId !== undefined ? { taskId: lease.taskId } : {}),
+          leaseCapability: lease.capability === 'agent-run' ? 'agent-run' : 'project-mcp',
         });
-        mcpMayHaveStarted = true;
       }
       const remoteWorkspace = await this.#remoteWorkspace?.(initial.projectId ?? '', agent.id);
       let attempt = await this.#runSession(
-        host, agent, option, assembled.prompt, prepared, stored?.key, assembled.instructions,
+        host, agent, option, assembled.prompt, prepared, stored?.key, instructions,
         workingDirectory, undefined, undefined, undefined, remoteWorkspace, remoteProjectMcp,
       );
       if (stored !== undefined && !attempt.ok && attempt.resumeRefused) {
         if (this.#sessionKeys && identity !== undefined) await this.#sessionKeys.delete(identity);
         attempt = await this.#runSession(
-          host, agent, option, assembled.prompt, prepared, undefined, assembled.instructions,
+          host, agent, option, assembled.prompt, prepared, undefined, instructions,
           workingDirectory, undefined, undefined, undefined, remoteWorkspace, remoteProjectMcp,
         );
       }
@@ -767,7 +795,7 @@ export class RunOrchestrator {
           catch { stopCertain = false; }
         }
         if (!stopCertain) this.#pool.markRecovering(initial.leaseId);
-        else if (this.#pool.getLease(initial.leaseId)?.state === 'active') this.#pool.releaseLease(initial.leaseId);
+        else if (initial.taskId === undefined && this.#pool.getLease(initial.leaseId)?.state === 'active') this.#pool.releaseLease(initial.leaseId);
       }
     }
   }
