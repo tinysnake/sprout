@@ -117,7 +117,7 @@ if (process.argv[2] === '--auth') {
     const mcpConfig = join(control, 'mcp.json');
     const diagnosticEmpty = process.env.CLAUDE_PROBE_EMPTY_CATALOG === '1';
     const nativeOnly = process.env.CLAUDE_PROBE_NATIVE_ONLY === '1';
-    if (nativeOnly && !diagnosticEmpty) throw new Error('unisolated-work-refused');
+    if (nativeOnly) facts.gaps.push('Diagnostic native-only launch omits engine outer file isolation; it cannot evidence criterion 4 or combined production acceptance.');
     facts.nativeIsolation = !nativeOnly;
     facts.diagnosticEmptyCatalog = diagnosticEmpty;
     writeFileSync(mcpConfig, JSON.stringify({ mcpServers: { origin: { command: '/usr/bin/sandbox-exec', args: ['-p', bridgeProfile, process.execPath, script, '--bridge', 'http://127.0.0.1:41020'], env: { HOME: control, PATH: '/usr/bin:/bin' } } } }));

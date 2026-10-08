@@ -7,255 +7,17 @@
   "fixture": "separate local sandbox origin; not an enrolled remote deployment",
   "turns": [
     {
-      "types": {
-        "system": 14,
-        "assistant": 2,
-        "result": 1
-      },
+      "types": {},
       "toolUses": [],
-      "catalog": [],
-      "mcp": [],
-      "result": "success",
-      "usage": {
-        "input_tokens": 89,
-        "output_tokens": 36,
-        "cache_read_input_tokens": 0,
-        "cache_creation_input_tokens": 0
-      },
-      "exitCode": 0,
-      "signal": null,
-      "timedOut": false,
-      "sessionObserved": true,
-      "interrupted": false,
-      "deniedOperation": [],
-      "deniedPathPrefixes": [
-        "/private/var/folders"
-      ],
-      "systemPathMentioned": [
-        "/var"
-      ],
-      "pathClassMentioned": {
-        "runner": true,
-        "control": false,
-        "auth": false,
-        "executable": false
-      },
-      "startupDiagnostics": {
-        "unknown option": false,
-        "error": true,
-        "permission denied": false,
-        "operation not permitted": false,
-        "apiKeyHelper": true,
-        "authentication": false,
-        "EACCES": false,
-        "EPERM": false,
-        "ENOENT": false,
-        "--tools": false,
-        "--bare": false,
-        "--setting-sources": false,
-        "--permission-prompts": false,
-        "--disallowedTools": false,
-        "--mcp-config": false,
-        "--model": false,
-        "--print": false,
-        "--output-format": false,
-        "--no-chrome": false,
-        "bwrap": false,
-        "sandbox": false,
-        "Unable": false,
-        "Cannot": false,
-        "not allowed": false,
-        "requires": false
-      },
-      "isError": false,
-      "permissionDenials": 0,
-      "authHelperInvoked": true
-    },
-    {
-      "types": {
-        "system": 64,
-        "assistant": 2,
-        "result": 1
-      },
-      "toolUses": [],
-      "catalog": [],
-      "mcp": [],
-      "result": "success",
-      "usage": {
-        "input_tokens": 53,
-        "output_tokens": 256,
-        "cache_read_input_tokens": 64,
-        "cache_creation_input_tokens": 0
-      },
-      "exitCode": 0,
-      "signal": null,
-      "timedOut": false,
-      "sessionObserved": true,
-      "interrupted": false,
-      "deniedOperation": [],
-      "deniedPathPrefixes": [
-        "/private/var/folders"
-      ],
-      "systemPathMentioned": [
-        "/var"
-      ],
-      "pathClassMentioned": {
-        "runner": true,
-        "control": false,
-        "auth": false,
-        "executable": false
-      },
-      "startupDiagnostics": {
-        "unknown option": false,
-        "error": true,
-        "permission denied": false,
-        "operation not permitted": false,
-        "apiKeyHelper": true,
-        "authentication": false,
-        "EACCES": false,
-        "EPERM": false,
-        "ENOENT": false,
-        "--tools": false,
-        "--bare": false,
-        "--setting-sources": false,
-        "--permission-prompts": false,
-        "--disallowedTools": false,
-        "--mcp-config": false,
-        "--model": false,
-        "--print": false,
-        "--output-format": false,
-        "--no-chrome": false,
-        "bwrap": false,
-        "sandbox": false,
-        "Unable": false,
-        "Cannot": false,
-        "not allowed": false,
-        "requires": false
-      },
-      "isError": false,
-      "permissionDenials": 0,
-      "authHelperInvoked": true
-    },
-    {
-      "types": {
-        "system": 33,
-        "assistant": 2,
-        "result": 1
-      },
-      "toolUses": [],
-      "catalog": [],
-      "mcp": [],
-      "result": "success",
-      "usage": {
-        "input_tokens": 93,
-        "output_tokens": 215,
-        "cache_read_input_tokens": 0,
-        "cache_creation_input_tokens": 0
-      },
-      "exitCode": 0,
-      "signal": null,
-      "timedOut": false,
-      "sessionObserved": true,
-      "interrupted": false,
-      "deniedOperation": [],
-      "deniedPathPrefixes": [
-        "/private/var/folders"
-      ],
-      "systemPathMentioned": [
-        "/var"
-      ],
-      "pathClassMentioned": {
-        "runner": true,
-        "control": false,
-        "auth": false,
-        "executable": false
-      },
-      "startupDiagnostics": {
-        "unknown option": false,
-        "error": true,
-        "permission denied": false,
-        "operation not permitted": false,
-        "apiKeyHelper": true,
-        "authentication": false,
-        "EACCES": false,
-        "EPERM": false,
-        "ENOENT": false,
-        "--tools": false,
-        "--bare": false,
-        "--setting-sources": false,
-        "--permission-prompts": false,
-        "--disallowedTools": false,
-        "--mcp-config": false,
-        "--model": false,
-        "--print": false,
-        "--output-format": false,
-        "--no-chrome": false,
-        "bwrap": false,
-        "sandbox": false,
-        "Unable": false,
-        "Cannot": true,
-        "not allowed": false,
-        "requires": false
-      },
-      "isError": false,
-      "permissionDenials": 0,
-      "authHelperInvoked": true
-    },
-    {
-      "types": {
-        "system": 2
-      },
-      "toolUses": [],
-      "catalog": [],
+      "catalog": null,
       "mcp": [],
       "result": null,
       "usage": null,
-      "exitCode": 0,
-      "signal": null,
-      "timedOut": false,
-      "sessionObserved": true,
-      "interrupted": true,
-      "deniedOperation": [],
-      "deniedPathPrefixes": [
-        "/private/var/folders"
-      ],
-      "systemPathMentioned": [
-        "/var"
-      ],
-      "pathClassMentioned": {
-        "runner": true,
-        "control": false,
-        "auth": false,
-        "executable": false
-      },
-      "startupDiagnostics": {
-        "unknown option": false,
-        "error": false,
-        "permission denied": false,
-        "operation not permitted": false,
-        "apiKeyHelper": true,
-        "authentication": false,
-        "EACCES": false,
-        "EPERM": false,
-        "ENOENT": false,
-        "--tools": false,
-        "--bare": false,
-        "--setting-sources": false,
-        "--permission-prompts": false,
-        "--disallowedTools": false,
-        "--mcp-config": false,
-        "--model": false,
-        "--print": false,
-        "--output-format": false,
-        "--no-chrome": false,
-        "bwrap": false,
-        "sandbox": false,
-        "Unable": false,
-        "Cannot": false,
-        "not allowed": false,
-        "requires": false
-      },
-      "interruptSent": true,
+      "exitCode": null,
+      "signal": "SIGKILL",
+      "timedOut": true,
+      "sessionObserved": false,
+      "interrupted": false,
       "authHelperInvoked": true
     }
   ],
@@ -349,7 +111,8 @@
   "gaps": [
     "Real Claude model behavior is unexercised.",
     "E7 root-turn attribution race (upstream Claude issue #55 in #226) cannot be confirmed or refuted on this backend; open evidence gap.",
-    "Windows, enrolled cross-host deployment, production cancellation/fencing and authentication refresh unexercised."
+    "Windows, enrolled cross-host deployment, production cancellation/fencing and authentication refresh unexercised.",
+    "Initial native catalog was not observed; dependent resume/catalog transition probes cannot establish safety."
   ],
   "boot": {
     "cliVersionUnderProfile": true,
@@ -431,8 +194,8 @@
       "remoteEffect": false
     }
   ],
-  "nativeIsolation": false,
-  "diagnosticEmptyCatalog": true,
+  "nativeIsolation": true,
+  "diagnosticEmptyCatalog": false,
   "final": {
     "hostOriginUnchanged": true,
     "hostEffectUnchanged": true,
