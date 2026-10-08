@@ -105,7 +105,11 @@ function observeRemoteReads(adapter: HostPiEngineAdapter): HostPiEngineAdapter {
 }
 
 try {
-  const pi = createProductionHostPiAdapter(process.env, {
+  const pi = createProductionHostPiAdapter({
+    ...process.env,
+    SPROUT_HOST_PI_PROVIDER: 'magpie',
+    SPROUT_HOST_PI_MODEL: 'codex/gpt-6.1-sol',
+  }, {
     providerRoot: resolve(process.cwd(), '..', 'pi-extensions', 'pi-magpie'),
     runnerRoot: join(root, 'engine-runner'),
   });
@@ -200,6 +204,7 @@ try {
         remoteMarkerMatched: observation?.contentMatched ?? false,
         bindingIdentityMatched: observation?.identityMatched ?? false,
         exactAuthorizedModelRetained: pi.authorizedModel === model,
+        verifiedProbeSelection: pi.provider === 'magpie' && pi.authorizedModel === 'codex/gpt-6.1-sol',
         workerHasNoModelEngine: (await runtime.enrollmentEnvironment.info?.(INSTANCE_ID))?.engines.length === 0,
         leaseCount: runtime.pool.leases().length,
         initialBindingGeneration: access.current?.generation ?? 0,
