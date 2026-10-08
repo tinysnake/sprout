@@ -209,7 +209,7 @@ export class EnvironmentWorker {
           this.#transport.respond(id, await this.#requireWorkspaceFiles().inspect(params as import('./protocol.ts').InspectWorkspaceFileOperationParams));
           return;
         case WORKER_METHODS.cancelWorkspaceFileOperation:
-          this.#transport.respond(id, this.#requireWorkspaceFiles().cancel(params as import('./protocol.ts').CancelWorkspaceFileOperationParams));
+          this.#transport.respond(id, await this.#requireWorkspaceFiles().cancel(params as import('./protocol.ts').CancelWorkspaceFileOperationParams));
           return;
         default:
           this.#transport.respondError(id, -32_601, WORKER_DIAGNOSTICS.methodUnsupported);

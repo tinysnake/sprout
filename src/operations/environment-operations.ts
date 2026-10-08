@@ -14,6 +14,7 @@ import type { AttachWorkspaceBindingParams, WorkspaceFileOperationParams, Inspec
 
 const MAX_SUPPORTED_READ_BYTES = 64 * 1024;
 const MAX_SUPPORTED_SEARCH_RESULTS = 100;
+const MAX_COMMAND_OUTPUT_BYTES = 32 * 1024;
 const MUTATION_CAPABILITY = 'agent-run';
 
 export type RemoteWorkspaceBlock = 'project-denied' | 'access-ended' | 'workspace-unbound' | 'worker-offline' | 'stale-epoch' | 'unsupported' | 'capability-denied' | 'lease-required' | 'worker-refused';
@@ -163,6 +164,8 @@ export class EnvironmentOperations {
     let pendingOperations = 0;
     let uncertainOutcome = false;
     let leaseCompromised = false;
+    let settlementRequested = false;
+    const activeCommandIds = new Set<string>();
     const uncertainOperationIds = new Set<string>();
     let leaseKeepalive: ReturnType<typeof setInterval> | undefined;
 
@@ -212,6 +215,12 @@ export class EnvironmentOperations {
       return { acquired: result.lease };
     };
 
+    const settleLeaseIfReady = (): void => {
+      if (!settlementRequested || mutationLease === undefined || this.#pool === undefined) return;
+      if (leaseCompromised || uncertainOutcome || uncertainOperationIds.size > 0 || pendingOperations > 0) this.#pool.markRecovering(mutationLease.id);
+      else this.#pool.releaseLease(mutationLease.id);
+    };
+
     const execute = async (operation: 'read' | 'search' | 'edit' | 'patch' | 'command', input: {
       readonly path?: string; readonly query?: string; readonly oldText?: string; readonly newText?: string;
       readonly hunks?: readonly { readonly before: string; readonly after: string }[];
@@ -241,6 +250,9 @@ export class EnvironmentOperations {
         return operationResult(fixed, operationId, operation, 'failed', normalized.failure);
       }
       const mutating = operation === 'edit' || operation === 'patch' || operation === 'command';
+      if (mutating && (runId === undefined || requestedOperationId === undefined || requestedOperationId.length < 1 || requestedOperationId.length > 512)) {
+        return operationResult(fixed, operationId, operation, 'failed', 'operation-identity-required');
+      }
       if (mutating) {
         try {
           await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed, MUTATION_CAPABILITY);
@@ -285,12 +297,24 @@ export class EnvironmentOperations {
           ? { ...common, operation, query: normalized.query!, ...(normalized.path !== undefined ? { path: normalized.path } : {}) }
           : operation === 'edit'
             ? { ...common, operation, path: normalized.path!, oldText: normalized.oldText!, newText: normalized.newText! }
-            : { ...common, operation, path: normalized.path!, hunks: normalized.hunks! };
+            : operation === 'patch'
+              ? { ...common, operation, path: normalized.path!, hunks: normalized.hunks! }
+              : { ...common, operation, executable: normalized.executable!, args: normalized.args!, ...(normalized.cwd !== undefined ? { cwd: normalized.cwd } : {}), ...(normalized.timeoutMs !== undefined ? { timeoutMs: normalized.timeoutMs } : {}) };
       let result: RemoteWorkspaceOperationResult;
+      let progressSequence = 0;
+      let progressBytes = 0;
       pendingOperations++;
+      if (operation === 'command') activeCommandIds.add(operationId);
       try {
         if (!this.#environment.executeWorkspaceFileOperation) throw new Error('unsupported');
-        result = await this.#environment.executeWorkspaceFileOperation(access.environmentInstanceId, request);
+        result = await this.#environment.executeWorkspaceFileOperation(access.environmentInstanceId, request, progress => {
+          if (operation !== 'command' || onProgress === undefined || !validProgress(progress, fixed, operationId, progressSequence + 1)) return;
+          const bytes = Buffer.byteLength(progress.text, 'utf8');
+          if (progressBytes + bytes > MAX_COMMAND_OUTPUT_BYTES) return;
+          progressSequence = progress.sequence;
+          progressBytes += bytes;
+          onProgress(progress);
+        });
         await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed, mutating ? MUTATION_CAPABILITY : 'read-only-investigation');
         if (!isBoundedRemoteResult(result, fixed, operationId, operation)) throw new Error('remote operation identity or bounds invalid');
       } catch {
@@ -303,17 +327,81 @@ export class EnvironmentOperations {
         return operationResult(fixed, operationId, operation, 'failed', mutating ? 'outcome-unknown-inspect-required' : 'worker-unavailable');
       } finally {
         pendingOperations--;
+        if (operation === 'command') activeCommandIds.delete(operationId);
+        settleLeaseIfReady();
       }
       await this.#saveState(row, result.status === 'completed' ? 'completed' : result.status);
+      if (mutating && result.status !== 'recovery-required') {
+        uncertainOperationIds.delete(operationId);
+        uncertainOutcome = leaseCompromised || uncertainOperationIds.size > 0;
+      }
+      if (mutating && result.status === 'recovery-required') {
+        uncertainOutcome = true;
+        uncertainOperationIds.add(operationId);
+      }
+      settleLeaseIfReady();
       return result;
     };
-    const remoteOperations: ('read' | 'search' | 'edit' | 'patch')[] = ['read', 'search'];
+    const inspectOperation = async (operationId: string): Promise<{ readonly status: string; readonly operation?: RemoteWorkspaceOperationResult }> => {
+      await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed);
+      const row = await this.#store.get(operationId);
+      if (!row || row.projectId !== projectId || row.bindingId !== binding.bindingId || row.generation !== binding.generation || row.connectionEpoch !== epoch) return { status: 'not-found' };
+      if (!this.#environment.inspectWorkspaceFileOperation) return { status: row.state };
+      const request: InspectWorkspaceFileOperationParams = { ...fixed, operationId };
+      const result = await this.#environment.inspectWorkspaceFileOperation(access.environmentInstanceId, request);
+      if (result.status === 'not-found') {
+        if (row.state === 'running' || row.state === 'unknown' || row.state === 'cancel-requested') {
+          await this.#saveState(row, 'unknown');
+          uncertainOperationIds.add(operationId);
+          uncertainOutcome = true;
+          settleLeaseIfReady();
+          return { status: 'unknown' };
+        }
+        return { status: row.state };
+      }
+      const operationTerminal = isTerminalOperationState(result.status);
+      if ((row.operation === 'edit' || row.operation === 'patch' || row.operation === 'command') && operationTerminal && result.result === undefined) return { status: 'unknown' };
+      if (result.result && (result.result.status !== result.status ||
+          !isBoundedRemoteResult(result.result, fixed, operationId, row.operation))) return { status: 'unknown' };
+      if (result.status === 'recovery-required') {
+        await this.#saveState(row, 'recovery-required');
+        uncertainOperationIds.add(operationId);
+        uncertainOutcome = true;
+        settleLeaseIfReady();
+        return { status: 'recovery-required' };
+      }
+      if (operationTerminal && result.status !== row.state) await this.#saveState(row, result.status);
+      if (operationTerminal && result.result && (row.operation === 'edit' || row.operation === 'patch' || row.operation === 'command')) {
+        uncertainOperationIds.delete(operationId);
+        uncertainOutcome = leaseCompromised || uncertainOperationIds.size > 0;
+      }
+      settleLeaseIfReady();
+      const status = result.status === 'running' && row.state === 'cancel-requested' ? 'cancel-requested' : result.status;
+      return { status, ...(result.result !== undefined ? { operation: result.result } : {}) };
+    };
+
+    const cancelOperation = async (operationId: string): Promise<{ readonly accepted: boolean; readonly status: string }> => {
+      await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed);
+      const row = await this.#store.get(operationId);
+      if (!row || row.projectId !== projectId || row.bindingId !== binding.bindingId || row.generation !== binding.generation || row.connectionEpoch !== epoch || !['running','cancel-requested'].includes(row.state)) {
+        return { accepted: false, status: row?.state ?? 'not-found' };
+      }
+      if (!this.#environment.cancelWorkspaceFileOperation) return { accepted: false, status: 'unsupported' };
+      const request: CancelWorkspaceFileOperationParams = { ...fixed, operationId };
+      const result = await this.#environment.cancelWorkspaceFileOperation(access.environmentInstanceId, request);
+      if (result.accepted) await this.#saveState(row, 'cancel-requested');
+      return { accepted: result.accepted, status: result.status };
+    };
+
+    const remoteOperations: ('read' | 'search' | 'edit' | 'patch' | 'command')[] = ['read', 'search'];
     const enrollment = await this.#enrollments.get(live.enrollment.id);
     const mutationCapability = this.#catalog.entry(access.environmentInstanceId)?.definition.capabilities.find(c => c.name === MUTATION_CAPABILITY);
     const operations = await this.#environment.info?.(access.environmentInstanceId);
     if (enrollment?.capabilityPermissions[MUTATION_CAPABILITY] === true && mutationCapability?.requiresLease === true &&
-        operations?.workspaceOperations?.version === 2 && operations.workspaceOperations.operations.includes('edit') &&
-        operations.workspaceOperations.operations.includes('patch')) remoteOperations.push('edit', 'patch');
+        (operations?.workspaceOperations?.version === 2 || operations?.workspaceOperations?.version === 3) &&
+        operations.workspaceOperations.operations.includes('edit') && operations.workspaceOperations.operations.includes('patch')) remoteOperations.push('edit', 'patch');
+    if (enrollment?.capabilityPermissions[MUTATION_CAPABILITY] === true && mutationCapability?.requiresLease === true &&
+        operations?.workspaceOperations?.version === 3 && operations.workspaceOperations.operations.includes('command')) remoteOperations.push('command');
     return {
       binding: { projectId, environmentInstanceId: access.environmentInstanceId, bindingId: binding.bindingId,
         generation: binding.generation!, connectionEpoch: epoch, workspaceId: binding.workspaceId },
@@ -322,44 +410,24 @@ export class EnvironmentOperations {
       search: (query, path, operationId) => execute('search', { query, ...(path !== undefined ? { path } : {}) }, operationId),
       edit: (path, oldText, newText, operationId) => execute('edit', { path, oldText, newText }, operationId),
       patch: (path, hunks, operationId) => execute('patch', { path, hunks }, operationId),
+      command: (executable, args, options, operationId, onProgress) => execute('command', {
+        executable, args, ...(options.cwd !== undefined ? { cwd: options.cwd } : {}), ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+      }, operationId, onProgress),
       settle: async outcome => {
+        settlementRequested = true;
         if (leaseKeepalive !== undefined) clearInterval(leaseKeepalive);
-        if (mutationLease === undefined || this.#pool === undefined) return;
-        if (outcome === 'unknown' || uncertainOutcome || pendingOperations > 0) this.#pool.markRecovering(mutationLease.id);
-        else this.#pool.releaseLease(mutationLease.id);
-      },
-      inspect: async operationId => {
-        await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed);
-        const row = await this.#store.get(operationId);
-        if (!row || row.projectId !== projectId || row.bindingId !== binding.bindingId || row.generation !== binding.generation || row.connectionEpoch !== epoch) return { status: 'not-found' };
-        if (!this.#environment.inspectWorkspaceFileOperation) return { status: row.state };
-        const request: InspectWorkspaceFileOperationParams = { ...fixed, operationId };
-        const result = await this.#environment.inspectWorkspaceFileOperation(access.environmentInstanceId, request);
-        if (result.status === 'not-found' && (row.state === 'running' || row.state === 'unknown' || row.state === 'cancel-requested')) {
-          await this.#saveState(row, 'unknown');
-          return { status: 'unknown' };
+        if (outcome === 'unknown') {
+          for (const operationId of activeCommandIds) {
+            uncertainOperationIds.add(operationId);
+            uncertainOutcome = true;
+            try { await cancelOperation(operationId); } catch { /* The Worker may be lost; lease remains protected. */ }
+            try { await inspectOperation(operationId); } catch { /* A failed inspection is unresolved outcome. */ }
+          }
         }
-        if ((row.operation === 'edit' || row.operation === 'patch') && isTerminalOperationState(result.status) && result.result === undefined) return { status: 'unknown' };
-        if (result.result && (row.operation === 'command' ||
-            result.result.status !== result.status ||
-            !isBoundedRemoteResult(result.result, fixed, operationId, row.operation as 'read' | 'search' | 'edit' | 'patch'))) return { status: 'unknown' };
-        if (isTerminalOperationState(result.status) && result.status !== row.state) await this.#saveState(row, result.status);
-        if (isTerminalOperationState(result.status) && result.result && (row.operation === 'edit' || row.operation === 'patch')) {
-          uncertainOperationIds.delete(operationId);
-          uncertainOutcome = leaseCompromised || uncertainOperationIds.size > 0;
-        }
-        return { status: result.status, ...(result.result !== undefined ? { operation: result.result } : {}) };
+        settleLeaseIfReady();
       },
-      cancel: async operationId => {
-        await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed);
-        const row = await this.#store.get(operationId);
-        if (!row || row.projectId !== projectId || row.bindingId !== binding.bindingId || row.generation !== binding.generation || row.connectionEpoch !== epoch || row.state !== 'running') return { accepted: false, status: row?.state ?? 'not-found' };
-        if (!this.#environment.cancelWorkspaceFileOperation) return { accepted: false, status: 'unsupported' };
-        const request: CancelWorkspaceFileOperationParams = { ...fixed, operationId };
-        const result = await this.#environment.cancelWorkspaceFileOperation(access.environmentInstanceId, request);
-        if (result.accepted) await this.#saveState(row, 'cancel-requested');
-        return { accepted: result.accepted, status: result.status };
-      },
+      inspect: inspectOperation,
+      cancel: cancelOperation,
     };
   }
 
@@ -388,8 +456,8 @@ export class EnvironmentOperations {
     if (epoch !== this.#gateway.currentConnectionEpoch(enrollment.id) || !this.#gateway.isCurrentConnection(enrollment.id, live.epoch.connectionId) || this.#environment.connectionEpoch?.(access.environmentInstanceId) !== epoch) return 'stale-epoch';
     const info = await this.#environment.info?.(access.environmentInstanceId);
     const operations = info?.workspaceOperations;
-    const supportsRead = operations?.version === 1 || operations?.version === 2;
-  if (!info || info.environmentInstanceId !== access.environmentInstanceId || !supportsRead ||
+    const supportsRead = operations?.version === 1 || operations?.version === 2 || operations?.version === 3;
+    if (!info || info.environmentInstanceId !== access.environmentInstanceId || !supportsRead ||
       !operations.operations.includes('read') || !operations.operations.includes('search') ||
       !Number.isSafeInteger(operations.maxReadBytes) || operations.maxReadBytes < 1 || operations.maxReadBytes > MAX_SUPPORTED_READ_BYTES ||
       !Number.isSafeInteger(operations.maxSearchResults) || operations.maxSearchResults < 1 || operations.maxSearchResults > MAX_SUPPORTED_SEARCH_RESULTS) return 'unsupported';
@@ -431,14 +499,16 @@ function hasAgent(project: Awaited<ReturnType<ProjectService['get']>> & {}, agen
   const version = project.content.versions.find(v => v.version === project.content.currentVersion);
   return version?.memberships.some(m => m.memberId === agentId && m.memberKind === 'agent' && m.endedAt === undefined) ?? false;
 }
-function normalizeOperationInput(operation: 'read' | 'search' | 'edit' | 'patch', input: {
+function normalizeOperationInput(operation: 'read' | 'search' | 'edit' | 'patch' | 'command', input: {
   readonly path?: string; readonly query?: string; readonly oldText?: string; readonly newText?: string;
   readonly hunks?: readonly { readonly before: string; readonly after: string }[];
+  readonly executable?: string; readonly args?: readonly string[]; readonly cwd?: string; readonly timeoutMs?: number;
 }): { readonly path?: string; readonly query?: string; readonly oldText?: string; readonly newText?: string;
-  readonly hunks?: readonly { readonly before: string; readonly after: string }[]; readonly failure?: string } {
+  readonly hunks?: readonly { readonly before: string; readonly after: string }[]; readonly executable?: string;
+  readonly args?: readonly string[]; readonly cwd?: string; readonly timeoutMs?: number; readonly failure?: string } {
   const path = input.path === undefined ? undefined : normalizeRelativePath(input.path);
   if (input.path !== undefined && (path === undefined || path.split('/')[0] === '.sprout')) return { failure: 'invalid-path' };
-  if (operation !== 'search' && path === undefined) return { failure: 'invalid-path' };
+  if (operation !== 'search' && operation !== 'command' && path === undefined) return { failure: 'invalid-path' };
   if (operation === 'search' && (typeof input.query !== 'string' || input.query.length < 1 || input.query.length > 256)) return { failure: 'invalid-path' };
   if (operation === 'edit' && (typeof input.oldText !== 'string' || input.oldText.length === 0 || typeof input.newText !== 'string' ||
       Buffer.byteLength(input.oldText, 'utf8') > 256 * 1024 || Buffer.byteLength(input.newText, 'utf8') > 256 * 1024)) return { failure: 'operation-limit' };
@@ -451,9 +521,21 @@ function normalizeOperationInput(operation: 'read' | 'search' | 'edit' | 'patch'
       if (bytes > 256 * 1024) return { failure: 'operation-limit' };
     }
   }
+  if (operation === 'command') {
+    if (input.executable !== 'node' && input.executable !== 'npm') return { failure: 'command-not-allowed' };
+    if (!Array.isArray(input.args) || input.args.length > 64 || Array.from(input.args).some(arg => typeof arg !== 'string' || Buffer.byteLength(arg, 'utf8') > 4_096) ||
+        Buffer.byteLength(JSON.stringify(input.args), 'utf8') > 16 * 1024) return { failure: 'operation-limit' };
+    const cwd = input.cwd === undefined ? undefined : normalizeRelativePath(input.cwd);
+    if (input.cwd !== undefined && cwd === undefined) return { failure: 'invalid-path' };
+    if (cwd?.split('/')[0] === '.sprout') return { failure: 'invalid-path' };
+    if (input.timeoutMs !== undefined && (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 100 || input.timeoutMs > 120_000)) return { failure: 'operation-limit' };
+    return { executable: input.executable, args: [...input.args], ...(cwd !== undefined ? { cwd } : {}), ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}) };
+  }
   return { ...(path !== undefined ? { path } : {}), ...(input.query !== undefined ? { query: input.query } : {}),
     ...(input.oldText !== undefined ? { oldText: input.oldText } : {}), ...(input.newText !== undefined ? { newText: input.newText } : {}),
-    ...(input.hunks !== undefined ? { hunks: input.hunks } : {}) };
+    ...(input.hunks !== undefined ? { hunks: input.hunks } : {}), ...(input.executable !== undefined ? { executable: input.executable } : {}),
+    ...(input.args !== undefined ? { args: input.args } : {}), ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
+    ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}) };
 }
 
 function normalizeRelativePath(value: string): string | undefined {
@@ -463,10 +545,25 @@ function normalizeRelativePath(value: string): string | undefined {
   return normalized;
 }
 
-function isBoundedRemoteResult(result: RemoteWorkspaceOperationResult, identity: AttachWorkspaceBindingParams, operationId: string, operation: 'read' | 'search' | 'edit' | 'patch'): boolean {
+function isBoundedRemoteResult(result: RemoteWorkspaceOperationResult, identity: AttachWorkspaceBindingParams, operationId: string, operation: 'read' | 'search' | 'edit' | 'patch' | 'command'): boolean {
   if (!sameOrigin(result, identity, operationId, operation) ||
-    !['completed', 'failed', 'cancelled'].includes(result.status) ||
+    !['completed', 'failed', 'cancelled', 'recovery-required'].includes(result.status) ||
     (result.truncated !== undefined && typeof result.truncated !== 'boolean')) return false;
+  if (operation === 'command') {
+    const chunks = result.outputChunks;
+    if (result.content !== undefined || result.matches !== undefined || result.path !== undefined || result.changedPaths !== undefined ||
+        typeof result.output !== 'string' || Buffer.byteLength(result.output, 'utf8') > MAX_COMMAND_OUTPUT_BYTES ||
+        !Array.isArray(chunks) || chunks.length > 64 ||
+        (result.exitCode !== null && result.exitCode !== undefined && !Number.isSafeInteger(result.exitCode))) return false;
+    let total = 0;
+    for (let index = 0; index < chunks.length; index++) {
+      const chunk = chunks[index];
+      if (!chunk || chunk.sequence !== index + 1 || (chunk.stream !== 'stdout' && chunk.stream !== 'stderr') || typeof chunk.text !== 'string' || Buffer.byteLength(chunk.text, 'utf8') > 1_024) return false;
+      total += Buffer.byteLength(chunk.text, 'utf8');
+    }
+    return total <= MAX_COMMAND_OUTPUT_BYTES && chunks.map(chunk => chunk.text).join('') === result.output &&
+      (result.failure === undefined || ['command-not-allowed','operation-limit','invalid-path','command-supervision-unsupported','command-timeout','command-start-failed','command-failed','cancelled','descendant-process-unknown','operation-identity-conflict','operation-journal-unavailable','outcome-unknown-inspect-required'].includes(result.failure));
+  }
   if (result.status !== 'completed') {
     return result.content === undefined && result.matches === undefined &&
       (result.path === undefined || normalizeRelativePath(result.path) === result.path) &&
@@ -489,12 +586,21 @@ function isBoundedRemoteResult(result: RemoteWorkspaceOperationResult, identity:
     Buffer.byteLength(match.text, 'utf8') <= 1_200);
 }
 
+function validProgress(progress: RemoteWorkspaceProgress, identity: AttachWorkspaceBindingParams, operationId: string, nextSequence: number): boolean {
+  return progress.operationId === operationId && progress.projectId === identity.projectId &&
+    progress.environmentInstanceId === identity.environmentInstanceId && progress.bindingId === identity.bindingId &&
+    progress.generation === identity.generation && progress.connectionEpoch === identity.connectionEpoch &&
+    progress.workspaceId === identity.workspaceId && progress.sequence === nextSequence &&
+    (progress.stream === 'stdout' || progress.stream === 'stderr') && typeof progress.text === 'string' &&
+    Buffer.byteLength(progress.text, 'utf8') <= 1_024;
+}
+
 function stableOperationId(runId: string | undefined, requested: string | undefined): string {
   if (runId === undefined || requested === undefined || requested.length < 1 || requested.length > 512) return randomUUID();
   return createHash('sha256').update(`${runId}\\u0000${requested}`).digest('hex');
 }
 
-function operationResult(identity: AttachWorkspaceBindingParams, operationId: string, operation: 'read' | 'search' | 'edit' | 'patch', status: 'completed' | 'failed' | 'cancelled', failure?: string,
+function operationResult(identity: AttachWorkspaceBindingParams, operationId: string, operation: 'read' | 'search' | 'edit' | 'patch' | 'command', status: 'completed' | 'failed' | 'cancelled' | 'recovery-required', failure?: string,
   leaseConflict?: { readonly holderId: string; readonly state: 'active' | 'recovering' }): RemoteWorkspaceOperationResult {
   return { operationId, projectId: identity.projectId, environmentInstanceId: identity.environmentInstanceId,
     bindingId: identity.bindingId, generation: identity.generation, connectionEpoch: identity.connectionEpoch,
@@ -502,7 +608,7 @@ function operationResult(identity: AttachWorkspaceBindingParams, operationId: st
     ...(leaseConflict !== undefined ? { leaseConflict } : {}) };
 }
 
-function sameOrigin(result: RemoteWorkspaceOperationResult, identity: AttachWorkspaceBindingParams, operationId: string, operation: 'read' | 'search' | 'edit' | 'patch'): boolean {
+function sameOrigin(result: RemoteWorkspaceOperationResult, identity: AttachWorkspaceBindingParams, operationId: string, operation: 'read' | 'search' | 'edit' | 'patch' | 'command'): boolean {
   return result.operationId === operationId && result.projectId === identity.projectId && result.environmentInstanceId === identity.environmentInstanceId &&
     result.bindingId === identity.bindingId && result.generation === identity.generation && result.connectionEpoch === identity.connectionEpoch &&
     result.workspaceId === identity.workspaceId && result.operation === operation;

@@ -226,6 +226,7 @@ test('Host-run edits and patches only through the enrolled Worker with one run-h
   let matchingReplay: RemoteWorkspaceOperationResult | undefined;
   let workerDispatches = 0;
   let leasesDuringRun: readonly { readonly capability: string }[] = [];
+  const commandProgress: { readonly sequence: number; readonly stream: string; readonly text: string }[] = [];
   let runtime: Awaited<ReturnType<typeof createRuntime>> | undefined;
   const hostPi = {
     id: 'pi', profileId: 'profile-runtime-remote-mutation', authorizedModel: model,
@@ -235,13 +236,14 @@ test('Host-run edits and patches only through the enrolled Worker with one run-h
         authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready', version: '1.0.4', observedAt: 1 };
     },
     async startSession(request: StartSessionRequest) {
-      assert.deepEqual(request.remoteWorkspace?.operations, ['read', 'search', 'edit', 'patch']);
+      assert.deepEqual(request.remoteWorkspace?.operations, ['read', 'search', 'edit', 'patch', 'command']);
       const tools = request.remoteWorkspace!;
       observed.push(await tools.edit!('src/target.txt', 'REMOTE_SENTINEL', 'REMOTE_EDITED', 'sdk-edit-1'));
       inspection = await tools.inspect(observed[0]!.operationId);
       conflictingReplay = await tools.edit!('src/target.txt', 'REMOTE_SENTINEL', 'CHANGED_PAYLOAD', 'sdk-edit-1');
       matchingReplay = await tools.edit!('src/target.txt', 'REMOTE_SENTINEL', 'REMOTE_EDITED', 'sdk-edit-1');
       observed.push(await tools.patch!('src/target.txt', [{ before: 'REMOTE_EDITED', after: 'REMOTE_PATCHED' }], 'sdk-patch-1'));
+      observed.push(await tools.command!('node', ['-e', "process.stdout.write('REMOTE_COMMAND_OK\\n')"], { cwd: 'src', timeoutMs: 5_000 }, 'sdk-command-1', progress => commandProgress.push(progress)));
       leasesDuringRun = runtime!.pool.leases();
       return localEngine.startSession(request);
     },
@@ -274,9 +276,9 @@ test('Host-run edits and patches only through the enrolled Worker with one run-h
     assert.equal(runtime.pool.requiresLeaseForBoundOperation(INSTANCE_ID, 'agent-run'), true);
     const execute = runtime.enrollmentEnvironment.executeWorkspaceFileOperation.bind(runtime.enrollmentEnvironment);
     let loseNextResponse = true;
-    runtime.enrollmentEnvironment.executeWorkspaceFileOperation = async (environmentInstanceId, input) => {
+    runtime.enrollmentEnvironment.executeWorkspaceFileOperation = async (environmentInstanceId, input, onProgress) => {
       workerDispatches++;
-      const result = await execute(environmentInstanceId, input);
+      const result = await execute(environmentInstanceId, input, onProgress);
       if (loseNextResponse && (input.operation === 'edit' || input.operation === 'patch')) {
         loseNextResponse = false;
         throw new Error('simulated Worker response loss');
@@ -295,13 +297,18 @@ test('Host-run edits and patches only through the enrolled Worker with one run-h
     const submitted = await runtime.orchestrator.submit({ agentId: 'scout', projectId: 'remote-mutation-project', prompt: 'Edit and patch the remote file.' });
     const run = await runtime.orchestrator.waitFor(submitted.id);
     if (run.status !== 'completed') throw new Error(`Host-run failed: ${run.failure ?? 'no failure detail'}`);
-    assert.deepEqual(observed.map(result => result.status), ['failed', 'completed'], JSON.stringify(observed));
+    assert.deepEqual(observed.map(result => result.status), ['failed', 'completed', 'completed'], JSON.stringify(observed));
     assert.equal(observed[0]?.failure, 'outcome-unknown-inspect-required');
     assert.equal(inspection?.status, 'completed');
     assert.equal(inspection?.operation?.status, 'completed');
     assert.equal(conflictingReplay?.failure, 'operation-identity-conflict');
     assert.equal(matchingReplay?.failure, 'operation-outcome-inspection-required');
-    assert.equal(workerDispatches, 2, 'neither same-identity retry nor conflicting reuse reaches the Worker');
+    assert.equal(workerDispatches, 3, 'neither same-identity retry nor conflicting reuse reaches the Worker');
+    assert.deepEqual(commandProgress.map(progress => progress.sequence), [1]);
+    assert.equal(commandProgress[0]?.stream, 'stdout');
+    assert.equal(commandProgress[0]?.text, 'REMOTE_COMMAND_OK\n');
+    assert.equal(observed[2]?.operation, 'command');
+    assert.equal(observed[2]?.output, 'REMOTE_COMMAND_OK\n');
     assert.ok(observed.every(result => result.environmentInstanceId === INSTANCE_ID && result.bindingId === access.current?.bindingId));
     assert.equal(readFileSync(join(workerRoot, 'repos', 'remote-mutation', 'src', 'target.txt'), 'utf8'), 'REMOTE_PATCHED');
     assert.equal(readFileSync(localFile, 'utf8'), 'LOCAL_SENTINEL');
@@ -326,6 +333,90 @@ test('Host-run edits and patches only through the enrolled Worker with one run-h
     assert.equal(blocked.leaseConflict?.holderId, 'other-agent');
     assert.equal(readFileSync(join(workerRoot, 'repos', 'remote-mutation', 'src', 'target.txt'), 'utf8'), 'REMOTE_PATCHED');
     runtime.pool.releaseLease(holder.lease.id);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test('an interrupted Host run protects its lease until remote command settlement is confirmed', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-remote-command-cancel-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const workerRoot = join(directory, 'worker-workspaces');
+  const hostRoot = join(directory, 'host-project');
+  const keyPath = join(directory, 'worker-key.pem');
+  const model = 'provider/model-host';
+  const localEngine = new ScriptedEngineAdapter({ turns: [] });
+  let commandResult: Promise<RemoteWorkspaceOperationResult> | undefined;
+  let commandStarted!: () => void;
+  const started = new Promise<void>(resolve => { commandStarted = resolve; });
+  let settleCompletion!: (result: { readonly status: 'interrupted' }) => void;
+  const completion = new Promise<{ readonly status: 'interrupted' }>(resolve => { settleCompletion = resolve; });
+  const hostPi = {
+    id: 'pi', profileId: 'profile-runtime-remote-command-cancel', authorizedModel: model,
+    capabilities: localEngine.capabilities,
+    async readiness() {
+      return { profileId: 'profile-runtime-remote-command-cancel', engine: 'pi', status: 'ready', installation: 'ready',
+        authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready', version: '1.0.4', observedAt: 1 };
+    },
+    async startSession(request: StartSessionRequest) {
+      const tools = request.remoteWorkspace!;
+      return {
+        sessionId: 'command-cancel-session', engineSessionKey: 'command-cancel-session',
+        run() {
+          commandResult = tools.command!('node', ['-e', "process.stdout.write('STARTED\\n');setInterval(()=>{},1000)"],
+            { timeoutMs: 10_000 }, 'sdk-command-cancel-1', () => commandStarted());
+          return { events: (async function* () {})(), completion };
+        },
+        async interrupt() { return true; },
+        async close() { settleCompletion({ status: 'interrupted' }); },
+      };
+    },
+  } as unknown as HostPiEngineAdapter;
+  const runtime = await createRuntime({
+    configuration: hostConfiguration({
+      executionMode: 'host-run', environmentSource: 'enrollment',
+      runtimeConfiguration: {
+        agents: [{ id: 'scout', name: 'scout', engine: 'pi', capability: 'agent-run', model, effort: 'medium',
+          workOptions: [{ id: 'host-pi', engine: 'pi', workModel: model, effort: 'medium' }] }],
+        project: { ...project(), memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }] },
+      },
+      databasePath: join(directory, 'state.db'),
+    }), projectRoot: hostRoot, hostPi,
+  });
+  try {
+    const identity = loadOrCreateWorkerIdentity(keyPath);
+    const enrollment = await runtime.enrollments.requestEnrollment({
+      environmentInstanceId: INSTANCE_ID, displayName: 'Remote command cancellation Worker',
+      publicKey: workerPublicKey(identity.privateKey), platform: 'macos', protocolVersion: '3.0',
+      capabilityRequests: ['agent-run', 'read-only-investigation'], engineFacts: [],
+    });
+    await runtime.enrollments.approve(enrollment.enrollment.id, {
+      capabilityPermissions: { 'agent-run': true, 'read-only-investigation': true },
+    });
+    await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, workerRoot);
+    await runtime.projectService.create({ id: 'remote-command-cancel-project', displayName: 'Remote command cancellation Project' });
+    await runtime.projectService.addMembership('remote-command-cancel-project', { agentId: 'scout' });
+    await runtime.projectAccess.grant({ projectId: 'remote-command-cancel-project', environmentInstanceId: INSTANCE_ID,
+      selection: { kind: 'relative', path: 'repos/remote-command-cancel' } });
+    const submitted = await runtime.orchestrator.submit({ agentId: 'scout', projectId: 'remote-command-cancel-project', prompt: 'Run a remote command.' });
+    await started;
+
+    const actualCancel = runtime.enrollmentEnvironment.cancelWorkspaceFileOperation!.bind(runtime.enrollmentEnvironment);
+    let unresolvedCancel: Parameters<typeof actualCancel>[1] | undefined;
+    runtime.enrollmentEnvironment.cancelWorkspaceFileOperation = async (_environmentInstanceId, input) => {
+      unresolvedCancel = input;
+      return { accepted: true, status: 'cancel-requested' };
+    };
+    const interrupted = await runtime.orchestrator.interrupt(submitted.id);
+    assert.equal(interrupted.status, 'interrupted');
+    assert.ok(unresolvedCancel);
+    assert.equal(runtime.pool.leases()[0]?.state, 'recovering');
+
+    runtime.enrollmentEnvironment.cancelWorkspaceFileOperation = actualCancel;
+    await actualCancel(INSTANCE_ID, unresolvedCancel!);
+    const result = await commandResult!;
+    assert.equal(result.status, 'cancelled');
+    assert.equal(runtime.pool.leases()[0]?.state, 'released');
   } finally {
     await runtime.close();
   }

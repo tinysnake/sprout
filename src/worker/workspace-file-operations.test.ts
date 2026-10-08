@@ -163,6 +163,80 @@ test('Worker operation identities replay completed edits without applying them t
   assert.equal(await readFile(target, 'utf8'), 'after');
 });
 
+test('Worker commands stream bounded sequenced output and cancellation remains inspectable until the process stops', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'sprout-worker-command-'));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const workspace = new WorkerWorkspace(root);
+  const selected = await workspace.validateWorkspace({ projectId: 'command-project', environmentInstanceId: 'env-1', kind: 'relative', path: 'repo' });
+  const binding = { projectId: 'command-project', environmentInstanceId: 'env-1', bindingId: 'command-binding', generation: 1,
+    connectionEpoch: 1, workspaceId: selected.workspaceId, kind: 'relative', path: 'repo' } as const;
+  const { path, ...bindingIdentity } = binding;
+  const progress: { operationId: string; sequence: number; stream: string; text: string }[] = [];
+  let cancelStartedResolve!: () => void;
+  const cancelStarted = new Promise<void>(resolve => { cancelStartedResolve = resolve; });
+  const streamedFiles = new WorkerWorkspaceFiles(workspace, 'env-1', chunk => {
+    progress.push(chunk);
+    if (chunk.operationId === 'command-cancel-1') cancelStartedResolve();
+  });
+  await streamedFiles.attach(binding);
+  const streamed = await streamedFiles.execute({ ...bindingIdentity, workspacePath: path, operationId: 'command-stream-1',
+    operation: 'command', executable: 'node', args: ['-e', "process.stdout.write('OUT');process.stderr.write('ERR')"], timeoutMs: 5_000 });
+  assert.equal(streamed.status, 'completed');
+  assert.equal(streamed.exitCode, 0);
+  assert.equal(streamed.output, 'OUTERR');
+  assert.deepEqual(streamed.outputChunks?.map(chunk => chunk.sequence), [1, 2]);
+  assert.deepEqual(progress.map(chunk => chunk.sequence), [1, 2]);
+  assert.deepEqual(progress.map(chunk => chunk.stream), ['stdout', 'stderr']);
+
+  const bounded = await streamedFiles.execute({ ...bindingIdentity, workspacePath: path, operationId: 'command-output-limit-1',
+    operation: 'command', executable: 'node', args: ['-e', "process.stdout.write('x'.repeat(50000))"], timeoutMs: 5_000 });
+  assert.equal(bounded.status, 'completed');
+  assert.equal(bounded.truncated, true);
+  assert.equal(Buffer.byteLength(bounded.output ?? '', 'utf8'), 32 * 1024);
+  assert.deepEqual(bounded.outputChunks?.map(chunk => chunk.sequence), Array.from({ length: 32 }, (_, index) => index + 1));
+
+  const cancellationPromise = streamedFiles.execute({ ...bindingIdentity, workspacePath: path, operationId: 'command-cancel-1',
+    operation: 'command', executable: 'node', args: ['-e', "console.log('started');setInterval(()=>{},1000)"], timeoutMs: 10_000 });
+  await cancelStarted;
+  const accepted = await streamedFiles.cancel({ ...binding, operationId: 'command-cancel-1' });
+  assert.equal(accepted.accepted, true);
+  assert.equal(accepted.status, 'cancel-requested');
+  assert.equal((await streamedFiles.inspect({ ...binding, operationId: 'command-cancel-1' })).status, 'cancel-requested');
+  const stopped = await cancellationPromise;
+  assert.equal(stopped.status, 'cancelled');
+  assert.equal((await streamedFiles.inspect({ ...binding, operationId: 'command-cancel-1' })).status, 'cancelled');
+});
+
+test('Worker reports recovery-required when cancellation cannot prove descendant settlement', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'sprout-worker-command-recovery-'));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const workspace = new WorkerWorkspace(root);
+  const selected = await workspace.validateWorkspace({ projectId: 'command-recovery-project', environmentInstanceId: 'env-1', kind: 'relative', path: 'repo' });
+  const binding = { projectId: 'command-recovery-project', environmentInstanceId: 'env-1', bindingId: 'command-recovery-binding', generation: 1,
+    connectionEpoch: 1, workspaceId: selected.workspaceId, kind: 'relative', path: 'repo' } as const;
+  let commandStarted!: () => void;
+  const started = new Promise<void>(resolve => { commandStarted = resolve; });
+  const files = new WorkerWorkspaceFiles(workspace, 'env-1', chunk => {
+    if (chunk.operationId === 'command-unknown-1') commandStarted();
+  }, {
+    groupAlive: () => true,
+    signalGroup: (pid, signal) => { try { process.kill(-pid, signal); return true; } catch { return false; } },
+    gracePeriodMs: 25,
+  });
+  await files.attach(binding);
+  const { path, ...identity } = binding;
+  const operation = files.execute({ ...identity, workspacePath: path, operationId: 'command-unknown-1', operation: 'command', executable: 'node',
+    args: ['-e', "console.log('started');setInterval(()=>{},1000)"], timeoutMs: 10_000 });
+  await started;
+  const cancel = await files.cancel({ ...binding, operationId: 'command-unknown-1' });
+  assert.equal(cancel.accepted, true);
+  assert.equal(cancel.status, 'cancel-requested');
+  const result = await operation;
+  assert.equal(result.status, 'recovery-required');
+  assert.equal(result.failure, 'descendant-process-unknown');
+  assert.equal((await files.inspect({ ...binding, operationId: 'command-unknown-1' })).status, 'recovery-required');
+});
+
 async function worker(root: string) {
   const server = new URL('./server.ts', import.meta.url).pathname;
   const carrier = new URL('./carrier.ts', import.meta.url).pathname;

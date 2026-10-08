@@ -49,7 +49,7 @@ interface DurableMutationRecord {
   readonly result?: RemoteWorkspaceOperationResult;
 }
 
-/** Worker-owned read-only Project file boundary with generation fencing. */
+/** Worker-owned Project operation boundary with binding and generation fencing. */
 export class WorkerWorkspaceFiles {
   readonly #workspace: WorkerWorkspace;
   readonly #environmentInstanceId: string;
@@ -261,6 +261,103 @@ export class WorkerWorkspaceFiles {
     return { ...identity(input), operationId: input.operationId, operation: input.operation, status: 'completed', path, changedPaths: [path] };
   }
 
+  async #command(binding: BoundWorkspace, input: Extract<WorkspaceFileOperationParams, { operation: 'command' }>, state: OperationState): Promise<RemoteWorkspaceOperationResult> {
+    if (process.platform === 'win32') return failure(input, 'failed', 'command-supervision-unsupported');
+    if (!COMMAND_EXECUTABLES.has(input.executable) || input.executable.includes('/') || input.executable.includes('\\') ||
+        !Array.isArray(input.args) || input.args.length > 64 || Array.from(input.args).some(arg => typeof arg !== 'string' || Buffer.byteLength(arg, 'utf8') > 4_096) ||
+        Buffer.byteLength(JSON.stringify(input.args), 'utf8') > 16 * 1024) return failure(input, 'failed', 'command-not-allowed');
+    const timeoutMs = input.timeoutMs ?? 30_000;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > MAX_COMMAND_DURATION_MS) return failure(input, 'failed', 'operation-limit');
+    let cwd: string;
+    try { cwd = await containedDirectory(binding.root, input.cwd === undefined ? '' : safeRelative(input.cwd, false)); }
+    catch { return failure(input, 'failed', 'invalid-path'); }
+
+    return new Promise(resolveResult => {
+      const child = spawn(input.executable, [...input.args], {
+        cwd,
+        detached: true,
+        env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: binding.root, TMPDIR: binding.root },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+      const outputChunks: { sequence: number; stream: 'stdout' | 'stderr'; text: string }[] = [];
+      const stdout = new StringDecoder('utf8');
+      const stderr = new StringDecoder('utf8');
+      let outputBytes = 0;
+      let sequence = 0;
+      let truncated = false;
+      let timedOut = false;
+      let cancelRequested = false;
+      let settled = false;
+      let termination: Promise<boolean> | undefined;
+      let spawnFailed = false;
+      const append = (stream: 'stdout' | 'stderr', text: string): void => {
+        const cleaned = sanitizeCommandOutput(text, binding.root);
+        let chunk = '';
+        let chunkBytes = 0;
+        const flush = (): void => {
+          if (!chunk) return;
+          sequence++;
+          const row = { sequence, stream, text: chunk } as const;
+          outputChunks.push(row);
+          try { this.#onProgress?.({ ...identity(input), operationId: input.operationId, ...row }); } catch { /* Progress observers cannot fail command execution. */ }
+          chunk = '';
+          chunkBytes = 0;
+        };
+        for (const character of cleaned) {
+          const bytes = Buffer.byteLength(character, 'utf8');
+          if (outputBytes + bytes > MAX_COMMAND_OUTPUT_BYTES) { truncated = true; break; }
+          if (chunkBytes + bytes > MAX_COMMAND_CHUNK_BYTES) flush();
+          chunk += character;
+          chunkBytes += bytes;
+          outputBytes += bytes;
+        }
+        flush();
+      };
+      const ensureStopped = (pid: number): Promise<boolean> => termination ??= stopProcessGroup(pid, this.#processControl);
+      const requestTermination = (): void => {
+        cancelRequested = true;
+        if (child.pid !== undefined) void ensureStopped(child.pid);
+      };
+      state.cancelProcess = requestTermination;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        void this.#saveMutation({ operationId: input.operationId, fingerprint: state.fingerprint, status: 'cancel-requested' })
+          .then(() => { state.status = 'cancel-requested'; requestTermination(); })
+          .catch(() => { state.status = 'recovery-required'; requestTermination(); });
+      }, timeoutMs);
+      child.stdout?.on('data', (chunk: Buffer) => append('stdout', stdout.write(chunk)));
+      child.stderr?.on('data', (chunk: Buffer) => append('stderr', stderr.write(chunk)));
+      child.on('error', () => { spawnFailed = true; });
+      child.on('close', (code, signal) => {
+        void (async () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          append('stdout', stdout.end());
+          append('stderr', stderr.end());
+          const treeStopped = child.pid === undefined ? true : await ensureStopped(child.pid);
+          delete state.cancelProcess;
+          const output = outputChunks.map(chunk => chunk.text).join('');
+          const base = { ...identity(input), operationId: input.operationId, operation: 'command' as const,
+            output, outputChunks, exitCode: code, ...(truncated ? { truncated: true } : {}) };
+          if (!treeStopped) {
+            resolveResult({ ...base, status: 'recovery-required', failure: 'descendant-process-unknown' });
+          } else if (cancelRequested) {
+            resolveResult({ ...base, status: 'cancelled', failure: 'cancelled' });
+          } else if (timedOut) {
+            resolveResult({ ...base, status: 'failed', failure: 'command-timeout' });
+          } else if (spawnFailed) {
+            resolveResult({ ...base, status: 'failed', failure: 'command-start-failed' });
+          } else {
+            resolveResult({ ...base, status: code === 0 && signal === null ? 'completed' : 'failed',
+              ...(code === 0 && signal === null ? {} : { failure: 'command-failed' }) });
+          }
+        })();
+      });
+    });
+  }
+
   #requireBinding(input: WorkspaceBindingIdentity): BoundWorkspace {
     if (input.environmentInstanceId !== this.#environmentInstanceId) throw new Error('workspace target refused');
     const binding = this.#bindings.get(input.projectId);
@@ -330,6 +427,42 @@ export class WorkerWorkspaceFiles {
     if (signal.aborted) return failure(input, 'cancelled', 'cancelled');
     return { ...identity(input), operationId: input.operationId, operation: 'search', status: 'completed', matches, ...(truncated ? { truncated: true } : {}) };
   }
+}
+
+async function stopProcessGroup(pid: number, control: WorkspaceCommandProcessControl): Promise<boolean> {
+  if (process.platform === 'win32') return false;
+  const alive = control.groupAlive ?? defaultProcessGroupAlive;
+  if (!alive(pid)) return true;
+  const signal = control.signalGroup ?? defaultSignalProcessGroup;
+  signal(pid, 'SIGTERM');
+  if (await waitForProcessGroupExit(pid, alive, control.gracePeriodMs ?? 250)) return true;
+  signal(pid, 'SIGKILL');
+  return waitForProcessGroupExit(pid, alive, Math.max(control.gracePeriodMs ?? 250, 500));
+}
+
+async function waitForProcessGroupExit(pid: number, alive: (pid: number) => boolean, durationMs: number): Promise<boolean> {
+  const deadline = Date.now() + durationMs;
+  while (alive(pid)) {
+    if (Date.now() >= deadline) return false;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  return true;
+}
+
+function defaultProcessGroupAlive(pid: number): boolean {
+  try { process.kill(-pid, 0); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
+}
+
+function defaultSignalProcessGroup(pid: number, signal: 'SIGTERM' | 'SIGKILL'): boolean {
+  try { process.kill(-pid, signal); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
+}
+
+function sanitizeCommandOutput(text: string, projectRoot: string): string {
+  return text.replace(/\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g, '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .split(projectRoot).join('<project>');
 }
 
 function validIdentity(input: WorkspaceBindingIdentity): boolean {
@@ -408,10 +541,12 @@ async function writeMutationFile(file: string, content: string, operationId: str
 
 function identity(input: WorkspaceBindingIdentity) { return { projectId: input.projectId, environmentInstanceId: input.environmentInstanceId, bindingId: input.bindingId, generation: input.generation, connectionEpoch: input.connectionEpoch, workspaceId: input.workspaceId }; }
 function failure(input: WorkspaceFileOperationParams, status: RemoteWorkspaceOperationResult['status'], reason: string): RemoteWorkspaceOperationResult {
-  return { ...identity(input), operationId: input.operationId, operation: input.operation, status, ...(input.path !== undefined ? { path: input.path } : {}), failure: reason };
+  return { ...identity(input), operationId: input.operationId, operation: input.operation, status,
+    ...('path' in input && input.path !== undefined ? { path: input.path } : {}),
+    ...(input.operation === 'command' ? { output: '', outputChunks: [], exitCode: null } : {}), failure: reason };
 }
 function errorCode(error: unknown): string {
-  if (error instanceof Error && ['invalid-path', 'not-text', 'file-too-large', 'content-conflict', 'invalid-patch', 'operation-limit'].includes(error.message)) return error.message;
+  if (error instanceof Error && ['invalid-path', 'not-text', 'file-too-large', 'content-conflict', 'invalid-patch', 'operation-limit', 'command-not-allowed', 'command-timeout'].includes(error.message)) return error.message;
   const code = typeof error === 'object' && error !== null ? (error as NodeJS.ErrnoException).code : undefined;
   return code === 'ENOENT' ? 'not-found' : 'unsupported';
 }

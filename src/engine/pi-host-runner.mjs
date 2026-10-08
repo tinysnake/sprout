@@ -205,9 +205,9 @@ async function openSession(config, input) {
   let remoteCallSequence = 0;
   const turnTelemetry = { streamCalls: 0, streamRejections: [] };
   let rawEventTypes = {};
-  const remoteCall = (operation, args) => new Promise((resolve) => {
+  const remoteCall = (operation, args, onProgress) => new Promise((resolve) => {
     const callId = `${config.sessionId}-${++remoteCallSequence}`;
-    remotePending.set(callId, resolve);
+    remotePending.set(callId, { resolve, onProgress });
     line({ kind: 'remote-call', callId, operation, args });
   });
   try {
@@ -300,6 +300,24 @@ async function openSession(config, input) {
           return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result, isError: result.status !== 'completed' };
         },
       });
+      if (remoteOperations.includes('command')) addTool({
+        name: 'remote_command', label: 'Run remote command', description: 'Run a bounded npm or Node command in the authorized remote Project workspace. Output is streamed and capped.',
+        parameters: { type: 'object', properties: {
+          executable: { type: 'string', enum: ['npm', 'node'] },
+          args: { type: 'array', maxItems: 64, items: { type: 'string', maxLength: 4096 } },
+          cwd: { type: 'string' }, timeoutMs: { type: 'integer', minimum: 100, maximum: 120000 },
+        }, required: ['executable', 'args'], additionalProperties: false },
+        annotations: { readOnlyHint: false, destructiveHint: true },
+        execute: async (id, args, _signal, onUpdate) => {
+          let accumulated = '';
+          const result = await remoteCall('command', { ...args, operationId: id }, progress => {
+            if (typeof progress.text !== 'string') return;
+            accumulated += progress.text;
+            onUpdate?.({ content: [{ type: 'text', text: accumulated }], details: { sequence: progress.sequence, stream: progress.stream } });
+          });
+          return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result, isError: result.status !== 'completed' };
+        },
+      });
     }
     const loader = emptyLoader(loaded.sdk, config);
     stage = 'session-create';
@@ -345,9 +363,16 @@ async function openSession(config, input) {
     input.on('line', async (raw) => {
       let command;
       try { command = JSON.parse(raw); } catch { return; }
+      if (command?.op === 'remote-progress' && typeof command.callId === 'string') {
+        const pending = remotePending.get(command.callId);
+        if (pending && typeof pending.onProgress === 'function' && command.progress && typeof command.progress === 'object') {
+          try { pending.onProgress(command.progress); } catch { /* UI progress cannot fail the remote tool. */ }
+        }
+        return;
+      }
       if (command?.op === 'remote-result' && typeof command.callId === 'string') {
-        const resolve = remotePending.get(command.callId);
-        if (resolve) { remotePending.delete(command.callId); resolve(command.result); }
+        const pending = remotePending.get(command.callId);
+        if (pending) { remotePending.delete(command.callId); pending.resolve(command.result); }
         return;
       }
       if (command?.op === 'prompt' && !settled && typeof command.prompt === 'string') {

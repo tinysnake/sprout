@@ -279,7 +279,7 @@ export class WorkerContextClient {
       sequence = notification.params.sequence;
       try { onProgress(notification.params); } catch { /* Progress observers cannot fail the Worker operation. */ }
     });
-    return sanitizedRequest(this.#transport.request(WORKER_METHODS.workspaceFileOperation, input))
+    return sanitizedRequest<import('../engine/port.ts').RemoteWorkspaceOperationResult>(this.#transport.request(WORKER_METHODS.workspaceFileOperation, input))
       .finally(() => unsubscribe?.());
   }
 
