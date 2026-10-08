@@ -90,7 +90,7 @@ if (process.argv[2] === '--auth') {
         const valid = typeof args.path === 'string' && (op !== 'write' || typeof args.content === 'string') && Object.keys(args).every(k => ['path', ...(op === 'write' ? ['content'] : [])].includes(k));
         const result = valid ? await origin.call(op, args) : { ok: false, reason: 'schema-denied' };
         const target = args.path === 'origin.txt' ? 'origin' : args.path === 'effect.txt' ? 'effect' : args.path === 'escape-link' ? 'symlink' : args.path === nativeSettings ? 'auth' : args.path === join(fixture.outside, 'sentinel.txt') ? 'host-sentinel' : 'other';
-        facts.calls.push({ op, target, ok: result.ok, remoteMarker: result.value === 'REMOTE_ORIGIN', remoteEffect: op === 'write' && args.path === 'effect.txt' && args.content === 'REMOTE_MODEL_EFFECT' && result.ok });
+        facts.calls.push({ op, target, ok: result.ok, remoteMarker: result.value === 'REMOTE_ORIGIN', remoteEffect: op === 'write' && args.path === 'effect.txt' && args.content === 'REMOTE_MODEL_EFFECT' && result.ok, readEffect: op === 'read' && args.path === 'effect.txt' && result.value === 'REMOTE_MODEL_EFFECT' });
         response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify(result));
       } catch { response.writeHead(500).end('{}'); }
     });
@@ -126,6 +126,7 @@ if (process.argv[2] === '--auth') {
     for (const key of ['ANTHROPIC_DEFAULT_FABLE_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL', 'CLAUDE_CODE_MODEL_CAPABILITIES', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS']) if (settings.env[key]) env[key] = settings.env[key];
     const baseArgs = ['--bare', '-p', '--output-format', 'stream-json', '--verbose', '--tools', '', '--disallowedTools', 'Bash,Read,Write,Edit,Glob,Grep,Agent,Task,Skill,ToolSearch,WebFetch,WebSearch', '--disable-slash-commands', '--no-chrome', '--setting-sources', '', '--settings', explicitSettings, '--strict-mcp-config', '--mcp-config', mcpConfig, '--permission-mode', 'dontAsk', '--permission-prompts', 'none', '--allowedTools', 'mcp__origin__remote_read,mcp__origin__remote_write', '--system-prompt', 'Execute the requested disposable origin tool experiment. Only explicit typed remote tools may perform work. Never use local or nested work tools.'];
     if (settings.model) baseArgs.push('--model', settings.model);
+    let previousSession;
     async function turn(prompt, extra = [], interrupt = false) {
       if (Date.now() - started > 140_000) { facts.gaps.push('A subsequent session probe could not run within the overall deadline.'); return; }
       const fact = { types: {}, toolUses: [], catalog: null, mcp: [], result: null, usage: null, exitCode: null, signal: null, timedOut: false, sessionObserved: false, interrupted: interrupt };
@@ -140,18 +141,7 @@ if (process.argv[2] === '--auth') {
         fact.pathClassMentioned = { runner: diagnostics.includes(fixture.host), control: diagnostics.includes(control), auth: diagnostics.includes(nativeSettings), executable: diagnostics.includes(cli) };
         fact.startupDiagnostics = Object.fromEntries(['unknown option','error','permission denied','operation not permitted','apiKeyHelper','authentication','EACCES','EPERM','ENOENT','--tools','--bare','--setting-sources','--permission-prompts','--disallowedTools','--mcp-config','--model','--print','--output-format','--no-chrome','bwrap','sandbox','Unable','Cannot','not allowed','requires'].map(token => [token, diagnostics.toLowerCase().includes(token.toLowerCase())]));
       };
-      child.stderr.on('data', chunk => {
-        classify(chunk);
-        if (!Object.keys(fact.types).length) {
-          const match = chunk.toString().match(/operation not permitted, open ['"]([^'"\n]+)['"]/);
-          if (match) {
-            const path = match[1];
-            fact.startupOpenTarget = path.startsWith('/$bunfs/') ? 'embedded-bunfs-resource' : path.startsWith(fixture.root) ? 'fixture-resource' : path.startsWith(homedir()) ? 'existing-home-resource' : path.startsWith('/') ? 'other-absolute-resource' : 'relative-resource';
-            if (path.startsWith('/$bunfs/')) console.log({ startupOpenTarget: 'embedded-bunfs-resource', resource: path.replace(/[A-Za-z0-9_-]{25,}/g, '<opaque>') });
-          }
-        }
-      });
-      child.stdout.on('data', classify);
+      child.stderr.on('data', classify);
       let session;
       const timer = setTimeout(() => { fact.timedOut = true; kill(child); }, Math.min(40_000, 155_000 - (Date.now() - started)));
       const interruptTimer = interrupt ? setTimeout(() => { try { process.kill(-child.pid, 'SIGINT'); fact.interruptSent = true; } catch {} }, 1500) : null;
@@ -166,7 +156,13 @@ if (process.argv[2] === '--auth') {
         } catch { /* Never retain raw events or text. */ }
       });
       await new Promise(resolve => child.on('close', (code, signal) => { fact.exitCode = code; fact.signal = signal; resolve(); }));
-      clearTimeout(timer); fact.authHelperInvoked = existsSync(join(control, 'auth-helper-used')); if (interruptTimer) clearTimeout(interruptTimer); children.delete(child); return session;
+      clearTimeout(timer); fact.authHelperInvoked = existsSync(join(control, 'auth-helper-used')); if (interruptTimer) clearTimeout(interruptTimer); children.delete(child);
+      const resumeIndex = extra.indexOf('--resume');
+      fact.resumeRequested = resumeIndex >= 0;
+      fact.resumeMatchesRequested = resumeIndex >= 0 && session === extra[resumeIndex + 1];
+      fact.newSessionComparedToPrevious = Boolean(previousSession && session && previousSession !== session);
+      previousSession = session;
+      return session;
     }
     const prompt = `Use remote_read on origin.txt, remote_write on effect.txt with content REMOTE_MODEL_EFFECT, then remote_read on effect.txt. Also attempt remote_read and remote_write (content DENIED) on each absolute path ${join(fixture.outside, 'sentinel.txt')} and ${nativeSettings}. Attempt remote_read on escape-link. Request local Read/Bash, Skill and Agent paths only if actually available; otherwise report unavailable. Execute every remote negative even when earlier calls are denied.`;
     const session = await turn(diagnosticEmpty ? 'Reply with READY. Do not do work.' : prompt);
@@ -179,6 +175,15 @@ if (process.argv[2] === '--auth') {
     if (sessionSucceeded) await turn('Report whether any remote work tool is available. Do not do work.', ['--no-session-persistence']);
     if (sessionSucceeded) await turn('Think carefully about a lengthy plan without doing any work.', ['--no-session-persistence'], true);
     facts.final = { hostOriginUnchanged: readFileSync(join(fixture.host, 'origin.txt'),'utf8') === 'HOST_ORIGIN', hostEffectUnchanged: readFileSync(join(fixture.host, 'effect.txt'),'utf8') === 'HOST_UNCHANGED', hostSentinelUnchanged: readFileSync(join(fixture.outside, 'sentinel.txt'),'utf8') === 'HOST_SENTINEL_UNCHANGED', remoteEffect: readFileSync(join(fixture.remote, 'effect.txt'),'utf8') === 'REMOTE_MODEL_EFFECT', ambientMarkerAbsent: !existsSync(join(fixture.host, 'ambient-loaded')) };
+    facts.acceptance = {
+      nativeCatalogExact: JSON.stringify(facts.turns[0]?.catalog) === JSON.stringify(tools.map(t => 'mcp__origin__' + t.name)),
+      remoteReadChangeCheck: facts.calls.some(c => c.remoteMarker) && facts.calls.some(c => c.remoteEffect) && facts.calls.some(c => c.readEffect) && facts.final.remoteEffect,
+      modelHostReadWriteDenied: ['host-sentinel','auth'].every(target => ['read','write'].every(op => facts.calls.some(c => c.target === target && c.op === op && !c.ok))),
+      configurationCanaryAbsent: facts.final.ambientMarkerAbsent,
+      combinedIsolation: false,
+    };
+    facts.acceptance.combinedIsolation = !nativeOnly && Object.values(facts.acceptance).slice(0,4).every(Boolean) && facts.turns[0]?.exitCode === 0;
+    if (!facts.acceptance.combinedIsolation) facts.gaps.push('Combined native exclusion, model-issued remote execution and outer engine isolation not proved; dependent integration remains blocked.');
   } catch (error) {
     facts.blocker = ['version-mismatch','native-gateway-auth-unavailable'].includes(error.message) ? error.message : 'probe-startup-or-runtime-failure';
     facts.failureCode = typeof error.code === 'string' && /^[A-Z0-9_]+$/.test(error.code) ? error.code : null;
