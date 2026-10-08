@@ -18,6 +18,10 @@ const root = await mkdtemp(join(tmpdir(), 'sprout-live-pi-remote-read-'));
 let runtime: Awaited<ReturnType<typeof createRuntime>> | undefined;
 let hostPiSessionStarted = false;
 let remoteWorkspaceAttached = false;
+let engineTurnStatus: string | undefined;
+let responseMentionsTool = false;
+let responseContainsMarker = false;
+const piToolNames: string[] = [];
 const resultFacts: {
   readonly status: string;
   readonly operation: string;
@@ -71,7 +75,31 @@ function observeRemoteReads(adapter: HostPiEngineAdapter): HostPiEngineAdapter {
           return response;
         },
       };
-      return adapter.startSession({ ...request, remoteWorkspace: observed });
+      const session = await adapter.startSession({ ...request, remoteWorkspace: observed });
+      return {
+        sessionId: session.sessionId,
+        engineSessionKey: session.engineSessionKey,
+        run(prompt: string) {
+          const turn = session.run(prompt);
+          const events = (async function* () {
+            for await (const event of turn.events) {
+              if (event.type === 'tool-call') piToolNames.push(event.name);
+              if (event.type === 'message') {
+                responseMentionsTool ||= event.text.includes('remote_read');
+                responseContainsMarker ||= event.text.includes('REMOTE_WORKER_SENTINEL');
+              }
+              yield event;
+            }
+          })();
+          const completion = turn.completion.then((result) => {
+            engineTurnStatus = result.status;
+            return result;
+          });
+          return { events, completion };
+        },
+        interrupt: session.interrupt.bind(session),
+        close: session.close.bind(session),
+      };
     },
   } as unknown as HostPiEngineAdapter;
 }
@@ -159,6 +187,11 @@ try {
         outcome: accepted ? 'model-issued-read-passed' : 'model-issued-read-incomplete',
         piVersion: readiness.version ?? 'unknown',
         runStatus: run.status,
+        eventTypes: run.events.map((event) => event.type),
+        toolNames: piToolNames,
+        engineTurnStatus,
+        responseMentionsTool,
+        responseContainsMarker,
         hostPiSessionStarted,
         remoteWorkspaceAttached,
         hostProfileMatched: run.engineHostProfileId === pi.profileId,
