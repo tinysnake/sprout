@@ -105,6 +105,8 @@ if (process.argv[2] === '--auth') {
       let diagnostics = '';
       const classify = chunk => {
         diagnostics = (diagnostics + chunk.toString()).slice(-32_768);
+        fact.deniedOperation = ['mkdir','open','scandir','realpath','stat','access','spawn','chdir','uv_cwd','write','readlink'].filter(token => new RegExp('\\b' + token + '\\b', 'i').test(diagnostics));
+        fact.pathClassMentioned = { runner: diagnostics.includes(fixture.host), control: diagnostics.includes(control), auth: diagnostics.includes(nativeSettings), executable: diagnostics.includes(cli) };
         fact.startupDiagnostics = Object.fromEntries(['unknown option','error','permission denied','operation not permitted','apiKeyHelper','authentication','EACCES','EPERM','ENOENT','--tools','--bare','--setting-sources','--permission-prompts','--disallowedTools','--mcp-config','--model','--print','--output-format','--no-chrome','bwrap','sandbox','Unable','Cannot','not allowed','requires'].map(token => [token, diagnostics.toLowerCase().includes(token.toLowerCase())]));
       };
       child.stderr.on('data', classify);
