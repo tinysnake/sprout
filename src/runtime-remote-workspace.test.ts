@@ -307,7 +307,8 @@ test('Host-run edits and patches only through the enrolled Worker with one run-h
     assert.equal(readFileSync(localFile, 'utf8'), 'LOCAL_SENTINEL');
     assert.equal(leasesDuringRun.length, 1);
     assert.equal(leasesDuringRun[0]?.capability, 'agent-run');
-    assert.equal(runtime.pool.leases().length, 0, 'the run releases its lease after confirmed settlement');
+    assert.equal(runtime.pool.leases().length, 1, 'the released lease remains inspectable');
+    assert.equal(runtime.pool.leases()[0]?.state, 'released', 'the run releases its lease after confirmed settlement');
 
     const replay = conflictingReplay!;
     assert.equal(replay.failure, 'operation-identity-conflict');

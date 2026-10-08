@@ -330,8 +330,13 @@ export class EnvironmentOperations {
         if (!this.#environment.inspectWorkspaceFileOperation) return { status: row.state };
         const request: InspectWorkspaceFileOperationParams = { ...fixed, operationId };
         const result = await this.#environment.inspectWorkspaceFileOperation(access.environmentInstanceId, request);
-        if (result.status === 'not-found' && (row.state === 'running' || row.state === 'unknown' || row.state === 'cancel-requested')) return { status: 'unknown' };
+        if (result.status === 'not-found' && (row.state === 'running' || row.state === 'unknown' || row.state === 'cancel-requested')) {
+          await this.#saveState(row, 'unknown');
+          return { status: 'unknown' };
+        }
+        if ((row.operation === 'edit' || row.operation === 'patch') && isTerminalOperationState(result.status) && result.result === undefined) return { status: 'unknown' };
         if (result.result && (row.operation === 'command' ||
+            result.result.status !== result.status ||
             !isBoundedRemoteResult(result.result, fixed, operationId, row.operation as 'read' | 'search' | 'edit' | 'patch'))) return { status: 'unknown' };
         if (isTerminalOperationState(result.status) && result.status !== row.state) await this.#saveState(row, result.status);
         if (isTerminalOperationState(result.status) && result.result && (row.operation === 'edit' || row.operation === 'patch')) {

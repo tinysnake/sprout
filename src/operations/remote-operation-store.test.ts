@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { MemoryRemoteOperationIdentityStore, SqliteRemoteOperationIdentityStore, type RemoteOperationIdentity } from './remote-operation-store.ts';
 
@@ -17,19 +20,25 @@ test('memory operation identity claim is atomic by ID and fingerprint', async ()
   assert.equal(await store.claim(identity({ fingerprint: 'fingerprint-b' })), 'conflicting-identity');
 });
 
-test('SQLite operation identity survives store reconstruction and terminal outcome cannot regress', async () => {
-  const db = new DatabaseSync(':memory:');
+test('SQLite operation identity survives store reconstruction and terminal outcome cannot regress', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-remote-operation-store-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const filename = join(directory, 'operations.db');
+  const db = new DatabaseSync(filename);
+  const first = new SqliteRemoteOperationIdentityStore(db);
+  assert.equal(await first.claim(identity()), 'claimed');
+  await first.save(identity({ state: 'unknown', updatedAt: 11 }));
+  db.close();
+
+  const reopenedDb = new DatabaseSync(filename);
   try {
-    const first = new SqliteRemoteOperationIdentityStore(db);
-    assert.equal(await first.claim(identity()), 'claimed');
-    await first.save(identity({ state: 'unknown', updatedAt: 11 }));
-    const reopened = new SqliteRemoteOperationIdentityStore(db);
+    const reopened = new SqliteRemoteOperationIdentityStore(reopenedDb);
     assert.equal(await reopened.claim(identity()), 'same-identity');
     assert.equal(await reopened.claim(identity({ fingerprint: 'fingerprint-b' })), 'conflicting-identity');
     await reopened.save(identity({ state: 'completed', updatedAt: 12 }));
     await reopened.save(identity({ state: 'running', updatedAt: 13 }));
     assert.equal((await reopened.get('stable-operation-id'))?.state, 'completed');
   } finally {
-    db.close();
+    reopenedDb.close();
   }
 });
