@@ -26,7 +26,7 @@ export class ProductionProjectService implements ProjectManagementService {
   }
 
   async loadOverview(projectId: string): Promise<ProjectOverviewData> {
-    const [project, agents, environments, access] = await Promise.all([
+    const [project, agents, environments, access, bindingReadiness] = await Promise.all([
       this.#ports.projects.getProject(projectId),
       this.#ports.agents.listAgents(),
       this.#ports.environments.listEnvironments(),

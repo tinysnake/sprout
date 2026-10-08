@@ -105,6 +105,9 @@ const UNKNOWN_ENVIRONMENT_LABEL = 'unknown-environment';
 const environmentFor = (id: string) => overview.value?.environments.find(
   (environment) => environment.environmentInstanceId === id || environment.id === id,
 );
+const bindingReadinessFor = (id: string) => overview.value?.bindingReadiness.find(
+  (readiness) => readiness.environmentInstanceId === id,
+);
 function environmentNoticeVariant(environmentInstanceId: string): 'success' | 'warning' | 'danger' | 'secondary' {
   const severity = environmentFor(environmentInstanceId)?.trafficLight;
   if (severity === 'green') return 'success';
@@ -608,6 +611,7 @@ const addMemberExhausted = computed(() => dialog.value === 'add-member' && unass
                     <div class="flex flex-wrap items-center gap-1.5"><Icon name="environments" :size="14" class="text-[var(--accent-primary)]" /><strong class="break-words text-xs text-[var(--text-primary)]">{{ environmentFor(entry.environmentInstanceId)?.displayName ?? UNKNOWN_ENVIRONMENT_LABEL }}</strong><Badge :variant="entry.status === 'active' ? environmentNoticeVariant(entry.environmentInstanceId) : 'secondary'">{{ entry.status === 'active' ? environmentFor(entry.environmentInstanceId)?.trafficLightReason ?? 'Active access' : 'Access ended' }}</Badge></div>
                     <p class="mt-1 break-all font-mono text-[11px] text-[var(--text-secondary)]">{{ entry.current ? entry.current.kind === 'relative' ? entry.current.path : 'Worker-managed default workspace' : 'No current workspace binding' }}</p>
                     <p class="mt-1 text-[10px] text-[var(--text-muted)]">{{ environmentFor(entry.environmentInstanceId)?.platform ?? 'Environment status unavailable' }} · Workspace files stay on the Environment host.</p>
+                    <p class="mt-1 text-[10px]" :data-binding-readiness="bindingReadinessFor(entry.environmentInstanceId)?.status ?? 'unknown'" :class="bindingReadinessFor(entry.environmentInstanceId)?.status === 'ready' ? 'text-[var(--green-success)]' : 'text-[var(--yellow-attention)]'">Remote workspace {{ bindingReadinessFor(entry.environmentInstanceId)?.status === 'ready' ? 'ready' : bindingReadinessFor(entry.environmentInstanceId)?.status === 'blocked' ? `blocked · ${bindingReadinessFor(entry.environmentInstanceId)?.reason ?? 'unavailable'}` : 'readiness not observed' }} · independent of engine readiness</p>
                   </div>
                   <div v-if="entry.status === 'active' && !projectArchived" class="flex shrink-0 flex-wrap gap-1">
                     <Button variant="secondary" size="sm" class="min-h-[44px]" :disabled="controlsDisabled" @click="openDialog('edit-workspace', '', entry.environmentInstanceId)">Change workspace</Button>
