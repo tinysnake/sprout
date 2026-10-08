@@ -111,7 +111,10 @@ if (process.argv[2] === '--auth') {
         fact.pathClassMentioned = { runner: diagnostics.includes(fixture.host), control: diagnostics.includes(control), auth: diagnostics.includes(nativeSettings), executable: diagnostics.includes(cli) };
         fact.startupDiagnostics = Object.fromEntries(['unknown option','error','permission denied','operation not permitted','apiKeyHelper','authentication','EACCES','EPERM','ENOENT','--tools','--bare','--setting-sources','--permission-prompts','--disallowedTools','--mcp-config','--model','--print','--output-format','--no-chrome','bwrap','sandbox','Unable','Cannot','not allowed','requires'].map(token => [token, diagnostics.toLowerCase().includes(token.toLowerCase())]));
       };
-      child.stderr.on('data', classify);
+      child.stderr.on('data', chunk => {
+        classify(chunk);
+        if (!Object.keys(fact.types).length) console.log(chunk.toString().split('\n').slice(0, 3).map(line => line.replace(/(['"])[^'"\n]*\1/g, '<opaque>').replace(/\/[\w.\/-]+/g, '<path>').replace(/[A-Za-z0-9_-]{25,}/g, '<opaque>')).join('\n'));
+      });
       child.stdout.on('data', classify);
       let session;
       const timer = setTimeout(() => { fact.timedOut = true; kill(child); }, Math.min(65_000, 155_000 - (Date.now() - started)));
