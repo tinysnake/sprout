@@ -12,13 +12,16 @@ import { SqliteLeaseStore } from '../environment/sqlite-store.ts';
 import { SqliteStore } from '../store/db.ts';
 import { migrateOrInitializeDatabase } from '../store/schema.ts';
 import type { EnvironmentLease } from '../environment/pool.ts';
+import { legacyEnvironmentPlacement } from '../execution-placement.ts';
 
 function sampleRun(overrides: Partial<AgentRun> = {}): AgentRun {
+  const environmentInstanceId = overrides.environmentInstanceId ?? 'mac-mini-1';
   return {
     id: 'run-1',
     agentId: 'agent-scout',
     prompt: 'say hi',
-    environmentInstanceId: 'mac-mini-1',
+    environmentInstanceId,
+    executionPlacement: legacyEnvironmentPlacement(environmentInstanceId),
     status: 'completed',
     events: [
       { type: 'notice', text: 'starting' },
@@ -113,7 +116,7 @@ test('saving the same run again updates it rather than duplicating it', async ()
   store.close();
 });
 
-test('a run with no optional fields round-trips without inventing them', async () => {
+test('a legacy run with no other optional fields reads with its Environment-hosted placement', async () => {
   const store = new SqliteRunStore({ filename: ':memory:' });
   const minimal: AgentRun = {
     id: 'run-2',
@@ -127,7 +130,10 @@ test('a run with no optional fields round-trips without inventing them', async (
   await store.save(minimal);
 
   const restored = await store.get('run-2');
-  assert.deepEqual(restored, minimal);
+  assert.deepEqual(restored, {
+    ...minimal,
+    executionPlacement: legacyEnvironmentPlacement('mac-mini-1'),
+  });
   assert.equal('result' in (restored ?? {}), false);
   assert.equal('leaseId' in (restored ?? {}), false);
   store.close();

@@ -212,6 +212,11 @@ export class EnvironmentPool {
     return this.#eligibleInstanceIds === undefined || this.#eligibleInstanceIds.has(instanceId);
   }
 
+  definition(instanceId: string): EnvironmentDefinition | undefined {
+    const instance = this.#instances.get(instanceId);
+    return instance === undefined ? undefined : this.#definitions.get(instance.definitionId);
+  }
+
   /**
    * One environment instance by id.
    *

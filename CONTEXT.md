@@ -112,6 +112,10 @@ _Avoid_: Environment binding, model fallback retry
 The immutable, process-wide choice made when a Sprout instance starts: `environment-hosted` places engine execution in the selected Environment worker, while `host-run` places engine execution on the Sprout host. Omission selects `environment-hosted` on every startup. Settings reports the effective mode; changing it requires restarting Sprout with a different startup argument.
 _Avoid_: Browser preference, runtime switch
 
+**Execution placement**:
+The durable facts describing where a run or begun Task executes: its immutable Execution mode and, after admission, the actual Engine host and non-secret host profile. A Task keeps the placement chosen when it began for every later run and recovery decision.
+_Avoid_: Work Environment, engine choice
+
 **Engine host**:
 The host that runs an engine process, owns its engine session storage, and holds its engine login. It is the Environment host in `environment-hosted` mode and the Sprout host in `host-run` mode, independently of the work Environment that owns files and remote operations.
 _Avoid_: Work Environment, Project workspace
@@ -165,7 +169,7 @@ The Human escalation available while a Task pause request still has an active ag
 _Avoid_: Interruption, Task pause, Task end
 
 **Session key**:
-The opaque, engine-native identifier of the conversation an agent run continued or created, stored by Sprout so the next run in the same environment and working directory can continue it. Owned by the engine; Sprout chooses it for Pi and captures it for the others.
+The opaque, engine-native identifier of a conversation an Agent run continued or created. It can continue only within the same Agent, engine, execution mode, Engine host and profile, working area, and authorized Conversation, Routing batch, or Task scope.
 _Avoid_: Session id, thread id, conversation id
 
 **Work model**:

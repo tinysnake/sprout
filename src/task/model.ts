@@ -18,6 +18,7 @@
  */
 
 import type { EnvironmentPreference } from '../environment/model.ts';
+import type { ExecutionPlacement } from '../execution-placement.ts';
 
 /**
  * The durable lifecycle of one Task.
@@ -176,6 +177,8 @@ export interface Task {
   /** Durable intent survives cleanup/release recovery without changing disposition. */
   readonly endDisposition?: 'completed' | 'cancelled';
   readonly forcedRelease?: { readonly actor: string; readonly reason: string; readonly unresolvedFacts: readonly string[]; readonly at: number };
+  /** Present for Tasks begun after execution placement was introduced. */
+  readonly executionPlacement?: ExecutionPlacement;
   /** Fixed only by Task begin; absent for an unbegun Task. */
   readonly environmentInstanceId?: string;
   /** The Task-held lease, never a nested run-held lease. */

@@ -11,6 +11,7 @@ import type { EnvironmentDefinition, EnvironmentInstance } from '../environment/
 import { EnvironmentPool } from '../environment/pool.ts';
 import { ProjectRegistry } from '../project/registry.ts';
 import { SqliteStore } from '../store/db.ts';
+import { createExecutionStrategy } from '../execution-mode.ts';
 import type { AgentRun } from '../run/model.ts';
 import { InMemoryTaskStore } from './store.ts';
 import { TaskEnvironmentLifecycle, type TaskContextWorker } from './environment-lifecycle.ts';
@@ -98,6 +99,7 @@ function sqliteLifecycle(store: SqliteStore, options: {
   runId?: () => string;
   worker?: TaskContextWorker;
   onSubmit?: () => void;
+  executionStrategy?: ReturnType<typeof createExecutionStrategy>;
 } = {}) {
   const pool = new EnvironmentPool({
     definitions: [definition],
@@ -117,6 +119,7 @@ function sqliteLifecycle(store: SqliteStore, options: {
       run: options.runId ?? (() => 'run-1'),
     },
     ...(options.worker !== undefined ? { worker: options.worker } : {}),
+    ...(options.executionStrategy !== undefined ? { executionStrategy: options.executionStrategy } : {}),
     runs: { submit: async (request) => { options.onSubmit?.(); return { id: request.runId }; } },
   });
   return { lifecycle, pool };
@@ -362,6 +365,65 @@ test('interrupted nested work and restart retain exclusion until the owning Task
   const discarded = await scenario.lifecycle.recover('task-1', 'discard');
   assert.equal(discarded.environmentLifecycleState, 'discarded');
   assert.equal(scenario.pool.getLease(begun.environmentLeaseId!)?.state, 'released');
+});
+
+test('a mode mismatch refuses Task advancement before changing run or lease state', async () => {
+  const scenario = build();
+  const reservation = scenario.pool.reserveTaskLease({
+    instanceId: 'mac-1', capability: 'agent-run', holderId: 'task-1', taskId: 'task-1', ttlMs: 60_000,
+  });
+  assert.equal(reservation.ok, true);
+  if (!reservation.ok) return;
+  scenario.pool.adoptLease(reservation.lease);
+  await scenario.store.create({
+    ...task(),
+    status: 'in-progress',
+    executionPlacement: {
+      mode: 'host-run',
+      engineHost: { kind: 'sprout', id: 'sprout-test', profile: { platform: 'macos', boundary: 'shared-host' } },
+    },
+    environmentInstanceId: 'mac-1',
+    environmentLeaseId: reservation.lease.id,
+    environmentLifecycleState: 'idle',
+  });
+
+  await assert.rejects(
+    scenario.lifecycle.advanceRun('task-1', 'pi', 'continue'),
+    /recorded under host-run.*this Sprout process is environment-hosted/,
+  );
+  assert.equal((await scenario.store.get('task-1'))?.environmentLifecycleState, 'idle');
+  assert.equal(scenario.pool.getLease(reservation.lease.id)?.state, 'active');
+  assert.deepEqual(scenario.submitted, []);
+});
+
+test('a Task retains its Environment-hosted placement through SQLite restart', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-task-placement-restart-'));
+  try {
+    const filename = join(directory, 'sprout.db');
+    const first = new SqliteStore({ filename });
+    await first.tasks.create(task());
+    const initial = sqliteLifecycle(first);
+    const begun = await initial.lifecycle.begin('task-1');
+    assert.equal(begun.executionPlacement?.mode, 'environment-hosted');
+    assert.equal(begun.executionPlacement?.engineHost?.id, 'mac-1');
+    first.close();
+
+    const reopened = new SqliteStore({ filename });
+    const restored = await reopened.tasks.get('task-1');
+    assert.deepEqual(restored?.executionPlacement, begun.executionPlacement);
+    assert.equal(restored?.environmentInstanceId, begun.environmentInstanceId);
+    assert.equal(restored?.environmentLeaseId, begun.environmentLeaseId);
+    assert.equal(reopened.leases.get(begun.environmentLeaseId!)?.instanceId, begun.environmentInstanceId);
+    assert.equal(reopened.leases.get(begun.environmentLeaseId!)?.state, 'active');
+    const mismatch = sqliteLifecycle(reopened, { executionStrategy: createExecutionStrategy('host-run') });
+    await assert.rejects(
+      mismatch.lifecycle.advanceRun('task-1', 'pi', 'continue after restart'),
+      /recorded under environment-hosted.*this Sprout process is host-run/,
+    );
+    assert.equal(reopened.leases.get(begun.environmentLeaseId!)?.state, 'active');
+    assert.equal((await reopened.tasks.get('task-1'))?.environmentLifecycleState, 'idle');
+    reopened.close();
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('SQLite restart preserves pause state and its attributed control history beside the held Task lease', async () => {

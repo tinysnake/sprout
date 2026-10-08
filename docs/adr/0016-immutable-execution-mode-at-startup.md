@@ -39,6 +39,8 @@ that performs inference.
   readiness probe.
 - Later placement work must keep the one Runtime admission seam and preserve
   Environment enrollment, Project authority, leases, and recovery guarantees.
+  ADR-0017 records the selected mode and actual engine host on admitted Runs and
+  begun Tasks so a restart cannot silently relabel unfinished work.
 
 **Rejected alternatives**
 

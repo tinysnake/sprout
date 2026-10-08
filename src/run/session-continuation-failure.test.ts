@@ -73,6 +73,24 @@ const events: readonly AgentRunEvent[] = [{ type: 'message', text: 'done', final
 
 const completed = { status: 'completed', text: 'done' } as const;
 
+function continuationIdentity(workingDirectory = '/srv/work') {
+  return {
+    agentId: 'agent-scout',
+    engine: 'scripted',
+    environmentInstanceId: 'mac-mini-1',
+    executionPlacement: {
+      mode: 'environment-hosted',
+      engineHost: {
+        kind: 'environment',
+        id: 'mac-mini-1',
+        profile: { platform: 'macos', boundary: 'shared-host' },
+      },
+    },
+    scope: { kind: 'conversation', id: 'test-conversation' },
+    workingDirectory,
+  } as const;
+}
+
 
 function build(options: {
   agent?: Partial<AgentDefinition>;
@@ -126,6 +144,11 @@ function build(options: {
     leaseTtlMs: 60_000,
     clock: { now: () => 5_000 },
   });
+  const submitInContinuationScope = orchestrator.submit.bind(orchestrator);
+  orchestrator.submit = (request) => submitInContinuationScope({
+    ...request,
+    sessionKeyScope: request.sessionKeyScope ?? { kind: 'conversation', id: 'test-conversation' },
+  });
   return { orchestrator, adapter, sessionKeys, store, agent };
 }
 
@@ -136,10 +159,7 @@ test('an empty-turn failure with a stored key is not retried and keeps the key',
   // be deleted and the run must not be silently retried fresh.
   const sessionKeys = new InMemorySessionKeyStore();
   await sessionKeys.save({
-    agentId: 'agent-scout',
-    engine: 'scripted',
-    environmentInstanceId: 'mac-mini-1',
-    workingDirectory: '/srv/work',
+    ...continuationIdentity(),
     key: 'a-valid-key',
     updatedAt: 1_000,
   });
@@ -162,12 +182,7 @@ test('an empty-turn failure with a stored key is not retried and keeps the key',
   assert.match(run.failure ?? '', /provider authentication failed/);
   assert.equal(adapter.requests.length, 1, 'an empty non-refusal turn is not retried fresh');
   assert.equal(adapter.requests[0]?.resumeSessionKey, 'a-valid-key');
-  const stored = await sessionKeys.get({
-    agentId: 'agent-scout',
-    engine: 'scripted',
-    environmentInstanceId: 'mac-mini-1',
-    workingDirectory: '/srv/work',
-  });
+  const stored = await sessionKeys.get(continuationIdentity());
   assert.equal(stored?.key, 'a-valid-key', 'the key survives an empty non-refusal failure');
 });
 
@@ -194,10 +209,7 @@ test('a soft-fallback engine is not retried, because it never fails', async () =
   // key once and takes whatever session the engine reports.
   const sessionKeys = new InMemorySessionKeyStore();
   await sessionKeys.save({
-    agentId: 'agent-scout',
-    engine: 'scripted',
-    environmentInstanceId: 'mac-mini-1',
-    workingDirectory: '/srv/work',
+    ...continuationIdentity(),
     key: 'stale-key',
     updatedAt: 1_000,
   });
@@ -213,12 +225,7 @@ test('a soft-fallback engine is not retried, because it never fails', async () =
   assert.equal(run.status, 'completed');
   assert.equal(adapter.requests.length, 1, 'no retry was needed');
   assert.equal(adapter.requests[0]?.resumeSessionKey, 'stale-key');
-  const stored = await sessionKeys.get({
-    agentId: 'agent-scout',
-    engine: 'scripted',
-    environmentInstanceId: 'mac-mini-1',
-    workingDirectory: '/srv/work',
-  });
+  const stored = await sessionKeys.get(continuationIdentity());
   assert.equal(stored?.key, 'scripted-key-1', 'the fresh key replaces the stale one');
 });
 

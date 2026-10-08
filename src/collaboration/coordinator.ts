@@ -105,6 +105,7 @@
 
 import type { AgentRun, RunObserver } from '../run/model.ts';
 import type { RunOrchestrator } from '../run/orchestrator.ts';
+import type { SessionKeyScope } from '../execution-placement.ts';
 import { createIdFactory, type IdFactory } from '../ids.ts';
 import { redactSensitiveText, sanitizeIdentifier } from '../environment/privacy.ts';
 import {
@@ -183,6 +184,8 @@ export interface RunAdmitter {
      * in this Project and refuses explicitly rather than falling back.
      */
     readonly projectId: string;
+    /** Authorized scope that owns this wake's native continuation. */
+    readonly sessionKeyScope: SessionKeyScope;
   }): Promise<{ id: string }>;
   waitFor(runId: string): Promise<AgentRun>;
   /**
@@ -815,10 +818,16 @@ export class CollaborationCoordinator {
     // can only ever resolve against the Project that owns the input. A target
     // Agent that also belongs to another Project never executes there by
     // accident; the orchestrator refuses a non-member explicitly.
+    const sessionKeyScope: SessionKeyScope = source.kind === 'batch'
+      ? { kind: 'routing-batch', id: source.batch.id }
+      : isProjectEvent(source.input)
+        ? { kind: 'conversation', id: projectChannelScopeId(source.input.projectId) }
+        : { kind: 'conversation', id: source.input.scopeId };
     const submission = await this.#runs.submit({
       agentId: wake.agentId,
       prompt: renderSourcePrompt(source, wake.agentId),
       projectId: sourceProjectId(source),
+      sessionKeyScope,
     });
 
     const admitted = await this.#store.admitWake({

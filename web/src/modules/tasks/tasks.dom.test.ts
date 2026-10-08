@@ -122,6 +122,24 @@ function appServices(conflictCodes: readonly string[] = [], snapshot = overview)
   });
   const allTasks = [
     task('agent-led-idle', 'idle'),
+    task('mode-mismatch', 'idle', {
+      executionPlacement: { mode: 'host-run', engineHost: { kind: 'sprout', id: 'sprout-test', profile: { platform: 'macos', boundary: 'shared-host' } } },
+      processExecutionMode: 'environment-hosted',
+      executionModeMismatchReason: 'Task was recorded under host-run; this Sprout process is environment-hosted. Restart Sprout with --execution-mode host-run to continue it.',
+    }),
+    task('awaiting-mode-mismatch', 'awaiting-validation', {
+      pendingCompletionClaimId: 'claim-mode-mismatch',
+      completionClaims: [{ id: 'claim-mode-mismatch', contentVersion: 1, actor: { memberId: 'agent-a', memberKind: 'agent' }, at: time, outcomeSummary: 'The work is ready for validation.', validationEvidence: ['Acceptance evidence is available.'], durableChanges: [], limitations: [], recommendedDisposition: 'continue' }],
+      executionPlacement: { mode: 'host-run', engineHost: { kind: 'sprout', id: 'sprout-test', profile: { platform: 'macos', boundary: 'shared-host' } } },
+      processExecutionMode: 'environment-hosted',
+      executionModeMismatchReason: 'Task was recorded under host-run; this Sprout process is environment-hosted. Restart Sprout with --execution-mode host-run to continue it.',
+    }),
+    task('ended-mode-mismatch', 'ended', {
+      status: 'done', endDisposition: 'completed',
+      executionPlacement: { mode: 'host-run', engineHost: { kind: 'sprout', id: 'sprout-test', profile: { platform: 'macos', boundary: 'shared-host' } } },
+      processExecutionMode: 'environment-hosted',
+      executionModeMismatchReason: 'Task was recorded under host-run; this Sprout process is environment-hosted. Restart Sprout with --execution-mode host-run to continue it.',
+    }),
     agentLedAwaiting,
     humanLedRunningWithLead,
     humanLedIdle,
@@ -497,7 +515,9 @@ test('Task run audit explains absent events, result, duration and usage when dis
   let app: { unmount(): void } | undefined;
   try {
     ({ app } = await mountTasks(vite, doc, [], overview, { async getRun() {
-      return auditRun({ events: [], result: undefined, completedAt: undefined, tokenUsage: undefined, status: 'running' });
+      return auditRun({ events: [], result: undefined, completedAt: undefined, tokenUsage: undefined, status: 'running',
+        executionPlacement: { mode: 'environment-hosted', engineHost: { kind: 'environment', id: 'instance-a', profile: { platform: 'macos', boundary: 'shared-host' } } },
+        processExecutionMode: 'host-run', executionModeMismatchReason: 'Run is recorded in environment-hosted mode and must be resumed with that mode.' });
     } }));
     const audit = await openCompletedAudit(doc);
     expandSummaryRows(audit);
@@ -506,6 +526,9 @@ test('Task run audit explains absent events, result, duration and usage when dis
     assert.match(audit.textContent ?? '', /No final result recorded/);
     assert.match(audit.textContent ?? '', /Duration unavailable/);
     assert.match(audit.textContent ?? '', /Tokens unavailable/);
+    assert.match(audit.textContent ?? '', /Recorded placement · environment-hosted · environment instance-a · macos\/shared-host/);
+    assert.match(audit.textContent ?? '', /Current Sprout mode · host-run/);
+    assert.match(audit.textContent ?? '', /Run is recorded in environment-hosted mode/);
   } finally { app?.unmount(); await cleanup(); }
 });
 
@@ -928,6 +951,38 @@ test('Project Tasks filters with a dropdown and keeps task switching inside Chat
       assert.equal(split.className, splitClasses, 'different detail lengths never change the bounded pane contract');
       assert.equal(doc.querySelector('[data-task-layout="split"]'), split);
     }
+    app.unmount();
+  } finally { await cleanup(); }
+});
+
+test('Project Tasks exposes placement mismatch and keeps validation acceptance while blocking continuation', async () => {
+  const { doc, vite, cleanup } = await setupHarness();
+  try {
+    const { app } = await mountTasks(vite, doc);
+    doc.querySelector<HTMLButtonElement>('[data-record-kind="task"][data-record-id="mode-mismatch"]')?.click();
+    await settle();
+    const idleDetails = doc.querySelector<HTMLElement>('[aria-label="Selected Task details"]');
+    assert.ok(idleDetails);
+    assert.match(idleDetails.textContent ?? '', /Recorded mode: host-run/);
+    assert.match(idleDetails.textContent ?? '', /Current Sprout mode: environment-hosted/);
+    assert.match(idleDetails.textContent ?? '', /Restart Sprout with --execution-mode host-run/);
+    assert.equal(idleDetails.querySelector('#advance-target-agent'), null, 'mismatched Tasks cannot admit a continuation run');
+    assert.ok([...idleDetails.querySelectorAll('button')].some((button) => button.textContent?.includes('Discard Task')), 'cleanup remains available');
+
+    doc.querySelector<HTMLButtonElement>('[data-record-kind="task"][data-record-id="awaiting-mode-mismatch"]')?.click();
+    await settle();
+    const validationDetails = doc.querySelector<HTMLElement>('[aria-label="Selected Task details"]');
+    assert.ok(validationDetails);
+    const accept = [...validationDetails.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent?.includes('Accept and safely end Task'));
+    assert.ok(accept, 'validation acceptance remains available');
+    assert.equal([...validationDetails.querySelectorAll('button')].some((button) => button.textContent?.includes('Request correction')), false, 'correction cannot continue work under a mismatched mode');
+
+    doc.querySelector<HTMLButtonElement>('[data-record-kind="task"][data-record-id="ended-mode-mismatch"]')?.click();
+    await settle();
+    const endedDetails = doc.querySelector<HTMLElement>('[aria-label="Selected Task details"]');
+    assert.ok(endedDetails);
+    assert.match(endedDetails.textContent ?? '', /Recorded mode: host-run/);
+    assert.equal([...endedDetails.querySelectorAll('button')].some((button) => button.textContent?.includes('Reopen Task')), false, 'mismatched ended Tasks cannot be reopened');
     app.unmount();
   } finally { await cleanup(); }
 });

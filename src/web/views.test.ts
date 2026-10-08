@@ -53,6 +53,10 @@ test('a run view exposes progress and the terminal result without server interna
   const view = toRunView(
     run({
       taskId: 'task-1',
+      executionPlacement: {
+        mode: 'environment-hosted',
+        engineHost: { kind: 'environment', id: 'mac-mini-1', profile: { platform: 'macos', boundary: 'shared-host' } },
+      },
       leaseId: 'lease-secret',
       handOff: {
         previousEnvironmentInstanceId: 'windows-1',
@@ -68,6 +72,10 @@ test('a run view exposes progress and the terminal result without server interna
   assert.equal(view.id, 'run-1');
   assert.equal(view.status, 'completed');
   assert.equal(view.taskId, 'task-1');
+  assert.deepEqual(view.executionPlacement, {
+    mode: 'environment-hosted',
+    engineHost: { kind: 'environment', id: 'mac-mini-1', profile: { platform: 'macos', boundary: 'shared-host' } },
+  });
   assert.equal(view.handOffAttached, true, 'a hand-off becomes a boolean fact');
   assert.deepEqual(view.tokenUsage, { promptTokens: 1, completionTokens: 2, totalTokens: 3 });
   assert.equal(view.createdAt, 1_000);
@@ -264,6 +272,10 @@ test('a task view projects the whole record and its derived context state', () =
     environmentPreference: { kind: 'definition', id: 'macos-workstation' },
     blockerReason: 'waiting on a review',
     environmentInstanceId: 'mac-mini-1',
+    executionPlacement: {
+      mode: 'environment-hosted',
+      engineHost: { kind: 'environment', id: 'mac-mini-1', profile: { platform: 'macos', boundary: 'shared-host' } },
+    },
     environmentLeaseId: 'lease-1',
     environmentLifecycleState: 'blocked',
     activeRunId: 'run-1',
@@ -276,8 +288,16 @@ test('a task view projects the whole record and its derived context state', () =
   assert.equal(view.blockerReason, 'waiting on a review');
   assert.deepEqual(view.environmentPreference, { kind: 'definition', id: 'macos-workstation' });
   assert.equal(view.environmentLeaseId, 'lease-1');
+  assert.deepEqual(view.executionPlacement?.engineHost?.profile, { platform: 'macos', boundary: 'shared-host' });
   assert.equal('recoveryState' in view, false);
   assert.equal('completedAt' in view, false);
+  const endedMismatch = toTaskView({
+    ...task,
+    status: 'done',
+    environmentLifecycleState: 'ended',
+    executionPlacement: { mode: 'host-run', engineHost: { kind: 'sprout', id: 'sprout-test', profile: { platform: 'macos', boundary: 'shared-host' } } },
+  }, 'environment-hosted');
+  assert.match(endedMismatch.executionModeMismatchReason ?? '', /recorded under host-run.*this Sprout process is environment-hosted/);
 });
 
 test('a task-with-runs view keeps run links ordered and hides an unsettled summary', () => {

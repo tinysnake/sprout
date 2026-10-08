@@ -27,6 +27,7 @@ import type {
   TaskWithRuns,
 } from './model.ts';
 import type { EnvironmentLease } from '../environment/pool.ts';
+import { normalizeLegacyTaskPlacement } from '../execution-placement.ts';
 
 /** Filters for listing Tasks. Both are optional and combine with AND. */
 export interface TaskFilter {
@@ -141,24 +142,29 @@ export class InMemoryTaskStore implements TaskStore {
   async create(task: Task): Promise<Task> {
     const existing = this.#tasks.get(task.id);
     if (existing) return existing;
-    this.#tasks.set(task.id, task);
+    this.#tasks.set(task.id, normalizeLegacyTaskPlacement(task));
     this.#links.set(task.id, []);
-    return task;
+    return normalizeLegacyTaskPlacement(task);
   }
 
   async get(taskId: string): Promise<Task | undefined> {
-    return this.#tasks.get(taskId);
+    const task = this.#tasks.get(taskId);
+    if (task === undefined) return undefined;
+    const normalized = normalizeLegacyTaskPlacement(task);
+    this.#tasks.set(taskId, normalized);
+    return normalized;
   }
 
   async list(filter: TaskFilter = {}): Promise<readonly Task[]> {
     return [...this.#tasks.values()]
+      .map(normalizeLegacyTaskPlacement)
       .filter((task) => filter.projectId === undefined || task.projectId === filter.projectId)
       .filter((task) => filter.status === undefined || task.status === filter.status)
       .sort((a, b) => b.createdAt - a.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   }
 
   async save(task: Task): Promise<void> {
-    this.#tasks.set(task.id, task);
+    this.#tasks.set(task.id, normalizeLegacyTaskPlacement(task));
   }
 
   async saveIfUnchanged(task: Task, expected: {

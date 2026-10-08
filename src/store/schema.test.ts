@@ -24,13 +24,13 @@ function withTempDir<T>(fn: (dir: string) => Promise<T> | T): Promise<T> {
 
 
 test('schema constants declare supported version range', () => {
-  assert.equal(CURRENT_SCHEMA_VERSION, 30);
+  assert.equal(CURRENT_SCHEMA_VERSION, 31);
   assert.equal(MIN_SUPPORTED_SCHEMA_VERSION, 0);
-  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 30);
+  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 31);
   assert.deepEqual(SUPPORTED_SCHEMA_RANGE, {
     min: 0,
-    max: 30,
-    current: 30,
+    max: 31,
+    current: 31,
   });
 });
 
@@ -63,7 +63,7 @@ test('v28 migration preserves Project events and adds durable conversation origi
     legacy.close();
 
     const store = new SqliteStore({ filename: path });
-    assert.equal(store.schemaVersion, 30);
+    assert.equal(store.schemaVersion, 31);
     const messageColumns = store.db.prepare('PRAGMA table_info(collaboration_messages)').all() as unknown as readonly { name: string }[];
     assert.ok(messageColumns.some((column) => column.name === 'message_kind'));
     assert.equal((store.db.prepare("SELECT message_kind FROM collaboration_messages WHERE id = 'legacy-message'").get() as { message_kind: string }).message_kind, 'status');

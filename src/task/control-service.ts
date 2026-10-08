@@ -6,10 +6,11 @@ import type { TaskService } from './service.ts';
 import { TaskTerminalMutationError, type TaskEnvironmentLifecycle, type TaskRecoveryAction } from './environment-lifecycle.ts';
 import type { TaskProposalService } from './proposal-service.ts';
 import { createExecutionStrategy, executionModeAdmissionRefusal, type ExecutionStrategy } from '../execution-mode.ts';
+import { executionModeMismatchReason, legacyEnvironmentPlacement } from '../execution-placement.ts';
 
 export type TaskBlockerInput = Omit<TaskBlocker, 'createdBy' | 'createdAt'>;
 export type TaskCompletionClaimInput = Omit<TaskCompletionClaim, 'id' | 'actor' | 'at' | 'contentVersion'>;
-export type TaskControlErrorCode = 'unknown-task' | 'authority-required' | 'invalid-command' | 'lifecycle-conflict' | 'execution-mode-unavailable';
+export type TaskControlErrorCode = 'unknown-task' | 'authority-required' | 'invalid-command' | 'lifecycle-conflict' | 'execution-mode-unavailable' | 'execution-mode-mismatch';
 
 export class TaskControlError extends Error {
   readonly code: TaskControlErrorCode;
@@ -87,9 +88,10 @@ export class TaskControlService {
   }
 
   async resumeForHuman(taskId: string, input: { readonly reason: string }): Promise<Task> {
-    this.assertExecutionModeAvailable();
     const actor = await this.#humanForTask(taskId);
     const task = await this.#task(taskId);
+    this.assertTaskMode(task);
+    this.assertExecutionModeAvailable();
     const reason = commandReason(input?.reason);
     if (task.status === 'stopped') return this.#lifecycle.resumeStopped(taskId, actor, reason);
     return this.#lifecycle.resumePause(taskId, actor, reason);
@@ -151,6 +153,7 @@ export class TaskControlService {
     readonly reason: string;
   }): Promise<Task> {
     const actor = await this.#humanForTask(taskId);
+    if (input?.decision === 'correct') this.assertTaskMode(await this.#task(taskId));
     if (!input || typeof input.claimId !== 'string' || !input.claimId.trim()
       || (input.decision !== 'accept' && input.decision !== 'correct')) {
       throw new TaskControlError('invalid-command', 'claimId and a valid validation decision are required');
@@ -182,15 +185,20 @@ export class TaskControlService {
   }
 
   async reopenForHuman(taskId: string, input: { readonly reason: string }): Promise<Task> {
-    this.assertExecutionModeAvailable();
     const actor = await this.#humanForTask(taskId);
+    const task = await this.#task(taskId);
+    this.assertTaskMode(task);
+    this.assertExecutionModeAvailable();
     return this.#lifecycle.reopen(taskId, actor, commandReason(input?.reason));
   }
 
   async recoverForHuman(taskId: string, input: { readonly action: TaskRecoveryAction; readonly reason: string }): Promise<Task> {
-    if (input?.action === 'resume') this.assertExecutionModeAvailable();
     const actor = await this.#humanForTask(taskId);
     const current = await this.#task(taskId);
+    if (input?.action === 'resume' && current.recoveryState !== 'ending') {
+      this.assertTaskMode(current);
+      this.assertExecutionModeAvailable();
+    }
     if (input?.action === 'discard' && current.environmentLifecycleState === 'discarded') return current;
     if (input?.action !== 'resume' && input?.action !== 'discard') {
       throw new TaskControlError('invalid-command', 'action must be resume or discard');
@@ -201,6 +209,18 @@ export class TaskControlService {
   assertExecutionModeAvailable(): void {
     const refusal = executionModeAdmissionRefusal(this.#executionStrategy);
     if (refusal !== undefined) throw new TaskControlError('execution-mode-unavailable', refusal);
+  }
+
+  assertTaskMode(task: Task): void {
+    const placement = task.executionPlacement ?? (task.environmentInstanceId !== undefined
+      ? legacyEnvironmentPlacement(task.environmentInstanceId)
+      : undefined);
+    const reason = executionModeMismatchReason(placement, this.#executionStrategy.mode);
+    if (reason !== undefined) throw new TaskControlError('execution-mode-mismatch', reason);
+  }
+
+  get processExecutionMode(): ExecutionStrategy['mode'] {
+    return this.#executionStrategy.mode;
   }
 
   async stopSubordinateForHumanLead(taskId: string, input: { readonly runId: string; readonly reason: string }): Promise<Task> {
