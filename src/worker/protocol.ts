@@ -309,6 +309,8 @@ export type WorkspaceFileOperationParams = Omit<WorkspaceBindingIdentity, 'path'
   | { readonly operation: 'command'; readonly executable: string; readonly args: readonly string[]; readonly cwd?: string; readonly timeoutMs?: number }
 );
 
+export type WorkspaceFileOperationResult = RemoteWorkspaceOperationResult;
+
 export interface WorkspaceCommandProgress {
   readonly operationId: string;
   readonly projectId: string;

@@ -29,9 +29,15 @@ const MAX_COMMAND_DURATION_MS = 120_000;
 const COMMAND_EXECUTABLES = new Set(['node', 'npm']);
 
 interface BoundWorkspace extends WorkspaceBindingIdentity { readonly root: string }
+interface WorkspaceCommandProcessControl {
+  readonly signalGroup?: (pid: number, signal: 'SIGTERM' | 'SIGKILL') => boolean;
+  readonly groupAlive?: (pid: number) => boolean;
+  readonly gracePeriodMs?: number;
+}
 interface OperationState {
   readonly controller: AbortController;
   readonly fingerprint: string;
+  readonly mutating: boolean;
   status: InspectWorkspaceFileOperationResult['status'];
   result?: RemoteWorkspaceOperationResult;
   cancelProcess?: () => void;
@@ -84,7 +90,8 @@ export class WorkerWorkspaceFiles {
   async execute(input: WorkspaceFileOperationParams): Promise<RemoteWorkspaceOperationResult> {
     const binding = this.#requireBinding({ ...input, ...(input.workspacePath !== undefined ? { path: input.workspacePath } : {}) });
     if (typeof input.operationId !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(input.operationId)) throw new Error('invalid operation identity');
-    const fingerprint = createHash('sha256').update(JSON.stringify([input.projectId, input.environmentInstanceId, input.bindingId, input.generation, input.connectionEpoch, input.workspaceId, input.kind, input.workspacePath ?? '', input.operation, input.path ?? '', input.operation === 'search' ? input.query : '', input.operation === 'edit' ? [input.oldText, input.newText] : input.operation === 'patch' ? input.hunks : input.operation === 'command' ? [input.executable, input.args, input.cwd ?? '', input.timeoutMs ?? 0] : []])).digest('hex');
+    const inputPath = 'path' in input ? input.path ?? '' : '';
+    const fingerprint = createHash('sha256').update(JSON.stringify([input.projectId, input.environmentInstanceId, input.bindingId, input.generation, input.connectionEpoch, input.workspaceId, input.kind, input.workspacePath ?? '', input.operation, inputPath, input.operation === 'search' ? input.query : '', input.operation === 'edit' ? [input.oldText, input.newText] : input.operation === 'patch' ? input.hunks : input.operation === 'command' ? [input.executable, input.args, input.cwd ?? '', input.timeoutMs ?? 0] : []])).digest('hex');
     const mutating = input.operation === 'edit' || input.operation === 'patch' || input.operation === 'command';
     let prior = this.#operations.get(input.operationId);
     if (prior) {
@@ -92,7 +99,7 @@ export class WorkerWorkspaceFiles {
       if (prior.result) return prior.result;
       return failure(input, 'failed', 'outcome-unknown-inspect-required');
     }
-    const state: OperationState = { controller: new AbortController(), fingerprint, status: 'running' };
+    const state: OperationState = { controller: new AbortController(), fingerprint, mutating, status: 'running' };
     this.#operations.set(input.operationId, state);
     if (mutating) {
       try {
@@ -149,17 +156,24 @@ export class WorkerWorkspaceFiles {
     if (state) return { status: state.status, ...(state.result ? { result: state.result } : {}) };
     const durable = await this.#readMutation(input.operationId);
     if (!durable) return { status: 'not-found' };
-    if (durable.status === 'running' || durable.status === 'cancel-requested') return { status: 'unknown' };
+    if (durable.status === 'running' || durable.status === 'cancel-requested' || durable.status === 'unknown') return { status: 'recovery-required' };
     return { status: durable.status, ...(durable.result ? { result: durable.result } : {}) };
   }
 
-  cancel(input: CancelWorkspaceFileOperationParams): CancelWorkspaceFileOperationResult {
+  async cancel(input: CancelWorkspaceFileOperationParams): Promise<CancelWorkspaceFileOperationResult> {
     this.#requireBinding(input);
     const state = this.#operations.get(input.operationId);
-    if (!state) return { accepted: false, status: 'not-found' };
+    if (!state) return { accepted: false, status: (await this.#readMutation(input.operationId))?.status ?? 'not-found' };
     if (state.status !== 'running') return { accepted: false, status: state.status };
+    if (state.mutating && !state.cancelProcess) return { accepted: false, status: 'running' };
+    if (state.mutating) {
+      try { await this.#saveMutation({ operationId: input.operationId, fingerprint: state.fingerprint, status: 'cancel-requested' }); }
+      catch { state.status = 'recovery-required'; return { accepted: false, status: 'recovery-required' }; }
+    }
+    state.status = 'cancel-requested';
+    state.cancelProcess?.();
     state.controller.abort();
-    return { accepted: true, status: 'running' };
+    return { accepted: true, status: 'cancel-requested' };
   }
 
   async #claimMutation(record: DurableMutationRecord): Promise<{ readonly claimed: boolean; readonly record: DurableMutationRecord }> {
@@ -179,6 +193,9 @@ export class WorkerWorkspaceFiles {
   async #saveMutation(record: DurableMutationRecord): Promise<void> {
     await mkdir(this.#journalDirectory, { recursive: true, mode: 0o700 });
     const path = this.#journalPath(record.operationId);
+    const existing = await this.#readMutation(record.operationId);
+    if (existing && existing.fingerprint !== record.fingerprint) throw new Error('operation identity conflict');
+    if (existing && ['completed','failed','cancelled','recovery-required'].includes(existing.status)) return;
     const temporary = `${path}.${randomUUID()}.tmp`;
     const handle = await open(temporary, 'wx', 0o600);
     try { await handle.writeFile(JSON.stringify(record)); await handle.sync(); }
@@ -194,10 +211,10 @@ export class WorkerWorkspaceFiles {
       if (!entry.isFile() || entry.isSymbolicLink() || entry.size > 128 * 1024) throw new Error('invalid journal entry');
       const value = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
       if (value.operationId !== operationId || typeof value.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(value.fingerprint) ||
-          !['running','completed','failed','cancelled','unknown','recovery-required'].includes(String(value.status))) throw new Error('invalid journal entry');
+          !['running','cancel-requested','completed','failed','cancelled','unknown','recovery-required'].includes(String(value.status))) throw new Error('invalid journal entry');
       const result = value.result as RemoteWorkspaceOperationResult | undefined;
-      if (result !== undefined && (result.operationId !== operationId || (result.operation !== 'edit' && result.operation !== 'patch') ||
-          !['completed','failed','cancelled'].includes(result.status))) throw new Error('invalid journal outcome');
+      if (result !== undefined && (result.operationId !== operationId || !['edit','patch','command'].includes(result.operation) ||
+          !['completed','failed','cancelled','recovery-required'].includes(result.status))) throw new Error('invalid journal outcome');
       return { operationId, fingerprint: value.fingerprint, status: value.status as DurableMutationRecord['status'], ...(result ? { result } : {}) };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
