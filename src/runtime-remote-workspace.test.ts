@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -110,6 +110,64 @@ test('Host-run reads an authorized Project file through an enrolled Worker witho
     await runtime.close();
   }
 });
+
+test('composed Runtime fails an attached remote read after Worker disconnection without local fallback', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-remote-disconnected-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const workerRoot = join(directory, 'worker-workspaces');
+  const keyPath = join(directory, 'worker-key.pem');
+  const localRoot = join(directory, 'local-files');
+  const localSentinel = join(localRoot, 'sentinel.txt');
+  mkdirSync(localRoot, { recursive: true });
+  writeFileSync(localSentinel, 'LOCAL_HOST_SENTINEL');
+  const runtime = await createRuntime({
+    configuration: hostConfiguration({
+      executionMode: 'host-run', environmentSource: 'enrollment',
+      databasePath: join(directory, 'state.db'),
+    }),
+    projectRoot: '/synthetic/project-root',
+    environment: {
+      async adapters() { return new Map(); },
+      async contexts() { return { async prepare() { return { bootstrapInstructions: '' }; }, async recycle() {} }; },
+      async close() {},
+    },
+  });
+  try {
+    const identity = loadOrCreateWorkerIdentity(keyPath);
+    const enrollment = await runtime.enrollments.requestEnrollment({
+      environmentInstanceId: INSTANCE_ID, displayName: 'Disconnecting file Worker',
+      publicKey: workerPublicKey(identity.privateKey), platform: 'macos', protocolVersion: '3.0',
+      capabilityRequests: ['read-only-investigation'], engineFacts: [],
+    });
+    await runtime.enrollments.approve(enrollment.enrollment.id, {
+      capabilityPermissions: { 'read-only-investigation': true },
+    });
+    const connection = await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, workerRoot);
+    await runtime.projectService.create({ id: 'disconnected-read-project', displayName: 'Disconnected read Project' });
+    await runtime.projectService.addMembership('disconnected-read-project', { agentId: 'scout' });
+    const access = await runtime.projectAccess.grant({
+      projectId: 'disconnected-read-project', environmentInstanceId: INSTANCE_ID,
+      selection: { kind: 'relative', path: 'repos/disconnected' },
+    });
+    writeFileSync(join(workerRoot, 'repos', 'disconnected', 'sentinel.txt'), 'REMOTE_WORKER_SENTINEL');
+    const tools = await runtime.environmentOperations.attach('disconnected-read-project', 'scout');
+    assert.equal(tools.binding.bindingId, access.current?.bindingId);
+
+    connection.close();
+    const readiness = await runtime.environmentOperations.bindingReadiness('disconnected-read-project');
+    assert.equal(readiness[0]?.status, 'blocked');
+    assert.equal(readiness[0]?.reason, 'worker-offline');
+    const result = await tools.read('sentinel.txt');
+    assert.equal(result.status, 'failed');
+    assert.equal(result.content, undefined);
+    assert.equal(result.failure, 'worker-unavailable');
+    assert.notEqual(result.content, 'LOCAL_HOST_SENTINEL', 'a lost Worker never falls back to a same-name local file');
+    assert.equal(runtime.workerGateway.liveFor(INSTANCE_ID), undefined);
+  } finally {
+    await runtime.close();
+  }
+});
+
 
 test('composed Runtime blocks remote reads when the enrolled Worker lacks the file capability permission', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-remote-denied-'));
