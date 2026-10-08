@@ -108,6 +108,30 @@ async function createRuntime(config) {
   const { createMagpieProvider } = await import(pathToFileURL(join(config.providerRoot, 'provider.ts')).href);
   const provider = createMagpieProvider().provider;
   if (provider.id !== config.provider) throw Object.assign(new Error(), { stage: 'provider-identity', code: 'unsupported' });
+  const providerStream = provider.stream;
+  provider.stream = (model, context, options) => {
+    const declaredTools = new Map();
+    for (const message of context.messages) {
+      for (const tool of message.toolsRemoved ?? []) declaredTools.delete(tool.name);
+      for (const tool of message.toolsAdded ?? []) declaredTools.set(tool.name, tool);
+    }
+    const tools = [...declaredTools.values()];
+    const remoteRead = tools.find((tool) => tool.name === 'remote_read');
+    const registeredRemoteRead = session?.getAllTools().find((tool) => tool.name === 'remote_read');
+    if (config.remoteWorkspace) {
+      line({ kind: 'provider-request-facts', facts: {
+        modelApi: model.api,
+        toolCount: tools.length,
+        toolNames: tools.map((tool) => tool.name),
+        toolChoice: options?.toolChoice ?? 'auto',
+        remoteReadPresent: remoteRead !== undefined,
+        ...(remoteRead ? { remoteReadDescription: remoteRead.description, remoteReadParameters: remoteRead.parameters } : {}),
+        remoteReadSource: registeredRemoteRead?.sourceInfo?.source ?? 'unknown',
+        remoteReadIsBuiltin: registeredRemoteRead?.sourceInfo?.source === 'builtin',
+      } });
+    }
+    return providerStream.call(provider, model, context, options);
+  };
   runtime.registerNativeProvider(provider);
   await runtime.refresh({ allowNetwork: false, providers: [config.provider] });
 

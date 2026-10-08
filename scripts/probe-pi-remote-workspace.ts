@@ -22,6 +22,7 @@ let engineTurnStatus: string | undefined;
 let responseMentionsTool = false;
 let responseContainsMarker = false;
 const piToolNames: string[] = [];
+const providerRequestFacts: Record<string, unknown>[] = [];
 const resultFacts: {
   readonly status: string;
   readonly operation: string;
@@ -61,6 +62,7 @@ function observeRemoteReads(adapter: HostPiEngineAdapter): HostPiEngineAdapter {
       remoteWorkspaceAttached = true;
       const observed = {
         ...remote,
+        observeProviderRequestFacts(facts: Record<string, unknown>) { providerRequestFacts.push(facts); },
         async read(path: string): Promise<RemoteWorkspaceOperationResult> {
           const response = await remote.read(path);
           resultFacts.push({
@@ -193,6 +195,7 @@ try {
         runStatus: run.status,
         eventTypes: run.events.map((event) => event.type),
         toolNames: piToolNames,
+        providerRequestFacts,
         engineTurnStatus,
         responseMentionsTool,
         responseContainsMarker,

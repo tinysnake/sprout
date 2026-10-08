@@ -292,6 +292,11 @@ class HostPiSession implements EngineSession {
             const outcome = mapPiEvent(message.event, this.#turnState);
             for (const event of outcome.events) this.#queue?.push(event);
             if (outcome.finish) this.#finish?.(outcome.finish);
+          } else if (message.kind === 'provider-request-facts' && typeof message.facts === 'object' && message.facts !== null) {
+            const observe = (this.#remoteWorkspace as (RemoteWorkspaceTools & {
+              observeProviderRequestFacts?: (facts: Record<string, unknown>) => void;
+            }) | undefined)?.observeProviderRequestFacts;
+            observe?.(message.facts as Record<string, unknown>);
           } else if (message.kind === 'remote-call' && typeof message.callId === 'string') {
             void this.#remoteCall(message.callId, message.operation, message.args);
           } else if (message.kind === 'failure') {
