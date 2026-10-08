@@ -313,7 +313,7 @@ export interface WorkspaceFileOperationResult {
   readonly content?: string;
   readonly truncated?: boolean;
   readonly matches?: readonly { readonly path: string; readonly line: number; readonly text: string }[];
-  readonly failure?: 'not-found' | 'invalid-path' | 'not-text' | 'too-large' | 'cancelled' | 'unsupported';
+  readonly failure?: 'not-found' | 'invalid-path' | 'not-text' | 'too-large' | 'cancelled' | 'unsupported' | 'worker-unavailable' | 'remote-operation-blocked';
 }
 
 export interface InspectWorkspaceFileOperationParams extends WorkspaceBindingIdentity { readonly operationId: string }

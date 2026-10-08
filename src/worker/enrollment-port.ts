@@ -37,8 +37,8 @@ import type {
   WorkspaceFileOperationParams,
   InspectWorkspaceFileOperationParams,
   CancelWorkspaceFileOperationParams,
-  type InspectWorkspaceFileOperationResult,
-  type CancelWorkspaceFileOperationResult,
+  InspectWorkspaceFileOperationResult,
+  CancelWorkspaceFileOperationResult,
   WorkerInfo,
   WorkerReadinessProbeResult,
 } from './protocol.ts';

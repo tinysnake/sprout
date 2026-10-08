@@ -276,7 +276,7 @@ class HostPiSession implements EngineSession {
         bindingId: tools?.binding.bindingId ?? '', generation: tools?.binding.generation ?? 0, connectionEpoch: tools?.binding.connectionEpoch ?? 0,
         workspaceId: tools?.binding.workspaceId ?? '', operation: operation === 'search' ? 'search' : 'read', status: 'failed', failure: 'remote-operation-blocked' };
     }
-    this.#child.stdin?.write(`${JSON.stringify({ op: 'remote-result', callId, result })}\\n`);
+    this.#child.stdin?.write(`${JSON.stringify({ op: 'remote-result', callId, result })}\n`);
   }
 
   #onData(chunk: string): void {
@@ -287,7 +287,7 @@ class HostPiSession implements EngineSession {
       this.#buffer = this.#buffer.slice(newline + 1);
       if (line) {
         try {
-          const message = JSON.parse(line) as { kind?: unknown; event?: unknown; stage?: unknown; code?: unknown };
+          const message = JSON.parse(line) as { kind?: unknown; event?: unknown; stage?: unknown; code?: unknown; callId?: unknown; operation?: unknown; args?: unknown };
           if (message.kind === 'pi-event') {
             const outcome = mapPiEvent(message.event, this.#turnState);
             for (const event of outcome.events) this.#queue?.push(event);
