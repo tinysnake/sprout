@@ -18,7 +18,10 @@
       "timedOut": true,
       "sessionObserved": false,
       "interrupted": false,
-      "authHelperInvoked": true
+      "authHelperInvoked": true,
+      "resumeRequested": false,
+      "resumeMatchesRequested": false,
+      "newSessionComparedToPrevious": false
     }
   ],
   "calls": [],
@@ -112,7 +115,8 @@
     "Real Claude model behavior is unexercised.",
     "E7 root-turn attribution race (upstream Claude issue #55 in #226) cannot be confirmed or refuted on this backend; open evidence gap.",
     "Windows, enrolled cross-host deployment, production cancellation/fencing and authentication refresh unexercised.",
-    "Initial native catalog was not observed; dependent resume/catalog transition probes cannot establish safety."
+    "Initial native catalog was not observed; dependent resume/catalog transition probes cannot establish safety.",
+    "Combined native exclusion, model-issued remote execution and outer engine isolation not proved; dependent integration remains blocked."
   ],
   "boot": {
     "cliVersionUnderProfile": true,
@@ -163,35 +167,40 @@
       "target": "origin",
       "ok": true,
       "remoteMarker": true,
-      "remoteEffect": false
+      "remoteEffect": false,
+      "readEffect": false
     },
     {
       "op": "write",
       "target": "effect",
       "ok": true,
       "remoteMarker": false,
-      "remoteEffect": false
+      "remoteEffect": false,
+      "readEffect": false
     },
     {
       "op": "read",
       "target": "host-sentinel",
       "ok": false,
       "remoteMarker": false,
-      "remoteEffect": false
+      "remoteEffect": false,
+      "readEffect": false
     },
     {
       "op": "write",
       "target": "auth",
       "ok": false,
       "remoteMarker": false,
-      "remoteEffect": false
+      "remoteEffect": false,
+      "readEffect": false
     },
     {
       "op": "read",
       "target": "symlink",
       "ok": false,
       "remoteMarker": false,
-      "remoteEffect": false
+      "remoteEffect": false,
+      "readEffect": false
     }
   ],
   "nativeIsolation": true,
@@ -202,5 +211,12 @@
     "hostSentinelUnchanged": true,
     "remoteEffect": false,
     "ambientMarkerAbsent": true
+  },
+  "acceptance": {
+    "nativeCatalogExact": false,
+    "remoteReadChangeCheck": false,
+    "modelHostReadWriteDenied": false,
+    "configurationCanaryAbsent": true,
+    "combinedIsolation": false
   }
 }

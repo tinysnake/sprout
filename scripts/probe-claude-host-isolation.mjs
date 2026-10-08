@@ -42,6 +42,9 @@ if (process.argv[2] === '--auth') {
   const facts = { ticket: 250, base: '1d88fb0f', evidenceTier: 'model-issued (Claude Code CLI pinned at 2.1.294, non-Claude backend via local gateway)', platform: 'macOS', cli: '2.1.294', fixture: 'separate local sandbox origin; not an enrolled remote deployment', turns: [], calls: [], negatives: {}, gaps: ['Real Claude model behavior is unexercised.', 'E7 root-turn attribution race (upstream Claude issue #55 in #226) cannot be confirmed or refuted on this backend; open evidence gap.', 'Windows, enrolled cross-host deployment, production cancellation/fencing and authentication refresh unexercised.'] };
   const started = Date.now();
   const fixture = makeOriginFixture();
+  const port = Number(process.env.CLAUDE_PROBE_PORT);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) { fixture.cleanup(); throw new Error('Set CLAUDE_PROBE_PORT to the assigned disposable port.'); }
+  const endpoint = `http://localhost:${port}`;
   const runtimeRoots = ['/opt/homebrew', dirname(realpathSync(process.execPath))];
   let origin, server;
   const children = new Set();
@@ -94,9 +97,9 @@ if (process.argv[2] === '--auth') {
         response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify(result));
       } catch { response.writeHead(500).end('{}'); }
     });
-    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(41020, '127.0.0.1', resolve); });
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, 'localhost', resolve); });
     facts.protocol = { initialized: false, catalog: null, calls: [] };
-    const bridge = spawn('/usr/bin/sandbox-exec', ['-p', bridgeProfile, process.execPath, script, '--bridge', 'http://127.0.0.1:41020'], { cwd: control, env: { HOME: control, PATH: '/usr/bin:/bin' }, stdio: ['pipe','pipe','pipe'], detached: true });
+    const bridge = spawn('/usr/bin/sandbox-exec', ['-p', bridgeProfile, process.execPath, script, '--bridge', endpoint], { cwd: control, env: { HOME: control, PATH: '/usr/bin:/bin' }, stdio: ['pipe','pipe','pipe'], detached: true });
     children.add(bridge); bridge.stderr.resume();
     let rpcId = 0; const pending = new Map();
     createInterface({ input: bridge.stdout }).on('line', line => { try { const reply = JSON.parse(line); pending.get(reply.id)?.(reply); pending.delete(reply.id); } catch {} });
@@ -120,7 +123,7 @@ if (process.argv[2] === '--auth') {
     if (nativeOnly) facts.gaps.push('Diagnostic native-only launch omits engine outer file isolation; it cannot evidence criterion 4 or combined production acceptance.');
     facts.nativeIsolation = !nativeOnly;
     facts.diagnosticEmptyCatalog = diagnosticEmpty;
-    writeFileSync(mcpConfig, JSON.stringify({ mcpServers: { origin: { command: '/usr/bin/sandbox-exec', args: ['-p', bridgeProfile, process.execPath, script, '--bridge', 'http://127.0.0.1:41020'], env: { HOME: control, PATH: '/usr/bin:/bin' } } } }));
+    writeFileSync(mcpConfig, JSON.stringify({ mcpServers: { origin: { command: '/usr/bin/sandbox-exec', args: ['-p', bridgeProfile, process.execPath, script, '--bridge', endpoint], env: { HOME: control, PATH: '/usr/bin:/bin' } } } }));
     if (diagnosticEmpty) writeFileSync(mcpConfig, '{"mcpServers":{}}');
     const env = { HOME: control, PATH: '/usr/bin:/bin', TMPDIR: control, CLAUDE_CODE_TMPDIR: control, CLAUDE_CONFIG_DIR: config, ANTHROPIC_BASE_URL: settings.env.ANTHROPIC_BASE_URL, DISABLE_AUTOUPDATER: '1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1' };
     for (const key of ['ANTHROPIC_DEFAULT_FABLE_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL', 'CLAUDE_CODE_MODEL_CAPABILITIES', 'CLAUDE_CODE_MAX_OUTPUT_TOKENS']) if (settings.env[key]) env[key] = settings.env[key];
