@@ -13,52 +13,11 @@
       "mcp": [],
       "result": null,
       "usage": null,
-      "exitCode": 1,
-      "signal": null,
-      "timedOut": false,
+      "exitCode": null,
+      "signal": "SIGKILL",
+      "timedOut": true,
       "sessionObserved": false,
-      "interrupted": false,
-      "deniedOperation": [
-        "open"
-      ],
-      "deniedPathPrefixes": [
-        "/tmp"
-      ],
-      "systemPathMentioned": [],
-      "pathClassMentioned": {
-        "runner": false,
-        "control": false,
-        "auth": false,
-        "executable": false
-      },
-      "startupDiagnostics": {
-        "unknown option": false,
-        "error": false,
-        "permission denied": false,
-        "operation not permitted": true,
-        "apiKeyHelper": false,
-        "authentication": false,
-        "EACCES": false,
-        "EPERM": true,
-        "ENOENT": false,
-        "--tools": false,
-        "--bare": false,
-        "--setting-sources": false,
-        "--permission-prompts": false,
-        "--disallowedTools": false,
-        "--mcp-config": false,
-        "--model": false,
-        "--print": false,
-        "--output-format": false,
-        "--no-chrome": false,
-        "bwrap": false,
-        "sandbox": false,
-        "Unable": false,
-        "Cannot": false,
-        "not allowed": false,
-        "requires": false
-      },
-      "startupOpenTarget": "other-absolute-resource"
+      "interrupted": false
     },
     {
       "types": {},
@@ -67,52 +26,11 @@
       "mcp": [],
       "result": null,
       "usage": null,
-      "exitCode": 1,
-      "signal": null,
-      "timedOut": false,
+      "exitCode": null,
+      "signal": "SIGKILL",
+      "timedOut": true,
       "sessionObserved": false,
-      "interrupted": false,
-      "deniedOperation": [
-        "open"
-      ],
-      "deniedPathPrefixes": [
-        "/tmp"
-      ],
-      "systemPathMentioned": [],
-      "pathClassMentioned": {
-        "runner": false,
-        "control": false,
-        "auth": false,
-        "executable": false
-      },
-      "startupDiagnostics": {
-        "unknown option": false,
-        "error": false,
-        "permission denied": false,
-        "operation not permitted": true,
-        "apiKeyHelper": false,
-        "authentication": false,
-        "EACCES": false,
-        "EPERM": true,
-        "ENOENT": false,
-        "--tools": false,
-        "--bare": false,
-        "--setting-sources": false,
-        "--permission-prompts": false,
-        "--disallowedTools": false,
-        "--mcp-config": false,
-        "--model": false,
-        "--print": false,
-        "--output-format": false,
-        "--no-chrome": false,
-        "bwrap": false,
-        "sandbox": false,
-        "Unable": false,
-        "Cannot": false,
-        "not allowed": false,
-        "requires": false
-      },
-      "startupOpenTarget": "other-absolute-resource"
+      "interrupted": false
     },
     {
       "types": {},
@@ -121,52 +39,12 @@
       "mcp": [],
       "result": null,
       "usage": null,
-      "exitCode": 1,
-      "signal": null,
-      "timedOut": false,
+      "exitCode": null,
+      "signal": "SIGKILL",
+      "timedOut": true,
       "sessionObserved": false,
       "interrupted": true,
-      "deniedOperation": [
-        "open"
-      ],
-      "deniedPathPrefixes": [
-        "/tmp"
-      ],
-      "systemPathMentioned": [],
-      "pathClassMentioned": {
-        "runner": false,
-        "control": false,
-        "auth": false,
-        "executable": false
-      },
-      "startupDiagnostics": {
-        "unknown option": false,
-        "error": false,
-        "permission denied": false,
-        "operation not permitted": true,
-        "apiKeyHelper": false,
-        "authentication": false,
-        "EACCES": false,
-        "EPERM": true,
-        "ENOENT": false,
-        "--tools": false,
-        "--bare": false,
-        "--setting-sources": false,
-        "--permission-prompts": false,
-        "--disallowedTools": false,
-        "--mcp-config": false,
-        "--model": false,
-        "--print": false,
-        "--output-format": false,
-        "--no-chrome": false,
-        "bwrap": false,
-        "sandbox": false,
-        "Unable": false,
-        "Cannot": false,
-        "not allowed": false,
-        "requires": false
-      },
-      "startupOpenTarget": "other-absolute-resource"
+      "interruptSent": true
     }
   ],
   "calls": [],
