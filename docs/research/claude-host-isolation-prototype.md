@@ -1,5 +1,13 @@
 # Claude builtin exclusion and remote-origin prototype (#250)
 
+> **Historical round-1 report.** Round 2 resolved the pre-initialization blocker
+> and passed the combined model-issued origin/negative experiment under the outer
+> profile. See [the round-2 findings](claude-host-isolation-round2.md) for the
+> current outcome, resource admission and remaining production gaps. The verdict
+> and unmet criteria below preserve round 1's findings, not the current result.
+> Evidence tier remains the pinned CLI with a non-Claude backend; real Claude
+> model behavior and the E7 attribution race remain unproved.
+
 Run `r225`, Job `r225-pro-worker-a1`, attempt 1; base `1d88fb0f`.
 Disposable experiment only. No production adapter, engine replacement, installation,
 login, permission interceptor, domain change or UI change.
@@ -42,7 +50,9 @@ blocked; this report does not accept or close the Ticket.
 - `scripts/probe-claude-host-isolation.mjs`: disposable bounded supervisor,
   authentication helper, stdio MCP bridge and fact-only event collector.
 - `scripts/prototype-origin-fixture.mjs`: reused unchanged from #239.
-- `claude-host-isolation-prototype-evidence.json`: final combined-profile failure.
+- `claude-host-isolation-round1-evidence.json`: preserved combined-profile failure.
+- `claude-host-isolation-prototype-evidence.json`: latest combined-profile result
+  (round 2); see the round-2 report before interpreting it.
 - `claude-native-remote-diagnostic.json`: final model-issued native-only diagnostic.
 - `claude-native-empty-catalog-diagnostic.json`: earlier native-only empty-catalog
   control, including resume and interrupt observations.

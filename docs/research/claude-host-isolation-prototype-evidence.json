@@ -7,24 +7,469 @@
   "fixture": "separate local sandbox origin; not an enrolled remote deployment",
   "turns": [
     {
-      "types": {},
-      "toolUses": [],
-      "catalog": null,
-      "mcp": [],
-      "result": null,
-      "usage": null,
-      "exitCode": null,
-      "signal": "SIGKILL",
-      "timedOut": true,
-      "sessionObserved": false,
+      "types": {
+        "system": 110,
+        "assistant": 13,
+        "user": 8,
+        "result": 1
+      },
+      "toolUses": [
+        "mcp__origin__remote_read",
+        "mcp__origin__remote_read",
+        "mcp__origin__remote_write",
+        "mcp__origin__remote_read",
+        "mcp__origin__remote_write",
+        "mcp__origin__remote_read",
+        "mcp__origin__remote_write",
+        "mcp__origin__remote_read"
+      ],
+      "catalog": [
+        "mcp__origin__remote_read",
+        "mcp__origin__remote_write"
+      ],
+      "mcp": [
+        {
+          "name": "origin",
+          "status": "connected"
+        }
+      ],
+      "result": "success",
+      "usage": {
+        "input_tokens": 1687,
+        "output_tokens": 979,
+        "cache_read_input_tokens": 2176,
+        "cache_creation_input_tokens": 0
+      },
+      "exitCode": 0,
+      "signal": null,
+      "timedOut": false,
+      "sessionObserved": true,
       "interrupted": false,
+      "deniedOperation": [
+        "spawn"
+      ],
+      "deniedPathPrefixes": [
+        "/Library",
+        "/private/var/folders"
+      ],
+      "systemPathMentioned": [
+        "/var"
+      ],
+      "pathClassMentioned": {
+        "runner": true,
+        "control": true,
+        "auth": false,
+        "executable": false
+      },
+      "startupDiagnostics": {
+        "unknown option": false,
+        "error": true,
+        "permission denied": false,
+        "operation not permitted": true,
+        "apiKeyHelper": false,
+        "authentication": false,
+        "EACCES": true,
+        "EPERM": true,
+        "ENOENT": true,
+        "--tools": false,
+        "--bare": false,
+        "--setting-sources": false,
+        "--permission-prompts": false,
+        "--disallowedTools": false,
+        "--mcp-config": true,
+        "--model": false,
+        "--print": false,
+        "--output-format": false,
+        "--no-chrome": false,
+        "bwrap": false,
+        "sandbox": false,
+        "Unable": false,
+        "Cannot": false,
+        "not allowed": false,
+        "requires": false
+      },
+      "isError": false,
+      "permissionDenials": 0,
+      "startupTrace": [
+        "settings",
+        "MCP",
+        "initialize",
+        "ENOENT",
+        "EACCES",
+        "EPERM",
+        "fetch",
+        "certificate",
+        "TLS",
+        "timeout",
+        "lock",
+        "OAuth"
+      ],
+      "debugLines": 212,
+      "debugErrorCodes": [
+        "ENOENT",
+        "EPERM"
+      ],
+      "nativeDiagnosticLabels": [
+        "posix_spawn",
+        "EPERM"
+      ],
       "authHelperInvoked": true,
       "resumeRequested": false,
       "resumeMatchesRequested": false,
       "newSessionComparedToPrevious": false
+    },
+    {
+      "types": {
+        "system": 6,
+        "assistant": 4,
+        "user": 1,
+        "result": 1
+      },
+      "toolUses": [
+        "mcp__origin__remote_read"
+      ],
+      "catalog": [
+        "mcp__origin__remote_read",
+        "mcp__origin__remote_write"
+      ],
+      "mcp": [
+        {
+          "name": "origin",
+          "status": "connected"
+        }
+      ],
+      "result": "success",
+      "usage": {
+        "input_tokens": 949,
+        "output_tokens": 76,
+        "cache_read_input_tokens": 2176,
+        "cache_creation_input_tokens": 0
+      },
+      "exitCode": 0,
+      "signal": null,
+      "timedOut": false,
+      "sessionObserved": true,
+      "interrupted": false,
+      "deniedOperation": [
+        "spawn"
+      ],
+      "deniedPathPrefixes": [
+        "/Library",
+        "/private/var/folders"
+      ],
+      "systemPathMentioned": [
+        "/var"
+      ],
+      "pathClassMentioned": {
+        "runner": true,
+        "control": true,
+        "auth": false,
+        "executable": false
+      },
+      "startupDiagnostics": {
+        "unknown option": false,
+        "error": true,
+        "permission denied": false,
+        "operation not permitted": true,
+        "apiKeyHelper": false,
+        "authentication": false,
+        "EACCES": true,
+        "EPERM": true,
+        "ENOENT": false,
+        "--tools": false,
+        "--bare": false,
+        "--setting-sources": false,
+        "--permission-prompts": false,
+        "--disallowedTools": false,
+        "--mcp-config": true,
+        "--model": false,
+        "--print": false,
+        "--output-format": false,
+        "--no-chrome": false,
+        "bwrap": false,
+        "sandbox": false,
+        "Unable": false,
+        "Cannot": false,
+        "not allowed": false,
+        "requires": false
+      },
+      "isError": false,
+      "permissionDenials": 0,
+      "startupTrace": [
+        "settings",
+        "MCP",
+        "initialize",
+        "EACCES",
+        "EPERM",
+        "fetch",
+        "certificate",
+        "TLS",
+        "timeout",
+        "lock",
+        "OAuth"
+      ],
+      "debugLines": 102,
+      "debugErrorCodes": [
+        "EPERM"
+      ],
+      "nativeDiagnosticLabels": [
+        "posix_spawn",
+        "EPERM"
+      ],
+      "authHelperInvoked": true,
+      "resumeRequested": true,
+      "resumeMatchesRequested": true,
+      "newSessionComparedToPrevious": false
+    },
+    {
+      "types": {
+        "system": 13,
+        "assistant": 2,
+        "result": 1
+      },
+      "toolUses": [],
+      "catalog": [],
+      "mcp": [],
+      "result": "success",
+      "usage": {
+        "input_tokens": 93,
+        "output_tokens": 75,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0
+      },
+      "exitCode": 0,
+      "signal": null,
+      "timedOut": false,
+      "sessionObserved": true,
+      "interrupted": false,
+      "deniedOperation": [
+        "spawn"
+      ],
+      "deniedPathPrefixes": [
+        "/Library",
+        "/private/var/folders"
+      ],
+      "systemPathMentioned": [
+        "/var"
+      ],
+      "pathClassMentioned": {
+        "runner": true,
+        "control": true,
+        "auth": false,
+        "executable": false
+      },
+      "startupDiagnostics": {
+        "unknown option": false,
+        "error": true,
+        "permission denied": false,
+        "operation not permitted": true,
+        "apiKeyHelper": false,
+        "authentication": false,
+        "EACCES": true,
+        "EPERM": true,
+        "ENOENT": false,
+        "--tools": false,
+        "--bare": false,
+        "--setting-sources": false,
+        "--permission-prompts": false,
+        "--disallowedTools": false,
+        "--mcp-config": true,
+        "--model": false,
+        "--print": false,
+        "--output-format": false,
+        "--no-chrome": false,
+        "bwrap": false,
+        "sandbox": false,
+        "Unable": false,
+        "Cannot": false,
+        "not allowed": false,
+        "requires": false
+      },
+      "isError": false,
+      "permissionDenials": 0,
+      "startupTrace": [
+        "settings",
+        "MCP",
+        "initialize",
+        "EACCES",
+        "EPERM",
+        "fetch",
+        "certificate",
+        "TLS",
+        "lock",
+        "OAuth"
+      ],
+      "debugLines": 83,
+      "debugErrorCodes": [
+        "EPERM"
+      ],
+      "nativeDiagnosticLabels": [
+        "posix_spawn",
+        "EPERM"
+      ],
+      "authHelperInvoked": true,
+      "resumeRequested": false,
+      "resumeMatchesRequested": false,
+      "newSessionComparedToPrevious": true
+    },
+    {
+      "types": {
+        "system": 2
+      },
+      "toolUses": [],
+      "catalog": [],
+      "mcp": [],
+      "result": null,
+      "usage": null,
+      "exitCode": 0,
+      "signal": null,
+      "timedOut": false,
+      "sessionObserved": true,
+      "interrupted": true,
+      "deniedOperation": [
+        "spawn"
+      ],
+      "deniedPathPrefixes": [
+        "/Library",
+        "/private/var/folders"
+      ],
+      "systemPathMentioned": [
+        "/var"
+      ],
+      "pathClassMentioned": {
+        "runner": true,
+        "control": true,
+        "auth": false,
+        "executable": false
+      },
+      "startupDiagnostics": {
+        "unknown option": false,
+        "error": true,
+        "permission denied": false,
+        "operation not permitted": true,
+        "apiKeyHelper": false,
+        "authentication": false,
+        "EACCES": true,
+        "EPERM": true,
+        "ENOENT": false,
+        "--tools": false,
+        "--bare": false,
+        "--setting-sources": false,
+        "--permission-prompts": false,
+        "--disallowedTools": false,
+        "--mcp-config": true,
+        "--model": false,
+        "--print": false,
+        "--output-format": false,
+        "--no-chrome": false,
+        "bwrap": false,
+        "sandbox": false,
+        "Unable": false,
+        "Cannot": false,
+        "not allowed": false,
+        "requires": false
+      },
+      "interruptSent": true,
+      "startupTrace": [
+        "settings",
+        "MCP",
+        "initialize",
+        "EACCES",
+        "EPERM",
+        "fetch",
+        "certificate",
+        "TLS",
+        "lock",
+        "OAuth"
+      ],
+      "debugLines": 78,
+      "debugErrorCodes": [
+        "EPERM"
+      ],
+      "nativeDiagnosticLabels": [
+        "posix_spawn",
+        "EPERM"
+      ],
+      "authHelperInvoked": true,
+      "resumeRequested": false,
+      "resumeMatchesRequested": false,
+      "newSessionComparedToPrevious": true
     }
   ],
-  "calls": [],
+  "calls": [
+    {
+      "op": "read",
+      "target": "origin",
+      "ok": true,
+      "remoteMarker": true,
+      "remoteEffect": false,
+      "readEffect": false
+    },
+    {
+      "op": "read",
+      "target": "host-sentinel",
+      "ok": false,
+      "remoteMarker": false,
+      "remoteEffect": false,
+      "readEffect": false
+    },
+    {
+      "op": "write",
+      "target": "host-sentinel",
+      "ok": false,
+      "remoteMarker": false,
+      "remoteEffect": false,
+      "readEffect": false
+    },
+    {
+      "op": "read",
+      "target": "auth",
+      "ok": false,
+      "remoteMarker": false,
+      "remoteEffect": false,
+      "readEffect": false
+    },
+    {
+      "op": "write",
+      "target": "auth",
+      "ok": false,
+      "remoteMarker": false,
+      "remoteEffect": false,
+      "readEffect": false
+    },
+    {
+      "op": "read",
+      "target": "symlink",
+      "ok": false,
+      "remoteMarker": false,
+      "remoteEffect": false,
+      "readEffect": false
+    },
+    {
+      "op": "write",
+      "target": "effect",
+      "ok": true,
+      "remoteMarker": false,
+      "remoteEffect": true,
+      "readEffect": false
+    },
+    {
+      "op": "read",
+      "target": "effect",
+      "ok": true,
+      "remoteMarker": false,
+      "remoteEffect": false,
+      "readEffect": true
+    },
+    {
+      "op": "read",
+      "target": "effect",
+      "ok": true,
+      "remoteMarker": false,
+      "remoteEffect": false,
+      "readEffect": true
+    }
+  ],
   "negatives": {
     "origin_host": {
       "id": 1,
@@ -114,10 +559,9 @@
   "gaps": [
     "Real Claude model behavior is unexercised.",
     "E7 root-turn attribution race (upstream Claude issue #55 in #226) cannot be confirmed or refuted on this backend; open evidence gap.",
-    "Windows, enrolled cross-host deployment, production cancellation/fencing and authentication refresh unexercised.",
-    "Initial native catalog was not observed; dependent resume/catalog transition probes cannot establish safety.",
-    "Combined native exclusion, model-issued remote execution and outer engine isolation not proved; dependent integration remains blocked."
+    "Windows, enrolled cross-host deployment, production cancellation/fencing and authentication refresh unexercised."
   ],
+  "runtimeAdmission": "literal-read-only-OS-ICU-timezone-data",
   "boot": {
     "cliVersionUnderProfile": true,
     "authHelperUnderProfile": true
@@ -209,14 +653,16 @@
     "hostOriginUnchanged": true,
     "hostEffectUnchanged": true,
     "hostSentinelUnchanged": true,
-    "remoteEffect": false,
+    "remoteEffect": true,
     "ambientMarkerAbsent": true
   },
   "acceptance": {
-    "nativeCatalogExact": false,
-    "remoteReadChangeCheck": false,
-    "modelHostReadWriteDenied": false,
+    "nativeCatalogExact": true,
+    "remoteReadChangeCheck": true,
+    "modelHostReadWriteDenied": true,
     "configurationCanaryAbsent": true,
-    "combinedIsolation": false
+    "modelSymlinkDenied": true,
+    "outerFileDenials": true,
+    "combinedIsolation": true
   }
 }
