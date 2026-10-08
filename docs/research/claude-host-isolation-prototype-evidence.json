@@ -21,7 +21,9 @@
       "deniedOperation": [
         "open"
       ],
-      "deniedPathPrefixes": [],
+      "deniedPathPrefixes": [
+        "/tmp"
+      ],
       "systemPathMentioned": [],
       "pathClassMentioned": {
         "runner": false,
@@ -73,7 +75,9 @@
       "deniedOperation": [
         "open"
       ],
-      "deniedPathPrefixes": [],
+      "deniedPathPrefixes": [
+        "/tmp"
+      ],
       "systemPathMentioned": [],
       "pathClassMentioned": {
         "runner": false,
@@ -125,7 +129,9 @@
       "deniedOperation": [
         "open"
       ],
-      "deniedPathPrefixes": [],
+      "deniedPathPrefixes": [
+        "/tmp"
+      ],
       "systemPathMentioned": [],
       "pathClassMentioned": {
         "runner": false,
