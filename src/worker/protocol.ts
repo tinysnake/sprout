@@ -308,13 +308,13 @@ export type WorkspaceFileOperationResult = RemoteWorkspaceOperationResult;
 
 export interface InspectWorkspaceFileOperationParams extends WorkspaceBindingIdentity { readonly operationId: string }
 export interface InspectWorkspaceFileOperationResult {
-  readonly status: 'not-found' | 'running' | 'completed' | 'failed' | 'cancelled';
+  readonly status: 'not-found' | 'running' | 'completed' | 'failed' | 'cancelled' | 'unknown' | 'recovery-required';
   readonly result?: WorkspaceFileOperationResult;
 }
 export interface CancelWorkspaceFileOperationParams extends InspectWorkspaceFileOperationParams {}
 export interface CancelWorkspaceFileOperationResult {
   readonly accepted: boolean;
-  readonly status: 'not-found' | 'running' | 'completed' | 'failed' | 'cancelled';
+  readonly status: 'not-found' | 'running' | 'completed' | 'failed' | 'cancelled' | 'unknown' | 'recovery-required';
 }
 
 export interface StartSessionResult {

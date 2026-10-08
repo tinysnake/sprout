@@ -145,8 +145,21 @@ test('Worker operation identities replay completed edits without applying them t
   const first = await files.execute(request);
   const replay = await files.execute(request);
   assert.deepEqual(replay, first);
+  const inspection = await files.inspect({ ...bindingIdentity, path, operationId: 'stable-edit-id' });
+  assert.equal(inspection.status, 'completed');
+  assert.deepEqual(inspection.result, first);
   assert.equal(await readFile(target, 'utf8'), 'after');
-  await assert.rejects(files.execute({ ...request, newText: 'conflicting' }), /operation identity conflict/);
+  const conflict = await files.execute({ ...request, newText: 'conflicting' });
+  assert.equal(conflict.status, 'failed');
+  assert.equal(conflict.failure, 'operation-identity-conflict');
+  assert.equal(await readFile(target, 'utf8'), 'after');
+
+  const restarted = new WorkerWorkspaceFiles(workspace, 'env-1');
+  await restarted.attach(binding);
+  const durableInspection = await restarted.inspect({ ...binding, operationId: 'stable-edit-id' });
+  assert.equal(durableInspection.status, 'completed');
+  assert.deepEqual(durableInspection.result, first);
+  assert.deepEqual(await restarted.execute(request), first, 'the durable journal returns the known result without repeating the edit');
   assert.equal(await readFile(target, 'utf8'), 'after');
 });
 

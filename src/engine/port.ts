@@ -198,7 +198,7 @@ export interface RemoteWorkspaceTools {
   patch?(path: string, hunks: readonly { readonly before: string; readonly after: string }[], operationId?: string): Promise<RemoteWorkspaceOperationResult>;
   /** Release or protect a lazily acquired mutation lease after run settlement. */
   settle?(outcome: 'settled' | 'unknown'): Promise<void>;
-  inspect(operationId: string): Promise<{ readonly status: string }>;
+  inspect(operationId: string): Promise<{ readonly status: string; readonly operation?: RemoteWorkspaceOperationResult }>;
   cancel(operationId: string): Promise<{ readonly accepted: boolean; readonly status: string }>;
 }
 

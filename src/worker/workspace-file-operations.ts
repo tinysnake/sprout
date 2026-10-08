@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto';
-import { open, lstat, realpath, readdir, stat, readFile, rename, unlink } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, open, lstat, realpath, readdir, stat, readFile, rename, unlink } from 'node:fs/promises';
 import { join, relative, resolve, sep } from 'node:path';
 import type { WorkerWorkspace } from './workspace.ts';
 import type {
@@ -28,6 +28,12 @@ interface OperationState {
   status: InspectWorkspaceFileOperationResult['status'];
   result?: RemoteWorkspaceOperationResult;
 }
+interface DurableMutationRecord {
+  readonly operationId: string;
+  readonly fingerprint: string;
+  readonly status: InspectWorkspaceFileOperationResult['status'];
+  readonly result?: RemoteWorkspaceOperationResult;
+}
 
 /** Worker-owned read-only Project file boundary with generation fencing. */
 export class WorkerWorkspaceFiles {
@@ -35,10 +41,12 @@ export class WorkerWorkspaceFiles {
   readonly #environmentInstanceId: string;
   readonly #bindings = new Map<string, BoundWorkspace>();
   readonly #operations = new Map<string, OperationState>();
+  readonly #journalDirectory: string;
 
   constructor(workspace: WorkerWorkspace, environmentInstanceId: string) {
     this.#workspace = workspace;
     this.#environmentInstanceId = environmentInstanceId;
+    this.#journalDirectory = workspace.operationJournalDirectory();
   }
 
   async attach(input: WorkspaceBindingIdentity): Promise<void> {
@@ -63,15 +71,31 @@ export class WorkerWorkspaceFiles {
   async execute(input: WorkspaceFileOperationParams): Promise<RemoteWorkspaceOperationResult> {
     const binding = this.#requireBinding({ ...input, ...(input.workspacePath !== undefined ? { path: input.workspacePath } : {}) });
     if (typeof input.operationId !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(input.operationId)) throw new Error('invalid operation identity');
-    const fingerprint = JSON.stringify([input.projectId, input.environmentInstanceId, input.bindingId, input.generation, input.connectionEpoch, input.workspaceId, input.kind, input.workspacePath ?? '', input.operation, input.path ?? '', input.operation === 'search' ? input.query : '', input.operation === 'edit' ? [input.oldText, input.newText] : input.operation === 'patch' ? input.hunks : []]);
-    const prior = this.#operations.get(input.operationId);
+    const fingerprint = createHash('sha256').update(JSON.stringify([input.projectId, input.environmentInstanceId, input.bindingId, input.generation, input.connectionEpoch, input.workspaceId, input.kind, input.workspacePath ?? '', input.operation, input.path ?? '', input.operation === 'search' ? input.query : '', input.operation === 'edit' ? [input.oldText, input.newText] : input.operation === 'patch' ? input.hunks : []])).digest('hex');
+    const mutating = input.operation === 'edit' || input.operation === 'patch';
+    let prior = this.#operations.get(input.operationId);
     if (prior) {
-      if (prior.fingerprint !== fingerprint) throw new Error('operation identity conflict');
+      if (prior.fingerprint !== fingerprint) return failure(input, 'failed', 'operation-identity-conflict');
       if (prior.result) return prior.result;
-      throw new Error('operation outcome is still running; inspect before retrying');
+      return failure(input, 'failed', 'outcome-unknown-inspect-required');
     }
     const state: OperationState = { controller: new AbortController(), fingerprint, status: 'running' };
     this.#operations.set(input.operationId, state);
+    if (mutating) {
+      try {
+        const claim = await this.#claimMutation({ operationId: input.operationId, fingerprint, status: 'running' });
+        if (!claim.claimed) {
+          this.#operations.delete(input.operationId);
+          if (claim.record.status === 'recovery-required') return failure(input, 'failed', 'outcome-unknown-inspect-required');
+          if (claim.record.fingerprint !== fingerprint) return failure(input, 'failed', 'operation-identity-conflict');
+          if (claim.record.result) return claim.record.result;
+          return failure(input, 'failed', 'outcome-unknown-inspect-required');
+        }
+      } catch {
+        if (this.#operations.get(input.operationId) === state) this.#operations.delete(input.operationId);
+        return failure(input, 'failed', 'operation-journal-unavailable');
+      }
+    }
     try {
       const result = input.operation === 'read'
         ? await this.#read(binding, input, state.controller.signal)
@@ -82,21 +106,36 @@ export class WorkerWorkspaceFiles {
             : await this.#patch(binding, input);
       state.result = result;
       state.status = result.status;
+      if (mutating) {
+        try { await this.#saveMutation({ operationId: input.operationId, fingerprint, status: result.status, result }); }
+        catch {
+          delete state.result;
+          state.status = 'unknown';
+          return failure(input, 'failed', 'outcome-unknown-inspect-required');
+        }
+      }
       return result;
     } catch (error) {
       const cancelled = state.controller.signal.aborted;
       const result = failure(input, cancelled ? 'cancelled' : 'failed', cancelled ? 'cancelled' : errorCode(error));
       state.result = result;
       state.status = result.status;
+      if (mutating) {
+        try { await this.#saveMutation({ operationId: input.operationId, fingerprint, status: result.status, result }); }
+        catch { delete state.result; state.status = 'unknown'; return failure(input, 'failed', 'outcome-unknown-inspect-required'); }
+      }
       return result;
     }
   }
 
-  inspect(input: InspectWorkspaceFileOperationParams): InspectWorkspaceFileOperationResult {
+  async inspect(input: InspectWorkspaceFileOperationParams): Promise<InspectWorkspaceFileOperationResult> {
     this.#requireBinding(input);
     const state = this.#operations.get(input.operationId);
-    if (!state) return { status: 'not-found' };
-    return { status: state.status, ...(state.result ? { result: state.result } : {}) };
+    if (state) return { status: state.status, ...(state.result ? { result: state.result } : {}) };
+    const durable = await this.#readMutation(input.operationId);
+    if (!durable) return { status: 'not-found' };
+    if (durable.status === 'running') return { status: 'unknown' };
+    return { status: durable.status, ...(durable.result ? { result: durable.result } : {}) };
   }
 
   cancel(input: CancelWorkspaceFileOperationParams): CancelWorkspaceFileOperationResult {
@@ -106,6 +145,54 @@ export class WorkerWorkspaceFiles {
     if (state.status !== 'running') return { accepted: false, status: state.status };
     state.controller.abort();
     return { accepted: true, status: 'running' };
+  }
+
+  async #claimMutation(record: DurableMutationRecord): Promise<{ readonly claimed: boolean; readonly record: DurableMutationRecord }> {
+    await mkdir(this.#journalDirectory, { recursive: true, mode: 0o700 });
+    const path = this.#journalPath(record.operationId);
+    try {
+      const handle = await open(path, 'wx', 0o600);
+      try { await handle.writeFile(JSON.stringify(record)); await handle.sync(); }
+      finally { await handle.close(); }
+      return { claimed: true, record };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      return { claimed: false, record: (await this.#readMutation(record.operationId)) ?? { ...record, status: 'recovery-required' } };
+    }
+  }
+
+  async #saveMutation(record: DurableMutationRecord): Promise<void> {
+    await mkdir(this.#journalDirectory, { recursive: true, mode: 0o700 });
+    const path = this.#journalPath(record.operationId);
+    const temporary = `${path}.${randomUUID()}.tmp`;
+    const handle = await open(temporary, 'wx', 0o600);
+    try { await handle.writeFile(JSON.stringify(record)); await handle.sync(); }
+    finally { await handle.close(); }
+    try { await rename(temporary, path); }
+    finally { await unlink(temporary).catch(() => undefined); }
+  }
+
+  async #readMutation(operationId: string): Promise<DurableMutationRecord | undefined> {
+    const path = this.#journalPath(operationId);
+    try {
+      const entry = await lstat(path);
+      if (!entry.isFile() || entry.isSymbolicLink() || entry.size > 128 * 1024) throw new Error('invalid journal entry');
+      const value = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+      if (value.operationId !== operationId || typeof value.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(value.fingerprint) ||
+          !['running','completed','failed','cancelled','unknown','recovery-required'].includes(String(value.status))) throw new Error('invalid journal entry');
+      const result = value.result as RemoteWorkspaceOperationResult | undefined;
+      if (result !== undefined && (result.operationId !== operationId || (result.operation !== 'edit' && result.operation !== 'patch') ||
+          !['completed','failed','cancelled'].includes(result.status))) throw new Error('invalid journal outcome');
+      return { operationId, fingerprint: value.fingerprint, status: value.status as DurableMutationRecord['status'], ...(result ? { result } : {}) };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      return { operationId, fingerprint: '', status: 'recovery-required' };
+    }
+  }
+
+  #journalPath(operationId: string): string {
+    if (!/^[A-Za-z0-9_-]{8,128}$/.test(operationId)) throw new Error('invalid operation identity');
+    return join(this.#journalDirectory, `${createHash('sha256').update(operationId).digest('hex')}.json`);
   }
 
   async #edit(binding: BoundWorkspace, input: Extract<WorkspaceFileOperationParams, { operation: 'edit' }>): Promise<RemoteWorkspaceOperationResult> {

@@ -221,8 +221,11 @@ test('Host-run edits and patches only through the enrolled Worker with one run-h
   writeFileSync(localFile, 'LOCAL_SENTINEL');
   const localEngine = new ScriptedEngineAdapter({ turns: [scriptedTurn('Remote changes completed.')] });
   const observed: RemoteWorkspaceOperationResult[] = [];
+  let inspection: { readonly status: string; readonly operation?: RemoteWorkspaceOperationResult } | undefined;
+  let conflictingReplay: RemoteWorkspaceOperationResult | undefined;
+  let matchingReplay: RemoteWorkspaceOperationResult | undefined;
+  let workerDispatches = 0;
   let leasesDuringRun: readonly { readonly capability: string }[] = [];
-  let capturedTools: StartSessionRequest['remoteWorkspace'];
   let runtime: Awaited<ReturnType<typeof createRuntime>> | undefined;
   const hostPi = {
     id: 'pi', profileId: 'profile-runtime-remote-mutation', authorizedModel: model,
@@ -233,9 +236,11 @@ test('Host-run edits and patches only through the enrolled Worker with one run-h
     },
     async startSession(request: StartSessionRequest) {
       assert.deepEqual(request.remoteWorkspace?.operations, ['read', 'search', 'edit', 'patch']);
-      capturedTools = request.remoteWorkspace;
       const tools = request.remoteWorkspace!;
       observed.push(await tools.edit!('src/target.txt', 'REMOTE_SENTINEL', 'REMOTE_EDITED', 'sdk-edit-1'));
+      inspection = await tools.inspect(observed[0]!.operationId);
+      conflictingReplay = await tools.edit!('src/target.txt', 'REMOTE_SENTINEL', 'CHANGED_PAYLOAD', 'sdk-edit-1');
+      matchingReplay = await tools.edit!('src/target.txt', 'REMOTE_SENTINEL', 'REMOTE_EDITED', 'sdk-edit-1');
       observed.push(await tools.patch!('src/target.txt', [{ before: 'REMOTE_EDITED', after: 'REMOTE_PATCHED' }], 'sdk-patch-1'));
       leasesDuringRun = runtime!.pool.leases();
       return localEngine.startSession(request);
@@ -267,6 +272,17 @@ test('Host-run edits and patches only through the enrolled Worker with one run-h
     });
     await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, workerRoot);
     assert.equal(runtime.pool.requiresLeaseForBoundOperation(INSTANCE_ID, 'agent-run'), true);
+    const execute = runtime.enrollmentEnvironment.executeWorkspaceFileOperation.bind(runtime.enrollmentEnvironment);
+    let loseNextResponse = true;
+    runtime.enrollmentEnvironment.executeWorkspaceFileOperation = async (environmentInstanceId, input) => {
+      workerDispatches++;
+      const result = await execute(environmentInstanceId, input);
+      if (loseNextResponse && (input.operation === 'edit' || input.operation === 'patch')) {
+        loseNextResponse = false;
+        throw new Error('simulated Worker response loss');
+      }
+      return result;
+    };
     await runtime.projectService.create({ id: 'remote-mutation-project', displayName: 'Remote mutation Project' });
     await runtime.projectService.addMembership('remote-mutation-project', { agentId: 'scout' });
     const access = await runtime.projectAccess.grant({
@@ -279,8 +295,13 @@ test('Host-run edits and patches only through the enrolled Worker with one run-h
     const submitted = await runtime.orchestrator.submit({ agentId: 'scout', projectId: 'remote-mutation-project', prompt: 'Edit and patch the remote file.' });
     const run = await runtime.orchestrator.waitFor(submitted.id);
     if (run.status !== 'completed') throw new Error(`Host-run failed: ${run.failure ?? 'no failure detail'}`);
-    assert.equal(observed.length, 2);
-    assert.deepEqual(observed.map(result => result.status), ['completed', 'completed'], JSON.stringify(observed));
+    assert.deepEqual(observed.map(result => result.status), ['failed', 'completed'], JSON.stringify(observed));
+    assert.equal(observed[0]?.failure, 'outcome-unknown-inspect-required');
+    assert.equal(inspection?.status, 'completed');
+    assert.equal(inspection?.operation?.status, 'completed');
+    assert.equal(conflictingReplay?.failure, 'operation-identity-conflict');
+    assert.equal(matchingReplay?.failure, 'operation-outcome-inspection-required');
+    assert.equal(workerDispatches, 2, 'neither same-identity retry nor conflicting reuse reaches the Worker');
     assert.ok(observed.every(result => result.environmentInstanceId === INSTANCE_ID && result.bindingId === access.current?.bindingId));
     assert.equal(readFileSync(join(workerRoot, 'repos', 'remote-mutation', 'src', 'target.txt'), 'utf8'), 'REMOTE_PATCHED');
     assert.equal(readFileSync(localFile, 'utf8'), 'LOCAL_SENTINEL');
@@ -288,10 +309,10 @@ test('Host-run edits and patches only through the enrolled Worker with one run-h
     assert.equal(leasesDuringRun[0]?.capability, 'agent-run');
     assert.equal(runtime.pool.leases().length, 0, 'the run releases its lease after confirmed settlement');
 
-    const replay = await capturedTools!.edit!('src/target.txt', 'REMOTE_SENTINEL', 'CHANGED_PAYLOAD', 'sdk-edit-1');
+    const replay = conflictingReplay!;
     assert.equal(replay.failure, 'operation-identity-conflict');
     assert.equal(readFileSync(join(workerRoot, 'repos', 'remote-mutation', 'src', 'target.txt'), 'utf8'), 'REMOTE_PATCHED');
-    const sameIdentity = await capturedTools!.edit!('src/target.txt', 'REMOTE_SENTINEL', 'REMOTE_EDITED', 'sdk-edit-1');
+    const sameIdentity = matchingReplay!;
     assert.equal(sameIdentity.failure, 'operation-outcome-inspection-required');
 
     const holder = await runtime.pool.acquireBoundOperationLeaseRevalidated({

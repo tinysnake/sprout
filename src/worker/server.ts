@@ -205,7 +205,7 @@ export class EnvironmentWorker {
           this.#transport.respond(id, await this.#requireWorkspaceFiles().execute(params as import('./protocol.ts').WorkspaceFileOperationParams));
           return;
         case WORKER_METHODS.inspectWorkspaceFileOperation:
-          this.#transport.respond(id, this.#requireWorkspaceFiles().inspect(params as import('./protocol.ts').InspectWorkspaceFileOperationParams));
+          this.#transport.respond(id, await this.#requireWorkspaceFiles().inspect(params as import('./protocol.ts').InspectWorkspaceFileOperationParams));
           return;
         case WORKER_METHODS.cancelWorkspaceFileOperation:
           this.#transport.respond(id, this.#requireWorkspaceFiles().cancel(params as import('./protocol.ts').CancelWorkspaceFileOperationParams));

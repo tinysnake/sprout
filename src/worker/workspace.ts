@@ -23,6 +23,11 @@ export class WorkerWorkspace {
     this.#root = resolve(root);
   }
 
+  /** Private durable journal location owned by this Worker, outside Project workspaces. */
+  operationJournalDirectory(): string {
+    return join(this.#root, '.sprout-worker-state', 'workspace-operations');
+  }
+
   async prepare(input: TaskContextMaterialization): Promise<PrepareTaskContextResult> {
     const root = await this.#rootPath();
     const workspace = await this.#workspace(root, input.projectId, true, input.projectWorkspacePath);

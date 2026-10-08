@@ -272,6 +272,16 @@ async function openSession(config, input) {
           return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result, isError: result.status !== 'completed' };
         },
       });
+      addTool({
+        name: 'remote_inspect', label: 'Inspect remote operation', description: 'Inspect the known outcome of a prior remote Project file operation without replaying it.',
+        parameters: { type: 'object', properties: { operationId: { type: 'string' } }, required: ['operationId'], additionalProperties: false },
+        annotations: { readOnlyHint: true },
+        execute: async (_id, args) => {
+          const result = await remoteCall('inspect', args);
+          return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result,
+            isError: result.status === 'unknown' || result.status === 'not-found' };
+        },
+      });
       if (remoteOperations.includes('edit')) addTool({
         name: 'remote_edit', label: 'Edit remote file', description: 'Replace one exact text match in a bounded file in the authorized remote Project workspace.',
         parameters: { type: 'object', properties: { path: { type: 'string' }, oldText: { type: 'string' }, newText: { type: 'string' } }, required: ['path', 'oldText', 'newText'], additionalProperties: false },

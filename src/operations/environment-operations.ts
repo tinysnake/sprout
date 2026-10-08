@@ -162,6 +162,8 @@ export class EnvironmentOperations {
     let leaseAcquisition: Promise<{ readonly acquired?: EnvironmentLease; readonly conflict?: { readonly holderId: string; readonly state: 'active' | 'recovering' }; readonly failure?: string }> | undefined;
     let pendingOperations = 0;
     let uncertainOutcome = false;
+    let leaseCompromised = false;
+    const uncertainOperationIds = new Set<string>();
     let leaseKeepalive: ReturnType<typeof setInterval> | undefined;
 
     const acquireMutationLease = async (): Promise<{ readonly acquired?: EnvironmentLease; readonly conflict?: { readonly holderId: string; readonly state: 'active' | 'recovering' }; readonly failure?: string }> => {
@@ -202,6 +204,7 @@ export class EnvironmentOperations {
         const extended = this.#pool?.extendLease(active.id, this.#leaseTtlMs);
         if (!extended) {
           uncertainOutcome = true;
+          leaseCompromised = true;
           this.#pool?.markRecovering(active.id);
         } else mutationLease = extended;
       }, interval);
@@ -219,12 +222,20 @@ export class EnvironmentOperations {
       const row: RemoteOperationIdentity = { operationId, fingerprint, projectId, environmentInstanceId: access.environmentInstanceId,
         bindingId: binding.bindingId, generation: binding.generation!, connectionEpoch: epoch, workspaceId: binding.workspaceId,
         operation, state: normalized.failure ? 'failed' : 'running', updatedAt: this.#clock() };
+      const claimIdentity = async (): Promise<RemoteWorkspaceOperationResult | undefined> => {
+        const claim = await this.#store.claim(row);
+        if (claim === 'claimed') return undefined;
+        return operationResult(fixed, operationId, operation, 'failed',
+          claim === 'same-identity' ? 'operation-outcome-inspection-required' : 'operation-identity-conflict');
+      };
       const prior = await this.#store.get(operationId);
       if (prior) {
         const failure = prior.fingerprint === fingerprint ? 'operation-outcome-inspection-required' : 'operation-identity-conflict';
         return operationResult(fixed, operationId, operation, 'failed', failure);
       }
       if (normalized.failure) {
+        const duplicate = await claimIdentity();
+        if (duplicate) return duplicate;
         await this.#store.save(row);
         return operationResult(fixed, operationId, operation, 'failed', normalized.failure);
       }
@@ -259,7 +270,8 @@ export class EnvironmentOperations {
         await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed);
       }
 
-      await this.#store.save(row);
+      const duplicate = await claimIdentity();
+      if (duplicate) return duplicate;
       const { path: workspacePath, ...bindingIdentity } = fixed;
       const common = { ...bindingIdentity, ...(workspacePath !== undefined ? { workspacePath } : {}), operationId };
       const request: WorkspaceFileOperationParams = operation === 'read'
@@ -278,14 +290,16 @@ export class EnvironmentOperations {
         if (!isBoundedRemoteResult(result, fixed, operationId, operation)) throw new Error('remote operation identity or bounds invalid');
       } catch {
         const state: RemoteOperationState = mutating ? 'unknown' : 'failed';
-        if (mutating) uncertainOutcome = true;
+        if (mutating) {
+          uncertainOutcome = true;
+          uncertainOperationIds.add(operationId);
+        }
         await this.#saveState(row, state);
         return operationResult(fixed, operationId, operation, 'failed', mutating ? 'outcome-unknown-inspect-required' : 'worker-unavailable');
       } finally {
         pendingOperations--;
       }
       await this.#saveState(row, result.status === 'completed' ? 'completed' : result.status);
-      if (result.status !== 'completed' && mutating) uncertainOutcome = true;
       return result;
     };
     const remoteOperations: ('read' | 'search' | 'edit' | 'patch')[] = ['read', 'search'];
@@ -317,8 +331,14 @@ export class EnvironmentOperations {
         const request: InspectWorkspaceFileOperationParams = { ...fixed, operationId };
         const result = await this.#environment.inspectWorkspaceFileOperation(access.environmentInstanceId, request);
         if (result.status === 'not-found' && (row.state === 'running' || row.state === 'unknown' || row.state === 'cancel-requested')) return { status: 'unknown' };
+        if (result.result && (row.operation === 'command' ||
+            !isBoundedRemoteResult(result.result, fixed, operationId, row.operation as 'read' | 'search' | 'edit' | 'patch'))) return { status: 'unknown' };
         if (isTerminalOperationState(result.status) && result.status !== row.state) await this.#saveState(row, result.status);
-        return { status: result.status };
+        if (isTerminalOperationState(result.status) && result.result && (row.operation === 'edit' || row.operation === 'patch')) {
+          uncertainOperationIds.delete(operationId);
+          uncertainOutcome = leaseCompromised || uncertainOperationIds.size > 0;
+        }
+        return { status: result.status, ...(result.result !== undefined ? { operation: result.result } : {}) };
       },
       cancel: async operationId => {
         await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed);

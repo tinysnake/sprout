@@ -23,6 +23,7 @@ export interface RemoteOperationIdentityStore {
 }
 
 export class MemoryRemoteOperationIdentityStore implements RemoteOperationIdentityStore {
+  readonly #rows = new Map<string, RemoteOperationIdentity>();
   async claim(row: RemoteOperationIdentity): Promise<RemoteOperationClaim> {
     const prior = this.#rows.get(row.operationId);
     if (prior) return prior.fingerprint === row.fingerprint ? 'same-identity' : 'conflicting-identity';
