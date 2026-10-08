@@ -157,12 +157,28 @@ async function main(): Promise<void> {
   process.stdout.write('PASS: disposable container Worker resolved a workspace dependency and completed a typed Pi tool call; process marker stayed inside the container.\n');
 }
 
+let mainFailed = false;
+let mainError: unknown;
 try {
   await main();
-} finally {
-  await connection?.close();
-  if (containerCreated) {
-    await execFileAsync('docker', ['rm', '-f', containerName], { timeout: 20_000 }).catch(() => undefined);
-    await execFileAsync('docker', ['volume', 'rm', volumeName], { timeout: 20_000 }).catch(() => undefined);
-  }
+} catch (error) {
+  mainFailed = true;
+  mainError = error;
 }
+
+const cleanupErrors: Error[] = [];
+const cleanup = async (label: string, operation: () => Promise<unknown>): Promise<void> => {
+  try {
+    await operation();
+  } catch (error) {
+    cleanupErrors.push(new Error(`Disposable Docker cleanup failed: ${label}`, { cause: error }));
+  }
+};
+if (connection) await cleanup('Worker connection close', () => connection!.close());
+if (containerCreated) {
+  await cleanup('container removal', () => execFileAsync('docker', ['rm', '-f', containerName], { timeout: 20_000 }));
+  await cleanup('volume removal', () => execFileAsync('docker', ['volume', 'rm', volumeName], { timeout: 20_000 }));
+}
+if (mainFailed && cleanupErrors.length > 0) throw new AggregateError([mainError, ...cleanupErrors], 'Docker verification and cleanup failed');
+if (mainFailed) throw mainError;
+if (cleanupErrors.length > 0) throw new AggregateError(cleanupErrors, 'Docker verification cleanup failed');

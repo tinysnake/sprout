@@ -25,6 +25,7 @@ import {
   type WorkerReadinessProbeResult,
 } from './worker/protocol.ts';
 import { EnvironmentWorker } from './worker/server.ts';
+import type { ProjectMcpClientLauncher } from './worker/project-mcp.ts';
 import type { WorkerRecoveryJournal } from './worker/recovery-journal.ts';
 import {
   connectWorkerEnrollment,
@@ -131,6 +132,7 @@ export async function connectRuntimeWorker(
   identityKeyPath: string,
   readiness: () => WorkerReadinessFacts = scriptedStartupReadiness,
   workspaceRoot?: string,
+  projectMcpClientLauncher?: ProjectMcpClientLauncher,
 ): Promise<WorkerEnrollmentConnection> {
   const port = await runtimePort(runtime);
   const connection = await connectWorkerEnrollment({
@@ -145,6 +147,7 @@ export async function connectRuntimeWorker(
     engines: new Map(),
     readiness,
     ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
+    ...(projectMcpClientLauncher !== undefined ? { projectMcpClientLauncher } : {}),
     input: connection.stream,
     output: connection.stream,
   });

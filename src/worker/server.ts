@@ -37,7 +37,7 @@ import {
 import { createAgentTaskGroupMessageBridge } from './agent-task-group-bridge.ts';
 import { WorkerWorkspace } from './workspace.ts';
 import { WorkerWorkspaceFiles } from './workspace-file-operations.ts';
-import { WorkerProjectMcp } from './project-mcp.ts';
+import { WorkerProjectMcp, type ProjectMcpClientLauncher } from './project-mcp.ts';
 import type { WorkerRecoveryJournal } from './recovery-journal.ts';
 import {
   contractDeliveryDiagnostic,
@@ -82,6 +82,8 @@ export interface EnvironmentWorkerOptions {
     params: WorkerReadinessProbeParams,
   ) => Promise<WorkerReadinessProbeResult>;
   readonly recoveryJournal?: WorkerRecoveryJournal;
+  /** Injected only by composition tests to model uncertain MCP process cleanup. */
+  readonly projectMcpClientLauncher?: ProjectMcpClientLauncher;
 }
 interface LiveSession {
   readonly closeTaskGroupMessageBridge?: () => Promise<void>;
@@ -134,7 +136,9 @@ export class EnvironmentWorker {
     this.#options = options;
     this.#workspace = options.workspaceRoot === undefined ? undefined : new WorkerWorkspace(options.workspaceRoot);
     this.#workspaceFiles = this.#workspace === undefined ? undefined : new WorkerWorkspaceFiles(this.#workspace, options.environmentInstanceId);
-    this.#projectMcp = this.#workspace === undefined ? undefined : new WorkerProjectMcp(this.#workspace, options.environmentInstanceId);
+    this.#projectMcp = this.#workspace === undefined ? undefined : new WorkerProjectMcp(
+      this.#workspace, options.environmentInstanceId, options.projectMcpClientLauncher,
+    );
     this.#transport = new LineJsonRpcTransport({
       input: options.input,
       output: options.output,

@@ -36,9 +36,19 @@ interface ToolOrigin {
   readonly rawName: string;
   readonly schema: JsonRecord;
 }
+export interface ProjectMcpClient {
+  discoverTools(): Promise<readonly { readonly name: string; readonly description: string; readonly inputSchema: unknown }[]>;
+  callTool(name: string, args: Readonly<Record<string, unknown>>): Promise<JsonRecord>;
+  close(): Promise<boolean>;
+}
+export type ProjectMcpClientLauncher = (
+  server: { readonly name: string; readonly command: string; readonly args: readonly string[]; readonly env: Readonly<Record<string, string>> },
+  cwd: string,
+  onCreated: (client: ProjectMcpClient) => void,
+) => Promise<ProjectMcpClient>;
 interface McpServerProcess {
   readonly name: string;
-  readonly client: StdioMcpClient;
+  readonly client: ProjectMcpClient;
   readonly tools: Map<string, ToolOrigin>;
   readonly secretValues: readonly string[];
 }
@@ -58,10 +68,12 @@ export class WorkerProjectMcp {
   readonly #environmentInstanceId: string;
   readonly #bindings = new Map<string, Binding>();
   readonly #processes = new Map<string, ProjectMcpProcess>();
+  readonly #launchClient: ProjectMcpClientLauncher;
 
-  constructor(workspace: WorkerWorkspace, environmentInstanceId: string) {
+  constructor(workspace: WorkerWorkspace, environmentInstanceId: string, launchClient: ProjectMcpClientLauncher = StdioMcpClient.launch) {
     this.#workspace = workspace;
     this.#environmentInstanceId = environmentInstanceId;
+    this.#launchClient = launchClient;
   }
 
   async attach(input: AttachWorkspaceBindingParams): Promise<void> {
@@ -100,17 +112,25 @@ export class WorkerProjectMcp {
     const publicServers: StartProjectMcpResult['servers'][number][] = [];
     let totalTools = 0;
     for (const declaration of manifest.servers) {
-      let client: StdioMcpClient | undefined;
+      let client: ProjectMcpClient | undefined;
+      let trackedServer: McpServerProcess | undefined;
       const secretValues = Object.values(declaration.env).filter(value => value.length > 0);
+      const trackClient = (created: ProjectMcpClient): void => {
+        if (trackedServer) return;
+        trackedServer = { name: declaration.name, client: created, tools: new Map(), secretValues };
+        servers.push(trackedServer);
+      };
       try {
-        client = await StdioMcpClient.launch(declaration, binding.root);
+        client = await this.#launchClient(declaration, binding.root, trackClient);
+        trackClient(client);
+        const serverProcess = trackedServer;
+        if (!serverProcess) throw new Error('MCP child process identity was not registered');
         const advertised = await client.discoverTools();
         if (totalTools + advertised.length > MAX_TOTAL_TOOLS) {
           await client.close();
           publicServers.push({ name: sanitizeIdentifier(declaration.name, { fallback: 'unknown-server', kind: 'generic', maxLength: 64 }), status: 'unsupported', tools: [] });
           continue;
         }
-        const tools = new Map<string, ToolOrigin>();
         const declarations: ProjectMcpToolDeclaration[] = [];
         let rejectedDeclaration = false;
         for (const tool of advertised) {
@@ -122,11 +142,10 @@ export class WorkerProjectMcp {
           const schema = sanitizeInputSchema(tool.inputSchema, 0, secretValues);
           if (!safeTool || !safeServer || !safeName || !schema) { rejectedDeclaration = true; continue; }
           const descriptor: ProjectMcpToolDeclaration = { id, server: safeServer, name: safeTool, description, inputSchema: schema };
-          tools.set(id, { declaration: descriptor, rawName: tool.name, schema });
+          serverProcess.tools.set(id, { declaration: descriptor, rawName: tool.name, schema });
           declarations.push(descriptor);
         }
         totalTools += declarations.length;
-        servers.push({ name: declaration.name, client, tools, secretValues });
         publicServers.push({ name: sanitizeIdentifier(declaration.name, { fallback: 'unknown-server', kind: 'generic', maxLength: 64 }), status: rejectedDeclaration ? 'unsupported' : 'ready', tools: declarations });
       } catch (error) {
         if (client) await client.close();
@@ -223,7 +242,7 @@ export class WorkerProjectMcp {
   }
 }
 
-class StdioMcpClient {
+class StdioMcpClient implements ProjectMcpClient {
   readonly #child: ChildProcessWithoutNullStreams;
   readonly #pending = new Map<number, { resolve(value: JsonRecord): void; reject(error: Error): void; timer: NodeJS.Timeout }>();
   #buffer = '';
@@ -240,7 +259,7 @@ class StdioMcpClient {
     child.on('close', () => { this.#closed = true; this.#failPending(new Error('MCP process exited')); });
   }
 
-  static async launch(server: ManifestServer, cwd: string): Promise<StdioMcpClient> {
+  static async launch(server: ManifestServer, cwd: string, onCreated: (client: ProjectMcpClient) => void): Promise<StdioMcpClient> {
     const child = spawn(server.command, [...server.args], {
       cwd,
       env: mcpChildEnvironment(server.env),
@@ -250,6 +269,7 @@ class StdioMcpClient {
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as ChildProcessWithoutNullStreams;
     const client = new StdioMcpClient(child);
+    onCreated(client);
     try {
       const initialized = await client.request('initialize', {
         protocolVersion: PROTOCOL_VERSION,

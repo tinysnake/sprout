@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { EndpointCarrier } from './carrier.ts';
 import { WorkerWorkspace } from './workspace.ts';
 import { WorkerWorkspaceFiles } from './workspace-file-operations.ts';
+import { WorkerProjectMcp, type ProjectMcpClientLauncher } from './project-mcp.ts';
 
 test('Worker MCP inspection reads only the bound root manifest and returns sanitized stdio descriptors', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'sprout-mcp-inspection-'));
@@ -147,6 +148,51 @@ test('Worker reports a missing MCP server dependency without exposing command co
   });
   assert.equal(JSON.stringify(started).includes('sprout-ticket-244-missing-mcp-fixture-command'), false);
   assert.deepEqual(await connection.contexts.stopProjectMcp({ ...binding, ...lease, processId }), { processId, status: 'stopped' });
+});
+
+test('Worker retains launch and discovery failures until process termination is confirmed', async (t) => {
+  for (const failure of ['launch', 'discovery'] as const) {
+    const root = await mkdtemp(join(tmpdir(), `sprout-mcp-${failure}-uncertain-`));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const workspace = new WorkerWorkspace(root);
+    const selected = await workspace.validateWorkspace({ projectId: `project-${failure}`, environmentInstanceId: 'env-uncertain', kind: 'relative', path: 'repo' });
+    const binding = {
+      projectId: `project-${failure}`, environmentInstanceId: 'env-uncertain', bindingId: `binding-${failure}`,
+      generation: 1, connectionEpoch: 1, workspaceId: selected.workspaceId, kind: 'relative' as const, path: 'repo',
+    };
+    await writeFile(join(root, 'repo', '.mcp.json'), JSON.stringify({ mcpServers: { fixture: { command: 'unused' } } }));
+    let closeCalls = 0;
+    let launches = 0;
+    const client = {
+      async discoverTools() {
+        if (failure === 'discovery') throw new Error('fixture discovery failed');
+        return [];
+      },
+      async callTool() { return {}; },
+      async close() { closeCalls += 1; return closeCalls >= 3; },
+    };
+    const launcher: ProjectMcpClientLauncher = async (_server, _cwd, onCreated) => {
+      launches += 1;
+      onCreated(client);
+      if (failure === 'launch') {
+        await client.close();
+        throw new Error('fixture initialization failed');
+      }
+      return client;
+    };
+    const supervisor = new WorkerProjectMcp(workspace, 'env-uncertain', launcher);
+    await supervisor.attach(binding);
+    const lease = { leaseId: `lease-${failure}`, holderKind: 'run' as const, holderId: `run-${failure}`, runId: `run-${failure}` };
+    const start = { ...binding, ...lease, processId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', format: 'claude-code-mcp-json-v1' as const };
+    const catalog = await supervisor.start(start);
+    assert.equal(catalog.status, 'blocked', `${failure} failure is reported as unavailable`);
+    assert.deepEqual(await supervisor.start(start), catalog, 'retry reuses the tracked process identity');
+    assert.equal(launches, 1);
+    assert.deepEqual(await supervisor.stop({ ...binding, ...lease, processId: start.processId }), { processId: start.processId, status: 'uncertain' });
+    assert.equal(closeCalls, 2, 'the failed child remains tracked after its first unconfirmed close');
+    assert.deepEqual(await supervisor.stop({ ...binding, ...lease, processId: start.processId }), { processId: start.processId, status: 'stopped' });
+    assert.equal(closeCalls, 3, 'the same child identity remains available for confirmed cleanup');
+  }
 });
 
 test('Worker file reads return the same-name remote sentinel and deny traversal, another Project, and host paths', async (t) => {
