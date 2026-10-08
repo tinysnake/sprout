@@ -107,7 +107,7 @@ const environmentFor = (id: string) => overview.value?.environments.find(
 );
 const bindingReadinessFor = (entry: ProjectEnvironmentAccessView) => overview.value?.bindingReadiness.find(
   (readiness) => readiness.environmentInstanceId === entry.environmentInstanceId && entry.current !== undefined &&
-    readiness.bindingId === entry.current.bindingId && readiness.generation === entry.current.generation,
+    readiness.bindingId === entry.current.bindingId,
 );
 const bindingReadinessReason = (entry: ProjectEnvironmentAccessView) => {
   const reason = bindingReadinessFor(entry)?.reason;

@@ -29,11 +29,14 @@ test('the Project production composition joins durable Project, Agent, Environme
         current: { bindingId: 'binding-a', workspaceId: 'workspace-a', kind: 'relative', path: 'repos/sprout', boundAt: 10 },
         history: [{ bindingId: 'binding-a', workspaceId: 'workspace-a', kind: 'relative', path: 'repos/sprout', boundAt: 10 }],
       }];
+    },
     async listWorkspaceBindingReadiness(id: string) {
       calls.push(`binding-readiness:${id}`);
       return [{ environmentInstanceId: 'inst-ready', bindingId: 'binding-a', generation: 7, status: 'blocked' as const, reason: 'worker-offline' as const }];
     },
   } as unknown as ProjectAccessBrowserAdapter;
+  const service = new ProductionProjectService({
+    projects: projectPort,
     access: accessPort,
     agents: agentService,
     environments: new FixtureEnvironmentService(envRows),
