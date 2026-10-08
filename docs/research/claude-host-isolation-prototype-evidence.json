@@ -17,34 +17,8 @@
       "signal": "SIGKILL",
       "timedOut": true,
       "sessionObserved": false,
-      "interrupted": false
-    },
-    {
-      "types": {},
-      "toolUses": [],
-      "catalog": null,
-      "mcp": [],
-      "result": null,
-      "usage": null,
-      "exitCode": null,
-      "signal": "SIGKILL",
-      "timedOut": true,
-      "sessionObserved": false,
-      "interrupted": false
-    },
-    {
-      "types": {},
-      "toolUses": [],
-      "catalog": null,
-      "mcp": [],
-      "result": null,
-      "usage": null,
-      "exitCode": null,
-      "signal": "SIGKILL",
-      "timedOut": true,
-      "sessionObserved": false,
-      "interrupted": true,
-      "interruptSent": true
+      "interrupted": false,
+      "authHelperInvoked": true
     }
   ],
   "calls": [],
@@ -137,8 +111,13 @@
   "gaps": [
     "Real Claude model behavior is unexercised.",
     "E7 root-turn attribution race (upstream Claude issue #55 in #226) cannot be confirmed or refuted on this backend; open evidence gap.",
-    "Windows, enrolled cross-host deployment, production cancellation/fencing and authentication refresh unexercised."
+    "Windows, enrolled cross-host deployment, production cancellation/fencing and authentication refresh unexercised.",
+    "Initial native catalog was not observed; dependent resume/catalog transition probes cannot establish safety."
   ],
+  "boot": {
+    "cliVersionUnderProfile": false,
+    "authHelperUnderProfile": true
+  },
   "final": {
     "hostOriginUnchanged": true,
     "hostEffectUnchanged": true,
