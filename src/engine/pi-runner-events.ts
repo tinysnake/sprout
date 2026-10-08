@@ -67,15 +67,10 @@ export function sanitizeAssistantContent(content: unknown): { type: 'text'; text
   });
 }
 
-/** Bounded model-authored tool arguments for the parent event stream. */
-export function sanitizeToolArgs(args: unknown): unknown {
-  if (args === undefined || args === null) return {};
-  try {
-    const json = JSON.stringify(args);
-    if (typeof json === 'string' && json.length <= 2048) return JSON.parse(json);
-  } catch {
-    // Unserializable arguments degrade to an empty object.
-  }
+/** Remote tool arguments may contain host paths or credential-shaped file text. */
+export function sanitizeToolArgs(_args: unknown): Record<string, unknown> {
+  // The bounded tool name and terminal operation status provide attribution;
+  // argument values are unnecessary in durable Run events.
   return {};
 }
 

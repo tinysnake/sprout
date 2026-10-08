@@ -38,8 +38,11 @@ test('session framing and unknown events are ignored without throwing', () => {
 
 test('only the authorized remote workspace tools pass the execution gate', () => {
   assert.deepEqual(
-    sessionEventDisposition({ type: 'tool_execution_start', toolName: 'remote_read', args: { path: 'sentinel.txt' } }, idle),
-    { action: 'pi-event', event: { type: 'tool_execution_start', toolName: 'remote_read', args: { path: 'sentinel.txt' } } },
+    sessionEventDisposition({
+      type: 'tool_execution_start', toolName: 'remote_read',
+      args: { path: '/Users/synthetic-host/private/sentinel.txt' },
+    }, idle),
+    { action: 'pi-event', event: { type: 'tool_execution_start', toolName: 'remote_read', args: {} } },
   );
   // Later phases of an authorized call continue the turn instead of aborting it.
   assert.deepEqual(
@@ -123,7 +126,11 @@ test('sanitizers keep only bounded, typed fields', () => {
   assert.deepEqual(sanitizeAssistantContent('text'), [{ type: 'text', text: 'text' }]);
   assert.deepEqual(sanitizeAssistantContent([{ type: 'text' }, { type: 'text', text: 'ok' }]), [{ type: 'text', text: 'ok' }]);
   assert.deepEqual(sanitizeToolArgs(undefined), {});
-  assert.deepEqual(sanitizeToolArgs({ path: 'sentinel.txt' }), { path: 'sentinel.txt' });
+  assert.deepEqual(sanitizeToolArgs({
+    path: '/Users/synthetic-host/private/sentinel.txt',
+    oldText: 'private key sentinel',
+    newText: 'api_key=ghp_sentinelCredentialValueThatMustNeverPersist123',
+  }), {});
   assert.deepEqual(sanitizeToolArgs({ blob: 'x'.repeat(4096) }), {});
   assert.deepEqual(sanitizeToolArgs(() => undefined), {});
 });
