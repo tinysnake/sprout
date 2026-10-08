@@ -184,6 +184,7 @@ export class SqliteRunStore implements RunStore {
   }
 
   async save(run: AgentRun): Promise<number> {
+    run = normalizeLegacyRunPlacement(run);
     const replaySequence = (this.#db.prepare(
       'SELECT COALESCE(MAX(replay_sequence), 0) + 1 AS sequence FROM agent_runs',
     ).get() as { sequence: number }).sequence;
@@ -218,8 +219,9 @@ export class SqliteRunStore implements RunStore {
         run.agentId,
         run.prompt,
         run.environmentInstanceId,
-        run.executionMode ?? 'environment-hosted',
-        run.engineHostProfileId ?? (run.executionMode === 'host-run' ? null : run.environmentInstanceId),
+        run.executionPlacement?.mode ?? run.executionMode ?? 'environment-hosted',
+        run.executionPlacement?.engineHost?.id ?? run.engineHostProfileId ??
+          (run.executionPlacement?.mode === 'host-run' ? null : run.environmentInstanceId),
         run.projectId ?? null,
         run.taskId ?? null,
         run.status,
@@ -370,7 +372,7 @@ export class SqliteSessionKeyStore implements SessionKeyStore {
           engine TEXT NOT NULL,
           environment_instance_id TEXT NOT NULL,
           execution_mode TEXT NOT NULL DEFAULT 'environment-hosted',
-          engine_host_profile_id TEXT NOT NULL,
+          engine_host_profile_id TEXT NOT NULL DEFAULT '',
           working_directory_id TEXT NOT NULL,
           engine_host_kind TEXT NOT NULL,
           engine_host_id TEXT NOT NULL,

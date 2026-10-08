@@ -63,8 +63,21 @@ test('a stored key round-trips through SQLite across a restart', async () => {
 
 test('Host-run continuation slots include the execution mode and Engine host profile', async () => {
   const store = new InMemorySessionKeyStore();
-  const hostA = { ...identity, environmentInstanceId: '', executionMode: 'host-run' as const, engineHostProfileId: 'profile-a' };
-  const hostB = { ...hostA, engineHostProfileId: 'profile-b' };
+  const hostA: SessionKeyIdentity = {
+    ...identity,
+    environmentInstanceId: '',
+    executionPlacement: {
+      mode: 'host-run',
+      engineHost: { kind: 'sprout', id: 'profile-a', profile: { platform: 'macos', boundary: 'shared-host' } },
+    },
+  };
+  const hostB: SessionKeyIdentity = {
+    ...hostA,
+    executionPlacement: {
+      ...hostA.executionPlacement!,
+      engineHost: { ...hostA.executionPlacement!.engineHost, id: 'profile-b' },
+    },
+  };
   await store.save({ ...hostA, key: 'host-a', updatedAt: 1_000 });
   await store.save({ ...hostB, key: 'host-b', updatedAt: 1_001 });
   assert.notEqual(sessionKeyId({ ...hostA, workingDirectory: identity.workingDirectory }),
@@ -175,14 +188,22 @@ test('a versioned hashed session-key table is re-keyed with Environment-hosted i
     identity.agentId, identity.engine, identity.environmentInstanceId, directoryId, 'sess-v2', 1_000,
   );
   const store = new SqliteSessionKeyStore({ db });
-  const restored = await store.get(identity);
+  const restored = await store.get({
+    ...identity,
+    executionPlacement: {
+      mode: 'environment-hosted',
+      engineHost: { kind: 'environment', id: identity.environmentInstanceId, profile: { platform: 'unknown', boundary: 'unknown' } },
+    },
+    scope: { kind: 'conversation', id: 'legacy-unscoped' },
+  });
+  assert.equal(await store.get(identity), undefined, 'historical unscoped keys cannot enter an authorized conversation');
   const rows = db.prepare('SELECT * FROM agent_session_keys').all();
   store.close();
   db.close();
 
   assert.equal(restored?.key, 'sess-v2');
-  assert.equal(restored?.executionMode, 'environment-hosted');
-  assert.equal(restored?.engineHostProfileId, identity.environmentInstanceId);
+  assert.equal(restored?.executionPlacement.mode, 'environment-hosted');
+  assert.equal(restored?.executionPlacement.engineHost.id, identity.environmentInstanceId);
   assert.equal(rows.length, 1);
 });
 

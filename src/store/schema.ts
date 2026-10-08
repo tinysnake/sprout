@@ -1336,6 +1336,12 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
         if (!names.has('execution_placement')) db.exec('ALTER TABLE agent_runs ADD COLUMN execution_placement TEXT;');
         if (!names.has('session_key_scope')) db.exec('ALTER TABLE agent_runs ADD COLUMN session_key_scope TEXT;');
         db.exec(`UPDATE agent_runs SET execution_placement = CASE
+          ${names.has('execution_mode') ? `WHEN execution_mode = 'host-run' THEN
+            ${names.has('engine_host_profile_id') ? `CASE WHEN engine_host_profile_id IS NOT NULL THEN
+              json_object('mode', 'host-run', 'engineHost', json_object(
+                'kind', 'sprout', 'id', engine_host_profile_id,
+                'profile', json_object('platform', 'unknown', 'boundary', 'unknown')))
+              ELSE json_object('mode', 'host-run') END` : "json_object('mode', 'host-run')"}` : ''}
           WHEN environment_instance_id IS NULL OR environment_instance_id = ''
             THEN json_object('mode', 'environment-hosted')
           ELSE json_object('mode', 'environment-hosted', 'engineHost', json_object(
@@ -1361,7 +1367,7 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
         // The path-bearing legacy table is converted by SqliteSessionKeyStore,
         // where each row can be hashed before the raw directory is discarded.
         if (names.has('working_directory_id')) {
-          const legacySlots = !names.has('execution_mode');
+          const legacySlots = !names.has('scope_kind');
           if (!names.has('execution_mode')) db.exec("ALTER TABLE agent_session_keys ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'environment-hosted';");
           if (!names.has('engine_host_kind')) db.exec("ALTER TABLE agent_session_keys ADD COLUMN engine_host_kind TEXT NOT NULL DEFAULT 'environment';");
           if (!names.has('engine_host_id')) db.exec('ALTER TABLE agent_session_keys ADD COLUMN engine_host_id TEXT;');
@@ -1369,6 +1375,10 @@ export const DEFAULT_MIGRATIONS: readonly MigrationStep[] = [
           if (!names.has('engine_host_boundary')) db.exec("ALTER TABLE agent_session_keys ADD COLUMN engine_host_boundary TEXT NOT NULL DEFAULT 'unknown';");
           if (!names.has('scope_kind')) db.exec("ALTER TABLE agent_session_keys ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'conversation';");
           if (!names.has('scope_id')) db.exec("ALTER TABLE agent_session_keys ADD COLUMN scope_id TEXT NOT NULL DEFAULT 'legacy-unscoped';");
+          if (names.has('engine_host_profile_id')) db.exec(`
+            UPDATE agent_session_keys SET engine_host_kind = 'sprout', engine_host_id = engine_host_profile_id
+              WHERE execution_mode = 'host-run' AND engine_host_id IS NULL AND engine_host_profile_id != '';
+          `);
           db.exec('UPDATE agent_session_keys SET engine_host_id = environment_instance_id WHERE engine_host_id IS NULL;');
           if (legacySlots) db.exec(`UPDATE agent_session_keys SET slot = json_array(
             agent_id, engine, environment_instance_id, execution_mode, engine_host_kind,

@@ -52,6 +52,11 @@ test('schema migration records legacy runs, begun Tasks, and continuation slots 
       createdAt: 12,
       completedAt: 13,
     });
+    await initial.runs.save({
+      id: 'host-run-migration', agentId: 'agent-migration', prompt: 'Historical Host-run reply',
+      environmentInstanceId: '', executionMode: 'host-run', engineHostProfileId: 'legacy-host-profile',
+      status: 'completed', events: [], createdAt: 15, completedAt: 16,
+    });
     initial.close();
 
     const legacy = new DatabaseSync(filename);
@@ -65,22 +70,28 @@ test('schema migration records legacy runs, begun Tasks, and continuation slots 
         agent_id TEXT NOT NULL,
         engine TEXT NOT NULL,
         environment_instance_id TEXT NOT NULL,
+        execution_mode TEXT NOT NULL DEFAULT 'environment-hosted',
+        engine_host_profile_id TEXT NOT NULL DEFAULT '',
         working_directory_id TEXT NOT NULL,
         session_key TEXT NOT NULL,
         updated_at INTEGER NOT NULL
       );
     `);
     const directoryId = workingDirectoryId('/work/project');
-    legacy.prepare('INSERT INTO agent_session_keys VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+    legacy.prepare('INSERT INTO agent_session_keys VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
       JSON.stringify(['agent-migration', 'pi', 'env-migration', directoryId]),
-      'agent-migration', 'pi', 'env-migration', directoryId, 'legacy-session', 14,
+      'agent-migration', 'pi', 'env-migration', 'environment-hosted', 'env-migration', directoryId, 'legacy-session', 14,
+    );
+    legacy.prepare('INSERT INTO agent_session_keys VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+      JSON.stringify(['host-run', 'legacy-host-profile', 'agent-migration', 'pi', '', workingDirectoryId('/work/host-runner')]),
+      'agent-migration', 'pi', '', 'host-run', 'legacy-host-profile', workingDirectoryId('/work/host-runner'), 'legacy-host-session', 15,
     );
     legacy.close();
 
     const reopened = new SqliteStore({ filename });
     const run = await reopened.runs.get('run-migration');
     const task = await reopened.tasks.get('task-migration');
-    const key = (await reopened.sessionKeys.list())[0];
+    const key = (await reopened.sessionKeys.list()).find(row => row.key === 'legacy-session');
     const legacySlotKey = await reopened.sessionKeys.get({
       agentId: 'agent-migration',
       engine: 'pi',
@@ -107,6 +118,20 @@ test('schema migration records legacy runs, begun Tasks, and continuation slots 
     assert.equal(task?.environmentInstanceId, 'env-migration');
     assert.equal(task?.environmentLeaseId, 'lease-migration');
     assert.equal(reopened.leases.get('lease-migration')?.state, 'active');
+    const hostRun = await reopened.runs.get('host-run-migration');
+    assert.deepEqual(hostRun?.executionPlacement, {
+      mode: 'host-run',
+      engineHost: { kind: 'sprout', id: 'legacy-host-profile', profile: legacyProfile },
+    });
+    const hostKey = (await reopened.sessionKeys.list()).find(row => row.key === 'legacy-host-session');
+    assert.deepEqual(hostKey?.executionPlacement, hostRun?.executionPlacement);
+    assert.deepEqual(hostKey?.scope, { kind: 'conversation', id: 'legacy-unscoped' });
+    assert.equal(await reopened.sessionKeys.get({
+      agentId: 'agent-migration', engine: 'pi', environmentInstanceId: '',
+      executionPlacement: hostKey!.executionPlacement,
+      scope: { kind: 'conversation', id: 'newly-authorized-channel' },
+      workingDirectory: '/work/host-runner',
+    }), undefined, 'a flat legacy key cannot enter a newly authorized conversation');
     assert.deepEqual(key?.executionPlacement, {
       mode: 'environment-hosted',
       engineHost: { kind: 'environment', id: 'env-migration', profile: legacyProfile },

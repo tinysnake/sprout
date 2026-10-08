@@ -94,6 +94,10 @@ test('a run view exposes progress and the terminal result without server interna
 test('run projections expose placement while keeping the local host profile identity private', () => {
   const view = toRunView(run({
     environmentInstanceId: '', executionMode: 'host-run', engineHostProfileId: 'opaque-local-profile',
+    executionPlacement: {
+      mode: 'host-run',
+      engineHost: { kind: 'sprout', id: 'opaque-local-profile', profile: { platform: 'macos', boundary: 'shared-host' } },
+    },
   }));
   assert.equal(view.executionMode, 'host-run');
   assert.equal('environmentInstanceId' in view, false);

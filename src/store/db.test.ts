@@ -130,7 +130,6 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'execution_mode', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'engine_host_profile_id', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'working_directory_id', type: 'TEXT', notnull: 1, pk: 0 },
-    { name: 'execution_mode', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'engine_host_kind', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'engine_host_id', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'engine_host_platform', type: 'TEXT', notnull: 1, pk: 0 },

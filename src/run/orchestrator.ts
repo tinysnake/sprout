@@ -639,6 +639,17 @@ export class RunOrchestrator {
       projectId: selectedProject.id,
       executionMode: 'host-run',
       engineHostProfileId: host.profileId,
+      executionPlacement: {
+        mode: 'host-run',
+        engineHost: {
+          kind: 'sprout',
+          // The opaque profile identifies this host-local engine session store.
+          id: host.profileId,
+          profile: engineHostProfileForPlatform(
+            process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'unknown',
+          ),
+        },
+      },
       workOption: option,
       configurationVersion: agent.configurationVersion ?? 1,
     };
@@ -662,21 +673,28 @@ export class RunOrchestrator {
       const assembled = await this.#assembleInput(initial, agent, running.id);
       if (assembled.handOff !== undefined) prepared = await this.#advance(running, { handOff: assembled.handOff });
       const workingDirectory = `host-profile:${host.profileId}:agent:${agent.id}`;
-      const identity: SessionKeyIdentity = {
-        agentId: agent.id,
-        engine: 'pi',
-        environmentInstanceId: '',
-        executionMode: 'host-run',
-        engineHostProfileId: host.profileId,
-        workingDirectory,
-      };
-      const stored = this.#sessionKeys ? await this.#sessionKeys.get(identity) : undefined;
+      const placement = initial.executionPlacement;
+      const scope = initial.sessionKeyScope;
+      const identity: SessionKeyIdentity | undefined = placement !== undefined &&
+        isEngineHostedPlacement(placement) && scope !== undefined
+        ? {
+            agentId: agent.id,
+            engine: 'pi',
+            environmentInstanceId: '',
+            executionPlacement: placement,
+            scope,
+            workingDirectory,
+          }
+        : undefined;
+      const stored = this.#sessionKeys && identity !== undefined
+        ? await this.#sessionKeys.get(identity)
+        : undefined;
       let attempt = await this.#runSession(
         host, agent, option, assembled.prompt, prepared, stored?.key, assembled.instructions,
         workingDirectory, undefined, undefined, undefined,
       );
       if (stored !== undefined && !attempt.ok && attempt.resumeRefused) {
-        if (this.#sessionKeys) await this.#sessionKeys.delete(identity);
+        if (this.#sessionKeys && identity !== undefined) await this.#sessionKeys.delete(identity);
         attempt = await this.#runSession(
           host, agent, option, assembled.prompt, prepared, undefined, assembled.instructions,
           workingDirectory, undefined, undefined, undefined,
@@ -687,7 +705,7 @@ export class RunOrchestrator {
           status: 'failed', message: attempt.message,
         });
       }
-      if (this.#sessionKeys && attempt.result.status === 'completed' && attempt.engineSessionKey) {
+      if (this.#sessionKeys && identity !== undefined && attempt.result.status === 'completed' && attempt.engineSessionKey) {
         await this.#sessionKeys.save({ ...identity, key: attempt.engineSessionKey, updatedAt: this.#clock.now() });
       }
       return this.#settleWithResult(attempt.run, attempt.result);

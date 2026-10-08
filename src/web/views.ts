@@ -189,10 +189,19 @@ export function toRunView(run: AgentRun, processExecutionMode?: ExecutionMode): 
     agentId: run.agentId,
     prompt: run.prompt,
     status: run.status,
-    executionMode: run.executionMode ?? 'environment-hosted',
+    executionMode: run.executionPlacement?.mode ?? run.executionMode ?? 'environment-hosted',
     events: run.events,
     ...(run.taskId !== undefined ? { taskId: run.taskId } : {}),
-    ...(run.executionPlacement !== undefined ? { executionPlacement: run.executionPlacement } : {}),
+    ...(run.executionPlacement !== undefined ? {
+      executionPlacement: run.executionPlacement.engineHost?.kind === 'sprout'
+        ? {
+            ...run.executionPlacement,
+            // Public placement reports the host kind and non-secret controls,
+            // never the host-local session namespace used for continuation.
+            engineHost: { ...run.executionPlacement.engineHost, id: 'sprout' },
+          }
+        : run.executionPlacement,
+    } : {}),
     ...(processExecutionMode !== undefined ? { processExecutionMode } : {}),
     ...(modeMismatch !== undefined ? { executionModeMismatchReason: modeMismatch } : {}),
     handOffAttached: run.handOff !== undefined,

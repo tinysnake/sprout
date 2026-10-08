@@ -78,7 +78,11 @@ function setup(options: { readonly readiness?: 'ready' | 'unavailable'; readonly
 
 test('Host-run Message uses the authorized local Pi profile without an Environment lookup or lease', async () => {
   const context = setup();
-  const { id } = await context.orchestrator.submit({ agentId: agent.id, projectId: project.id, prompt: 'Please reply.' });
+  const request = {
+    agentId: agent.id, projectId: project.id, prompt: 'Please reply.',
+    sessionKeyScope: { kind: 'conversation' as const, id: 'project-chat-channel' },
+  };
+  const { id } = await context.orchestrator.submit(request);
   const run = await context.orchestrator.waitFor(id);
 
   assert.equal(run.status, 'completed');
@@ -95,10 +99,21 @@ test('Host-run Message uses the authorized local Pi profile without an Environme
   assert.deepEqual(context.pool.leases(), []);
   assert.equal(context.readinessChecks(), 1);
   assert.deepEqual(await context.sessionKeys.list().then(rows => rows.map(row => ({
-    executionMode: row.executionMode,
-    engineHostProfileId: row.engineHostProfileId,
+    executionMode: row.executionPlacement.mode,
+    engineHostProfileId: row.executionPlacement.engineHost.id,
     environmentInstanceId: row.environmentInstanceId,
   }))), [{ executionMode: 'host-run', engineHostProfileId: profileId, environmentInstanceId: '' }]);
+  const key = context.engine.sessions[0]?.engineSessionKey;
+  const next = await context.orchestrator.submit(request);
+  assert.equal((await context.orchestrator.waitFor(next.id)).status, 'completed');
+  assert.equal(context.engine.requests[1]?.resumeSessionKey, key, 'the authorized conversation resumes its native key');
+  const other = await context.orchestrator.submit({ ...request, sessionKeyScope: { kind: 'conversation', id: 'other-channel' } });
+  assert.equal((await context.orchestrator.waitFor(other.id)).status, 'completed');
+  assert.equal(context.engine.requests[2]?.resumeSessionKey, undefined, 'another conversation starts fresh');
+  const unscoped = await context.orchestrator.submit({ agentId: agent.id, projectId: project.id, prompt: 'No continuation scope.' });
+  assert.equal((await context.orchestrator.waitFor(unscoped.id)).status, 'completed');
+  assert.equal(context.engine.requests[3]?.resumeSessionKey, undefined);
+  assert.equal((await context.sessionKeys.list()).length, 2, 'unscoped work saves no native key');
 });
 
 test('Host-run admission refuses unauthorized models, unready profiles, and Task bindings before the engine starts', async () => {

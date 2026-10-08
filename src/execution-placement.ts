@@ -10,7 +10,7 @@ export interface EngineHostProfile {
 /** The actual host and its execution profile, kept separate from the work Environment. */
 export interface EngineHostPlacement {
   readonly kind: 'environment' | 'sprout';
-  /** Environment instance identity, or the Sprout instance identity for Host-run. */
+  /** Environment instance identity, or the opaque Sprout-host engine profile/session namespace for Host-run. */
   readonly id: string;
   readonly profile: EngineHostProfile;
 }
@@ -47,10 +47,19 @@ export function legacyEnvironmentPlacement(instanceId?: string): ExecutionPlacem
 export function normalizeLegacyRunPlacement<T extends {
   readonly environmentInstanceId: string;
   readonly executionPlacement?: ExecutionPlacement;
+  readonly executionMode?: ExecutionMode;
+  readonly engineHostProfileId?: string;
 }>(run: T): T & { readonly executionPlacement: ExecutionPlacement } {
-  return run.executionPlacement !== undefined
-    ? run as T & { readonly executionPlacement: ExecutionPlacement }
-    : { ...run, executionPlacement: legacyEnvironmentPlacement(run.environmentInstanceId) };
+  if (run.executionPlacement !== undefined) return run as T & { readonly executionPlacement: ExecutionPlacement };
+  const placement: ExecutionPlacement = run.executionMode === 'host-run'
+    ? {
+        mode: 'host-run',
+        ...(run.engineHostProfileId !== undefined ? {
+          engineHost: { kind: 'sprout', id: run.engineHostProfileId, profile: LEGACY_ENGINE_HOST_PROFILE },
+        } : {}),
+      }
+    : legacyEnvironmentPlacement(run.environmentInstanceId);
+  return { ...run, executionPlacement: placement };
 }
 
 export function normalizeLegacyTaskPlacement<T extends {

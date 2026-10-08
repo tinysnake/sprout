@@ -54,7 +54,10 @@ test('Host-run placement and its Engine profile survive SQLite reopen', async ()
   const dir = mkdtempSync(join(tmpdir(), 'sprout-sqlite-host-run-'));
   const dbPath = join(dir, 'sprout.db');
   const writer = new SqliteRunStore({ filename: dbPath });
-  await writer.save(sampleRun({ executionMode: 'host-run', engineHostProfileId: 'profile-local-a', environmentInstanceId: '' }));
+  const { executionPlacement: _oldPlacement, ...flatHostRun } = sampleRun({
+    executionMode: 'host-run', engineHostProfileId: 'profile-local-a', environmentInstanceId: '',
+  });
+  await writer.save(flatHostRun);
   writer.close();
 
   const reader = new SqliteRunStore({ filename: dbPath });
@@ -63,6 +66,10 @@ test('Host-run placement and its Engine profile survive SQLite reopen', async ()
   assert.equal(restored?.executionMode, 'host-run');
   assert.equal(restored?.engineHostProfileId, 'profile-local-a');
   assert.equal(restored?.environmentInstanceId, '');
+  assert.deepEqual(restored?.executionPlacement, {
+    mode: 'host-run',
+    engineHost: { kind: 'sprout', id: 'profile-local-a', profile: { platform: 'unknown', boundary: 'unknown' } },
+  });
 });
 
 test('trusted failure class survives SQLite reopen while legacy free text cannot classify an event', async () => {

@@ -4,7 +4,7 @@ ADR-0016 selects one immutable execution mode per Sprout process, but process co
 
 A begun Task may continue only when its recorded mode matches the current process. The guard runs before another Agent activation, Task reopen, or recovery that would resume execution. A mismatch keeps the Task's Environment, workspace, and lease bound to their recorded facts; interrupted runs still reconcile to terminal history, and explicit cleanup, discard, and Human Force Release remain available.
 
-Native session keys are scoped to Agent, engine, execution mode, actual engine host and profile, work area, and the authorized Conversation, Routing batch, or Task scope. This prevents a key from crossing a startup mode, host boundary, work area, or authorization boundary. Environment-hosted remains the only currently admitted execution strategy; Host-run placement is recorded as a process mode but remains unavailable until its execution capabilities are implemented.
+Native session keys are scoped to Agent, engine, execution mode, actual engine host and profile, work area, and the authorized Conversation, Routing batch, or Task scope. This prevents a key from crossing a startup mode, host boundary, work area, or authorization boundary. Environment-hosted remains available for Task and standalone work. Ticket #240 also admits supported one-round Host-run Pi Message conversations without a work Environment or lease; Task execution still requires Environment-hosted mode. The Host-run Engine host identity names the opaque host-local Pi profile/session namespace, while its profile records non-secret platform and isolation facts. Public Run views expose placement without disclosing that local namespace.
 
 **Consequences**
 
