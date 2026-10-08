@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { RemoteWorkspaceOperationResult, RemoteWorkspaceTools } from '../engine/port.ts';
 import type { ProjectAccessService } from '../project/access-service.ts';
+import { accessIsConsistent, sanitizeWorkspaceSelection } from '../project/access.ts';
 import type { ProjectService } from '../project/authority-service.ts';
 import type { ProjectEnvironmentAccess, WorkspaceBinding } from '../project/access.ts';
 import type { RuntimeEnvironment, WorkerGatewayView } from '../runtime.ts';
@@ -8,6 +9,9 @@ import type { EnvironmentCatalog } from '../environment/catalog.ts';
 import type { EnvironmentEnrollmentService } from '../environment/enrollment-service.ts';
 import type { RemoteOperationIdentityStore, RemoteOperationIdentity, RemoteOperationState } from './remote-operation-store.ts';
 import type { AttachWorkspaceBindingParams, WorkspaceFileOperationParams, InspectWorkspaceFileOperationParams, CancelWorkspaceFileOperationParams } from '../worker/protocol.ts';
+
+const MAX_SUPPORTED_READ_BYTES = 64 * 1024;
+const MAX_SUPPORTED_SEARCH_RESULTS = 100;
 
 export type RemoteWorkspaceBlock = 'project-denied' | 'access-ended' | 'workspace-unbound' | 'worker-offline' | 'stale-epoch' | 'unsupported' | 'capability-denied' | 'lease-required' | 'worker-refused';
 export interface RemoteWorkspaceReadiness {
@@ -184,8 +188,19 @@ export class EnvironmentOperations {
   async #blockReason(projectId: string, agentId: string, access: ProjectEnvironmentAccess, binding: WorkspaceBinding | undefined): Promise<RemoteWorkspaceBlock | undefined> {
     const project = await this.#projects.get(projectId);
     if (!project || project.status !== 'active' || !hasAgent(project, agentId)) return 'project-denied';
+    if (access.projectId !== projectId || access.environmentInstanceId === '' || !accessIsConsistent(access)) return 'workspace-unbound';
     if (access.status !== 'active') return 'access-ended';
-    if (!binding || !Number.isSafeInteger(binding.generation) || binding.generation! < 1) return 'workspace-unbound';
+    if (!binding || !Number.isSafeInteger(binding.generation) || binding.generation! < 1 ||
+      typeof binding.workspaceId !== 'string' || binding.workspaceId.trim().length === 0) return 'workspace-unbound';
+    try {
+      const selection = sanitizeWorkspaceSelection({ kind: binding.kind, ...(binding.path !== undefined ? { path: binding.path } : {}) });
+      if (selection.kind !== binding.kind || selection.path !== binding.path) return 'workspace-unbound';
+    } catch {
+      return 'workspace-unbound';
+    }
+    const current = access.history.find(row => row.bindingId === binding.bindingId && row.unboundAt === undefined);
+    if (!current || current.generation !== binding.generation || current.workspaceId !== binding.workspaceId ||
+      current.kind !== binding.kind || current.path !== binding.path) return 'workspace-unbound';
     const live = this.#gateway.liveFor(access.environmentInstanceId);
     if (!live || live.enrollment.status !== 'approved') return 'worker-offline';
     const enrollment = await this.#enrollments.get(live.enrollment.id);
@@ -194,8 +209,11 @@ export class EnvironmentOperations {
     const epoch = live.epoch.epoch;
     if (epoch !== this.#gateway.currentConnectionEpoch(enrollment.id) || !this.#gateway.isCurrentConnection(enrollment.id, live.epoch.connectionId) || this.#environment.connectionEpoch?.(access.environmentInstanceId) !== epoch) return 'stale-epoch';
     const info = await this.#environment.info?.(access.environmentInstanceId);
-    if (!info || info.environmentInstanceId !== access.environmentInstanceId || info.workspaceOperations?.version !== 1 ||
-      !info.workspaceOperations.operations.includes('read') || !info.workspaceOperations.operations.includes('search')) return 'unsupported';
+    const operations = info?.workspaceOperations;
+    if (!info || info.environmentInstanceId !== access.environmentInstanceId || operations?.version !== 1 ||
+      !operations.operations.includes('read') || !operations.operations.includes('search') ||
+      !Number.isSafeInteger(operations.maxReadBytes) || operations.maxReadBytes < 1 || operations.maxReadBytes > MAX_SUPPORTED_READ_BYTES ||
+      !Number.isSafeInteger(operations.maxSearchResults) || operations.maxSearchResults < 1 || operations.maxSearchResults > MAX_SUPPORTED_SEARCH_RESULTS) return 'unsupported';
     const capability = this.#catalog.entry(access.environmentInstanceId)?.definition.capabilities.find(c => c.name === 'read-only-investigation');
     if (!capability) return 'unsupported';
     // Only this explicit catalog grant authorizes the read/search allowlist lease-free.
