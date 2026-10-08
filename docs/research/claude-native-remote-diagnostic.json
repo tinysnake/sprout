@@ -8,19 +8,19 @@
   "turns": [
     {
       "types": {
-        "system": 89,
-        "assistant": 12,
+        "system": 82,
+        "assistant": 15,
         "user": 8,
         "result": 1
       },
       "toolUses": [
         "mcp__origin__remote_read",
-        "mcp__origin__remote_write",
+        "mcp__origin__remote_read",
+        "mcp__origin__remote_read",
         "mcp__origin__remote_read",
         "mcp__origin__remote_write",
-        "mcp__origin__remote_read",
         "mcp__origin__remote_write",
-        "mcp__origin__remote_read",
+        "mcp__origin__remote_write",
         "mcp__origin__remote_read"
       ],
       "catalog": [
@@ -35,9 +35,9 @@
       ],
       "result": "success",
       "usage": {
-        "input_tokens": 1567,
-        "output_tokens": 1020,
-        "cache_read_input_tokens": 1024,
+        "input_tokens": 1585,
+        "output_tokens": 979,
+        "cache_read_input_tokens": 1792,
         "cache_creation_input_tokens": 0
       },
       "exitCode": 0,
@@ -45,25 +45,18 @@
       "timedOut": false,
       "sessionObserved": true,
       "interrupted": false,
-      "deniedOperation": [
-        "write"
-      ],
-      "deniedPathPrefixes": [
-        "/private/var/folders",
-        "/Users"
-      ],
-      "systemPathMentioned": [
-        "/var"
-      ],
+      "deniedOperation": [],
+      "deniedPathPrefixes": [],
+      "systemPathMentioned": [],
       "pathClassMentioned": {
         "runner": false,
         "control": false,
-        "auth": true,
+        "auth": false,
         "executable": false
       },
       "startupDiagnostics": {
         "unknown option": false,
-        "error": true,
+        "error": false,
         "permission denied": false,
         "operation not permitted": false,
         "apiKeyHelper": false,
@@ -82,19 +75,22 @@
         "--output-format": false,
         "--no-chrome": false,
         "bwrap": false,
-        "sandbox": true,
+        "sandbox": false,
         "Unable": false,
-        "Cannot": true,
+        "Cannot": false,
         "not allowed": false,
         "requires": false
       },
       "isError": false,
       "permissionDenials": 0,
-      "authHelperInvoked": true
+      "authHelperInvoked": true,
+      "resumeRequested": false,
+      "resumeMatchesRequested": false,
+      "newSessionComparedToPrevious": false
     },
     {
       "types": {
-        "system": 7,
+        "system": 6,
         "assistant": 4,
         "user": 1,
         "result": 1
@@ -114,9 +110,9 @@
       ],
       "result": "success",
       "usage": {
-        "input_tokens": 559,
-        "output_tokens": 141,
-        "cache_read_input_tokens": 2624,
+        "input_tokens": 938,
+        "output_tokens": 61,
+        "cache_read_input_tokens": 2176,
         "cache_creation_input_tokens": 0
       },
       "exitCode": 0,
@@ -124,27 +120,21 @@
       "timedOut": false,
       "sessionObserved": true,
       "interrupted": false,
-      "deniedOperation": [
-        "write"
-      ],
-      "deniedPathPrefixes": [
-        "/private/var/folders"
-      ],
-      "systemPathMentioned": [
-        "/var"
-      ],
+      "deniedOperation": [],
+      "deniedPathPrefixes": [],
+      "systemPathMentioned": [],
       "pathClassMentioned": {
-        "runner": true,
+        "runner": false,
         "control": false,
         "auth": false,
         "executable": false
       },
       "startupDiagnostics": {
         "unknown option": false,
-        "error": true,
+        "error": false,
         "permission denied": false,
         "operation not permitted": false,
-        "apiKeyHelper": true,
+        "apiKeyHelper": false,
         "authentication": false,
         "EACCES": false,
         "EPERM": false,
@@ -168,11 +158,14 @@
       },
       "isError": false,
       "permissionDenials": 0,
-      "authHelperInvoked": true
+      "authHelperInvoked": true,
+      "resumeRequested": true,
+      "resumeMatchesRequested": true,
+      "newSessionComparedToPrevious": false
     },
     {
       "types": {
-        "system": 110,
+        "system": 67,
         "assistant": 2,
         "result": 1
       },
@@ -182,7 +175,7 @@
       "result": "success",
       "usage": {
         "input_tokens": 93,
-        "output_tokens": 281,
+        "output_tokens": 337,
         "cache_read_input_tokens": 0,
         "cache_creation_input_tokens": 0
       },
@@ -192,24 +185,20 @@
       "sessionObserved": true,
       "interrupted": false,
       "deniedOperation": [],
-      "deniedPathPrefixes": [
-        "/private/var/folders"
-      ],
-      "systemPathMentioned": [
-        "/var"
-      ],
+      "deniedPathPrefixes": [],
+      "systemPathMentioned": [],
       "pathClassMentioned": {
-        "runner": true,
+        "runner": false,
         "control": false,
         "auth": false,
         "executable": false
       },
       "startupDiagnostics": {
         "unknown option": false,
-        "error": true,
+        "error": false,
         "permission denied": false,
         "operation not permitted": false,
-        "apiKeyHelper": true,
+        "apiKeyHelper": false,
         "authentication": false,
         "EACCES": false,
         "EPERM": false,
@@ -233,7 +222,10 @@
       },
       "isError": false,
       "permissionDenials": 0,
-      "authHelperInvoked": true
+      "authHelperInvoked": true,
+      "resumeRequested": false,
+      "resumeMatchesRequested": false,
+      "newSessionComparedToPrevious": true
     },
     {
       "types": {
@@ -250,14 +242,10 @@
       "sessionObserved": true,
       "interrupted": true,
       "deniedOperation": [],
-      "deniedPathPrefixes": [
-        "/private/var/folders"
-      ],
-      "systemPathMentioned": [
-        "/var"
-      ],
+      "deniedPathPrefixes": [],
+      "systemPathMentioned": [],
       "pathClassMentioned": {
-        "runner": true,
+        "runner": false,
         "control": false,
         "auth": false,
         "executable": false
@@ -267,7 +255,7 @@
         "error": false,
         "permission denied": false,
         "operation not permitted": false,
-        "apiKeyHelper": true,
+        "apiKeyHelper": false,
         "authentication": false,
         "EACCES": false,
         "EPERM": false,
@@ -290,7 +278,10 @@
         "requires": false
       },
       "interruptSent": true,
-      "authHelperInvoked": true
+      "authHelperInvoked": true,
+      "resumeRequested": false,
+      "resumeMatchesRequested": false,
+      "newSessionComparedToPrevious": true
     }
   ],
   "calls": [
@@ -299,63 +290,72 @@
       "target": "origin",
       "ok": true,
       "remoteMarker": true,
-      "remoteEffect": false
-    },
-    {
-      "op": "write",
-      "target": "effect",
-      "ok": true,
-      "remoteMarker": false,
-      "remoteEffect": true
+      "remoteEffect": false,
+      "readEffect": false
     },
     {
       "op": "read",
       "target": "host-sentinel",
       "ok": false,
       "remoteMarker": false,
-      "remoteEffect": false
-    },
-    {
-      "op": "write",
-      "target": "host-sentinel",
-      "ok": false,
-      "remoteMarker": false,
-      "remoteEffect": false
+      "remoteEffect": false,
+      "readEffect": false
     },
     {
       "op": "read",
       "target": "auth",
       "ok": false,
       "remoteMarker": false,
-      "remoteEffect": false
-    },
-    {
-      "op": "write",
-      "target": "auth",
-      "ok": false,
-      "remoteMarker": false,
-      "remoteEffect": false
+      "remoteEffect": false,
+      "readEffect": false
     },
     {
       "op": "read",
       "target": "symlink",
       "ok": false,
       "remoteMarker": false,
-      "remoteEffect": false
+      "remoteEffect": false,
+      "readEffect": false
+    },
+    {
+      "op": "write",
+      "target": "effect",
+      "ok": true,
+      "remoteMarker": false,
+      "remoteEffect": true,
+      "readEffect": false
+    },
+    {
+      "op": "write",
+      "target": "host-sentinel",
+      "ok": false,
+      "remoteMarker": false,
+      "remoteEffect": false,
+      "readEffect": false
+    },
+    {
+      "op": "write",
+      "target": "auth",
+      "ok": false,
+      "remoteMarker": false,
+      "remoteEffect": false,
+      "readEffect": false
     },
     {
       "op": "read",
       "target": "effect",
       "ok": true,
       "remoteMarker": false,
-      "remoteEffect": false
+      "remoteEffect": false,
+      "readEffect": true
     },
     {
       "op": "read",
       "target": "effect",
       "ok": true,
       "remoteMarker": false,
-      "remoteEffect": false
+      "remoteEffect": false,
+      "readEffect": true
     }
   ],
   "negatives": {
@@ -448,7 +448,8 @@
     "Real Claude model behavior is unexercised.",
     "E7 root-turn attribution race (upstream Claude issue #55 in #226) cannot be confirmed or refuted on this backend; open evidence gap.",
     "Windows, enrolled cross-host deployment, production cancellation/fencing and authentication refresh unexercised.",
-    "Diagnostic native-only launch omits engine outer file isolation; it cannot evidence criterion 4 or combined production acceptance."
+    "Diagnostic native-only launch omits engine outer file isolation; it cannot evidence criterion 4 or combined production acceptance.",
+    "Combined native exclusion, model-issued remote execution and outer engine isolation not proved; dependent integration remains blocked."
   ],
   "boot": {
     "cliVersionUnderProfile": true,
@@ -499,35 +500,40 @@
       "target": "origin",
       "ok": true,
       "remoteMarker": true,
-      "remoteEffect": false
+      "remoteEffect": false,
+      "readEffect": false
     },
     {
       "op": "write",
       "target": "effect",
       "ok": true,
       "remoteMarker": false,
-      "remoteEffect": false
+      "remoteEffect": false,
+      "readEffect": false
     },
     {
       "op": "read",
       "target": "host-sentinel",
       "ok": false,
       "remoteMarker": false,
-      "remoteEffect": false
+      "remoteEffect": false,
+      "readEffect": false
     },
     {
       "op": "write",
       "target": "auth",
       "ok": false,
       "remoteMarker": false,
-      "remoteEffect": false
+      "remoteEffect": false,
+      "readEffect": false
     },
     {
       "op": "read",
       "target": "symlink",
       "ok": false,
       "remoteMarker": false,
-      "remoteEffect": false
+      "remoteEffect": false,
+      "readEffect": false
     }
   ],
   "nativeIsolation": false,
@@ -538,5 +544,12 @@
     "hostSentinelUnchanged": true,
     "remoteEffect": true,
     "ambientMarkerAbsent": true
+  },
+  "acceptance": {
+    "nativeCatalogExact": true,
+    "remoteReadChangeCheck": true,
+    "modelHostReadWriteDenied": true,
+    "configurationCanaryAbsent": true,
+    "combinedIsolation": false
   }
 }
