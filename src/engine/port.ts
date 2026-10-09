@@ -15,6 +15,8 @@ import type {
   BillingBasis,
 } from '../usage/model.ts';
 
+import type { BindingGenerationFence } from '../environment/binding-generation-fence.ts';
+
 export type {
   DetailedTokenDimensions,
   ApiEquivalentCostEstimate,
@@ -206,6 +208,7 @@ export interface ProjectMcpToolDeclaration {
 /** Core-authorized Project MCP bridge. Tool names map to fixed Worker origins. */
 export interface RemoteProjectMcpTools {
   readonly binding: RemoteWorkspaceTools['binding'];
+  readonly bindingFence?: BindingGenerationFence;
   readonly tools: readonly ProjectMcpToolDeclaration[];
   call(name: string, arguments_: Readonly<Record<string, unknown>>): Promise<{ readonly status: 'completed' | 'failed' | 'unsupported'; readonly text?: string; readonly reason?: string }>;
   close(): Promise<'stopped' | 'uncertain'>;
@@ -229,7 +232,10 @@ export interface RemoteWorkspaceTools {
     readonly generation: number;
     readonly connectionEpoch: number;
     readonly workspaceId: string;
+    readonly kind?: 'default' | 'relative';
+    readonly path?: string;
   };
+  readonly bindingFence?: BindingGenerationFence;
   readonly operations?: readonly ('read' | 'search' | 'edit' | 'patch' | 'command')[];
   read(path: string, operationId?: string): Promise<RemoteWorkspaceOperationResult>;
   search(query: string, path?: string, operationId?: string): Promise<RemoteWorkspaceOperationResult>;
