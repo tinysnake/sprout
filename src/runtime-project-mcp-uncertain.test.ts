@@ -150,8 +150,8 @@ test('an HTTP MCP call whose effect succeeds but response is lost remains uncert
     assert.equal(runtime.pool.getLease(leaseId)?.state, 'released', 'confirmed recovery releases the same containing lease');
     const recoveredDatabase = new DatabaseSync(join(directory, 'state.db'));
     try {
-      assert.equal((await new SqliteRemoteOperationIdentityStore(recoveredDatabase).getMcpOperation(operationId))?.state, 'uncertain',
-        'recovery acknowledges the unknown effect without recording a false success or failure');
+      assert.equal((await new SqliteRemoteOperationIdentityStore(recoveredDatabase).getMcpOperation(operationId))?.state, 'resolved-uncertain',
+        'confirmed recovery resolves disposition without recording a false success or failure');
     } finally { recoveredDatabase.close(); }
   } finally { await runtime.close(); }
 });

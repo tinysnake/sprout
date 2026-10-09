@@ -17,7 +17,7 @@ export interface RemoteOperationIdentity {
 }
 
 export type RemoteMcpProcessState = 'starting' | 'running' | 'stopping' | 'stopped' | 'uncertain';
-export type RemoteMcpOperationState = 'running' | 'completed' | 'failed' | 'uncertain';
+export type RemoteMcpOperationState = 'running' | 'completed' | 'failed' | 'uncertain' | 'resolved-uncertain';
 
 interface RemoteMcpIdentityScope extends WorkspaceBindingIdentity, ProjectMcpLeaseIdentity {
   readonly fingerprint: string;
@@ -45,6 +45,7 @@ export interface RemoteOperationIdentityStore {
   listOpenMcpProcesses(environmentInstanceId: string): Promise<readonly RemoteMcpProcessIdentity[]>;
   saveMcpOperation(row: RemoteMcpOperationIdentity): Promise<void>;
   getMcpOperation(operationId: string): Promise<RemoteMcpOperationIdentity | undefined>;
+  resolveUncertainMcpOperationsForLease(leaseId: string, updatedAt: number): Promise<void>;
 }
 
 export class MemoryRemoteOperationIdentityStore implements RemoteOperationIdentityStore {
@@ -80,11 +81,19 @@ export class MemoryRemoteOperationIdentityStore implements RemoteOperationIdenti
   async saveMcpOperation(row: RemoteMcpOperationIdentity): Promise<void> {
     const prior = this.#mcpOperations.get(row.operationId);
     if (prior && prior.fingerprint !== row.fingerprint) throw new Error('MCP operation identity conflict');
+    if (prior?.state === 'resolved-uncertain') return;
     this.#mcpOperations.set(row.operationId, { ...row });
   }
   async getMcpOperation(id: string): Promise<RemoteMcpOperationIdentity | undefined> {
     const row = this.#mcpOperations.get(id);
     return row ? { ...row } : undefined;
+  }
+  async resolveUncertainMcpOperationsForLease(leaseId: string, updatedAt: number): Promise<void> {
+    for (const [id, row] of this.#mcpOperations) {
+      if (row.leaseId === leaseId && row.state === 'uncertain') {
+        this.#mcpOperations.set(id, { ...row, state: 'resolved-uncertain', updatedAt });
+      }
+    }
   }
 }
 
@@ -160,15 +169,22 @@ export class SqliteRemoteOperationIdentityStore implements RemoteOperationIdenti
     return rows.map(processFromRow).filter((row): row is RemoteMcpProcessIdentity => row !== undefined);
   }
   async saveMcpOperation(row: RemoteMcpOperationIdentity): Promise<void> {
+    const prior = await this.getMcpOperation(row.operationId);
+    if (prior && prior.fingerprint !== row.fingerprint) throw new Error('MCP operation identity conflict');
+    if (prior?.state === 'resolved-uncertain') return;
     const result = this.#db.prepare(`INSERT INTO remote_project_mcp_operations
       (operation_id,fingerprint,process_id,tool_id,project_id,environment_instance_id,binding_id,generation,connection_epoch,workspace_id,workspace_kind,workspace_path,lease_id,holder_kind,holder_id,run_id,task_id,state,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(operation_id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at
-      WHERE fingerprint=excluded.fingerprint`).run(row.operationId,row.fingerprint,row.processId,row.toolId,row.projectId,row.environmentInstanceId,row.bindingId,row.generation,row.connectionEpoch,row.workspaceId,row.kind,row.path ?? null,row.leaseId,row.holderKind,row.holderId,row.runId,row.taskId ?? null,row.state,row.updatedAt);
+      WHERE fingerprint=excluded.fingerprint AND remote_project_mcp_operations.state != 'resolved-uncertain'`).run(row.operationId,row.fingerprint,row.processId,row.toolId,row.projectId,row.environmentInstanceId,row.bindingId,row.generation,row.connectionEpoch,row.workspaceId,row.kind,row.path ?? null,row.leaseId,row.holderKind,row.holderId,row.runId,row.taskId ?? null,row.state,row.updatedAt);
     if (Number(result.changes) === 0) throw new Error('MCP operation identity conflict');
   }
   async getMcpOperation(id: string): Promise<RemoteMcpOperationIdentity | undefined> {
     const row = this.#db.prepare(`SELECT * FROM remote_project_mcp_operations WHERE operation_id = ?`).get(id) as Record<string, unknown> | undefined;
     return row ? operationFromRow(row) : undefined;
+  }
+  async resolveUncertainMcpOperationsForLease(leaseId: string, updatedAt: number): Promise<void> {
+    this.#db.prepare(`UPDATE remote_project_mcp_operations SET state = 'resolved-uncertain', updated_at = ? WHERE lease_id = ? AND state = 'uncertain'`)
+      .run(updatedAt, leaseId);
   }
 }
 
@@ -177,7 +193,7 @@ function processFromRow(row: Record<string, unknown>): RemoteMcpProcessIdentity 
   return { ...mcpScopeFromRow(row), processId: String(row.process_id), state: row.state as RemoteMcpProcessState };
 }
 function operationFromRow(row: Record<string, unknown>): RemoteMcpOperationIdentity | undefined {
-  if (!validMcpScopeRow(row) || !['running','completed','failed','uncertain'].includes(String(row.state))) return undefined;
+  if (!validMcpScopeRow(row) || !['running','completed','failed','uncertain','resolved-uncertain'].includes(String(row.state))) return undefined;
   return { ...mcpScopeFromRow(row), operationId: String(row.operation_id), processId: String(row.process_id),
     toolId: String(row.tool_id), state: row.state as RemoteMcpOperationState };
 }

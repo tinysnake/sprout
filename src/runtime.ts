@@ -659,6 +659,8 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
 
     stores = options.stores ?? new SqliteStore({ filename: databasePath });
     const durableStores: RuntimeStores = stores;
+    const remoteOperationIdentityStore: RemoteOperationIdentityStore =
+      durableStores.remoteWorkspaceOperations ?? new MemoryRemoteOperationIdentityStore();
     // A narrowed, non-optional alias: after this point a failed store open has
     // already thrown, so the graph below never sees `undefined`.
     const openedStores = stores;
@@ -1339,6 +1341,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       taskRuns: async (taskId) =>
         (await durableStores.tasks.listRuns(taskId)).map((link) => link.runId),
       activeRunForTask: async (taskId) => (await durableStores.tasks.get(taskId))?.activeRunId,
+      onConfirmedLeaseRelease: (leaseId) => remoteOperationIdentityStore.resolveUncertainMcpOperationsForLease(leaseId, Date.now()),
       // A recovery change (open, reconnect, evidence, resolve, Force Release) is
       // a work-safety fact for the catalog, so eligibility follows it.
       onMutation: onEnrollmentMutation,
@@ -1635,7 +1638,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       catalog: environmentCatalog,
       enrollments,
       pool,
-      store: durableStores.remoteWorkspaceOperations ?? new MemoryRemoteOperationIdentityStore(),
+      store: remoteOperationIdentityStore,
       onUncertainMcp: async (scope) => {
         await recovery.open({ leaseId: scope.leaseId, cause: 'cleanup-failed', hadActiveRun: true, runId: scope.runId });
       },
