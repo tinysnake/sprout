@@ -6,6 +6,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { EnvironmentRecoveryError } from './environment/recovery-service.ts';
 import { ScriptedEngineAdapter } from './engine/scripted.ts';
 import type { HostPiEngineAdapter } from './engine/pi-host.ts';
 import type { StartSessionRequest } from './engine/port.ts';
@@ -14,12 +15,14 @@ import { connectRuntimeWorker, createRuntime, hostConfiguration, INSTANCE_ID, pr
 
 test('an HTTP MCP call whose effect succeeds but response is lost remains uncertain until confirmed recovery', async t => {
   let effectCount = 0;
+  let sessionCloseCount = 0;
   const origin = createServer((request, response) => {
     let body = '';
     request.setEncoding('utf8');
     request.on('data', chunk => { body += chunk; });
     request.on('end', () => {
       if (request.method === 'DELETE') {
+        sessionCloseCount += 1;
         response.writeHead(204).end();
         return;
       }
@@ -127,7 +130,10 @@ test('an HTTP MCP call whose effect succeeds but response is lost remains uncert
     const database = new DatabaseSync(join(directory, 'state.db'));
     try {
       const store = new SqliteRemoteOperationIdentityStore(database);
-      assert.equal((await store.getMcpOperation(operationId))?.state, 'uncertain');
+      const operation = await store.getMcpOperation(operationId);
+      assert.equal(sessionCloseCount, 1, 'the HTTP session was successfully closed after the lost response');
+      assert.equal(operation?.state, 'uncertain', 'session closure supplies no invocation-specific settlement evidence');
+      assert.equal(operation?.leaseId, leaseId);
     } finally { database.close(); }
     assert.equal(runtime.pool.getLease(leaseId)?.state, 'recovering');
     const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({
@@ -146,12 +152,15 @@ test('an HTTP MCP call whose effect succeeds but response is lost remains uncert
       retainedEventCount: settled.events.length, turnSettlementObserved: true, engineSessionStopped: true,
       terminalStatus: 'completed', taskContextRecycled: true,
     } });
-    await runtime.recovery.release(leaseId);
-    assert.equal(runtime.pool.getLease(leaseId)?.state, 'released', 'confirmed recovery releases the same containing lease');
+    await assert.rejects(runtime.recovery.release(leaseId), (error: unknown) =>
+      error instanceof EnvironmentRecoveryError && error.code === 'evidence-not-synchronized');
+    assert.equal(runtime.pool.getLease(leaseId)?.state, 'recovering', 'engine settlement preserves the same containing lease');
     const recoveredDatabase = new DatabaseSync(join(directory, 'state.db'));
     try {
-      assert.equal((await new SqliteRemoteOperationIdentityStore(recoveredDatabase).getMcpOperation(operationId))?.state, 'resolved-uncertain',
-        'confirmed recovery resolves disposition without recording a false success or failure');
+      const operation = await new SqliteRemoteOperationIdentityStore(recoveredDatabase).getMcpOperation(operationId);
+      assert.equal(operation?.state, 'uncertain', 'engine settlement cannot confirm the lost remote outcome');
+      assert.equal(operation?.leaseId, leaseId);
+      assert.equal(effectCount, 1, 'ordinary recovery never replays the uncertain call');
     } finally { recoveredDatabase.close(); }
   } finally { await runtime.close(); }
 });
