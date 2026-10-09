@@ -261,14 +261,30 @@ redactor preserves a relative reference when it is a slash-separated path with
 simple directory components, or when explicit file context directly names one
 dotted filename token (for example, after a file operation, a `file`, `filename`,
 or `path` label, or inside inline code). For a bare filename in that context,
-the final label decides whether it is host-shaped: labels in the IANA root-zone
-TLD snapshot and IANA's special-use single-label names are redacted unless the
-label is in the known Project file-extension set. Thus `report.final.pdf` and
-`some.unknown.qqq` survive, `README.md` survives because `.md` is a known file
-extension even though it is also a TLD, and `worker.node1.tailnet.example` is
-redacted because `.example` is an IANA special-use name rather than a known file
-extension. The general free-text redactor used for Environment, diagnostic,
-and AgentRun output stays context-free.
+the token must first match the dotted-host shape. Its final label then decides:
+labels in the IANA root-zone TLD snapshot and IANA's special-use single-label
+names have host precedence unless classified in the curated `FILE_LIKELY_SUFFIXES`
+set. `.com`, `.net`, `.org`, and `.io` are host-likely and excluded from that
+set, even when they can be file extensions. This decision applies at every
+label count: `Read worker.node1.tailnet.com` and `Read api.github.com` both
+redact the hostname. A label-count threshold would preserve three-label hosts
+and therefore does not provide the required privacy boundary.
+
+`report.final.pdf` and `some.unknown.qqq` survive because their suffixes are not
+IANA host suffixes; `README.md`, `parser.pl`, and `config.in` survive because
+these suffixes are classified as file-likely despite their TLD overlap.
+`worker.node1.tailnet.example` and `worker.node1.tailnet.fail` are redacted.
+Numeric-label filenames such as `notes.2024.10.md` do not match the dotted-host
+shape. This is a prose classification, not proof of a token's real identity:
+`Read installer.com` is deliberately redacted, while `Read files/installer.com`
+is preserved as a structural relative path. Conversely, a host using a
+file-likely suffix can survive explicit file context; the same dotted-host
+shape outside file context is redacted. Unknown non-IANA suffixes in explicit
+file context remain preserved without requiring a filename-extension registry.
+All earlier sensitive-category rules still run, including private host suffixes,
+named host/port assignments, credentials, URLs, identities, and absolute paths.
+The general free-text redactor used for Environment, diagnostic, and AgentRun
+output stays context-free.
 
 ## Failure, suppression, admission, and retry
 

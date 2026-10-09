@@ -53,7 +53,7 @@ test('Human and Agent proposals share validated attributable content without exe
 
 test('a Task content version preserves relative Project filenames and redacts hostnames in its composed prompt', async () => {
   const { service } = fixture();
-  const hostname = 'worker.node1.tailnet.example';
+  const hostname = 'worker.node1.tailnet.com';
   const contentInput = {
     title: 'Review README.md',
     goal: `Read report.final.pdf; Read ${hostname}; Read README.md; Read notes/today.txt; report any issue with ${hostname}`,

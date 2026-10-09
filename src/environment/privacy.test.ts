@@ -193,7 +193,7 @@ test('Project prose preserves clear relative filenames while general hostnames s
   assert.ok(sensitive.includes('<redacted-credential>'));
 });
 
-test('file context preserves known extensions and unfamiliar non-host suffixes, but redacts authoritative host suffixes', () => {
+test('file context uses suffix classification without exempting common host suffixes', () => {
   const cases = [
     ['Read report.final.pdf', 'Read report.final.pdf'],
     ['Read README.md', 'Read README.md'],
@@ -203,7 +203,9 @@ test('file context preserves known extensions and unfamiliar non-host suffixes, 
     ['Read data.tar.gz', 'Read data.tar.gz'],
     ['Read a.b.c; Read README.', 'Read a.b.c; Read README.'],
     ['Read some.unknown.qqq', 'Read some.unknown.qqq'],
-    ['Read worker.node1.tailnet.com', 'Read worker.node1.tailnet.com'],
+    ['Read worker.node1.tailnet.com', 'Read <redacted-host>'],
+    ['Read installer.com', 'Read <redacted-host>'],
+    ['Read files/installer.com', 'Read files/installer.com'],
     ['Read parser.pl; Read config.in', 'Read parser.pl; Read config.in'],
     ['Read worker.node1.tailnet.fail', 'Read <redacted-host>'],
     ['Read worker.node1.tailnet.example', 'Read <redacted-host>'],
@@ -213,6 +215,15 @@ test('file context preserves known extensions and unfamiliar non-host suffixes, 
   ] as const;
   for (const [input, expected] of cases) {
     assert.equal(redactProjectText(input), expected, input);
+  }
+
+  for (const hostname of [
+    'worker.node1.tailnet.example', 'worker.node1.tailnet.com', 'worker.node1.tailnet.fail',
+    'api.github.com', 'api.example.net', 'api.example.org', 'api.example.io', 'api.example.test',
+  ]) {
+    for (const prefix of ['Read ', '', 'Connect to ', 'Open the file at ']) {
+      assert.equal(redactProjectText(prefix + hostname), prefix + '<redacted-host>', prefix + hostname);
+    }
   }
 
   assert.equal(IANA_HOST_SUFFIXES.has('md'), true, '.md is in the IANA root-zone list');
@@ -227,7 +238,7 @@ test('file context preserves known extensions and unfamiliar non-host suffixes, 
   assert.equal(redactProjectText('host=worker-7; port=41020'), '<redacted-host>; <redacted-host>');
 
   const sensitive = redactProjectText(
-    'gateway.internal:41020; host=worker-7; port=41020; path=/Users/example/private; ' +
+    'gateway.internal:41020; worker-7; host=worker-7; port=41020; path=/Users/example/private; ' +
       'api_key={{API_KEY_TEST}}; URL https://user:pass@internal.example/data; ' +
       'email ops@example.com; payload {"model":"gpt-6","messages":[{"content":"api_key={{API_KEY_TEST}}"}]}',
   );
@@ -237,7 +248,7 @@ test('file context preserves known extensions and unfamiliar non-host suffixes, 
   assert.ok(sensitive.includes('<redacted-url>'));
   assert.ok(sensitive.includes('<redacted-identity>'));
   for (const privateValue of [
-    'gateway.internal', 'host=worker-7', 'port=41020', '/Users/example/private',
+    'gateway.internal', 'worker-7', 'host=worker-7', 'port=41020', '/Users/example/private',
     'API_KEY_TEST', 'https://user:pass@', 'ops@example.com',
   ]) {
     assert.equal(sensitive.includes(privateValue), false, `${privateValue} survived Project sanitization`);

@@ -122,14 +122,14 @@ const DOTTED_HOST_PATTERN = new RegExp(String.raw`(?<![\w.-])${DOTTED_HOST_SOURC
 const DOTTED_HOST_TOKEN_PATTERN = new RegExp(`^${DOTTED_HOST_SOURCE}$`);
 
 /**
- * File suffixes known to name Project files. A matching suffix only exempts a
- * contextually named token from host redaction; an unfamiliar suffix is still
- * preserved when it is not an authoritative host suffix.
+ * File-likely suffixes in Project prose. This classification deliberately
+ * excludes common host suffixes such as com, net, org, and io, even when they
+ * can name files. Unknown non-IANA suffixes do not need membership here.
  */
-const KNOWN_PROJECT_FILE_EXTENSIONS = new Set(
+const FILE_LIKELY_SUFFIXES = new Set(
   String.raw`
-    adoc ai app as avi avif aac bash bib bmp bz2 c cc cfg cjs com conf cpp cts css csv
-    dll doc docx epub err exe flac gif gql graphql gz h hpp heic htm html in ipynb ini io
+    adoc ai app as avi avif aac bash bib bmp bz2 c cc cfg cjs conf cpp cts css csv
+    dll doc docx epub err exe flac gif gql graphql gz h hpp heic htm html in ipynb ini
     java jpeg jpg js json json5 jsonc jsx kt kts less lock log m4a md mdx me mov
     mp3 mpeg mpg mts mjs mkv mobi ogg odt ods odp pdf png ppt pptx properties
     pl pro proto py rb rar rst rs rtf sass scss sh so sql svg svelte tar tex tgz tif
@@ -307,8 +307,10 @@ export function redactSensitiveText(value: string): string {
  * references. Slash-separated paths with simple directory components are
  * recognized structurally. A bare dotted filename needs explicit file context;
  * it is still redacted when it matches the host shape and its final label is an
- * IANA root-zone or special-use name, unless that label is a known file extension.
- * Unrecognized suffixes that are not authoritative host names remain filenames.
+ * IANA root-zone or special-use name, unless classified as file-likely above.
+ * Common host suffixes (including com and io) get host precedence at any label
+ * count: Read installer.com is redacted; Read files/installer.com is preserved.
+ * Unknown non-IANA suffixes in file context remain filenames.
  */
 export function redactProjectText(value: string): string {
   return redactText(value, true);
@@ -328,7 +330,7 @@ function redactDottedHostsExceptProjectFiles(value: string, replacement: string)
     const isKnownHost =
       DOTTED_HOST_TOKEN_PATTERN.test(filename) &&
       IANA_HOST_SUFFIXES.has(finalLabel) &&
-      !KNOWN_PROJECT_FILE_EXTENSIONS.has(finalLabel);
+      !FILE_LIKELY_SUFFIXES.has(finalLabel);
     return !isKnownHost;
   });
   if (protectedFiles.length === 0) return value.replace(DOTTED_HOST_PATTERN, replacement);
