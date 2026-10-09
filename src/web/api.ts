@@ -919,11 +919,24 @@ export function createRunApi(options: RunApiOptions): RunApi {
       const body = await readBody();
       const agentId = typeof body.agentId === 'string' ? body.agentId : '';
       const prompt = typeof body.prompt === 'string' ? body.prompt : '';
+      const projectId = typeof body.projectId === 'string' ? body.projectId : undefined;
+      const workEnvironmentInstanceId = typeof body.workEnvironmentInstanceId === 'string'
+        ? body.workEnvironmentInstanceId
+        : undefined;
+      if (body.workEnvironmentInstanceId !== undefined &&
+          (workEnvironmentInstanceId === undefined || workEnvironmentInstanceId.trim() === '')) {
+        sendJson(response, 400, { error: 'workEnvironmentInstanceId must be a non-empty string' });
+        return;
+      }
       if (agentId === '' || prompt === '') {
         sendJson(response, 400, { error: 'agentId and prompt are required' });
         return;
       }
-      const { id } = await orchestrator.submit({ agentId, prompt });
+      const { id } = await orchestrator.submit({
+        agentId, prompt,
+        ...(projectId !== undefined ? { projectId } : {}),
+        ...(workEnvironmentInstanceId !== undefined ? { workEnvironmentInstanceId } : {}),
+      });
       sendJson(response, 202, { id });
       return;
     }

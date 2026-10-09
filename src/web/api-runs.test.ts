@@ -95,12 +95,41 @@ test('run history totals accumulate terminal duration and provider usage without
   });
 });
 
+test('a standalone run request forwards its selected Work Environment to admission', async () => {
+  await withServer(async (base) => {
+    const submit = await fetch(`${base}/api/runs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        agentId: 'agent-scout', prompt: 'work only in the selected Environment',
+        workEnvironmentInstanceId: 'not-authorized-instance',
+      }),
+    });
+    assert.equal(submit.status, 202);
+    const { id } = (await submit.json()) as { id: string };
+    const run = await waitForTerminal(base, id);
+    assert.equal(run.status, 'failed');
+    assert.match(String(run.failure), /requested Work Environment is not authorized/);
+  });
+});
+
 test('a submission without an agent or prompt is rejected', async () => {
   await withServer(async (base) => {
     const response = await fetch(`${base}/api/runs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ prompt: 'no agent' }),
+    });
+    assert.equal(response.status, 400);
+  });
+});
+
+test('an empty selected Work Environment is rejected as malformed input', async () => {
+  await withServer(async (base) => {
+    const response = await fetch(`${base}/api/runs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: 'agent-scout', prompt: 'say hi', workEnvironmentInstanceId: '  ' }),
     });
     assert.equal(response.status, 400);
   });

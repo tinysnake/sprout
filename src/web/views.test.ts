@@ -533,6 +533,23 @@ test('a run view exposes the workspace binding it was admitted under, sanitized'
   assert.ok(!JSON.stringify(corrupt).includes('/Users/'));
 });
 
+test('a run view reports current binding state and capability names with sanitized identity', () => {
+  const view = toRunView(run({
+    workspaceBindingStatus: 'recovering',
+    workspaceBinding: {
+      environmentInstanceId: 'environment-b', bindingId: 'binding-b', generation: 7,
+      catalogGeneration: 3, workspaceId: 'b'.repeat(40), kind: 'default',
+      operations: ['read', 'command'], projectMcpTools: ['lookup', '../private'],
+    },
+  }));
+  assert.equal(view.workspaceBindingStatus, 'recovering');
+  assert.deepEqual(view.workspaceBinding, {
+    environmentInstanceId: 'environment-b', bindingId: 'binding-b', generation: 7,
+    catalogGeneration: 3, workspaceId: 'b'.repeat(40), kind: 'default',
+    operations: ['read', 'command'], projectMcpTools: ['lookup'],
+  });
+});
+
 test('a run with no workspace binding reports none rather than inventing one', () => {
   const view = toRunView(run({ projectId: 'project-sprout' }));
   assert.equal('workspaceBinding' in view, false);
