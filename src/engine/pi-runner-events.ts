@@ -12,11 +12,24 @@
  * gated to the authorized remote workspace tools.
  */
 
+import { sanitizeOperatorText } from '../environment/privacy.ts';
+
+export interface SessionEventProgressState {
+  readonly lastTextByCallId: Map<string, string>;
+  emittedBytes: number;
+}
+
+export function createSessionEventProgressState(): SessionEventProgressState {
+  return { lastTextByCallId: new Map(), emittedBytes: 0 };
+}
+
 export interface SessionEventDispositionState {
   /** Whether the terminal settle has already been forwarded this turn. */
   readonly settled: boolean;
   /** The only tool names this session may execute. */
   readonly remoteToolNames: readonly string[];
+  /** Per-turn output budget for sanitized remote command progress. */
+  readonly progress?: SessionEventProgressState;
 }
 
 export type SessionEventDisposition =
@@ -67,16 +80,103 @@ export function sanitizeAssistantContent(content: unknown): { type: 'text'; text
   });
 }
 
-/** Bounded model-authored tool arguments for the parent event stream. */
-export function sanitizeToolArgs(args: unknown): unknown {
-  if (args === undefined || args === null) return {};
-  try {
-    const json = JSON.stringify(args);
-    if (typeof json === 'string' && json.length <= 2048) return JSON.parse(json);
-  } catch {
-    // Unserializable arguments degrade to an empty object.
-  }
+/** Remote tool arguments may contain host paths or credential-shaped file text. */
+export function sanitizeToolArgs(_args: unknown): Record<string, unknown> {
+  // The bounded tool name and terminal operation status provide attribution;
+  // argument values are unnecessary in durable Run events.
   return {};
+}
+
+const MAX_REMOTE_PROGRESS_EVENT_BYTES = 2_048;
+const MAX_REMOTE_PROGRESS_TURN_BYTES = 32 * 1024;
+const REMOTE_OPERATION_NAMES = new Set(['read', 'search', 'edit', 'patch', 'command', 'inspect']);
+const REMOTE_OPERATION_STATUSES = new Set([
+  'completed', 'failed', 'cancelled', 'recovery-required', 'unknown', 'not-found', 'running', 'cancel-requested',
+]);
+
+function remoteOperationName(toolName: string): string {
+  const operation = toolName.startsWith('remote_') ? toolName.slice('remote_'.length) : '';
+  return REMOTE_OPERATION_NAMES.has(operation) ? operation : 'operation';
+}
+
+function extractToolText(payload: unknown): string {
+  if (typeof payload === 'string') return payload;
+  if (typeof payload !== 'object' || payload === null) return '';
+  const content = (payload as Record<string, unknown>)['content'];
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content.flatMap(part => {
+    if (typeof part !== 'object' || part === null) return [];
+    const record = part as Record<string, unknown>;
+    return typeof record['text'] === 'string' && (record['type'] === undefined || record['type'] === 'text')
+      ? [record['text']]
+      : [];
+  }).join('');
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  let result = '';
+  for (const character of value) {
+    if (Buffer.byteLength(result + character, 'utf8') > maxBytes) break;
+    result += character;
+  }
+  return result;
+}
+
+function safeProgressEvent(message: Record<string, unknown>, state: SessionEventDispositionState): SessionEventDisposition {
+  if (message['toolName'] !== 'remote_command') return IGNORE;
+  const partial = extractToolText(message['partialResult']);
+  if (partial === '') return IGNORE;
+  const callId = typeof message['toolCallId'] === 'string' ? message['toolCallId'] : 'remote_command';
+  const progress = state.progress;
+  const previous = progress?.lastTextByCallId.get(callId) ?? '';
+  const delta = partial.startsWith(previous) ? partial.slice(previous.length) : partial;
+  if (progress) {
+    if (!progress.lastTextByCallId.has(callId) && progress.lastTextByCallId.size >= 32) {
+      const oldest = progress.lastTextByCallId.keys().next().value;
+      if (oldest !== undefined) progress.lastTextByCallId.delete(oldest);
+    }
+    progress.lastTextByCallId.set(callId, partial);
+  }
+  if (delta === '') return IGNORE;
+  const remaining = Math.max(0, MAX_REMOTE_PROGRESS_TURN_BYTES - (progress?.emittedBytes ?? 0));
+  if (remaining === 0) return IGNORE;
+  const sanitized = sanitizeOperatorText(delta, { fallback: '', maxLength: MAX_REMOTE_PROGRESS_EVENT_BYTES });
+  const text = truncateUtf8(sanitized, Math.min(MAX_REMOTE_PROGRESS_EVENT_BYTES, remaining));
+  if (text === '') return IGNORE;
+  if (progress) progress.emittedBytes += Buffer.byteLength(text, 'utf8');
+  return {
+    action: 'pi-event',
+    event: { type: 'tool_execution_update', toolName: 'remote_command', partialResult: { content: [{ type: 'text', text }], details: {} } },
+  };
+}
+
+function safeTerminalEvent(message: Record<string, unknown>): SessionEventDisposition {
+  const toolName = message['toolName'] as string;
+  const operation = remoteOperationName(toolName);
+  const result = message['result'];
+  const details = typeof result === 'object' && result !== null
+    ? (result as Record<string, unknown>)['details']
+    : undefined;
+  const rawDetails = typeof details === 'object' && details !== null ? details as Record<string, unknown> : {};
+  const rawOperation = rawDetails['operation'];
+  const safeOperation = typeof rawOperation === 'string' && REMOTE_OPERATION_NAMES.has(rawOperation) ? rawOperation : operation;
+  const rawStatus = rawDetails['status'];
+  const safeStatus = typeof rawStatus === 'string' && REMOTE_OPERATION_STATUSES.has(rawStatus)
+    ? rawStatus
+    : message['isError'] === true ? 'failed' : 'completed';
+  return {
+    action: 'pi-event',
+    event: {
+      type: 'tool_execution_end',
+      toolName,
+      result: {
+        content: [{ type: 'text', text: `Remote ${safeOperation} ${safeStatus}.` }],
+        details: { operation: safeOperation, status: safeStatus },
+      },
+      isError: message['isError'] === true,
+    },
+  };
 }
 
 /** Decide what the runner does with one AgentSession event. Total, no throws. */
@@ -133,6 +233,8 @@ export function sessionEventDisposition(event: unknown, state: SessionEventDispo
           },
         };
       }
+      if (type === 'tool_execution_update') return safeProgressEvent(message, state);
+      if (type === 'tool_execution_end') return safeTerminalEvent(message);
       return IGNORE;
     }
     default:

@@ -22,6 +22,7 @@ import {
   type StartSessionResult,
   type PrepareTaskContextResult,
   type RecycleTaskContextParams,
+  type RunContextParams,
   type TaskContextMaterialization,
   type ValidateWorkspaceParams,
   type ValidateWorkspaceResult,
@@ -135,7 +136,6 @@ export class EnvironmentWorker {
   constructor(options: EnvironmentWorkerOptions) {
     this.#options = options;
     this.#workspace = options.workspaceRoot === undefined ? undefined : new WorkerWorkspace(options.workspaceRoot);
-    this.#workspaceFiles = this.#workspace === undefined ? undefined : new WorkerWorkspaceFiles(this.#workspace, options.environmentInstanceId);
     this.#projectMcp = this.#workspace === undefined ? undefined : new WorkerProjectMcp(
       this.#workspace, options.environmentInstanceId, options.projectMcpClientLauncher,
     );
@@ -146,6 +146,8 @@ export class EnvironmentWorker {
         void this.shutdown();
       },
     });
+    this.#workspaceFiles = this.#workspace === undefined ? undefined : new WorkerWorkspaceFiles(this.#workspace, options.environmentInstanceId,
+      progress => this.#transport.notify(WORKER_NOTIFICATIONS.workspaceOperationProgress, progress));
     this.#serve();
   }
 
@@ -205,6 +207,16 @@ export class EnvironmentWorker {
         case WORKER_METHODS.inspectTaskContext:
           this.#transport.respond(id, await this.#requireWorkspace().inspectTaskContext(params as RecycleTaskContextParams));
           return;
+        case WORKER_METHODS.prepareRunContext:
+          this.#transport.respond(id, await this.#requireWorkspaceFiles().prepareRunContext(params as RunContextParams));
+          return;
+        case WORKER_METHODS.recycleRunContext:
+          await this.#requireWorkspaceFiles().recycleRunContext(params as RunContextParams);
+          this.#transport.respond(id, {});
+          return;
+        case WORKER_METHODS.inspectRunContext:
+          this.#transport.respond(id, await this.#requireWorkspaceFiles().inspectRunContext(params as RunContextParams));
+          return;
         case WORKER_METHODS.validateWorkspace:
           this.#transport.respond(id, await this.#validateWorkspace(params as ValidateWorkspaceParams));
           return;
@@ -231,10 +243,10 @@ export class EnvironmentWorker {
           this.#transport.respond(id, await this.#requireProjectMcp().stop(params as StopProjectMcpParams));
           return;
         case WORKER_METHODS.inspectWorkspaceFileOperation:
-          this.#transport.respond(id, this.#requireWorkspaceFiles().inspect(params as import('./protocol.ts').InspectWorkspaceFileOperationParams));
+          this.#transport.respond(id, await this.#requireWorkspaceFiles().inspect(params as import('./protocol.ts').InspectWorkspaceFileOperationParams));
           return;
         case WORKER_METHODS.cancelWorkspaceFileOperation:
-          this.#transport.respond(id, this.#requireWorkspaceFiles().cancel(params as import('./protocol.ts').CancelWorkspaceFileOperationParams));
+          this.#transport.respond(id, await this.#requireWorkspaceFiles().cancel(params as import('./protocol.ts').CancelWorkspaceFileOperationParams));
           return;
         default:
           this.#transport.respondError(id, -32_601, WORKER_DIAGNOSTICS.methodUnsupported);
@@ -269,8 +281,9 @@ export class EnvironmentWorker {
         standingInstructions: engine.capabilities.standingInstructions,
       })),
       ...(this.#workspaceFiles !== undefined ? { workspaceOperations: {
-        version: 1 as const, operations: ['read', 'search', 'inspect-mcp-configuration', 'start-project-mcp', 'call-project-mcp-tool', 'stop-project-mcp'] as const,
-        maxReadBytes: 64 * 1024, maxSearchResults: 100,
+        version: 3 as const, operations: ['read', 'search', 'edit', 'patch', 'command', 'inspect-mcp-configuration', 'start-project-mcp', 'call-project-mcp-tool', 'stop-project-mcp'] as const,
+        maxReadBytes: 64 * 1024, maxSearchResults: 100, maxMutationBytes: 1024 * 1024,
+        maxCommandOutputBytes: 32 * 1024, maxCommandDurationMs: 120_000,
       } } : {}),
       ...(this.#readiness !== undefined
         ? { readiness: this.#readiness }

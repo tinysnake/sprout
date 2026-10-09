@@ -108,6 +108,18 @@ _Avoid_: Repository MCP permission, implicit plugin configuration
 A typed operation advertised by a configured stdio server and bound to its Environment Worker, Project workspace binding, and containing run or Task lease. The supported tool catalog does not imply support for MCP resources, prompts, notifications, cancellation, or server-to-client requests.
 _Avoid_: Universal MCP capability, arbitrary server selector
 
+**Run context**:
+A private, temporary working area inside an Environment for one Agent run. It holds disposable execution state while the Agent works in the persistent Project workspace; it does not replace or own that workspace.
+_Avoid_: Project workspace, Task context directory
+
+**Remote workspace operation**:
+A bounded request by an Agent run to read, search, edit, patch, or run an allowlisted command against its authorized Project workspace through one pinned Environment binding. Its outcome stays attributable to that request when the caller loses the response and must inspect it.
+_Avoid_: Host-local operation, Environment fallback
+
+**Remote workspace operation outcome**:
+The recorded result and settlement state of one Remote workspace operation. It may be completed, failed, cancelled, or require recovery; an uncertain outcome remains inspectable without creating a replacement operation.
+_Avoid_: Command log, retry result
+
 **Agent**:
 A persistent worker identity with its own capabilities, model configuration, and private memory, independent of any environment instance or project.
 _Avoid_: Process, bot instance, environment agent

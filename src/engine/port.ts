@@ -159,6 +159,8 @@ export interface AgentTaskGroupMessageResult {
   readonly wakes: readonly { readonly agentId: string; readonly reason: string; readonly status: string; readonly detail?: string }[];
 }
 
+export type RemoteWorkspaceOperationKind = 'read' | 'search' | 'edit' | 'patch' | 'command';
+
 export interface RemoteWorkspaceOperationResult {
   readonly operationId: string;
   readonly projectId: string;
@@ -167,13 +169,32 @@ export interface RemoteWorkspaceOperationResult {
   readonly generation: number;
   readonly connectionEpoch: number;
   readonly workspaceId: string;
-  readonly operation: 'read' | 'search';
-  readonly status: 'completed' | 'failed' | 'cancelled';
+  readonly operation: RemoteWorkspaceOperationKind;
+  readonly status: 'completed' | 'failed' | 'cancelled' | 'recovery-required';
   readonly path?: string;
   readonly content?: string;
+  readonly output?: string;
+  readonly outputChunks?: readonly { readonly sequence: number; readonly stream: 'stdout' | 'stderr'; readonly text: string }[];
+  readonly exitCode?: number | null;
   readonly matches?: readonly { readonly path: string; readonly line: number; readonly text: string }[];
+  readonly changedPaths?: readonly string[];
   readonly truncated?: boolean;
   readonly failure?: string;
+  readonly leaseConflict?: { readonly holderId: string; readonly state: 'active' | 'recovering' };
+}
+
+
+export interface RemoteWorkspaceProgress {
+  readonly operationId: string;
+  readonly projectId: string;
+  readonly environmentInstanceId: string;
+  readonly bindingId: string;
+  readonly generation: number;
+  readonly connectionEpoch: number;
+  readonly workspaceId: string;
+  readonly sequence: number;
+  readonly stream: 'stdout' | 'stderr';
+  readonly text: string;
 }
 
 export interface ProjectMcpToolDeclaration {
@@ -209,9 +230,16 @@ export interface RemoteWorkspaceTools {
     readonly connectionEpoch: number;
     readonly workspaceId: string;
   };
-  read(path: string): Promise<RemoteWorkspaceOperationResult>;
-  search(query: string, path?: string): Promise<RemoteWorkspaceOperationResult>;
-  inspect(operationId: string): Promise<{ readonly status: string }>;
+  readonly operations?: readonly ('read' | 'search' | 'edit' | 'patch' | 'command')[];
+  read(path: string, operationId?: string): Promise<RemoteWorkspaceOperationResult>;
+  search(query: string, path?: string, operationId?: string): Promise<RemoteWorkspaceOperationResult>;
+  edit?(path: string, oldText: string, newText: string, operationId?: string): Promise<RemoteWorkspaceOperationResult>;
+  command?(executable: string, args: readonly string[], options: { readonly cwd?: string; readonly timeoutMs?: number }, operationId: string,
+    onProgress?: (progress: RemoteWorkspaceProgress) => void): Promise<RemoteWorkspaceOperationResult>;
+  patch?(path: string, hunks: readonly { readonly before: string; readonly after: string }[], operationId?: string): Promise<RemoteWorkspaceOperationResult>;
+  /** Release or protect a lazily acquired mutation lease after run settlement. */
+  settle?(outcome: 'settled' | 'unknown'): Promise<void>;
+  inspect(operationId: string): Promise<{ readonly status: string; readonly operation?: RemoteWorkspaceOperationResult }>;
   cancel(operationId: string): Promise<{ readonly accepted: boolean; readonly status: string }>;
 }
 

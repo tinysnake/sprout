@@ -235,6 +235,25 @@ export class EnvironmentPool {
     return this.#instances.get(instanceId);
   }
 
+  /** Whether a lease-bearing capability exists for an already-authorized bound operation. */
+  requiresLeaseForBoundOperation(instanceId: string, capability: string): boolean | undefined {
+    return this.#capability(instanceId, capability)?.requiresLease;
+  }
+
+  /**
+   * Acquire a lease for work already authorized by a live bound operation route.
+   * This deliberately bypasses model-admission eligibility only; callers must
+   * revalidate the Worker authority, Project binding, permission, and epoch.
+   */
+  async acquireBoundOperationLeaseRevalidated(request: AcquireLeaseRequest): Promise<AcquireLeaseResult> {
+    await this.revalidateTaskLease(request.instanceId);
+    const held = this.#lease(request.instanceId);
+    if (held?.state === 'recovering') {
+      return { ok: false, reason: 'conflict', heldBy: held.holderId, state: held.state, leaseId: held.id };
+    }
+    return this.#acquireLease(request, true, true);
+  }
+
   /** Whether a capability must be leased before it can be used. */
   requiresLease(instanceId: string, capability: string): boolean | undefined {
     const found = this.#lookup(instanceId, capability);
@@ -291,8 +310,8 @@ export class EnvironmentPool {
     this.#leases.delete(leaseId);
   }
 
-  #acquireLease(request: AcquireLeaseRequest, persist: boolean): AcquireLeaseResult {
-    const found = this.#lookup(request.instanceId, request.capability);
+  #acquireLease(request: AcquireLeaseRequest, persist: boolean, allowIneligible = false): AcquireLeaseResult {
+    const found = allowIneligible ? this.#capability(request.instanceId, request.capability) : this.#lookup(request.instanceId, request.capability);
     if (!found) {
       return {
         ok: false,
@@ -429,6 +448,10 @@ export class EnvironmentPool {
     // same "cannot be used" signal the resolution seam already understands, so
     // lease acquisition and run resolution fail closed without a new branch.
     if (!this.isEligible(instanceId) && !this.#capabilityEligibleInstanceIds.get(capability)?.has(instanceId)) return undefined;
+    return this.#capability(instanceId, capability);
+  }
+
+  #capability(instanceId: string, capability: string) {
     const instance = this.#instances.get(instanceId);
     if (!instance) return undefined;
     const definition = this.#definitions.get(instance.definitionId);

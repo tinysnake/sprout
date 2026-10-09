@@ -47,6 +47,8 @@ import type {
   CallProjectMcpToolResult,
   StopProjectMcpParams,
   StopProjectMcpResult,
+  RunContextParams,
+  WorkspaceCommandProgress,
   WorkerInfo,
   WorkerReadinessProbeResult,
 } from './protocol.ts';
@@ -223,18 +225,40 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
 
   async attachWorkspaceBinding(environmentInstanceId: string, input: AttachWorkspaceBindingParams): Promise<{ readonly attached: true }> {
     const connection = await this.#connection(environmentInstanceId);
-    if (!connection || connection.info.workspaceOperations?.version !== 1 ||
-      !connection.info.workspaceOperations.operations.includes('read') ||
-      !connection.info.workspaceOperations.operations.includes('search')) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    const operations = connection?.info.workspaceOperations;
+    if (!connection || !operations || ![1, 2, 3].includes(operations.version) ||
+      !operations.operations.includes('read') || !operations.operations.includes('search')) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
     const currentEpoch = this.connectionEpoch(environmentInstanceId);
     if (currentEpoch !== input.connectionEpoch) throw new Error('stale Worker epoch');
     return connection.contexts.attachWorkspaceBinding(input);
   }
 
-  async executeWorkspaceFileOperation(environmentInstanceId: string, input: WorkspaceFileOperationParams): Promise<import('../engine/port.ts').RemoteWorkspaceOperationResult> {
+  async prepareRunContext(environmentInstanceId: string, input: RunContextParams): Promise<{ readonly prepared: true }> {
     const connection = await this.#connection(environmentInstanceId);
     if (!connection || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
-    const result = await connection.contexts.executeWorkspaceFileOperation(input);
+    const result = await connection.contexts.prepareRunContext(input);
+    if (this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error('stale Worker epoch');
+    return result;
+  }
+
+  async recycleRunContext(environmentInstanceId: string, input: RunContextParams): Promise<void> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    await connection.contexts.recycleRunContext(input);
+    if (this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error('stale Worker epoch');
+  }
+
+  async inspectRunContext(environmentInstanceId: string, input: RunContextParams): Promise<'present' | 'absent' | 'unknown'> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    return connection.contexts.inspectRunContext(input);
+  }
+
+  async executeWorkspaceFileOperation(environmentInstanceId: string, input: WorkspaceFileOperationParams,
+    onProgress?: (progress: WorkspaceCommandProgress) => void): Promise<import('../engine/port.ts').RemoteWorkspaceOperationResult> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    const result = await connection.contexts.executeWorkspaceFileOperation(input, onProgress);
     if (this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error('stale Worker epoch');
     return result;
   }

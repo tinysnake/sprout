@@ -55,3 +55,40 @@ test('SQLite MCP process and operation identities survive reopen with Task lease
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+const identity = (overrides: Partial<RemoteOperationIdentity> = {}): RemoteOperationIdentity => ({
+  operationId: 'stable-operation-id', fingerprint: 'fingerprint-a', projectId: 'project-a',
+  environmentInstanceId: 'environment-a', bindingId: 'binding-a', generation: 2,
+  connectionEpoch: 4, workspaceId: 'workspace-a', operation: 'edit', state: 'running', updatedAt: 10,
+  ...overrides,
+});
+
+test('memory operation identity claim is atomic by ID and fingerprint', async () => {
+  const store = new MemoryRemoteOperationIdentityStore();
+  assert.equal(await store.claim(identity()), 'claimed');
+  assert.equal(await store.claim(identity()), 'same-identity');
+  assert.equal(await store.claim(identity({ fingerprint: 'fingerprint-b' })), 'conflicting-identity');
+});
+
+test('SQLite operation identity survives store reconstruction and terminal outcome cannot regress', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-remote-operation-store-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const filename = join(directory, 'operations.db');
+  const db = new DatabaseSync(filename);
+  const first = new SqliteRemoteOperationIdentityStore(db);
+  assert.equal(await first.claim(identity()), 'claimed');
+  await first.save(identity({ state: 'unknown', updatedAt: 11 }));
+  db.close();
+
+  const reopenedDb = new DatabaseSync(filename);
+  try {
+    const reopened = new SqliteRemoteOperationIdentityStore(reopenedDb);
+    assert.equal(await reopened.claim(identity()), 'same-identity');
+    assert.equal(await reopened.claim(identity({ fingerprint: 'fingerprint-b' })), 'conflicting-identity');
+    await reopened.save(identity({ state: 'completed', updatedAt: 12 }));
+    await reopened.save(identity({ state: 'running', updatedAt: 13 }));
+    assert.equal((await reopened.get('stable-operation-id'))?.state, 'completed');
+  } finally {
+    reopenedDb.close();
+  }
+});

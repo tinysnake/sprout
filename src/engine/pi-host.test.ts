@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 
 import { macOsTimezoneFiles } from './host-runtime-files.ts';
 import { HostPiEngineAdapter, hostEngineProfileId, isolationProfile, type HostPiLaunchInput, type HostPiReadiness } from './pi-host.ts';
-import type { RemoteWorkspaceTools } from './port.ts';
+import type { RemoteWorkspaceOperationResult, RemoteWorkspaceProgress, RemoteWorkspaceTools } from './port.ts';
 import { sanitizeStreamError, sanitizedProbeErrorFields, sanitizedPromptErrorFields } from './pi-error-facts.ts';
 
 function readiness(profileId: string, status: HostPiReadiness['status'] = 'ready'): HostPiReadiness {
@@ -81,6 +81,59 @@ test('Host Pi streams the exact selected model response and versioned provider u
     assert.equal(result.sourceVersion, '1.0.4');
     assert.deepEqual(result.tokenUsage, { promptTokens: 12, completionTokens: 5, totalTokens: 17 });
   }
+  await session.close();
+});
+
+test('Host Pi relays sequenced remote command progress to its runner before settlement', async () => {
+  const receivedProgress: RemoteWorkspaceProgress[] = [];
+  const progress: RemoteWorkspaceProgress = { operationId: 'command-tool-1', projectId: 'project-a', environmentInstanceId: 'env-a',
+    bindingId: 'binding-a', generation: 1, connectionEpoch: 1, workspaceId: 'workspace-a', sequence: 1, stream: 'stdout', text: 'REMOTE_OUTPUT' };
+  const child = (input: HostPiLaunchInput): ChildProcess => {
+    const fake = new EventEmitter() as ChildProcess;
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    Object.assign(fake, { stdin, stdout, stderr, pid: undefined, exitCode: null, signalCode: null });
+    let pending = '';
+    stdin.on('data', chunk => {
+      pending += chunk.toString();
+      let newline = pending.indexOf('\n');
+      while (newline >= 0) {
+        const raw = pending.slice(0, newline);
+        pending = pending.slice(newline + 1);
+        let command: { op?: string; progress?: RemoteWorkspaceProgress };
+        try { command = JSON.parse(raw) as typeof command; } catch { newline = pending.indexOf('\n'); continue; }
+        if (command.op === 'prompt') stdout.write(`${JSON.stringify({ kind: 'remote-call', callId: 'call-command-1', operation: 'command', args: {
+          operationId: 'command-tool-1', executable: 'node', args: [],
+        } })}\n`);
+        if (command.op === 'remote-progress' && command.progress) receivedProgress.push(command.progress);
+        if (command.op === 'remote-result') stdout.write(`${JSON.stringify({ kind: 'pi-event', event: { type: 'agent_settled' } })}\n`);
+        newline = pending.indexOf('\n');
+      }
+    });
+    queueMicrotask(() => stdout.write(`${JSON.stringify({ kind: 'ready', sessionId: input.sessionId })}\n`));
+    return fake;
+  };
+  const adapter = new HostPiEngineAdapter({ profileId: 'profile-remote-command', provider: 'provider-a', model: 'provider-a/model-a',
+    probeProcess: async launch => readiness(launch.profileId), spawnProcess: child });
+  const remoteWorkspace: RemoteWorkspaceTools = {
+    binding: { projectId: 'project-a', environmentInstanceId: 'env-a', bindingId: 'binding-a', generation: 1, connectionEpoch: 1, workspaceId: 'workspace-a' },
+    operations: ['read', 'search', 'command'],
+    read: async () => { throw new Error('not exercised'); }, search: async () => { throw new Error('not exercised'); },
+    command: async (_executable, _args, _options, _operationId, onProgress) => {
+      onProgress?.(progress);
+      const result: RemoteWorkspaceOperationResult = { ...remoteWorkspace.binding, operationId: 'command-tool-1', operation: 'command',
+        status: 'completed', output: 'REMOTE_OUTPUT', outputChunks: [{ sequence: 1, stream: 'stdout', text: 'REMOTE_OUTPUT' }], exitCode: 0 };
+      return result;
+    },
+    inspect: async () => ({ status: 'not-found' }), cancel: async () => ({ accepted: false, status: 'not-found' }),
+  };
+  const session = await adapter.startSession({ agentId: 'agent-a', runId: 'run-remote-command', workingDirectory: 'opaque',
+    model: 'provider-a/model-a', effort: 'medium', remoteWorkspace });
+  const turn = session.run('Run the authorized remote command.');
+  for await (const event of turn.events) void event;
+  assert.equal((await turn.completion).status, 'completed');
+  assert.deepEqual(receivedProgress, [progress]);
   await session.close();
 });
 

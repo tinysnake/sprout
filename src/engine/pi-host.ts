@@ -278,13 +278,31 @@ class HostPiSession implements EngineSession {
     const input = typeof args === 'object' && args !== null ? args as Record<string, unknown> : {};
     let result: unknown;
     try {
-      if (operation === 'read' && tools && typeof input.path === 'string') result = await tools.read(input.path);
-      else if (operation === 'search' && tools && typeof input.query === 'string') result = await tools.search(input.query, typeof input.path === 'string' ? input.path : undefined);
-      else if (operation === 'mcp' && this.#remoteProjectMcp && typeof input.name === 'string' && typeof input.arguments === 'object' && input.arguments !== null && !Array.isArray(input.arguments)) {
+      const operationId = typeof input.operationId === 'string' ? input.operationId : undefined;
+      const onProgress = (progress: import('./port.ts').RemoteWorkspaceProgress): void => {
+        this.#child.stdin?.write(`${JSON.stringify({ op: 'remote-progress', callId, progress })}\n`);
+      };
+      if (operation === 'mcp' && this.#remoteProjectMcp && typeof input.name === 'string' && typeof input.arguments === 'object' && input.arguments !== null && !Array.isArray(input.arguments)) {
         result = await this.#remoteProjectMcp.call(input.name, input.arguments as Record<string, unknown>);
-      } else throw new Error('invalid remote operation');
+        this.#child.stdin?.write(`${JSON.stringify({ op: 'remote-result', callId, result })}\n`);
+        return;
+      }
+      if (!tools) throw new Error('remote workspace is unavailable');
+      if (operation === 'inspect' && typeof operationId === 'string') result = await tools.inspect(operationId);
+      else if (operation === 'read' && typeof input.path === 'string') result = await tools.read(input.path, operationId);
+      else if (operation === 'search' && typeof input.query === 'string') result = await tools.search(input.query, typeof input.path === 'string' ? input.path : undefined, operationId);
+      else if (operation === 'edit' && typeof input.path === 'string' && typeof input.oldText === 'string' && typeof input.newText === 'string' && tools.edit) result = await tools.edit(input.path, input.oldText, input.newText, operationId);
+      else if (operation === 'patch' && typeof input.path === 'string' && Array.isArray(input.hunks) && tools.patch) result = await tools.patch(input.path, input.hunks as { before: string; after: string }[], operationId);
+      else if (operation === 'command' && typeof input.executable === 'string' && Array.isArray(input.args) && tools.command) result = await tools.command(input.executable, input.args as string[], {
+        ...(typeof input.timeoutMs === 'number' ? { timeoutMs: input.timeoutMs } : {}),
+      }, operationId ?? '', onProgress);
+      else throw new Error('invalid remote operation');
     } catch {
-      result = { status: 'failed', reason: 'remote-operation-blocked' };
+      if (operation === 'inspect') result = { status: 'unknown' };
+      else result = { operationId: 'unavailable', projectId: tools?.binding.projectId ?? '', environmentInstanceId: tools?.binding.environmentInstanceId ?? '',
+        bindingId: tools?.binding.bindingId ?? '', generation: tools?.binding.generation ?? 0, connectionEpoch: tools?.binding.connectionEpoch ?? 0,
+        workspaceId: tools?.binding.workspaceId ?? '', operation: operation === 'search' ? 'search' : operation === 'edit' ? 'edit' : operation === 'patch' ? 'patch' : operation === 'command' ? 'command' : 'read', status: 'failed',
+        ...(operation === 'command' ? { output: '', outputChunks: [], exitCode: null } : {}), failure: 'remote-operation-blocked' };
     }
     this.#child.stdin?.write(`${JSON.stringify({ op: 'remote-result', callId, result })}\n`);
   }
@@ -526,9 +544,9 @@ export function isolationProfile(input: HostPiProbeInput & { readonly agentRoot:
     fileURLToPath(new URL('./pi-host-runner.mjs', import.meta.url)),
     fileURLToPath(new URL('./pi-runner-events.ts', import.meta.url)),
     fileURLToPath(new URL('./pi-error-facts.ts', import.meta.url)),
-    // The runner's TypeScript module needs the repository package scope read
-    // (module format resolution) inside the sandbox; nothing else in the
-    // repository is readable.
+    fileURLToPath(new URL('../environment/privacy.ts', import.meta.url)),
+    // The runner and its shared sanitizer need these exact source modules and
+    // the repository package scope; nothing else in the repository is readable.
     fileURLToPath(new URL('../../package.json', import.meta.url)),
     input.authPath,
     input.modelsPath,

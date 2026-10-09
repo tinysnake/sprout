@@ -1,7 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { ProjectMcpLeaseIdentity, WorkspaceBindingIdentity } from '../worker/protocol.ts';
 
-export type RemoteOperationState = 'running' | 'completed' | 'failed' | 'cancelled';
+export type RemoteOperationState = 'running' | 'completed' | 'failed' | 'cancelled' | 'unknown' | 'cancel-requested' | 'recovery-required';
 export interface RemoteOperationIdentity {
   readonly operationId: string;
   readonly fingerprint: string;
@@ -11,7 +11,7 @@ export interface RemoteOperationIdentity {
   readonly generation: number;
   readonly connectionEpoch: number;
   readonly workspaceId: string;
-  readonly operation: 'read' | 'search';
+  readonly operation: 'read' | 'search' | 'edit' | 'patch' | 'command';
   readonly state: RemoteOperationState;
   readonly updatedAt: number;
 }
@@ -34,7 +34,10 @@ export interface RemoteMcpOperationIdentity extends RemoteMcpIdentityScope {
   readonly state: RemoteMcpOperationState;
 }
 
+export type RemoteOperationClaim = 'claimed' | 'same-identity' | 'conflicting-identity';
 export interface RemoteOperationIdentityStore {
+  /** Atomically reserve a durable operation ID before any Worker dispatch. */
+  claim(row: RemoteOperationIdentity): Promise<RemoteOperationClaim>;
   save(row: RemoteOperationIdentity): Promise<void>;
   get(operationId: string): Promise<RemoteOperationIdentity | undefined>;
   saveMcpProcess(row: RemoteMcpProcessIdentity): Promise<void>;
@@ -49,15 +52,19 @@ export class MemoryRemoteOperationIdentityStore implements RemoteOperationIdenti
   readonly #mcpProcesses = new Map<string, RemoteMcpProcessIdentity>();
   readonly #mcpOperations = new Map<string, RemoteMcpOperationIdentity>();
 
+  async claim(row: RemoteOperationIdentity): Promise<RemoteOperationClaim> {
+    const prior = this.#rows.get(row.operationId);
+    if (prior) return prior.fingerprint === row.fingerprint ? 'same-identity' : 'conflicting-identity';
+    this.#rows.set(row.operationId, { ...row });
+    return 'claimed';
+  }
   async save(row: RemoteOperationIdentity): Promise<void> {
     const prior = this.#rows.get(row.operationId);
     if (prior && prior.fingerprint !== row.fingerprint) throw new Error('remote operation identity conflict');
+    if (prior && isTerminal(prior.state)) return;
     this.#rows.set(row.operationId, { ...row });
   }
-  async get(id: string): Promise<RemoteOperationIdentity | undefined> {
-    const row = this.#rows.get(id);
-    return row ? { ...row } : undefined;
-  }
+  async get(id: string): Promise<RemoteOperationIdentity | undefined> { const row = this.#rows.get(id); return row ? { ...row } : undefined; }
   async saveMcpProcess(row: RemoteMcpProcessIdentity): Promise<void> {
     const prior = this.#mcpProcesses.get(row.processId);
     if (prior && prior.fingerprint !== row.fingerprint) throw new Error('MCP process identity conflict');
@@ -81,6 +88,9 @@ export class MemoryRemoteOperationIdentityStore implements RemoteOperationIdenti
   }
 }
 
+function isTerminal(state: RemoteOperationState): boolean {
+  return state === 'completed' || state === 'failed' || state === 'cancelled';
+}
 export class SqliteRemoteOperationIdentityStore implements RemoteOperationIdentityStore {
   readonly #db: DatabaseSync;
   constructor(db: DatabaseSync) {
@@ -107,20 +117,31 @@ export class SqliteRemoteOperationIdentityStore implements RemoteOperationIdenti
       updated_at INTEGER NOT NULL
     );`);
   }
-
+  async claim(row: RemoteOperationIdentity): Promise<RemoteOperationClaim> {
+    const inserted = this.#db.prepare(`INSERT INTO remote_workspace_operations
+      (operation_id,fingerprint,project_id,environment_instance_id,binding_id,generation,connection_epoch,workspace_id,operation,state,updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(operation_id) DO NOTHING`)
+      .run(row.operationId,row.fingerprint,row.projectId,row.environmentInstanceId,row.bindingId,row.generation,row.connectionEpoch,row.workspaceId,row.operation,row.state,row.updatedAt);
+    if (Number(inserted.changes) === 1) return 'claimed';
+    const prior = await this.get(row.operationId);
+    if (!prior) throw new Error('remote operation identity claim could not be inspected');
+    return prior.fingerprint === row.fingerprint ? 'same-identity' : 'conflicting-identity';
+  }
   async save(row: RemoteOperationIdentity): Promise<void> {
-    const result = this.#db.prepare(`INSERT INTO remote_workspace_operations
+    const prior = await this.get(row.operationId);
+    if (prior && prior.fingerprint !== row.fingerprint) throw new Error('remote operation identity conflict');
+    this.#db.prepare(`INSERT INTO remote_workspace_operations
       (operation_id,fingerprint,project_id,environment_instance_id,binding_id,generation,connection_epoch,workspace_id,operation,state,updated_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(operation_id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at
-      WHERE fingerprint=excluded.fingerprint`).run(row.operationId,row.fingerprint,row.projectId,row.environmentInstanceId,row.bindingId,row.generation,row.connectionEpoch,row.workspaceId,row.operation,row.state,row.updatedAt);
-    if (Number(result.changes) === 0) throw new Error('remote operation identity conflict');
+      WHERE fingerprint=excluded.fingerprint AND (remote_workspace_operations.state IN ('running','unknown','cancel-requested','recovery-required'))`)
+      .run(row.operationId,row.fingerprint,row.projectId,row.environmentInstanceId,row.bindingId,row.generation,row.connectionEpoch,row.workspaceId,row.operation,row.state,row.updatedAt);
   }
   async get(id: string): Promise<RemoteOperationIdentity | undefined> {
     const row = this.#db.prepare(`SELECT * FROM remote_workspace_operations WHERE operation_id = ?`).get(id) as Record<string, unknown> | undefined;
-    if (!row || !['read','search'].includes(String(row.operation)) || !['running','completed','failed','cancelled'].includes(String(row.state))) return undefined;
+    if (!row || !['read','search','edit','patch','command'].includes(String(row.operation)) || !['running','completed','failed','cancelled','unknown','cancel-requested','recovery-required'].includes(String(row.state))) return undefined;
     return { operationId: String(row.operation_id), fingerprint: String(row.fingerprint), projectId: String(row.project_id),
       environmentInstanceId: String(row.environment_instance_id), bindingId: String(row.binding_id), generation: Number(row.generation),
-      connectionEpoch: Number(row.connection_epoch), workspaceId: String(row.workspace_id), operation: row.operation as 'read'|'search',
+      connectionEpoch: Number(row.connection_epoch), workspaceId: String(row.workspace_id), operation: row.operation as RemoteOperationIdentity['operation'],
       state: row.state as RemoteOperationState, updatedAt: Number(row.updated_at) };
   }
   async saveMcpProcess(row: RemoteMcpProcessIdentity): Promise<void> {

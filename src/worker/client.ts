@@ -31,6 +31,8 @@ import {
   type CancelWorkspaceFileOperationParams,
   type InspectWorkspaceFileOperationResult,
   type CancelWorkspaceFileOperationResult,
+  type RunContextParams,
+  type WorkspaceCommandProgress,
   type WorkerInfo,
   type WorkerReadinessProbeParams,
   type WorkerReadinessProbeResult,
@@ -270,6 +272,18 @@ export class WorkerContextClient {
     return sanitizedRequest(this.#transport.request(WORKER_METHODS.recycleTaskContext, input));
   }
 
+  prepareRunContext(input: RunContextParams): Promise<{ readonly prepared: true }> {
+    return sanitizedRequest(this.#transport.request(WORKER_METHODS.prepareRunContext, input));
+  }
+
+  recycleRunContext(input: RunContextParams): Promise<void> {
+    return sanitizedRequest(this.#transport.request(WORKER_METHODS.recycleRunContext, input));
+  }
+
+  inspectRunContext(input: RunContextParams): Promise<'present' | 'absent' | 'unknown'> {
+    return sanitizedRequest(this.#transport.request(WORKER_METHODS.inspectRunContext, input));
+  }
+
   validateWorkspace(input: ValidateWorkspaceParams): Promise<ValidateWorkspaceResult> {
     return sanitizedRequest(this.#transport.request(WORKER_METHODS.validateWorkspace, input));
   }
@@ -278,8 +292,16 @@ export class WorkerContextClient {
     return sanitizedRequest(this.#transport.request(WORKER_METHODS.attachWorkspaceBinding, input));
   }
 
-  executeWorkspaceFileOperation(input: WorkspaceFileOperationParams): Promise<import('../engine/port.ts').RemoteWorkspaceOperationResult> {
-    return sanitizedRequest(this.#transport.request(WORKER_METHODS.workspaceFileOperation, input));
+  executeWorkspaceFileOperation(input: WorkspaceFileOperationParams, onProgress?: (progress: WorkspaceCommandProgress) => void): Promise<import('../engine/port.ts').RemoteWorkspaceOperationResult> {
+    let sequence = 0;
+    const unsubscribe = onProgress === undefined ? undefined : this.#transport.onNotification(notification => {
+      if (notification.method !== WORKER_NOTIFICATIONS.workspaceOperationProgress || !isWorkspaceCommandProgress(notification.params, input)) return;
+      if (notification.params.sequence !== sequence + 1) return;
+      sequence = notification.params.sequence;
+      try { onProgress(notification.params); } catch { /* Progress observers cannot fail the Worker operation. */ }
+    });
+    return sanitizedRequest<import('../engine/port.ts').RemoteWorkspaceOperationResult>(this.#transport.request(WORKER_METHODS.workspaceFileOperation, input))
+      .finally(() => unsubscribe?.());
   }
 
   inspectProjectMcpConfiguration(input: InspectProjectMcpConfigurationParams): Promise<InspectProjectMcpConfigurationResult> {
@@ -426,6 +448,18 @@ class WorkerEngineSession implements EngineSession {
       .request(WORKER_METHODS.close, { sessionId: this.sessionId })
       .catch(() => undefined);
   }
+}
+
+function isWorkspaceCommandProgress(value: unknown, input: WorkspaceFileOperationParams): value is WorkspaceCommandProgress {
+  if (!value || typeof value !== 'object') return false;
+  const progress = value as Record<string, unknown>;
+  return input.operation === 'command' && progress.operationId === input.operationId &&
+    progress.projectId === input.projectId && progress.environmentInstanceId === input.environmentInstanceId &&
+    progress.bindingId === input.bindingId && progress.generation === input.generation &&
+    progress.connectionEpoch === input.connectionEpoch && progress.workspaceId === input.workspaceId &&
+    Number.isSafeInteger(progress.sequence) && (progress.sequence as number) > 0 &&
+    (progress.stream === 'stdout' || progress.stream === 'stderr') && typeof progress.text === 'string' &&
+    Buffer.byteLength(progress.text, 'utf8') <= 1_024;
 }
 
 async function sanitizedRequest<T>(request: Promise<T>): Promise<T> {

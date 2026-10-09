@@ -5,7 +5,7 @@ import { createInterface } from 'node:readline';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { registerHooks } from 'node:module';
-import { sessionEventDisposition } from './pi-runner-events.ts';
+import { createSessionEventProgressState, sessionEventDisposition } from './pi-runner-events.ts';
 import { buildProjectMcpTools } from './pi-host-tools.ts';
 import { safeErrorCode, safeErrorName, sanitizeStreamError, sanitizedPromptErrorFields } from './pi-error-facts.ts';
 
@@ -206,9 +206,9 @@ async function openSession(config, input) {
   let remoteCallSequence = 0;
   const turnTelemetry = { streamCalls: 0, streamRejections: [] };
   let rawEventTypes = {};
-  const remoteCall = (operation, args) => new Promise((resolve) => {
+  const remoteCall = (operation, args, onProgress) => new Promise((resolve) => {
     const callId = `${config.sessionId}-${++remoteCallSequence}`;
-    remotePending.set(callId, resolve);
+    remotePending.set(callId, { resolve, onProgress });
     line({ kind: 'remote-call', callId, operation, args });
   });
   try {
@@ -249,33 +249,81 @@ async function openSession(config, input) {
     const manager = sessionPath === undefined
       ? loaded.sdk.SessionManager.create(config.agentRoot, sessionDir, { id: config.sessionId })
       : loaded.sdk.SessionManager.open(sessionPath, sessionDir, config.agentRoot);
+    const remoteOperations = Array.isArray(config.remoteWorkspace?.operations) ? config.remoteWorkspace.operations : [];
     const remoteAvailable = typeof config.remoteWorkspace?.binding?.projectId === 'string';
     const remoteMcpTools = buildProjectMcpTools(config.remoteProjectMcp?.tools ?? [], remoteCall);
     const remoteMcpAvailable = remoteMcpTools.length > 0;
-    const customTools = [
-      ...(remoteAvailable ? [
-        {
-          name: 'remote_read', label: 'Read remote file', description: 'Read a bounded text file from the authorized remote Project workspace.',
-          parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false },
-          annotations: { readOnlyHint: true },
-          execute: async (_id, args) => {
-            const result = await remoteCall('read', args);
-            return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result, isError: result.status !== 'completed' };
-          },
+    const remoteToolNames = [];
+    const customTools = [];
+    if (remoteAvailable) {
+      const addTool = (tool) => { remoteToolNames.push(tool.name); customTools.push(tool); };
+      addTool({
+        name: 'remote_read', label: 'Read remote file', description: 'Read a bounded text file from the authorized remote Project workspace.',
+        parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false },
+        annotations: { readOnlyHint: true },
+        execute: async (id, args) => {
+          const result = await remoteCall('read', { ...args, operationId: id });
+          return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result, isError: result.status !== 'completed' };
         },
-        {
-          name: 'remote_search', label: 'Search remote files', description: 'Search bounded text files in the authorized remote Project workspace.',
-          parameters: { type: 'object', properties: { query: { type: 'string' }, path: { type: 'string' } }, required: ['query'], additionalProperties: false },
-          annotations: { readOnlyHint: true },
-          execute: async (_id, args) => {
-            const result = await remoteCall('search', args);
-            return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result, isError: result.status !== 'completed' };
-          },
+      });
+      addTool({
+        name: 'remote_search', label: 'Search remote files', description: 'Search bounded text files in the authorized remote Project workspace.',
+        parameters: { type: 'object', properties: { query: { type: 'string' }, path: { type: 'string' } }, required: ['query'], additionalProperties: false },
+        annotations: { readOnlyHint: true },
+        execute: async (id, args) => {
+          const result = await remoteCall('search', { ...args, operationId: id });
+          return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result, isError: result.status !== 'completed' };
         },
-      ] : []),
-      ...remoteMcpTools,
-    ];
-    const remoteToolNames = customTools.map((tool) => tool.name);
+      });
+      addTool({
+        name: 'remote_inspect', label: 'Inspect remote operation', description: 'Inspect the known outcome of a prior remote Project file operation without replaying it.',
+        parameters: { type: 'object', properties: { operationId: { type: 'string' } }, required: ['operationId'], additionalProperties: false },
+        annotations: { readOnlyHint: true },
+        execute: async (_id, args) => {
+          const result = await remoteCall('inspect', args);
+          return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result,
+            isError: result.status === 'unknown' || result.status === 'not-found' };
+        },
+      });
+      if (remoteOperations.includes('edit')) addTool({
+        name: 'remote_edit', label: 'Edit remote file', description: 'Replace one exact text match in a bounded file in the authorized remote Project workspace.',
+        parameters: { type: 'object', properties: { path: { type: 'string' }, oldText: { type: 'string' }, newText: { type: 'string' } }, required: ['path', 'oldText', 'newText'], additionalProperties: false },
+        annotations: { readOnlyHint: false, destructiveHint: true },
+        execute: async (id, args) => {
+          const result = await remoteCall('edit', { ...args, operationId: id });
+          return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result, isError: result.status !== 'completed' };
+        },
+      });
+      if (remoteOperations.includes('patch')) addTool({
+        name: 'remote_patch', label: 'Patch remote file', description: 'Apply bounded exact text hunks to a file in the authorized remote Project workspace.',
+        parameters: { type: 'object', properties: { path: { type: 'string' }, hunks: { type: 'array', minItems: 1, maxItems: 32, items: { type: 'object', properties: { before: { type: 'string' }, after: { type: 'string' } }, required: ['before', 'after'], additionalProperties: false } } }, required: ['path', 'hunks'], additionalProperties: false },
+        annotations: { readOnlyHint: false, destructiveHint: true },
+        execute: async (id, args) => {
+          const result = await remoteCall('patch', { ...args, operationId: id });
+          return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result, isError: result.status !== 'completed' };
+        },
+      });
+      if (remoteOperations.includes('command')) addTool({
+        name: 'remote_command', label: 'Run remote command', description: 'Run a bounded npm or Node command in the authorized remote Project workspace. Output is streamed and capped.',
+        parameters: { type: 'object', properties: {
+          executable: { type: 'string', enum: ['npm', 'node'] },
+          args: { type: 'array', maxItems: 64, items: { type: 'string', maxLength: 4096 } },
+          timeoutMs: { type: 'integer', minimum: 100, maximum: 120000 },
+        }, required: ['executable', 'args'], additionalProperties: false },
+        annotations: { readOnlyHint: false, destructiveHint: true },
+        execute: async (id, args, _signal, onUpdate) => {
+          let accumulated = '';
+          const result = await remoteCall('command', { ...args, operationId: id }, progress => {
+            if (typeof progress.text !== 'string') return;
+            accumulated += progress.text;
+            onUpdate?.({ content: [{ type: 'text', text: accumulated }], details: { sequence: progress.sequence, stream: progress.stream } });
+          });
+          return { content: [{ type: 'text', text: JSON.stringify(result) }], details: result, isError: result.status !== 'completed' };
+        },
+      });
+    }
+    customTools.push(...remoteMcpTools);
+    remoteToolNames.push(...remoteMcpTools.map(tool => tool.name));
     const loader = emptyLoader(loaded.sdk, config);
     stage = 'session-create';
     ({ session } = await loaded.sdk.createAgentSession({
@@ -301,10 +349,11 @@ async function openSession(config, input) {
     }
 
     let settled = false;
+    let progressState = createSessionEventProgressState();
     session.subscribe((event) => {
       const eventType = typeof event?.type === 'string' ? event.type : 'unknown';
       rawEventTypes[eventType] = (rawEventTypes[eventType] ?? 0) + 1;
-      const disposition = sessionEventDisposition(event, { settled, remoteToolNames });
+      const disposition = sessionEventDisposition(event, { settled, remoteToolNames, progress: progressState });
       if (disposition.action === 'settle') {
         settled = true;
         line({ kind: 'pi-event', event: { type: 'agent_settled' } });
@@ -320,13 +369,21 @@ async function openSession(config, input) {
     input.on('line', async (raw) => {
       let command;
       try { command = JSON.parse(raw); } catch { return; }
+      if (command?.op === 'remote-progress' && typeof command.callId === 'string') {
+        const pending = remotePending.get(command.callId);
+        if (pending && typeof pending.onProgress === 'function' && command.progress && typeof command.progress === 'object') {
+          try { pending.onProgress(command.progress); } catch { /* UI progress cannot fail the remote tool. */ }
+        }
+        return;
+      }
       if (command?.op === 'remote-result' && typeof command.callId === 'string') {
-        const resolve = remotePending.get(command.callId);
-        if (resolve) { remotePending.delete(command.callId); resolve(command.result); }
+        const pending = remotePending.get(command.callId);
+        if (pending) { remotePending.delete(command.callId); pending.resolve(command.result); }
         return;
       }
       if (command?.op === 'prompt' && !settled && typeof command.prompt === 'string') {
         stage = 'turn';
+        progressState = createSessionEventProgressState();
         rawEventTypes = {};
         turnTelemetry.streamCalls = 0;
         turnTelemetry.streamRejections.length = 0;

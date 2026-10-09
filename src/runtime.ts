@@ -262,8 +262,13 @@ export interface RuntimeEnvironment {
   ): Promise<ValidateWorkspaceResult>;
   /** Bind one authorized Project workspace on the current authenticated Worker. */
   attachWorkspaceBinding?(environmentInstanceId: string, input: AttachWorkspaceBindingParams): Promise<{ readonly attached: true }>;
+  /** Create, recycle, or inspect one temporary Run context; Project files remain persistent. */
+  prepareRunContext?(environmentInstanceId: string, input: import('./worker/protocol.ts').RunContextParams): Promise<{ readonly prepared: true }>;
+  recycleRunContext?(environmentInstanceId: string, input: import('./worker/protocol.ts').RunContextParams): Promise<void>;
+  inspectRunContext?(environmentInstanceId: string, input: import('./worker/protocol.ts').RunContextParams): Promise<'present' | 'absent' | 'unknown'>;
   /** Typed read-only Workspace operations on the already accepted Worker. */
-  executeWorkspaceFileOperation?(environmentInstanceId: string, input: WorkspaceFileOperationParams): Promise<import('./engine/port.ts').RemoteWorkspaceOperationResult>;
+  executeWorkspaceFileOperation?(environmentInstanceId: string, input: WorkspaceFileOperationParams,
+    onProgress?: (progress: import('./worker/protocol.ts').WorkspaceCommandProgress) => void): Promise<import('./engine/port.ts').RemoteWorkspaceOperationResult>;
   /** Inspect a Project-selected MCP manifest on the Worker without returning its contents. */
   inspectProjectMcpConfiguration?(environmentInstanceId: string, input: InspectProjectMcpConfigurationParams): Promise<InspectProjectMcpConfigurationResult>;
   /** Start, call, and stop selected Project MCP tools only on the bound Worker. */
@@ -1169,9 +1174,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       // (ADR-0003), and so execution follows the leased instance (F1, #18).
       engines: (requestedInstanceId) => runtimeEnvironment.adapters(requestedInstanceId),
       executionStrategy,
-      remoteWorkspace: async (projectId, agentId) => {
+      remoteWorkspace: async (projectId, agentId, runId, onLeaseAcquired) => {
         if (!environmentOperations) return undefined;
-        try { return await environmentOperations.attach(projectId, agentId); }
+        try { return await environmentOperations.attach(projectId, agentId, runId, onLeaseAcquired); }
         catch { return undefined; }
       },
       projectMcpSelected: async (projectId) => {
@@ -1630,6 +1635,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       onUncertainMcp: async (scope) => {
         await recovery.open({ leaseId: scope.leaseId, cause: 'cleanup-failed', hadActiveRun: true, runId: scope.runId });
       },
+      leaseTtlMs: configuration.leaseTtlMs,
     });
     switchableEnvironment?.setTarget(enrollmentEnvironment);
     /**
@@ -2494,10 +2500,29 @@ class EnrollmentEnvironmentDelegate implements RuntimeEnvironment {
     return target.inspectProjectMcpConfiguration(environmentInstanceId, input);
   }
 
-  executeWorkspaceFileOperation(environmentInstanceId: string, input: import('./worker/protocol.ts').WorkspaceFileOperationParams) {
+  prepareRunContext(environmentInstanceId: string, input: import('./worker/protocol.ts').RunContextParams) {
+    const target = this.#require();
+    if (target.prepareRunContext === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
+    return target.prepareRunContext(environmentInstanceId, input);
+  }
+
+  recycleRunContext(environmentInstanceId: string, input: import('./worker/protocol.ts').RunContextParams) {
+    const target = this.#require();
+    if (target.recycleRunContext === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
+    return target.recycleRunContext(environmentInstanceId, input);
+  }
+
+  inspectRunContext(environmentInstanceId: string, input: import('./worker/protocol.ts').RunContextParams) {
+    const target = this.#require();
+    if (target.inspectRunContext === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
+    return target.inspectRunContext(environmentInstanceId, input);
+  }
+
+  executeWorkspaceFileOperation(environmentInstanceId: string, input: import('./worker/protocol.ts').WorkspaceFileOperationParams,
+    onProgress?: (progress: import('./worker/protocol.ts').WorkspaceCommandProgress) => void) {
     const target = this.#require();
     if (target.executeWorkspaceFileOperation === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
-    return target.executeWorkspaceFileOperation(environmentInstanceId, input);
+    return target.executeWorkspaceFileOperation(environmentInstanceId, input, onProgress);
   }
 
   inspectWorkspaceFileOperation(environmentInstanceId: string, input: import('./worker/protocol.ts').InspectWorkspaceFileOperationParams) {

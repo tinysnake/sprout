@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { RemoteWorkspaceOperationResult, RemoteWorkspaceTools, RemoteProjectMcpTools } from '../engine/port.ts';
+import type { RemoteWorkspaceOperationResult, RemoteWorkspaceTools, RemoteProjectMcpTools, RemoteWorkspaceProgress } from '../engine/port.ts';
 import { RemoteProjectMcpStartupError } from '../engine/port.ts';
 import type { ProjectAccessService } from '../project/access-service.ts';
 import { accessIsConsistent, sanitizeWorkspaceSelection } from '../project/access.ts';
@@ -8,14 +8,17 @@ import type { ProjectService } from '../project/authority-service.ts';
 import { PROJECT_MCP_CONFIGURATION_FORMAT } from '../project/authority-model.ts';
 import type { ProjectEnvironmentAccess, WorkspaceBinding } from '../project/access.ts';
 import type { RuntimeEnvironment, WorkerGatewayView } from '../runtime.ts';
+import type { EnvironmentPool } from '../environment/pool.ts';
+import type { EnvironmentLease } from '../environment/pool.ts';
 import type { EnvironmentCatalog } from '../environment/catalog.ts';
 import type { EnvironmentEnrollmentService } from '../environment/enrollment-service.ts';
-import type { EnvironmentPool, EnvironmentLease } from '../environment/pool.ts';
 import type { RemoteOperationIdentityStore, RemoteOperationIdentity, RemoteOperationState, RemoteMcpProcessIdentity, RemoteMcpOperationIdentity } from './remote-operation-store.ts';
-import type { AttachWorkspaceBindingParams, ProjectMcpLeaseIdentity, WorkspaceFileOperationParams, InspectWorkspaceFileOperationParams, CancelWorkspaceFileOperationParams, InspectProjectMcpConfigurationResult, StartProjectMcpParams, CallProjectMcpToolParams, StopProjectMcpParams, StartProjectMcpResult, CallProjectMcpToolResult } from '../worker/protocol.ts';
+import type { AttachWorkspaceBindingParams, ProjectMcpLeaseIdentity, WorkspaceFileOperationParams, InspectWorkspaceFileOperationParams, CancelWorkspaceFileOperationParams, InspectProjectMcpConfigurationResult, StartProjectMcpParams, CallProjectMcpToolParams, StopProjectMcpParams, StartProjectMcpResult, CallProjectMcpToolResult, RunContextParams } from '../worker/protocol.ts';
 
 const MAX_SUPPORTED_READ_BYTES = 64 * 1024;
 const MAX_SUPPORTED_SEARCH_RESULTS = 100;
+const MAX_COMMAND_OUTPUT_BYTES = 32 * 1024;
+const MUTATION_CAPABILITY = 'agent-run';
 
 export type RemoteWorkspaceBlock = 'project-denied' | 'access-ended' | 'workspace-unbound' | 'worker-offline' | 'stale-epoch' | 'unsupported' | 'capability-denied' | 'lease-required' | 'worker-refused';
 export interface ProjectMcpLeaseScope extends ProjectMcpLeaseIdentity {
@@ -63,7 +66,7 @@ interface BindingCandidate {
 type EnvironmentOperationsPort = Pick<RuntimeEnvironment,
   'info' | 'connectionEpoch' | 'attachWorkspaceBinding' | 'executeWorkspaceFileOperation' |
   'inspectProjectMcpConfiguration' | 'startProjectMcp' | 'callProjectMcpTool' | 'stopProjectMcp' |
-  'inspectWorkspaceFileOperation' | 'cancelWorkspaceFileOperation'>;
+  'inspectWorkspaceFileOperation' | 'cancelWorkspaceFileOperation' | 'prepareRunContext' | 'recycleRunContext' | 'inspectRunContext'>;
 type EnvironmentOperationsGateway = Pick<WorkerGatewayView, 'liveFor' | 'currentConnectionEpoch' | 'isCurrentConnection'>;
 type EnvironmentOperationsCatalog = Pick<EnvironmentCatalog, 'entry'>;
 type EnvironmentOperationsEnrollments = Pick<EnvironmentEnrollmentService, 'get'>;
@@ -74,14 +77,15 @@ export class EnvironmentOperations {
   readonly #environment: Pick<RuntimeEnvironment,
     'info' | 'connectionEpoch' | 'attachWorkspaceBinding' | 'executeWorkspaceFileOperation' |
     'inspectProjectMcpConfiguration' | 'startProjectMcp' | 'callProjectMcpTool' | 'stopProjectMcp' |
-    'inspectWorkspaceFileOperation' | 'cancelWorkspaceFileOperation'>;
-  readonly #pool: Pick<EnvironmentPool, 'getLease' | 'markRecovering'>;
+    'inspectWorkspaceFileOperation' | 'cancelWorkspaceFileOperation' | 'prepareRunContext' | 'recycleRunContext' | 'inspectRunContext'>;
   readonly #gateway: Pick<WorkerGatewayView, 'liveFor' | 'currentConnectionEpoch' | 'isCurrentConnection'>;
   readonly #catalog: EnvironmentOperationsCatalog;
   readonly #enrollments: EnvironmentOperationsEnrollments;
   readonly #store: RemoteOperationIdentityStore;
   readonly #onUncertainMcp: ((scope: ProjectMcpLeaseScope) => Promise<void>) | undefined;
   readonly #clock: () => number;
+  readonly #pool: Pick<EnvironmentPool, 'getLease' | 'requiresLeaseForBoundOperation' | 'acquireBoundOperationLeaseRevalidated' | 'extendLease' | 'markRecovering' | 'releaseLease'> | undefined;
+  readonly #leaseTtlMs: number;
 
   constructor(options: {
     readonly projects: Pick<ProjectService, 'get'>;
@@ -90,9 +94,10 @@ export class EnvironmentOperations {
     readonly gateway: EnvironmentOperationsGateway;
     readonly catalog: EnvironmentOperationsCatalog;
     readonly enrollments: EnvironmentOperationsEnrollments;
-    readonly pool: Pick<EnvironmentPool, 'getLease' | 'markRecovering'>;
+    readonly pool?: Pick<EnvironmentPool, 'getLease' | 'requiresLeaseForBoundOperation' | 'acquireBoundOperationLeaseRevalidated' | 'extendLease' | 'markRecovering' | 'releaseLease'>;
     readonly store: RemoteOperationIdentityStore;
     readonly onUncertainMcp?: (scope: ProjectMcpLeaseScope) => Promise<void>;
+    readonly leaseTtlMs?: number;
     readonly clock?: () => number;
   }) {
     this.#projects = options.projects;
@@ -104,6 +109,7 @@ export class EnvironmentOperations {
     this.#pool = options.pool;
     this.#store = options.store;
     this.#onUncertainMcp = options.onUncertainMcp;
+    this.#leaseTtlMs = options.leaseTtlMs ?? 900_000;
     this.#clock = options.clock ?? Date.now;
   }
 
@@ -180,7 +186,7 @@ export class EnvironmentOperations {
     const rows = await this.#store.listOpenMcpProcesses(environmentInstanceId);
     const liveEpoch = this.#gateway.liveFor(environmentInstanceId)?.epoch.epoch;
     for (const row of rows) {
-      const lease = this.#pool.getLease(row.leaseId);
+      const lease = this.#pool?.getLease(row.leaseId);
       const leaseCapability = row.holderKind === 'task' ? 'agent-run' : 'project-mcp';
       const scope: ProjectMcpLeaseScope = {
         environmentInstanceId, leaseId: row.leaseId, holderKind: row.holderKind, holderId: row.holderId,
@@ -265,7 +271,7 @@ export class EnvironmentOperations {
           catch { /* Stop still proceeds; an unresolved durable row protects recovery. */ }
         }
         try {
-          const currentLease = this.#pool.getLease(scope.leaseId);
+          const currentLease = this.#pool?.getLease(scope.leaseId);
           if (!sameMcpLease(currentLease, scope)) throw new Error('MCP lease identity changed');
           const stopInput: StopProjectMcpParams = { ...authority.identity, ...leaseIdentity, processId: processId! };
           const stopped = await this.#environment.stopProjectMcp?.(scope.environmentInstanceId, stopInput);
@@ -376,6 +382,7 @@ export class EnvironmentOperations {
   }
 
   async attach(projectId: string, agentId: string): Promise<RemoteWorkspaceTools> {
+  async attach(projectId: string, agentId: string, runId?: string, onLeaseAcquired?: (leaseId: string) => Promise<void>): Promise<RemoteWorkspaceTools> {
     const project = await this.#projects.get(projectId);
     if (!project || project.status !== 'active' || !hasAgent(project, agentId)) throw new RemoteWorkspaceUnavailableError('project-denied');
     const accesses = (await this.#access.listForProject(projectId)).filter(a => a.status === 'active' && a.current)
@@ -414,64 +421,331 @@ export class EnvironmentOperations {
       throw new RemoteWorkspaceUnavailableError('worker-refused');
     }
     const fixed = { ...identity };
-    const execute = async (operation: 'read' | 'search', path: string | undefined, query: string | undefined): Promise<RemoteWorkspaceOperationResult> => {
-      await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed);
-      const normalized = normalizeOperationInput(operation, path, query);
-      const operationId = randomUUID();
-      const fingerprint = createHash('sha256').update(JSON.stringify([fixed, operation, normalized.path ?? '', normalized.query ?? '', normalized.failure ?? ''])).digest('hex');
+    const runContext: RunContextParams | undefined = runId === undefined ? undefined : { ...fixed, runId };
+    let runContextState: 'absent' | 'prepared' | 'unknown' = 'absent';
+    let contextPreparationUncertain = false;
+    let mutationLease: EnvironmentLease | undefined;
+    let leaseAcquisition: Promise<{ readonly acquired?: EnvironmentLease; readonly conflict?: { readonly holderId: string; readonly state: 'active' | 'recovering' }; readonly failure?: string }> | undefined;
+    let pendingOperations = 0;
+    let uncertainOutcome = false;
+    let leaseCompromised = false;
+    let settlementRequested = false;
+    let settlementFinalizing = false;
+    const activeOperationIds = new Set<string>();
+    const uncertainOperationIds = new Set<string>();
+    let leaseKeepalive: ReturnType<typeof setInterval> | undefined;
+
+    const acquireMutationLease = async (): Promise<{ readonly acquired?: EnvironmentLease; readonly conflict?: { readonly holderId: string; readonly state: 'active' | 'recovering' }; readonly failure?: string }> => {
+      if (runId === undefined) return { failure: 'run-required' };
+      if (this.#pool === undefined) return { failure: 'lease-pool-unavailable' };
+      if (this.#pool.requiresLeaseForBoundOperation(access.environmentInstanceId, MUTATION_CAPABILITY) !== true) return { failure: 'lease-capability-unavailable' };
+      const prior = mutationLease;
+      if (prior !== undefined) {
+        const extended = this.#pool.extendLease(prior.id, this.#leaseTtlMs);
+        if (extended === undefined) {
+          uncertainOutcome = true;
+          this.#pool.markRecovering(prior.id);
+          return {};
+        }
+        mutationLease = extended;
+        return { acquired: extended };
+      }
+      const result = await this.#pool.acquireBoundOperationLeaseRevalidated({
+        instanceId: access.environmentInstanceId, capability: MUTATION_CAPABILITY,
+        holderId: agentId, runId, ttlMs: this.#leaseTtlMs,
+      });
+      if (!result.ok) {
+        return result.reason === 'conflict'
+          ? { conflict: { holderId: result.heldBy ?? 'unknown-holder', state: result.state === 'recovering' ? 'recovering' : 'active' } }
+          : { failure: `lease-${result.reason}` };
+      }
+      mutationLease = result.lease;
+      try { await onLeaseAcquired?.(result.lease.id); }
+      catch {
+        this.#pool.markRecovering(result.lease.id);
+        uncertainOutcome = true;
+        return { failure: 'lease-reference-persistence-failed' };
+      }
+      const interval = Math.max(1_000, Math.floor(this.#leaseTtlMs / 3));
+      leaseKeepalive = setInterval(() => {
+        const active = mutationLease;
+        if (!active) return;
+        const extended = this.#pool?.extendLease(active.id, this.#leaseTtlMs);
+        if (!extended) {
+          uncertainOutcome = true;
+          leaseCompromised = true;
+          this.#pool?.markRecovering(active.id);
+        } else mutationLease = extended;
+      }, interval);
+      leaseKeepalive.unref?.();
+      return { acquired: result.lease };
+    };
+
+    const settleLeaseIfReady = async (): Promise<void> => {
+      if (!settlementRequested || mutationLease === undefined || this.#pool === undefined || settlementFinalizing) return;
+      if (runContextState === 'unknown' && contextPreparationUncertain && runContext !== undefined && this.#environment.inspectRunContext) {
+        try {
+          const inspected = await this.#environment.inspectRunContext(access.environmentInstanceId, runContext);
+          if (inspected === 'present') runContextState = 'prepared';
+          else if (inspected === 'absent') runContextState = 'absent';
+          if (inspected !== 'unknown') {
+            contextPreparationUncertain = false;
+            uncertainOutcome = leaseCompromised || uncertainOperationIds.size > 0;
+          }
+        } catch { /* An unavailable cleanup proof leaves the context and lease protected. */ }
+      }
+      if (leaseCompromised || uncertainOutcome || uncertainOperationIds.size > 0 || pendingOperations > 0 || runContextState === 'unknown') {
+        this.#pool.markRecovering(mutationLease.id);
+        return;
+      }
+      settlementFinalizing = true;
+      try {
+        if (runContextState === 'prepared' && runContext !== undefined) {
+          if (!this.#environment.recycleRunContext) throw new Error('Run context cleanup unavailable');
+          await this.#environment.recycleRunContext(access.environmentInstanceId, runContext);
+          runContextState = 'absent';
+        }
+        this.#pool.releaseLease(mutationLease.id);
+      } catch {
+        runContextState = 'unknown';
+        uncertainOutcome = true;
+        this.#pool.markRecovering(mutationLease.id);
+      } finally {
+        settlementFinalizing = false;
+      }
+    };
+
+    const execute = async (operation: 'read' | 'search' | 'edit' | 'patch' | 'command', input: {
+      readonly path?: string; readonly query?: string; readonly oldText?: string; readonly newText?: string;
+      readonly hunks?: readonly { readonly before: string; readonly after: string }[];
+      readonly executable?: string; readonly args?: readonly string[]; readonly cwd?: string; readonly timeoutMs?: number;
+    }, requestedOperationId?: string, onProgress?: (progress: RemoteWorkspaceProgress) => void): Promise<RemoteWorkspaceOperationResult> => {
+      const operationId = stableOperationId(runId, requestedOperationId);
+      const normalized = normalizeOperationInput(operation, input);
+      const fingerprint = createHash('sha256').update(JSON.stringify([fixed, operation, runId ?? '', normalized])).digest('hex');
       const row: RemoteOperationIdentity = { operationId, fingerprint, projectId, environmentInstanceId: access.environmentInstanceId,
         bindingId: binding.bindingId, generation: binding.generation!, connectionEpoch: epoch, workspaceId: binding.workspaceId,
         operation, state: normalized.failure ? 'failed' : 'running', updatedAt: this.#clock() };
-      await this.#store.save(row);
-      if (normalized.failure) return { operationId, projectId, environmentInstanceId: access.environmentInstanceId, bindingId: binding.bindingId,
-        generation: binding.generation!, connectionEpoch: epoch, workspaceId: binding.workspaceId, operation, status: 'failed', failure: normalized.failure };
-      const { path: workspacePath, ...bindingIdentity } = fixed;
-      const request: WorkspaceFileOperationParams = {
-        ...bindingIdentity,
-        ...(workspacePath !== undefined ? { workspacePath } : {}),
-        operationId,
-        operation,
-        ...(normalized.path !== undefined ? { path: normalized.path } : {}),
-        ...(normalized.query !== undefined ? { query: normalized.query } : {}),
+      const claimIdentity = async (): Promise<RemoteWorkspaceOperationResult | undefined> => {
+        const claim = await this.#store.claim(row);
+        if (claim === 'claimed') return undefined;
+        return operationResult(fixed, operationId, operation, 'failed',
+          claim === 'same-identity' ? 'operation-outcome-inspection-required' : 'operation-identity-conflict');
       };
+      const prior = await this.#store.get(operationId);
+      if (prior) {
+        const failure = prior.fingerprint === fingerprint ? 'operation-outcome-inspection-required' : 'operation-identity-conflict';
+        return operationResult(fixed, operationId, operation, 'failed', failure);
+      }
+      if (normalized.failure) {
+        const duplicate = await claimIdentity();
+        if (duplicate) return duplicate;
+        await this.#store.save(row);
+        return operationResult(fixed, operationId, operation, 'failed', normalized.failure);
+      }
+      const mutating = operation === 'edit' || operation === 'patch' || operation === 'command';
+      if (mutating && (runId === undefined || requestedOperationId === undefined || requestedOperationId.length < 1 || requestedOperationId.length > 512)) {
+        return operationResult(fixed, operationId, operation, 'failed', 'operation-identity-required');
+      }
+      if (mutating) {
+        try {
+          await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed, MUTATION_CAPABILITY);
+        } catch {
+          return operationResult(fixed, operationId, operation, 'failed', 'remote-operation-blocked');
+        }
+        const capability = this.#catalog.entry(access.environmentInstanceId)?.definition.capabilities.find(c => c.name === MUTATION_CAPABILITY);
+        const info = await this.#environment.info?.(access.environmentInstanceId);
+        const supported = info?.workspaceOperations?.version === 3 && info.workspaceOperations.operations.includes(operation);
+        if (!capability || capability.requiresLease !== true || !supported || runId === undefined || this.#pool === undefined) {
+          return operationResult(fixed, operationId, operation, 'failed', 'lease-required');
+        }
+        if (leaseAcquisition === undefined) {
+          leaseAcquisition = acquireMutationLease();
+          void leaseAcquisition.finally(() => { leaseAcquisition = undefined; });
+        }
+        const lease = await leaseAcquisition;
+        if (!lease.acquired) {
+          return operationResult(fixed, operationId, operation, 'failed', lease.conflict ? 'lease-conflict' : (lease.failure ?? 'lease-unavailable'), lease.conflict);
+        }
+        try {
+          await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed, MUTATION_CAPABILITY);
+        } catch {
+          uncertainOutcome = true;
+          return operationResult(fixed, operationId, operation, 'failed', 'remote-operation-blocked');
+        }
+      } else {
+        await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed);
+      }
+
+      const duplicate = await claimIdentity();
+      if (duplicate) return duplicate;
+      if (mutating) {
+        if (runContext === undefined || runContextState === 'unknown') return operationResult(fixed, operationId, operation, 'failed', 'run-context-recovery-required');
+        if (runContextState === 'absent') {
+          try {
+            await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed, MUTATION_CAPABILITY);
+            if (!this.#environment.prepareRunContext) throw new Error('Run context preparation unavailable');
+            await this.#environment.prepareRunContext(access.environmentInstanceId, runContext);
+            runContextState = 'prepared';
+          } catch {
+            runContextState = 'unknown';
+            contextPreparationUncertain = true;
+            uncertainOutcome = true;
+            await this.#saveState(row, 'failed');
+            return operationResult(fixed, operationId, operation, 'failed', 'run-context-unknown-inspect-required');
+          }
+        }
+      }
+      const { path: workspacePath, ...bindingIdentity } = fixed;
+      const common = { ...bindingIdentity, ...(workspacePath !== undefined ? { workspacePath } : {}), operationId };
+      const request: WorkspaceFileOperationParams = operation === 'read'
+        ? { ...common, operation, path: normalized.path! }
+        : operation === 'search'
+          ? { ...common, operation, query: normalized.query!, ...(normalized.path !== undefined ? { path: normalized.path } : {}) }
+          : operation === 'edit'
+            ? { ...common, operation, path: normalized.path!, oldText: normalized.oldText!, newText: normalized.newText! }
+            : operation === 'patch'
+              ? { ...common, operation, path: normalized.path!, hunks: normalized.hunks! }
+              : { ...common, operation, runId: runId!, executable: normalized.executable!, args: normalized.args!, ...(normalized.cwd !== undefined ? { cwd: normalized.cwd } : {}), ...(normalized.timeoutMs !== undefined ? { timeoutMs: normalized.timeoutMs } : {}) };
       let result: RemoteWorkspaceOperationResult;
+      let progressSequence = 0;
+      let progressBytes = 0;
+      pendingOperations++;
+      if (mutating) activeOperationIds.add(operationId);
       try {
         if (!this.#environment.executeWorkspaceFileOperation) throw new Error('unsupported');
-        result = await this.#environment.executeWorkspaceFileOperation(access.environmentInstanceId, request);
-        await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed);
+        result = await this.#environment.executeWorkspaceFileOperation(access.environmentInstanceId, request, progress => {
+          if (operation !== 'command' || onProgress === undefined || !validProgress(progress, fixed, operationId, progressSequence + 1)) return;
+          const bytes = Buffer.byteLength(progress.text, 'utf8');
+          if (progressBytes + bytes > MAX_COMMAND_OUTPUT_BYTES) return;
+          progressSequence = progress.sequence;
+          progressBytes += bytes;
+          onProgress(progress);
+        });
+        await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed, mutating ? MUTATION_CAPABILITY : 'read-only-investigation');
         if (!isBoundedRemoteResult(result, fixed, operationId, operation)) throw new Error('remote operation identity or bounds invalid');
       } catch {
-        await this.#saveState(row, 'failed');
-        return { operationId, projectId, environmentInstanceId: access.environmentInstanceId, bindingId: binding.bindingId,
-          generation: binding.generation!, connectionEpoch: epoch, workspaceId: binding.workspaceId, operation, status: 'failed', failure: 'worker-unavailable' };
+        const state: RemoteOperationState = mutating ? 'unknown' : 'failed';
+        if (mutating) {
+          uncertainOutcome = true;
+          uncertainOperationIds.add(operationId);
+        }
+        await this.#saveState(row, state);
+        return operationResult(fixed, operationId, operation, 'failed', mutating ? 'outcome-unknown-inspect-required' : 'worker-unavailable');
+      } finally {
+        pendingOperations--;
+        if (mutating) activeOperationIds.delete(operationId);
+        void settleLeaseIfReady();
       }
       await this.#saveState(row, result.status === 'completed' ? 'completed' : result.status);
+      if (mutating && result.status !== 'recovery-required') {
+        uncertainOperationIds.delete(operationId);
+        uncertainOutcome = leaseCompromised || uncertainOperationIds.size > 0;
+      }
+      if (mutating && result.status === 'recovery-required') {
+        uncertainOutcome = true;
+        uncertainOperationIds.add(operationId);
+      }
+      settleLeaseIfReady();
       return result;
     };
+    const inspectOperation = async (operationId: string): Promise<{ readonly status: string; readonly operation?: RemoteWorkspaceOperationResult }> => {
+      await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed);
+      const row = await this.#store.get(operationId);
+      if (!row || row.projectId !== projectId || row.bindingId !== binding.bindingId || row.generation !== binding.generation || row.connectionEpoch !== epoch) return { status: 'not-found' };
+      if (!this.#environment.inspectWorkspaceFileOperation) return { status: row.state };
+      const request: InspectWorkspaceFileOperationParams = { ...fixed, operationId };
+      const result = await this.#environment.inspectWorkspaceFileOperation(access.environmentInstanceId, request);
+      if (result.status === 'not-found') {
+        if (row.state === 'running' || row.state === 'unknown' || row.state === 'cancel-requested') {
+          await this.#saveState(row, 'unknown');
+          uncertainOperationIds.add(operationId);
+          uncertainOutcome = true;
+          void settleLeaseIfReady();
+          return { status: 'unknown' };
+        }
+        return { status: row.state };
+      }
+      const operationTerminal = isTerminalOperationState(result.status) || result.status === 'recovery-required';
+      if (!operationTerminal) {
+        if (row.operation === 'edit' || row.operation === 'patch' || row.operation === 'command') {
+          uncertainOperationIds.add(operationId);
+          uncertainOutcome = true;
+        }
+        void settleLeaseIfReady();
+        return { status: result.status };
+      }
+      if ((row.operation === 'edit' || row.operation === 'patch' || row.operation === 'command') && operationTerminal && result.result === undefined) return { status: 'unknown' };
+      if (result.result && (result.result.status !== result.status ||
+          !isBoundedRemoteResult(result.result, fixed, operationId, row.operation))) return { status: 'unknown' };
+      if (result.status === 'recovery-required') {
+        await this.#saveState(row, 'recovery-required');
+        uncertainOperationIds.add(operationId);
+        uncertainOutcome = true;
+        void settleLeaseIfReady();
+        return { status: 'recovery-required' };
+      }
+      if (operationTerminal && result.status !== row.state) await this.#saveState(row, result.status);
+      if (operationTerminal && result.result && (row.operation === 'edit' || row.operation === 'patch' || row.operation === 'command')) {
+        uncertainOperationIds.delete(operationId);
+        uncertainOutcome = leaseCompromised || uncertainOperationIds.size > 0;
+      }
+      void settleLeaseIfReady();
+      const status = result.status;
+      return { status, ...(result.result !== undefined ? { operation: result.result } : {}) };
+    };
+
+    const cancelOperation = async (operationId: string): Promise<{ readonly accepted: boolean; readonly status: string }> => {
+      await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed);
+      const row = await this.#store.get(operationId);
+      if (!row || row.projectId !== projectId || row.bindingId !== binding.bindingId || row.generation !== binding.generation || row.connectionEpoch !== epoch || !['running','cancel-requested'].includes(row.state)) {
+        return { accepted: false, status: row?.state ?? 'not-found' };
+      }
+      if (!this.#environment.cancelWorkspaceFileOperation) return { accepted: false, status: 'unsupported' };
+      const request: CancelWorkspaceFileOperationParams = { ...fixed, operationId };
+      const result = await this.#environment.cancelWorkspaceFileOperation(access.environmentInstanceId, request);
+      if (result.accepted) await this.#saveState(row, 'cancel-requested');
+      return { accepted: result.accepted, status: result.status };
+    };
+
+    const remoteOperations: ('read' | 'search' | 'edit' | 'patch' | 'command')[] = ['read', 'search'];
+    const enrollment = await this.#enrollments.get(live.enrollment.id);
+    const mutationCapability = this.#catalog.entry(access.environmentInstanceId)?.definition.capabilities.find(c => c.name === MUTATION_CAPABILITY);
+    const operations = await this.#environment.info?.(access.environmentInstanceId);
+    if (enrollment?.capabilityPermissions[MUTATION_CAPABILITY] === true && mutationCapability?.requiresLease === true &&
+        operations?.workspaceOperations?.version === 3 && operations.workspaceOperations.operations.includes('edit') &&
+        operations.workspaceOperations.operations.includes('patch')) remoteOperations.push('edit', 'patch');
+    if (enrollment?.capabilityPermissions[MUTATION_CAPABILITY] === true && mutationCapability?.requiresLease === true &&
+        operations?.workspaceOperations?.version === 3 && operations.workspaceOperations.operations.includes('command')) remoteOperations.push('command');
     return {
       binding: { projectId, environmentInstanceId: access.environmentInstanceId, bindingId: binding.bindingId,
         generation: binding.generation!, connectionEpoch: epoch, workspaceId: binding.workspaceId },
-      read: path => execute('read', path, undefined),
-      search: (query, path) => execute('search', path, query),
-      inspect: async operationId => {
-        await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed);
-        const row = await this.#store.get(operationId);
-        if (!row || row.projectId !== projectId || row.bindingId !== binding.bindingId || row.generation !== binding.generation || row.connectionEpoch !== epoch) return { status: 'not-found' };
-        if (!this.#environment.inspectWorkspaceFileOperation) return { status: row.state };
-        const request: InspectWorkspaceFileOperationParams = { ...fixed, operationId };
-        const result = await this.#environment.inspectWorkspaceFileOperation(access.environmentInstanceId, request);
-        return { status: result.status };
+      operations: remoteOperations,
+      read: (path, operationId) => execute('read', { path }, operationId),
+      search: (query, path, operationId) => execute('search', { query, ...(path !== undefined ? { path } : {}) }, operationId),
+      edit: (path, oldText, newText, operationId) => execute('edit', { path, oldText, newText }, operationId),
+      patch: (path, hunks, operationId) => execute('patch', { path, hunks }, operationId),
+      command: (executable, args, options, operationId, onProgress) => execute('command', {
+        executable, args, ...(options.cwd !== undefined ? { cwd: options.cwd } : {}), ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+      }, operationId, onProgress),
+      settle: async outcome => {
+        settlementRequested = true;
+        if (outcome === 'unknown' && mutationLease !== undefined) this.#pool?.markRecovering(mutationLease.id);
+        if (leaseKeepalive !== undefined) clearInterval(leaseKeepalive);
+        if (outcome === 'unknown') {
+          const operationIds = new Set([...activeOperationIds, ...uncertainOperationIds]);
+          for (const operationId of operationIds) {
+            const row = await this.#store.get(operationId);
+            if (row?.operation === 'command') {
+              try { await cancelOperation(operationId); } catch { /* Worker loss leaves the lease protected. */ }
+            }
+            try { await inspectOperation(operationId); } catch { /* Failed inspection leaves the lease protected. */ }
+          }
+        }
+        await settleLeaseIfReady();
       },
-      cancel: async operationId => {
-        await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed);
-        const row = await this.#store.get(operationId);
-        if (!row || row.projectId !== projectId || row.bindingId !== binding.bindingId || row.generation !== binding.generation || row.connectionEpoch !== epoch || row.state !== 'running') return { accepted: false, status: row?.state ?? 'not-found' };
-        if (!this.#environment.cancelWorkspaceFileOperation) return { accepted: false, status: 'unsupported' };
-        const request: CancelWorkspaceFileOperationParams = { ...fixed, operationId };
-        const result = await this.#environment.cancelWorkspaceFileOperation(access.environmentInstanceId, request);
-        if (result.accepted) await this.#saveState(row, 'cancelled');
-        return { accepted: result.accepted, status: result.status };
-      },
+      inspect: inspectOperation,
+      cancel: cancelOperation,
     };
   }
 
@@ -486,7 +760,7 @@ export class EnvironmentOperations {
     if (!project || project.status !== 'active' || !content?.mcpConfiguration || content.mcpConfiguration.format !== PROJECT_MCP_CONFIGURATION_FORMAT || !hasAgent(project, agentId)) {
       throw new RemoteWorkspaceUnavailableError('project-denied');
     }
-    const lease = this.#pool.getLease(scope.leaseId);
+    const lease = this.#pool?.getLease(scope.leaseId);
     if (!sameMcpLease(lease, scope) || (lease?.state !== 'active' && !(allowRecovering && lease?.state === 'recovering'))) {
       throw new RemoteWorkspaceUnavailableError('lease-required');
     }
@@ -524,7 +798,7 @@ export class EnvironmentOperations {
   }
 
   async #noteUncertainMcp(scope: ProjectMcpLeaseScope): Promise<void> {
-    this.#pool.markRecovering(scope.leaseId);
+    this.#pool?.markRecovering(scope.leaseId);
     try { await this.#onUncertainMcp?.(scope); } catch { /* The lease remains protected in the pool. */ }
   }
 
@@ -580,7 +854,8 @@ export class EnvironmentOperations {
     if (epoch !== this.#gateway.currentConnectionEpoch(enrollment.id) || !this.#gateway.isCurrentConnection(enrollment.id, live.epoch.connectionId) || this.#environment.connectionEpoch?.(access.environmentInstanceId) !== epoch) return 'stale-epoch';
     const info = await this.#environment.info?.(access.environmentInstanceId);
     const operations = info?.workspaceOperations;
-    if (!info || info.environmentInstanceId !== access.environmentInstanceId || operations?.version !== 1 ||
+    const supportsRead = operations?.version === 1 || operations?.version === 2 || operations?.version === 3;
+    if (!info || info.environmentInstanceId !== access.environmentInstanceId || !supportsRead ||
       !operations.operations.includes('read') || !operations.operations.includes('search') ||
       !Number.isSafeInteger(operations.maxReadBytes) || operations.maxReadBytes < 1 || operations.maxReadBytes > MAX_SUPPORTED_READ_BYTES ||
       !Number.isSafeInteger(operations.maxSearchResults) || operations.maxSearchResults < 1 || operations.maxSearchResults > MAX_SUPPORTED_SEARCH_RESULTS) return 'unsupported';
@@ -592,16 +867,16 @@ export class EnvironmentOperations {
     return undefined;
   }
 
-  async #assertCurrent(projectId: string, agentId: string | undefined, environmentInstanceId: string, identity: AttachWorkspaceBindingParams): Promise<void> {
+  async #assertCurrent(projectId: string, agentId: string | undefined, environmentInstanceId: string, identity: AttachWorkspaceBindingParams, capability = 'read-only-investigation'): Promise<void> {
     const project = await this.#projects.get(projectId);
     if (!project || project.status !== 'active' || (agentId !== undefined && !hasAgent(project, agentId))) throw new RemoteWorkspaceUnavailableError('project-denied');
     const current = await this.#access.get(projectId, environmentInstanceId);
-    if (!current || current.status !== 'active' || current.current?.bindingId !== identity.bindingId || current.current.generation !== identity.generation || current.current.workspaceId !== identity.workspaceId || current.current.kind !== identity.kind || current.current.path !== identity.path) throw new RemoteWorkspaceUnavailableError('access-ended');
+    if (!current || current.status !== 'active' || !current.current || current.current.bindingId !== identity.bindingId || current.current.generation !== identity.generation || current.current.workspaceId !== identity.workspaceId || current.current.kind !== identity.kind || current.current.path !== identity.path) throw new RemoteWorkspaceUnavailableError('access-ended');
     const live = this.#gateway.liveFor(environmentInstanceId);
     if (!live) throw new RemoteWorkspaceUnavailableError('worker-offline');
     const enrollment = await this.#enrollments.get(live.enrollment.id);
     if (!enrollment || enrollment.environmentInstanceId !== environmentInstanceId || enrollment.status !== 'approved') throw new RemoteWorkspaceUnavailableError('worker-offline');
-    if (enrollment.capabilityPermissions['read-only-investigation'] !== true) throw new RemoteWorkspaceUnavailableError('capability-denied');
+    if (enrollment.capabilityPermissions[capability] !== true) throw new RemoteWorkspaceUnavailableError('capability-denied');
     if (live.epoch.epoch !== identity.connectionEpoch ||
       this.#gateway.currentConnectionEpoch(enrollment.id) !== identity.connectionEpoch ||
       !this.#gateway.isCurrentConnection(enrollment.id, live.epoch.connectionId) ||
@@ -810,17 +1085,52 @@ function sameMcpBinding(a: AttachWorkspaceBindingParams, b: AttachWorkspaceBindi
 }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
 
+function isTerminalOperationState(value: string): value is 'completed' | 'failed' | 'cancelled' {
+  return value === 'completed' || value === 'failed' || value === 'cancelled';
+}
+
 function hasAgent(project: Awaited<ReturnType<ProjectService['get']>> & {}, agentId: string): boolean {
   if (!project) return false;
   const version = project.content.versions.find(v => v.version === project.content.currentVersion);
   return version?.memberships.some(m => m.memberId === agentId && m.memberKind === 'agent' && m.endedAt === undefined) ?? false;
 }
-function normalizeOperationInput(operation: 'read' | 'search', path: string | undefined, query: string | undefined): { readonly path?: string; readonly query?: string; readonly failure?: string } {
-  const normalizedPath = path === undefined ? undefined : normalizeRelativePath(path);
-  if (path !== undefined && normalizedPath === undefined) return { failure: 'invalid-path' };
-  if (operation === 'read' && normalizedPath === undefined) return { failure: 'invalid-path' };
-  if (operation === 'search' && (typeof query !== 'string' || query.length < 1 || query.length > 256)) return { failure: 'invalid-path' };
-  return { ...(normalizedPath !== undefined ? { path: normalizedPath } : {}), ...(query !== undefined ? { query } : {}) };
+function normalizeOperationInput(operation: 'read' | 'search' | 'edit' | 'patch' | 'command', input: {
+  readonly path?: string; readonly query?: string; readonly oldText?: string; readonly newText?: string;
+  readonly hunks?: readonly { readonly before: string; readonly after: string }[];
+  readonly executable?: string; readonly args?: readonly string[]; readonly cwd?: string; readonly timeoutMs?: number;
+}): { readonly path?: string; readonly query?: string; readonly oldText?: string; readonly newText?: string;
+  readonly hunks?: readonly { readonly before: string; readonly after: string }[]; readonly executable?: string;
+  readonly args?: readonly string[]; readonly cwd?: string; readonly timeoutMs?: number; readonly failure?: string } {
+  const path = input.path === undefined ? undefined : normalizeRelativePath(input.path);
+  if (input.path !== undefined && (path === undefined || path.split('/')[0] === '.sprout')) return { failure: 'invalid-path' };
+  if (operation !== 'search' && operation !== 'command' && path === undefined) return { failure: 'invalid-path' };
+  if (operation === 'search' && (typeof input.query !== 'string' || input.query.length < 1 || input.query.length > 256)) return { failure: 'invalid-path' };
+  if (operation === 'edit' && (typeof input.oldText !== 'string' || input.oldText.length === 0 || typeof input.newText !== 'string' ||
+      Buffer.byteLength(input.oldText, 'utf8') > 256 * 1024 || Buffer.byteLength(input.newText, 'utf8') > 256 * 1024)) return { failure: 'operation-limit' };
+  if (operation === 'patch') {
+    if (!Array.isArray(input.hunks) || input.hunks.length < 1 || input.hunks.length > 32) return { failure: 'operation-limit' };
+    let bytes = 0;
+    for (const hunk of input.hunks) {
+      if (typeof hunk?.before !== 'string' || hunk.before.length === 0 || typeof hunk.after !== 'string') return { failure: 'invalid-patch' };
+      bytes += Buffer.byteLength(hunk.before, 'utf8') + Buffer.byteLength(hunk.after, 'utf8');
+      if (bytes > 256 * 1024) return { failure: 'operation-limit' };
+    }
+  }
+  if (operation === 'command') {
+    if (input.executable !== 'node' && input.executable !== 'npm') return { failure: 'command-not-allowed' };
+    if (!Array.isArray(input.args) || input.args.length > 64 || Array.from(input.args).some(arg => typeof arg !== 'string' || Buffer.byteLength(arg, 'utf8') > 4_096) ||
+        Buffer.byteLength(JSON.stringify(input.args), 'utf8') > 16 * 1024) return { failure: 'operation-limit' };
+    const cwd = input.cwd === undefined || input.cwd === '.' ? undefined : normalizeRelativePath(input.cwd);
+    if (input.cwd !== undefined && input.cwd !== '.' && cwd === undefined) return { failure: 'invalid-path' };
+    if (cwd?.split('/')[0] === '.sprout') return { failure: 'invalid-path' };
+    if (input.timeoutMs !== undefined && (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 100 || input.timeoutMs > 120_000)) return { failure: 'operation-limit' };
+    return { executable: input.executable, args: [...input.args], ...(cwd !== undefined ? { cwd } : {}), ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}) };
+  }
+  return { ...(path !== undefined ? { path } : {}), ...(input.query !== undefined ? { query: input.query } : {}),
+    ...(input.oldText !== undefined ? { oldText: input.oldText } : {}), ...(input.newText !== undefined ? { newText: input.newText } : {}),
+    ...(input.hunks !== undefined ? { hunks: input.hunks } : {}), ...(input.executable !== undefined ? { executable: input.executable } : {}),
+    ...(input.args !== undefined ? { args: input.args } : {}), ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
+    ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}) };
 }
 
 function normalizeRelativePath(value: string): string | undefined {
@@ -830,16 +1140,35 @@ function normalizeRelativePath(value: string): string | undefined {
   return normalized;
 }
 
-function isBoundedRemoteResult(result: RemoteWorkspaceOperationResult, identity: AttachWorkspaceBindingParams, operationId: string, operation: 'read' | 'search'): boolean {
+function isBoundedRemoteResult(result: RemoteWorkspaceOperationResult, identity: AttachWorkspaceBindingParams, operationId: string, operation: 'read' | 'search' | 'edit' | 'patch' | 'command'): boolean {
   if (!sameOrigin(result, identity, operationId, operation) ||
-    !['completed', 'failed', 'cancelled'].includes(result.status) ||
+    !['completed', 'failed', 'cancelled', 'recovery-required'].includes(result.status) ||
     (result.truncated !== undefined && typeof result.truncated !== 'boolean')) return false;
+  if (operation === 'command') {
+    const chunks = result.outputChunks;
+    if (result.content !== undefined || result.matches !== undefined || result.path !== undefined || result.changedPaths !== undefined ||
+        typeof result.output !== 'string' || Buffer.byteLength(result.output, 'utf8') > MAX_COMMAND_OUTPUT_BYTES ||
+        !Array.isArray(chunks) || chunks.length > 64 ||
+        (result.exitCode !== null && result.exitCode !== undefined && !Number.isSafeInteger(result.exitCode))) return false;
+    let total = 0;
+    for (let index = 0; index < chunks.length; index++) {
+      const chunk = chunks[index];
+      if (!chunk || chunk.sequence !== index + 1 || (chunk.stream !== 'stdout' && chunk.stream !== 'stderr') || typeof chunk.text !== 'string' || Buffer.byteLength(chunk.text, 'utf8') > 1_024) return false;
+      total += Buffer.byteLength(chunk.text, 'utf8');
+    }
+    return total <= MAX_COMMAND_OUTPUT_BYTES && chunks.map(chunk => chunk.text).join('') === result.output &&
+      (result.failure === undefined || ['command-not-allowed','operation-limit','invalid-path','command-supervision-unsupported','command-timeout','command-start-failed','command-failed','cancelled','descendant-process-unknown','run-context-unavailable','operation-identity-conflict','operation-journal-unavailable','outcome-unknown-inspect-required'].includes(result.failure));
+  }
   if (result.status !== 'completed') {
     return result.content === undefined && result.matches === undefined &&
       (result.path === undefined || normalizeRelativePath(result.path) === result.path) &&
       (result.failure === undefined || (typeof result.failure === 'string' && result.failure.length <= 64));
   }
   if (result.failure !== undefined) return false;
+  if (operation === 'edit' || operation === 'patch') {
+    return result.content === undefined && result.matches === undefined && typeof result.path === 'string' &&
+      normalizeRelativePath(result.path) === result.path && result.changedPaths?.length === 1 && result.changedPaths[0] === result.path;
+  }
   if (operation === 'read') {
     return typeof result.path === 'string' && normalizeRelativePath(result.path) === result.path &&
       typeof result.content === 'string' && Buffer.byteLength(result.content, 'utf8') <= MAX_SUPPORTED_READ_BYTES && result.matches === undefined;
@@ -852,7 +1181,29 @@ function isBoundedRemoteResult(result: RemoteWorkspaceOperationResult, identity:
     Buffer.byteLength(match.text, 'utf8') <= 1_200);
 }
 
-function sameOrigin(result: RemoteWorkspaceOperationResult, identity: AttachWorkspaceBindingParams, operationId: string, operation: 'read' | 'search'): boolean {
+function validProgress(progress: RemoteWorkspaceProgress, identity: AttachWorkspaceBindingParams, operationId: string, nextSequence: number): boolean {
+  return progress.operationId === operationId && progress.projectId === identity.projectId &&
+    progress.environmentInstanceId === identity.environmentInstanceId && progress.bindingId === identity.bindingId &&
+    progress.generation === identity.generation && progress.connectionEpoch === identity.connectionEpoch &&
+    progress.workspaceId === identity.workspaceId && progress.sequence === nextSequence &&
+    (progress.stream === 'stdout' || progress.stream === 'stderr') && typeof progress.text === 'string' &&
+    Buffer.byteLength(progress.text, 'utf8') <= 1_024;
+}
+
+function stableOperationId(runId: string | undefined, requested: string | undefined): string {
+  if (runId === undefined || requested === undefined || requested.length < 1 || requested.length > 512) return randomUUID();
+  return createHash('sha256').update(`${runId}\\u0000${requested}`).digest('hex');
+}
+
+function operationResult(identity: AttachWorkspaceBindingParams, operationId: string, operation: 'read' | 'search' | 'edit' | 'patch' | 'command', status: 'completed' | 'failed' | 'cancelled' | 'recovery-required', failure?: string,
+  leaseConflict?: { readonly holderId: string; readonly state: 'active' | 'recovering' }): RemoteWorkspaceOperationResult {
+  return { operationId, projectId: identity.projectId, environmentInstanceId: identity.environmentInstanceId,
+    bindingId: identity.bindingId, generation: identity.generation, connectionEpoch: identity.connectionEpoch,
+    workspaceId: identity.workspaceId, operation, status, ...(failure !== undefined ? { failure } : {}),
+    ...(leaseConflict !== undefined ? { leaseConflict } : {}) };
+}
+
+function sameOrigin(result: RemoteWorkspaceOperationResult, identity: AttachWorkspaceBindingParams, operationId: string, operation: 'read' | 'search' | 'edit' | 'patch' | 'command'): boolean {
   return result.operationId === operationId && result.projectId === identity.projectId && result.environmentInstanceId === identity.environmentInstanceId &&
     result.bindingId === identity.bindingId && result.generation === identity.generation && result.connectionEpoch === identity.connectionEpoch &&
     result.workspaceId === identity.workspaceId && result.operation === operation;

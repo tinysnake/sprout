@@ -91,6 +91,20 @@ test('a run view exposes progress and the terminal result without server interna
   );
 });
 
+test('Web Run projection exposes remote progress and every terminal operation status', () => {
+  const statuses = ['completed', 'failed', 'cancelled', 'recovery-required'] as const;
+  const events: AgentRun['events'] = [
+    { type: 'tool-call', name: 'remote_command', detail: 'Remote operation requested.' },
+    { type: 'tool-output', text: 'remote test progress' },
+    ...statuses.map(status => ({ type: 'notice' as const, text: `Remote command ${status}.` })),
+  ];
+  const view = toRunView(run({ events }));
+
+  assert.deepEqual(view.events, events);
+  for (const status of statuses) assert.ok(view.events.some(event => event.type === 'notice' && event.text === `Remote command ${status}.`));
+  assert.ok(view.events.some(event => event.type === 'tool-output' && event.text === 'remote test progress'));
+});
+
 test('run projections expose placement while keeping the local host profile identity private', () => {
   const view = toRunView(run({
     environmentInstanceId: '', executionMode: 'host-run', engineHostProfileId: 'opaque-local-profile',
