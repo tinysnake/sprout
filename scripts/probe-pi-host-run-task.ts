@@ -33,7 +33,7 @@ const remoteFailureCodes = new Set([
   'command-supervision-unsupported',
 ]);
 
-const taskCommandArgs = ['--input-type=module', '-e', "import{readFile}from'node:fs/promises';if(await readFile('proof.txt','utf8')!=='after')process.exit(1)"];
+const taskCommandArgs = ['--version'];
 
 type Binding = {
   readonly projectId: string;
@@ -252,8 +252,12 @@ createInterface({ input: process.stdin }).on('line', line => {
       const proposal = await runtime.taskProposals.propose('host-task-proof-project', actor, {
         title: 'Bounded Host-run workspace Task',
         goal: 'Use the authorized Project workspace and Project MCP tools in one bounded activation.',
-        constraints: ['Use only the provided tools and do not disclose file contents.'],
-        validationCriteria: ['The remote workspace check passes and the Project file persists after Task end.'],
+        constraints: [
+          'Use only the provided tools and do not disclose file contents.',
+          'The only file to read and edit is proof.txt at the root of the authorized Project workspace. Its initial content is before; replace it with after using remote_edit.',
+          'Remote file paths are relative to the Project workspace root, not the Pi session or Task context directory. The remote command starts at the Project workspace root; omit cwd.',
+        ],
+        validationCriteria: ['Remote read, edit, command, and Project MCP calls succeed under the Task lease, then the Project file persists after safe Task end.'],
       });
       const begun = await runtime.taskAdmissions.beginForHuman(proposal.id, {
         expectedRevision: proposal.revision,
@@ -273,7 +277,7 @@ createInterface({ input: process.stdin }).on('line', line => {
         const advanced = await runtime.taskAdmissions.advanceForHuman(taskId, {
           targetAgentId: 'scout',
           reason: 'Run the bounded workspace and MCP check.',
-          prompt: `Use only the four tools named below, once each in this order. Remote file paths are relative to the root of the authorized Project workspace, not the Pi session or Task context directory. First call remote_read with exactly {"path":"proof.txt"}. Second call remote_edit with exactly {"path":"proof.txt","oldText":"before","newText":"after"}. Third call remote_command with executable "node" and args ${JSON.stringify(taskCommandArgs)}; this command runs from the Project workspace root. Fourth, call the available Project MCP tool described as echoing supplied text once with {"text":"MCP_OK"}. Do not call remote_search or any other tool, repeat calls, or include tool arguments, file contents, or command output in your final response. Report the check result in one short sentence.`,
+          prompt: `Use only the four tools named below, once each in this order. Remote file paths are relative to the root of the authorized Project workspace, not the Pi session or Task context directory. First call remote_read with exactly {"path":"proof.txt"}. Second call remote_edit with exactly {"path":"proof.txt","oldText":"before","newText":"after"}. Third call remote_command with executable "node" and args ${JSON.stringify(taskCommandArgs)}; omit cwd because this command runs from the Project workspace root. Fourth, call the available Project MCP tool described as echoing supplied text once with {"text":"MCP_OK"}. Do not call remote_search or any other tool, repeat calls, or include tool arguments, file contents, or command output in your final response. Report the check result in one short sentence.`,
         });
         const settledRun = await runtime.orchestrator.waitFor(advanced.runId);
         const afterRunTask = await runtime.tasks.get(taskId);
