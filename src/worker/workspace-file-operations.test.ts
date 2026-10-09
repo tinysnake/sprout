@@ -187,6 +187,74 @@ test('Worker reports denied HTTP MCP authorization as an unavailable remote serv
   assert.deepEqual(await connection.contexts.stopProjectMcp({ ...binding, ...lease, processId }), { processId, status: 'stopped' });
 });
 
+test('Worker refuses same-origin and cross-origin HTTP MCP redirects without forwarding authorization or session identifiers', async (t) => {
+  for (const redirectKind of ['same-origin', 'different-origin'] as const) {
+    const selectedRequests: { readonly path: string; readonly authorization?: string; readonly session?: string }[] = [];
+    const targetRequests: { readonly authorization?: string; readonly session?: string }[] = [];
+    let selectedPort = 0;
+    let targetUrl = '';
+    const selected = createServer((request, response) => {
+      selectedRequests.push({
+        path: request.url ?? '',
+        ...(typeof request.headers.authorization === 'string' ? { authorization: request.headers.authorization } : {}),
+        ...(typeof request.headers['mcp-session-id'] === 'string' ? { session: request.headers['mcp-session-id'] } : {}),
+      });
+      if (request.method === 'DELETE') {
+        response.writeHead(204).end();
+      } else if (request.url === '/redirect-target') {
+        targetRequests.push({
+          ...(typeof request.headers.authorization === 'string' ? { authorization: request.headers.authorization } : {}),
+          ...(typeof request.headers['mcp-session-id'] === 'string' ? { session: request.headers['mcp-session-id'] } : {}),
+        });
+        response.writeHead(200).end();
+      } else {
+        response.writeHead(302, { location: targetUrl, 'mcp-session-id': 'redirect-session-sentinel' }).end();
+      }
+    });
+    const target = createServer((request, response) => {
+      targetRequests.push({
+        ...(typeof request.headers.authorization === 'string' ? { authorization: request.headers.authorization } : {}),
+        ...(typeof request.headers['mcp-session-id'] === 'string' ? { session: request.headers['mcp-session-id'] } : {}),
+      });
+      response.writeHead(200).end();
+    });
+    const targetPort = await listenLocalServer(target);
+    selectedPort = await listenLocalServer(selected);
+    targetUrl = redirectKind === 'same-origin'
+      ? `http://localhost:${selectedPort}/redirect-target`
+      : `http://localhost:${targetPort}/redirect-target`;
+    t.after(async () => {
+      await closeLocalServer(selected);
+      await closeLocalServer(target);
+    });
+
+    const root = await mkdtemp(join(tmpdir(), 'sprout-mcp-http-redirect-'));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const connection = await worker(root);
+    t.after(() => connection.close());
+    const selectedWorkspace = await connection.contexts.validateWorkspace({ projectId: `project-redirect-${redirectKind}`, environmentInstanceId: 'env-1', kind: 'relative', path: 'repo' });
+    const binding = {
+      projectId: `project-redirect-${redirectKind}`, environmentInstanceId: 'env-1', bindingId: `binding-redirect-${redirectKind}`,
+      generation: 1, connectionEpoch: 4, workspaceId: selectedWorkspace.workspaceId, kind: 'relative' as const, path: 'repo',
+    };
+    await connection.contexts.attachWorkspaceBinding(binding);
+    await writeFile(join(root, 'repo', '.mcp.json'), JSON.stringify({ mcpServers: {
+      redirected: { type: 'http', url: `http://localhost:${selectedPort}/mcp`, headers: { Authorization: 'Bearer redirect-auth-sentinel' } },
+    } }));
+    const processId = redirectKind === 'same-origin' ? 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee' : 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+    const lease = { leaseId: `lease-redirect-${redirectKind}`, holderKind: 'run' as const, holderId: `run-redirect-${redirectKind}`, runId: `run-redirect-${redirectKind}` };
+    const started = await connection.contexts.startProjectMcp({ ...binding, ...lease, processId, format: 'claude-code-mcp-json-v1' });
+    assert.deepEqual(started, {
+      processId, status: 'blocked', reason: 'unavailable',
+      servers: [{ name: 'redirected', status: 'unavailable', tools: [] }],
+    }, `${redirectKind} redirect fails visibly during startup`);
+    assert.equal(targetRequests.length, 0, `${redirectKind} redirect target receives no request`);
+    assert.ok(targetRequests.every(row => row.authorization !== 'Bearer redirect-auth-sentinel' && row.session !== 'redirect-session-sentinel'));
+    assert.ok(selectedRequests.some(row => row.path === '/mcp' && row.authorization === 'Bearer redirect-auth-sentinel'));
+    assert.deepEqual(await connection.contexts.stopProjectMcp({ ...binding, ...lease, processId }), { processId, status: 'stopped' });
+  }
+});
+
 test('Worker launches a selected stdio MCP server in the bound workspace, validates calls, and fences by lease', async (t) => {
   const workerRoot = await mkdtemp(join(tmpdir(), 'sprout-mcp-worker-'));
   const hostRoot = await mkdtemp(join(tmpdir(), 'sprout-mcp-host-'));
