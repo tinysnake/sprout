@@ -39,7 +39,10 @@ test('a pinned remote mutation refuses transport loss, revocation, and epoch cha
     if (environmentInstanceId === 'env-a' && !liveA) return undefined;
     const isA = environmentInstanceId === 'env-a';
     return {
-      enrollment: { id: isA ? 'enrollment-a' : 'enrollment-b', status: 'approved' },
+      enrollment: {
+        id: isA ? 'enrollment-a' : 'enrollment-b', status: 'approved',
+        worker: { identityDigest: isA ? 'worker-digest-a' : 'worker-digest-b' },
+      },
       epoch: { epoch: isA ? epochA : 1, connectionId: isA ? connectionA : 'connection-b-1' },
     };
   };

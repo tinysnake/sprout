@@ -226,7 +226,7 @@ export class EnvironmentOperations {
   }
 
   async reconcileRemoteOperations(environmentInstanceId: string): Promise<void> {
-    await this.reconcileProjectMcpProcesses(environmentInstanceId);
+    await this.#reconcileProjectMcpProcesses(environmentInstanceId, false);
     await this.#reconcileProjectMcpOperations(environmentInstanceId);
     await this.#reconcileRemoteWorkspaceOperations(environmentInstanceId);
   }
@@ -312,6 +312,10 @@ export class EnvironmentOperations {
   }
 
   async reconcileProjectMcpProcesses(environmentInstanceId: string): Promise<void> {
+    await this.#reconcileProjectMcpProcesses(environmentInstanceId, true);
+  }
+
+  async #reconcileProjectMcpProcesses(environmentInstanceId: string, includeSameEpoch: boolean): Promise<void> {
     const rows = await this.#store.listOpenMcpProcesses(environmentInstanceId);
     const live = this.#gateway.liveFor(environmentInstanceId);
     const liveEpoch = live?.epoch.epoch;
@@ -329,6 +333,7 @@ export class EnvironmentOperations {
         if (lease?.state === 'active' && sameMcpLease(lease, scope)) await this.#noteUncertainMcp(scope);
         continue;
       }
+      if (!includeSameEpoch && lease.state === 'recovering' && liveEpoch === row.connectionEpoch) continue;
       if ((row.state === 'starting' || row.state === 'running') && lease.state === 'active' && liveEpoch === row.connectionEpoch) continue;
       if (lease.state === 'active') await this.#noteUncertainMcp(scope);
       const identity: AttachWorkspaceBindingParams = {
