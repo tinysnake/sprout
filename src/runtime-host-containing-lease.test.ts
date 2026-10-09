@@ -214,6 +214,13 @@ for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unk
         const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'another-run', runId: 'another-run', ttlMs: 60_000 });
         assert.equal(conflict.ok, false);
         if (outcome === 'mutation-unknown') {
+          const database = new DatabaseSync(join(directory, 'state.db'));
+          try {
+            const operation = await new SqliteRemoteOperationIdentityStore(database).get(operationId!);
+            assert.equal(operation?.leaseId, leaseId, 'the durable operation points to its containing lease');
+            assert.equal(operation?.runId, run.id, 'the durable operation points to its run');
+            assert.equal(operation?.holderKind, 'run');
+          } finally { database.close(); }
           allowInspection = true;
           assert.equal((await tools!.inspect(operationId!)).status, 'completed');
           await tools!.settle!('settled');

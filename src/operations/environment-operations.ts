@@ -561,8 +561,10 @@ export class EnvironmentOperations {
       const operationId = stableOperationId(runId, requestedOperationId);
       const normalized = normalizeOperationInput(operation, input);
       const fingerprint = createHash('sha256').update(JSON.stringify([fixed, operation, runId ?? '', normalized])).digest('hex');
-      const row: RemoteOperationIdentity = { operationId, fingerprint, projectId, environmentInstanceId: access.environmentInstanceId,
+      let row: RemoteOperationIdentity = { operationId, fingerprint, projectId, environmentInstanceId: access.environmentInstanceId,
         bindingId: binding.bindingId, generation: binding.generation!, connectionEpoch: epoch, workspaceId: binding.workspaceId,
+        ...(runId !== undefined ? { runId } : {}),
+        ...(mutationLease !== undefined ? operationLeaseIdentity(mutationLease) : {}),
         operation, state: normalized.failure ? 'failed' : 'running', updatedAt: this.#clock() };
       const claimIdentity = async (): Promise<RemoteWorkspaceOperationResult | undefined> => {
         const claim = await this.#store.claim(row);
@@ -605,6 +607,7 @@ export class EnvironmentOperations {
         if (!lease.acquired) {
           return operationResult(fixed, operationId, operation, 'failed', lease.conflict ? 'lease-conflict' : (lease.failure ?? 'lease-unavailable'), lease.conflict);
         }
+        row = { ...row, ...operationLeaseIdentity(lease.acquired) };
         try {
           await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed, MUTATION_CAPABILITY);
         } catch {
@@ -1126,6 +1129,16 @@ function sameMcpBinding(a: AttachWorkspaceBindingParams, b: AttachWorkspaceBindi
     a.generation === b.generation && a.connectionEpoch === b.connectionEpoch && a.workspaceId === b.workspaceId && a.kind === b.kind && a.path === b.path;
 }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
+
+function operationLeaseIdentity(lease: EnvironmentLease): Pick<RemoteOperationIdentity, 'runId' | 'leaseId' | 'holderKind' | 'holderId' | 'taskId'> {
+  return {
+    ...(lease.runId !== undefined ? { runId: lease.runId } : {}),
+    leaseId: lease.id,
+    holderKind: lease.holderKind ?? 'run',
+    holderId: lease.holderId,
+    ...(lease.taskId !== undefined ? { taskId: lease.taskId } : {}),
+  };
+}
 
 function isTerminalOperationState(value: string): value is 'completed' | 'failed' | 'cancelled' {
   return value === 'completed' || value === 'failed' || value === 'cancelled';

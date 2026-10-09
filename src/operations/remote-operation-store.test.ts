@@ -59,15 +59,41 @@ test('SQLite MCP process and operation identities survive reopen with Task lease
 const identity = (overrides: Partial<RemoteOperationIdentity> = {}): RemoteOperationIdentity => ({
   operationId: 'stable-operation-id', fingerprint: 'fingerprint-a', projectId: 'project-a',
   environmentInstanceId: 'environment-a', bindingId: 'binding-a', generation: 2,
-  connectionEpoch: 4, workspaceId: 'workspace-a', operation: 'edit', state: 'running', updatedAt: 10,
+  connectionEpoch: 4, workspaceId: 'workspace-a', runId: 'run-a', leaseId: 'lease-a',
+  holderKind: 'run', holderId: 'agent-a', operation: 'edit', state: 'running', updatedAt: 10,
   ...overrides,
 });
 
 test('memory operation identity claim is atomic by ID and fingerprint', async () => {
   const store = new MemoryRemoteOperationIdentityStore();
   assert.equal(await store.claim(identity()), 'claimed');
+  assert.deepEqual(await store.listOpenOperations('environment-a'), [identity()]);
+  assert.deepEqual(await store.listOpenOperations('environment-b'), []);
   assert.equal(await store.claim(identity()), 'same-identity');
   assert.equal(await store.claim(identity({ fingerprint: 'fingerprint-b' })), 'conflicting-identity');
+});
+
+test('SQLite operation store adds recovery links to an existing journal without inventing lease ownership', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-remote-operation-migration-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const db = new DatabaseSync(join(directory, 'operations.db'));
+  try {
+    db.exec(`CREATE TABLE remote_workspace_operations (
+      operation_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, project_id TEXT NOT NULL,
+      environment_instance_id TEXT NOT NULL, binding_id TEXT NOT NULL, generation INTEGER NOT NULL,
+      connection_epoch INTEGER NOT NULL, workspace_id TEXT NOT NULL, operation TEXT NOT NULL,
+      state TEXT NOT NULL, updated_at INTEGER NOT NULL
+    )`);
+    db.prepare(`INSERT INTO remote_workspace_operations VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
+      .run('legacy-operation', 'legacy-fingerprint', 'project-a', 'environment-a', 'binding-a', 2, 4, 'workspace-a', 'edit', 'unknown', 10);
+    const store = new SqliteRemoteOperationIdentityStore(db);
+    const legacy = await store.get('legacy-operation');
+    assert.equal(legacy?.state, 'unknown');
+    assert.equal(legacy?.leaseId, undefined);
+    assert.deepEqual(await store.listOpenOperations('environment-a'), [legacy]);
+  } finally {
+    db.close();
+  }
 });
 
 test('SQLite operation identity survives store reconstruction and terminal outcome cannot regress', async (t) => {
@@ -85,8 +111,11 @@ test('SQLite operation identity survives store reconstruction and terminal outco
     const reopened = new SqliteRemoteOperationIdentityStore(reopenedDb);
     assert.equal(await reopened.claim(identity()), 'same-identity');
     assert.equal(await reopened.claim(identity({ fingerprint: 'fingerprint-b' })), 'conflicting-identity');
+    assert.deepEqual(await reopened.listOpenOperations('environment-a'), [{ ...identity(), state: 'unknown', updatedAt: 11 }]);
+    assert.deepEqual(await reopened.listOpenOperations('environment-b'), []);
     await reopened.save(identity({ state: 'completed', updatedAt: 12 }));
     await reopened.save(identity({ state: 'running', updatedAt: 13 }));
+    assert.deepEqual(await reopened.listOpenOperations('environment-a'), []);
     assert.equal((await reopened.get('stable-operation-id'))?.state, 'completed');
   } finally {
     reopenedDb.close();
