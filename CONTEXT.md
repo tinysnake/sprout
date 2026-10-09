@@ -129,15 +129,15 @@ One entry in an Agent's ordered execution preferences, naming an engine, work mo
 _Avoid_: Environment binding, model fallback retry
 
 **Execution mode**:
-The immutable, process-wide choice made when a Sprout instance starts: `environment-hosted` places engine execution in the selected Environment worker, while `host-run` places supported one-round Message conversations on the Sprout host through its authorized Pi profile. Host-run Message admission needs no work Environment lookup or lease. It does not provide Project workspace access or Task execution; Tasks require Environment-hosted mode. Omission selects `environment-hosted` on every startup. Settings reports the effective mode and Host Pi readiness; changing mode requires restarting Sprout with a different startup argument.
+The immutable, process-wide choice made when a Sprout instance starts: `environment-hosted` places engine execution in the selected Environment worker, while `host-run` places supported one-round Message conversations on the Sprout host through its authorized Pi profile. A standalone run may independently select a Project-authorized Work Environment for workspace access; without that selection, Host-run Message admission needs no Environment lookup or lease. Host-run does not provide Task execution; Tasks require Environment-hosted mode. Omission selects `environment-hosted` on every startup. Settings reports the effective mode and Host Pi readiness; changing mode requires restarting Sprout with a different startup argument.
 _Avoid_: Browser preference, runtime switch
 
 **Execution placement**:
-The durable facts describing where a run or begun Task executes: its immutable Execution mode and, after admission, the actual Engine host and non-secret host profile. A Task keeps the placement chosen when it began for every later run and recovery decision.
-_Avoid_: Work Environment, engine choice
+The durable facts describing where a run or begun Task executes: its immutable Execution mode and, after admission, the actual Engine host and non-secret host profile. The Work Environment is a separate workspace authority and does not change the Engine host. A Task keeps the placement chosen when it began for every later run and recovery decision.
+_Avoid_: Work Environment selection, Agent work option
 
 **Engine host**:
-The host that runs an engine process, owns its engine session storage, and holds its engine login. It is the Environment host in `environment-hosted` mode and the Sprout host in `host-run` mode. A Host-run Pi profile has one explicit provider/model authority and a host-local session namespace, independent of any work Environment.
+The host that runs an engine process, owns its engine session storage, and holds its engine login. It is the Environment host in `environment-hosted` mode and the Sprout host in `host-run` mode. A Host-run Pi profile has one explicit provider/model authority and a host-local session namespace, independent of any Work Environment.
 _Avoid_: Work Environment, Project workspace
 
 **Host Pi readiness**:
@@ -145,7 +145,7 @@ A Sprout-host-local, non-inference observation that the pinned Pi runtime, confi
 _Avoid_: Environment readiness, smoke run, hidden model call
 
 **Agent run**:
-One bounded activation of an agent in response to a message, task, or system event. Its durable execution mode records where the engine ran; a Host-run record also names its opaque Engine host profile. A run executing inside a Task is a nested activation: it neither acquires nor releases that Task's environment lease.
+One bounded activation of an agent in response to a message, task, or system event. Its durable execution mode records where the engine ran; a Host-run record also names its opaque Engine host profile. A standalone activation may use a separately selected Work Environment for Project workspace tools. A run executing inside a Task is a nested activation: it neither changes nor releases that Task's Environment lease.
 _Avoid_: Agent, task
 
 **Agent run stop**:
@@ -153,7 +153,7 @@ An intentional request by a Human or Task lead to settle one active Task-linked 
 _Avoid_: Chat run interruption, Task pause, Task end
 
 **Chat run interruption**:
-A Human-authorized request from Chat to settle an active run outside a Task. Its outcome is interrupted with a Human-stop reason. An Environment-hosted run releases its run-held Environment lease before the conversation is reused; a Host-run Pi child is interrupted and closed without contacting an Environment.
+A Human-authorized request from Chat to settle an active run outside a Task. Its outcome is interrupted with a Human-stop reason. An Environment-hosted run releases its run-held Environment lease before the conversation is reused; a Host-run Pi child is interrupted and closed, and any unresolved remote operation remains under its Environment recovery ownership.
 _Avoid_: Agent run stop, Task interruption, Task end
 
 **Usage activity**:
@@ -193,7 +193,7 @@ The Human escalation available while a Task pause request still has an active ag
 _Avoid_: Interruption, Task pause, Task end
 
 **Session key**:
-The opaque, engine-native identifier of a conversation an Agent run continued or created, stored by Sprout so a later run can continue it only within the same Agent, engine, execution mode, Engine host and profile, Environment slot, working directory or controlled working area, and authorized Conversation, Routing batch, or Task scope. Owned by the engine; Sprout chooses it for Pi and captures it for the others.
+The opaque, engine-native identifier of a conversation an Agent run continued or created, stored by Sprout so a later run can continue it only within the same Agent, engine, execution mode, Engine host and profile, Work Environment slot, working directory or controlled working area, and authorized Conversation, Routing batch, or Task scope. A Work Environment change therefore starts a fresh native session while Sprout supplies bounded prior-result facts and the current capability snapshot. Owned by the engine; Sprout chooses it for Pi and captures it for the others.
 _Avoid_: Session id, thread id, conversation id
 
 **Work model**:
@@ -307,6 +307,10 @@ _Avoid_: Session key, reconnect count
 **Environment readiness probe**:
 A Worker-produced, non-inference observation of the Environment's local capability and engine readiness facts, scoped by the core's current engine-to-model requirements. A v3 complete envelope carries measured target evidence and a requirement revision; supported v2 complete observations remain inspectable but aggregate model availability alone cannot prove current targets. Unsupported model measurement stays unknown. It never starts a model turn or sends a prompt and is distinct from connectivity heartbeat and real Agent work.
 _Avoid_: Heartbeat, smoke run, hidden model call
+
+**Standalone Work Environment**:
+A Project-authorized Environment and workspace selected for one standalone Agent activation. It controls where remote workspace operations run, independently of the Engine host and process-wide Execution mode. Task runs keep the Environment selected by their Task lifecycle.
+_Avoid_: Engine host, runtime execution mode
 
 **Project workspace binding readiness**:
 The current, live status of one Project's authorized workspace on an enrolled Environment Worker, including its supported remote file operations and any reason those operations are blocked. It is independent of Environment engine and model readiness.
