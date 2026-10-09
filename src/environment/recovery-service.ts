@@ -4,6 +4,8 @@ import {
   deriveUnresolvedFacts,
   phaseAfterEvidence,
   phaseAfterReconnect,
+  remoteWorkHasUnresolvedFacts,
+  EMPTY_REMOTE_WORK_RECOVERY_EVIDENCE,
   sanitizeRecoveryReason,
   validateForceRelease,
   type EnvironmentRecoveryCause,
@@ -11,6 +13,7 @@ import {
   type ForceReleaseRecord,
   type ForceReleaseRefusal,
   type RetainedEvidence,
+  type RemoteWorkRecoveryEvidence,
   type ReconciliationDecision,
 } from './recovery.ts';
 import { DEFAULT_FORCE_RELEASE_REASON } from './privacy.ts';
@@ -144,6 +147,7 @@ export interface EnvironmentRecoveryServiceOptions {
   readonly workerIdentityForInstance?: (instanceId: string) => Promise<{
     readonly enrollmentId: string; readonly identityDigest: string;
   } | undefined>;
+  readonly remoteWorkEvidenceForLease?: (lease: EnvironmentLease) => Promise<RemoteWorkRecoveryEvidence>;
   readonly activeRunForTask?: (taskId: string) => Promise<string | undefined>;
   readonly clock?: () => number;
   readonly idFactory?: () => string;
@@ -181,6 +185,7 @@ export class EnvironmentRecoveryService {
   readonly #holders: RecoveryHolderActions;
   readonly #taskRuns: ((taskId: string) => Promise<readonly string[]>) | undefined;
   readonly #workerIdentityForInstance: EnvironmentRecoveryServiceOptions['workerIdentityForInstance'];
+  readonly #remoteWorkEvidenceForLease: EnvironmentRecoveryServiceOptions['remoteWorkEvidenceForLease'];
   readonly #activeRunForTask: ((taskId: string) => Promise<string | undefined>) | undefined;
   readonly #clock: () => number;
   readonly #idFactory: () => string;
@@ -193,6 +198,7 @@ export class EnvironmentRecoveryService {
     this.#holders = options.holders ?? {};
     this.#taskRuns = options.taskRuns;
     this.#workerIdentityForInstance = options.workerIdentityForInstance;
+    this.#remoteWorkEvidenceForLease = options.remoteWorkEvidenceForLease;
     this.#activeRunForTask = options.activeRunForTask;
     this.#clock = options.clock ?? Date.now;
     this.#idFactory = options.idFactory ?? (() => `recovery-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
@@ -218,6 +224,7 @@ export class EnvironmentRecoveryService {
     const enrollmentId = input.enrollmentId ?? identity?.enrollmentId;
     const workerIdentityDigest = input.workerIdentityDigest ?? identity?.identityDigest;
     const at = this.#clock();
+    const remoteWorkEvidence = await this.#readRemoteWorkEvidence(lease);
     // The lease registry and the recovery record must agree. Marking the lease
     // recovering is what stops an ordinary acquisition from racing ahead of the
     // record; the record is written first so a crash between the two leaves the
@@ -225,7 +232,7 @@ export class EnvironmentRecoveryService {
     const record = this.#buildRecord(lease, { ...input,
       ...(enrollmentId !== undefined ? { enrollmentId } : {}),
       ...(workerIdentityDigest !== undefined ? { workerIdentityDigest } : {}),
-    }, at, existing);
+    }, at, existing, remoteWorkEvidence);
     await this.#store.save(record);
     this.#leases.markRecovering(input.leaseId);
     this.#announce();
@@ -264,19 +271,19 @@ export class EnvironmentRecoveryService {
 
   /** The open record protecting one lease, if any. */
   async forLease(leaseId: string): Promise<EnvironmentRecoveryRecord | undefined> {
-    return this.#store.forLease(leaseId);
+    const record = await this.#store.forLease(leaseId);
+    return record === undefined ? undefined : this.#refreshRemoteWorkEvidence(record);
   }
 
   /** Every recovery record, newest first, including resolved history. */
   async list(): Promise<readonly EnvironmentRecoveryRecord[]> {
-    return this.#store.list();
+    return Promise.all((await this.#store.list()).map(record => this.#refreshRemoteWorkEvidence(record)));
   }
 
   /** The recovery records for one Environment, newest first. */
   async listForEnvironment(environmentInstanceId: string): Promise<readonly EnvironmentRecoveryRecord[]> {
-    return (await this.#store.list()).filter(
-      (record) => record.environmentInstanceId === environmentInstanceId,
-    );
+    const records = (await this.#store.list()).filter(record => record.environmentInstanceId === environmentInstanceId);
+    return Promise.all(records.map(record => this.#refreshRemoteWorkEvidence(record)));
   }
 
   /** Every permanent Force Release outcome for one Environment, newest first. */
@@ -378,7 +385,7 @@ export class EnvironmentRecoveryService {
    */
   async synchronizeEvidence(
     leaseId: string,
-    input: { readonly evidence: RetainedEvidence; readonly hadActiveRun: boolean },
+    input: { readonly evidence: RetainedEvidence; readonly hadActiveRun: boolean; readonly remoteWorkEvidence?: RemoteWorkRecoveryEvidence },
   ): Promise<EnvironmentRecoveryRecord> {
     const record = await this.#requireRecord(leaseId);
     if (record.phase !== 'reconciling') {
@@ -388,18 +395,22 @@ export class EnvironmentRecoveryService {
       );
     }
     const at = this.#clock();
+    const remoteWorkEvidence = input.remoteWorkEvidence ?? record.remoteWorkEvidence ?? EMPTY_REMOTE_WORK_RECOVERY_EVIDENCE;
     const next: EnvironmentRecoveryRecord = {
       ...record,
       phase: phaseAfterEvidence({
         hadActiveRun: input.hadActiveRun,
         holderKind: record.holderKind,
         evidence: input.evidence,
+        remoteWorkEvidence,
       }),
       evidence: input.evidence,
+      remoteWorkEvidence,
       updatedAt: at,
       unresolvedFacts: deriveUnresolvedFacts({
         holderKind: record.holderKind,
         evidence: input.evidence,
+        remoteWorkEvidence,
         evidenceSynchronized: true,
       }),
       decisions: [
@@ -606,7 +617,28 @@ export class EnvironmentRecoveryService {
     if (record === undefined) {
       throw new EnvironmentRecoveryError('unknown-recovery', `No open recovery record protects lease ${leaseId}.`);
     }
-    return record;
+    return this.#refreshRemoteWorkEvidence(record);
+  }
+
+  async #readRemoteWorkEvidence(lease: EnvironmentLease): Promise<RemoteWorkRecoveryEvidence> {
+    if (this.#remoteWorkEvidenceForLease === undefined) return EMPTY_REMOTE_WORK_RECOVERY_EVIDENCE;
+    try { return await this.#remoteWorkEvidenceForLease(lease); }
+    catch { return { ...EMPTY_REMOTE_WORK_RECOVERY_EVIDENCE, journalAvailable: false }; }
+  }
+
+  async #refreshRemoteWorkEvidence(record: EnvironmentRecoveryRecord): Promise<EnvironmentRecoveryRecord> {
+    if (record.phase === 'resolved' || this.#remoteWorkEvidenceForLease === undefined) return record;
+    const lease = this.#leases.getLease(record.leaseId);
+    if (lease === undefined || lease.state === 'released') return record;
+    const evidence = await this.#readRemoteWorkEvidence(lease);
+    if (JSON.stringify(evidence) === JSON.stringify(record.remoteWorkEvidence)) return record;
+    const next = { ...record, remoteWorkEvidence: evidence, updatedAt: this.#clock(),
+      unresolvedFacts: deriveUnresolvedFacts({ holderKind: record.holderKind,
+        ...(record.evidence !== undefined ? { evidence: record.evidence } : {}),
+        remoteWorkEvidence: evidence, evidenceSynchronized: record.evidence !== undefined }) };
+    await this.#store.save(next);
+    this.#announce();
+    return next;
   }
 
   /** A record that may be resolved by an ordinary decision. */
@@ -626,10 +658,11 @@ export class EnvironmentRecoveryService {
     }
     if (!record.evidence.engineSessionStopped || !record.evidence.turnSettlementObserved ||
         (record.runId !== undefined && record.evidence.terminalStatus === undefined) ||
-        (record.holderKind === 'task' && record.evidence.taskContextPrepared !== true)) {
+        (record.holderKind === 'task' && record.evidence.taskContextPrepared !== true) ||
+        (record.remoteWorkEvidence !== undefined && remoteWorkHasUnresolvedFacts(record.remoteWorkEvidence))) {
       throw new EnvironmentRecoveryError(
         'evidence-not-synchronized',
-        'Ordinary recovery requires an acknowledged terminal outcome, engine fence, and safe held context.',
+        'Ordinary recovery requires an acknowledged terminal outcome, engine fence, safe held context, settled remote operations, and confirmed Project MCP process stops.',
       );
     }
     return record;
@@ -724,8 +757,10 @@ export class EnvironmentRecoveryService {
     input: OpenRecoveryInput,
     at: number,
     existing: EnvironmentRecoveryRecord | undefined,
+    remoteWorkEvidence?: RemoteWorkRecoveryEvidence,
   ): EnvironmentRecoveryRecord {
     const holderKind = lease.holderKind ?? 'run';
+    const effectiveRemoteWorkEvidence = remoteWorkEvidence ?? existing?.remoteWorkEvidence;
     const base: EnvironmentRecoveryRecord = {
       id: existing?.id ?? this.#idFactory(),
       environmentInstanceId: lease.instanceId,
@@ -743,10 +778,12 @@ export class EnvironmentRecoveryService {
       phase: 'recovery',
       startedAt: existing?.startedAt ?? at,
       updatedAt: at,
+      ...(effectiveRemoteWorkEvidence !== undefined ? { remoteWorkEvidence: effectiveRemoteWorkEvidence } : {}),
       // A new channel loss invalidates prior connection proof. Keep the
       // historical decisions, but never authorize a Human action from an old
       // epoch's settlement/fence or context observation.
-      unresolvedFacts: deriveUnresolvedFacts({ holderKind, evidenceSynchronized: false }),
+      unresolvedFacts: deriveUnresolvedFacts({ holderKind, evidenceSynchronized: false,
+        ...(effectiveRemoteWorkEvidence !== undefined ? { remoteWorkEvidence: effectiveRemoteWorkEvidence } : {}) }),
       decisions: [
         ...(existing?.decisions ?? []),
         {

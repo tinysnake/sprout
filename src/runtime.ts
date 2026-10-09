@@ -132,7 +132,7 @@ import { UsageService } from './usage/service.ts';
 import { UsageAwareRoutingModelPort } from './usage/routing-adapter.ts';
 import type { WorkerConnectionEpochStore } from './environment/worker-epoch-store.ts';
 import { SUPPORTED_WORKER_PROTOCOL } from './environment/enrollment-service.ts';
-import { workSafetyFromRecovery } from './environment/recovery.ts';
+import { EMPTY_REMOTE_WORK_RECOVERY_EVIDENCE, workSafetyFromRecovery } from './environment/recovery.ts';
 
 /**
  * The in-process composition of one Sprout runtime.
@@ -1324,6 +1324,11 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           enrollmentId: enrollment.id, identityDigest: enrollment.worker.identityDigest,
         };
       },
+      remoteWorkEvidenceForLease: async (lease) => {
+        if (environmentOperations === undefined) return { ...EMPTY_REMOTE_WORK_RECOVERY_EVIDENCE, journalAvailable: false };
+        try { return await environmentOperations.remoteWorkEvidenceForLease(lease.id); }
+        catch { return { ...EMPTY_REMOTE_WORK_RECOVERY_EVIDENCE, journalAvailable: false }; }
+      },
       // The holder decisions reuse the existing lifecycle ordering rather than
       // re-implementing Task context cleanup or lease release here.
       holders: {
@@ -1639,6 +1644,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       onUncertainMcp: async (scope) => {
         await recovery.open({ leaseId: scope.leaseId, cause: 'cleanup-failed', hadActiveRun: true, runId: scope.runId });
       },
+      onUncertainOperation: async (leaseId) => {
+        const lease = pool.getLease(leaseId);
+        await recovery.open({ leaseId, cause: 'cleanup-failed', hadActiveRun: true, ...(lease?.runId !== undefined ? { runId: lease.runId } : {}) });
+      },
       leaseTtlMs: configuration.leaseTtlMs,
     });
     switchableEnvironment?.setTarget(enrollmentEnvironment);
@@ -1665,7 +1674,6 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     const channelLosses = new Map<string, Promise<void>>();
     workerGateway.onAccept((acceptance) => {
       readinessWorkflow.reserveAccepted(acceptance);
-      void environmentOperations.reconcileProjectMcpProcesses(acceptance.enrollment.environmentInstanceId).catch(() => undefined);
       // Invalidate an in-flight source snapshot before publishing the accepted
       // epoch synchronously, then schedule the store-backed refresh that may
       // replace this projection. The bump above aborts any refresh already in
@@ -1700,6 +1708,8 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           await channelLosses.get(acceptance.enrollment.environmentInstanceId);
           if (!current() || acceptance.enrollment.capabilityPermissions['agent-run'] !== true ||
               durableStores.recovery.receiveWorkerTurn === undefined) return;
+          await environmentOperations.reconcileRemoteOperations(acceptance.enrollment.environmentInstanceId);
+          if (!current()) return;
           const snapshot = await acceptance.transport.request<import('./worker/recovery-journal.ts').JournalSnapshot | null>(
             'recovery/snapshot');
           if (!current() || snapshot === null || snapshot.epoch !== acceptance.epoch.epoch) return;
@@ -1789,9 +1799,11 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
             const idle = record.interruptedRunActive === false && record.holderKind === 'task' && record.runId === undefined;
             const contextState = record.taskId !== undefined && durableStores.recovery.workerContext !== undefined
               ? await durableStores.recovery.workerContext(acceptance.enrollment.id, record.taskId) : undefined;
+            const remoteWorkEvidence = await environmentOperations.remoteWorkEvidenceForLease(record.leaseId);
             if (!current()) return;
             await recovery.synchronizeEvidence(record.leaseId, {
               hadActiveRun: !idle,
+              remoteWorkEvidence,
               evidence: {
                 retainedEventCount: receipt?.eventCount ?? 0,
                 turnSettlementObserved: idle || (receipt?.terminal === true && !receipt.pending),

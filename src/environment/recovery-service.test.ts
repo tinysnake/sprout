@@ -944,3 +944,32 @@ test('#171 identity rotation is attested, never inferred: unexplained mismatches
   assert.equal(unchanged?.phase, 'recovery');
   assert.equal(unchanged?.evidence, undefined);
 });
+
+test('unresolved remote operations block ordinary recovery and preserve the Task lease', async () => {
+  const built = build({ now: 1_700_000_000_000 });
+  await built.store.create(task());
+  const begun = await built.lifecycle.begin('task-1');
+  const leaseId = begun.environmentLeaseId;
+  assert.ok(leaseId);
+  await built.recovery.open({ leaseId, cause: 'sprout-restart', hadActiveRun: false });
+  await built.recovery.observeReconnect(leaseId, {
+    enrollmentId: 'enroll-1', environmentInstanceId: 'mac-1', identityVerified: true,
+    protocolCompatible: true, permissionsAllowed: true, hadActiveRun: false,
+  });
+  const record = await built.recovery.synchronizeEvidence(leaseId, {
+    hadActiveRun: false,
+    evidence: { retainedEventCount: 0, turnSettlementObserved: true, engineSessionStopped: true,
+      taskContextPrepared: true, taskContextRecycled: false },
+    remoteWorkEvidence: {
+      journalAvailable: true,
+      workspaceOperations: { running: 0, unknown: 1, cancelRequested: 0, recoveryRequired: 0 },
+      projectMcpOperations: { running: 0, uncertain: 0 },
+      projectMcpProcesses: { starting: 0, running: 0, stopping: 0, uncertain: 0 },
+    },
+  });
+  assert.equal(record.phase, 'recovery');
+  assert.ok(record.unresolvedFacts.some(fact => fact.includes('remote workspace operation')));
+  await assert.rejects(built.recovery.resume(leaseId), (error: unknown) =>
+    error instanceof EnvironmentRecoveryError && error.code === 'evidence-not-synchronized');
+  assert.equal(built.pool.getLease(leaseId)?.state, 'recovering');
+});

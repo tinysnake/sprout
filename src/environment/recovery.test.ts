@@ -14,6 +14,7 @@ import {
   UNRESOLVED_FACT_TASK_CONTEXT,
   UNRESOLVED_FACT_WORKER_OFFLINE,
   type RetainedEvidence,
+  type RemoteWorkRecoveryEvidence,
 } from './recovery.ts';
 
 const cleanEvidence: RetainedEvidence = {
@@ -101,6 +102,33 @@ test('unresolved facts are derived deterministically from retained evidence', ()
     }),
     [],
   );
+});
+
+test('unresolved remote work remains visible and prevents automatic idle Task resolution', () => {
+  const remoteWork: RemoteWorkRecoveryEvidence = {
+    journalAvailable: true,
+    workspaceOperations: { running: 0, unknown: 1, cancelRequested: 0, recoveryRequired: 0 },
+    projectMcpOperations: { running: 0, uncertain: 0 },
+    projectMcpProcesses: { starting: 0, running: 0, stopping: 0, uncertain: 1 },
+  };
+  const facts = deriveUnresolvedFacts({ holderKind: 'task', evidence: cleanEvidence, remoteWorkEvidence: remoteWork, evidenceSynchronized: true });
+  assert.deepEqual(facts, [
+    '1 remote workspace operation(s) do not have a confirmed terminal outcome.',
+    '1 Project MCP process(es) have not been confirmed stopped.',
+  ]);
+  assert.equal(canAutoResolve({ hadActiveRun: false, holderKind: 'task', evidence: cleanEvidence, remoteWorkEvidence: remoteWork }), false);
+});
+
+test('an unavailable remote journal is itself unresolved evidence', () => {
+  const remoteWork: RemoteWorkRecoveryEvidence = {
+    journalAvailable: false,
+    workspaceOperations: { running: 0, unknown: 0, cancelRequested: 0, recoveryRequired: 0 },
+    projectMcpOperations: { running: 0, uncertain: 0 },
+    projectMcpProcesses: { starting: 0, running: 0, stopping: 0, uncertain: 0 },
+  };
+  assert.deepEqual(deriveUnresolvedFacts({ holderKind: 'run', evidence: cleanEvidence, remoteWorkEvidence: remoteWork, evidenceSynchronized: true }), [
+    'The remote operation journal could not be checked; operation and process outcomes remain unverified.',
+  ]);
 });
 
 test('Force Release is refused unless it is in recovery with facts and full acknowledgement', () => {
