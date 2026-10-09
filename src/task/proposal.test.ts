@@ -56,7 +56,7 @@ test('a Task content version preserves relative Project filenames and redacts ho
   const hostname = 'worker.node1.tailnet.com';
   const contentInput = {
     title: 'Review README.md',
-    goal: `Read report.final.pdf; Read ${hostname}; Read README.md; Read notes/today.txt; report any issue with ${hostname}`,
+    goal: `Read installer.com; Read ${hostname}; Read report.final.pdf; Read github.com; Read worker.example.md; Read README.md; Read notes/today.txt; report any issue with ${hostname}`,
     constraints: ['Keep notes/today.txt unchanged.'],
     validationCriteria: ['Confirm the instructions in README.md.'],
   };
@@ -77,9 +77,12 @@ test('a Task content version preserves relative Project filenames and redacts ho
   const prompt = renderTaskPrompt(buildTaskContext(task, []), 'Continue with the requested files.');
 
   assert.ok(
-    prompt.includes('Read report.final.pdf; Read <redacted-host>; Read README.md'),
+    prompt.includes('Read installer.com; Read <redacted-host>; Read report.final.pdf'),
     'the filename survives while the immediately following hostname is redacted in the composed prompt',
   );
+  assert.ok(prompt.includes('installer.com'), 'the bare common-TLD filename reaches the composed Task prompt unchanged');
+  assert.ok(prompt.includes('Read github.com'), 'the Human-accepted two-label hostname cost is visible in the prompt');
+  assert.ok(prompt.includes('Read worker.example.md'), 'file-likely suffix precedence survives into the prompt (S1)');
   assert.ok(prompt.includes('report.final.pdf'), 'the filename reaches the composed Task prompt unchanged');
   assert.ok(prompt.includes('README.md'), 'the dotted root filename reaches the composed prompt unchanged');
   assert.ok(prompt.includes('notes/today.txt'), 'the dotted relative path reaches the composed prompt unchanged');

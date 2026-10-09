@@ -121,6 +121,9 @@ const DOTTED_HOST_SOURCE = String.raw`(?:[A-Za-z][A-Za-z0-9-]*\.)+[A-Za-z]{2,}`;
 const DOTTED_HOST_PATTERN = new RegExp(String.raw`(?<![\w.-])${DOTTED_HOST_SOURCE}(?![\w.-])`, 'g');
 const DOTTED_HOST_TOKEN_PATTERN = new RegExp(`^${DOTTED_HOST_SOURCE}$`);
 
+/** Human-chosen file preference applies only to two-label tokens in file context. */
+const COMMON_HOST_SUFFIXES = new Set(['com', 'net', 'org', 'io']);
+
 /**
  * File-likely suffixes in Project prose. This classification deliberately
  * excludes common host suffixes such as com, net, org, and io, even when they
@@ -308,8 +311,9 @@ export function redactSensitiveText(value: string): string {
  * recognized structurally. A bare dotted filename needs explicit file context;
  * it is still redacted when it matches the host shape and its final label is an
  * IANA root-zone or special-use name, unless classified as file-likely above.
- * Common host suffixes (including com and io) get host precedence at any label
- * count: Read installer.com is redacted; Read files/installer.com is preserved.
+ * In file context, two-label common-host tokens (com, net, org, io) are preserved:
+ * Read installer.com and Read github.com are lexically indistinguishable. Three
+ * or more labels retain host precedence; slash paths remain structural files.
  * Unknown non-IANA suffixes in file context remain filenames.
  */
 export function redactProjectText(value: string): string {
@@ -326,9 +330,11 @@ function redactDottedHostsExceptProjectFiles(value: string, replacement: string)
     const inFileContext = PROJECT_FILE_INTENT_PREFIX.test(prefix) || PROJECT_FILE_INTENT_SUFFIX.test(suffix);
     if (!inFileContext) return false;
 
-    const finalLabel = filename.slice(filename.lastIndexOf('.') + 1).toLowerCase();
+    if (!DOTTED_HOST_TOKEN_PATTERN.test(filename)) return true;
+    const labels = filename.split('.');
+    const finalLabel = labels[labels.length - 1]!.toLowerCase();
+    if (labels.length === 2 && COMMON_HOST_SUFFIXES.has(finalLabel) && !/^:\d+\b/.test(suffix)) return true;
     const isKnownHost =
-      DOTTED_HOST_TOKEN_PATTERN.test(filename) &&
       IANA_HOST_SUFFIXES.has(finalLabel) &&
       !FILE_LIKELY_SUFFIXES.has(finalLabel);
     return !isKnownHost;

@@ -193,7 +193,7 @@ test('Project prose preserves clear relative filenames while general hostnames s
   assert.ok(sensitive.includes('<redacted-credential>'));
 });
 
-test('file context uses suffix classification without exempting common host suffixes', () => {
+test('file context preserves two-label common-TLD tokens but redacts longer hosts', () => {
   const cases = [
     ['Read report.final.pdf', 'Read report.final.pdf'],
     ['Read README.md', 'Read README.md'],
@@ -204,7 +204,8 @@ test('file context uses suffix classification without exempting common host suff
     ['Read a.b.c; Read README.', 'Read a.b.c; Read README.'],
     ['Read some.unknown.qqq', 'Read some.unknown.qqq'],
     ['Read worker.node1.tailnet.com', 'Read <redacted-host>'],
-    ['Read installer.com', 'Read <redacted-host>'],
+    ['Read installer.com', 'Read installer.com'],
+    ['Read github.com', 'Read github.com'],
     ['Read files/installer.com', 'Read files/installer.com'],
     ['Read parser.pl; Read config.in', 'Read parser.pl; Read config.in'],
     ['Read worker.node1.tailnet.fail', 'Read <redacted-host>'],
@@ -219,12 +220,25 @@ test('file context uses suffix classification without exempting common host suff
 
   for (const hostname of [
     'worker.node1.tailnet.example', 'worker.node1.tailnet.com', 'worker.node1.tailnet.fail',
-    'api.github.com', 'api.example.net', 'api.example.org', 'api.example.io', 'api.example.test',
+    'api.github.com', 'installer.v2.com', 'api.example.net', 'api.example.org', 'api.example.io', 'api.example.test',
   ]) {
     for (const prefix of ['Read ', '', 'Connect to ', 'Open the file at ']) {
       assert.equal(redactProjectText(prefix + hostname), prefix + '<redacted-host>', prefix + hostname);
     }
   }
+
+  for (const suffix of ['com', 'net', 'org', 'io']) {
+    assert.equal(redactProjectText(`Read installer.${suffix}`), `Read installer.${suffix}`);
+    assert.equal(redactProjectText(`Read installer.v2.${suffix}`), 'Read <redacted-host>');
+    for (const prefix of ['', 'Connect to ', 'Open the file at ']) {
+      assert.equal(redactProjectText(`${prefix}installer.${suffix}`), `${prefix}<redacted-host>`);
+    }
+    assert.equal(redactSensitiveText(`Read installer.${suffix}`), 'Read <redacted-host>');
+  }
+  assert.equal(redactProjectText('Read github.com:41020'), 'Read <redacted-host>:41020', 'a host:port is not a bare file token');
+  assert.equal(redactProjectText('Read worker.internal'), 'Read <redacted-host>', 'private suffix redaction runs before file classification');
+  assert.equal(redactProjectText('Read host=github.com; port=41020'), 'Read <redacted-host>; <redacted-host>');
+  assert.equal(redactProjectText('Read worker.fail'), 'Read <redacted-host>', 'other IANA suffixes do not gain the two-label exception');
 
   assert.equal(IANA_HOST_SUFFIXES.has('md'), true, '.md is in the IANA root-zone list');
   assert.equal(IANA_HOST_SUFFIXES.has('pl'), true, '.pl is in the IANA root-zone list');
