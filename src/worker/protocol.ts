@@ -367,6 +367,8 @@ export interface CallProjectMcpToolResult {
   readonly processId: string;
   readonly operationId: string;
   readonly status: 'completed' | 'failed' | 'unsupported';
+  /** The tool may have taken effect, but its HTTP reply was not received. */
+  readonly outcomeUnknown?: true;
   readonly text?: string;
   readonly reason?: 'unknown-tool' | 'invalid-arguments' | 'server-error' | 'invalid-result' | 'unsupported-feature' | 'timeout' | 'worker-refused';
 }

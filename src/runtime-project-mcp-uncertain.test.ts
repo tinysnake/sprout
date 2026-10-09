@@ -12,7 +12,7 @@ import type { StartSessionRequest } from './engine/port.ts';
 import { loadOrCreateWorkerIdentity, workerPublicKey } from './worker/enrollment-connector.ts';
 import { connectRuntimeWorker, createRuntime, hostConfiguration, INSTANCE_ID, project, scriptedTurn } from './runtime-test-harness.ts';
 
- test('an HTTP MCP call whose effect succeeds but response is lost remains uncertain until confirmed recovery', async t => {
+test('an HTTP MCP call whose effect succeeds but response is lost remains uncertain until confirmed recovery', async t => {
   let effectCount = 0;
   const origin = createServer((request, response) => {
     let body = '';
@@ -134,6 +134,24 @@ import { connectRuntimeWorker, createRuntime, hostConfiguration, INSTANCE_ID, pr
       instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'competitor-after-call', runId: 'competitor-after-call', ttlMs: 60_000,
     });
     assert.equal(conflict.ok, false, 'another run cannot acquire the containing lease while the effect is uncertain');
-    assert.ok(await runtime.recovery.forLease(leaseId));
+    const recovery = await runtime.recovery.forLease(leaseId);
+    assert.ok(recovery);
+    await assert.rejects(runtime.recovery.release(leaseId), 'unconfirmed settlement cannot release recovery');
+    await runtime.recovery.observeReconnect(leaseId, {
+      enrollmentId: enrollment.enrollment.id, environmentInstanceId: INSTANCE_ID,
+      ...(recovery.workerIdentityDigest !== undefined ? { workerIdentityDigest: recovery.workerIdentityDigest } : {}),
+      identityVerified: true, protocolCompatible: true, permissionsAllowed: true, hadActiveRun: true,
+    });
+    await runtime.recovery.synchronizeEvidence(leaseId, { hadActiveRun: true, evidence: {
+      retainedEventCount: settled.events.length, turnSettlementObserved: true, engineSessionStopped: true,
+      terminalStatus: 'completed', taskContextRecycled: true,
+    } });
+    await runtime.recovery.release(leaseId);
+    assert.equal(runtime.pool.getLease(leaseId)?.state, 'released', 'confirmed recovery releases the same containing lease');
+    const recoveredDatabase = new DatabaseSync(join(directory, 'state.db'));
+    try {
+      assert.equal((await new SqliteRemoteOperationIdentityStore(recoveredDatabase).getMcpOperation(operationId))?.state, 'uncertain',
+        'recovery acknowledges the unknown effect without recording a false success or failure');
+    } finally { recoveredDatabase.close(); }
   } finally { await runtime.close(); }
 });

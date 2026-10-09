@@ -175,9 +175,9 @@ export class WorkerProjectMcp {
     const binding = this.#requireBinding(input);
     const process = this.#processes.get(input.processId);
     const lease = validLease(input);
-    const result = (status: CallProjectMcpToolResult['status'], reason?: CallProjectMcpToolResult['reason'], text?: string): CallProjectMcpToolResult => ({
+    const result = (status: CallProjectMcpToolResult['status'], reason?: CallProjectMcpToolResult['reason'], text?: string, outcomeUnknown = false): CallProjectMcpToolResult => ({
       processId: input.processId, operationId: input.operationId, status,
-      ...(reason !== undefined ? { reason } : {}), ...(text !== undefined ? { text } : {}),
+      ...(reason !== undefined ? { reason } : {}), ...(outcomeUnknown ? { outcomeUnknown: true as const } : {}), ...(text !== undefined ? { text } : {}),
     });
     if (!/^[0-9a-f-]{36}$/i.test(input.operationId) || !process || !lease || !sameBinding(process.binding, binding) || !sameLease(process.lease, lease)) {
       return result('failed', 'worker-refused');
@@ -209,9 +209,11 @@ export class WorkerProjectMcp {
       const text = chunks.join('\n');
       return remember(response.isError === true ? result('failed', 'server-error', text) : result('completed', undefined, text));
     } catch (error) {
-      return remember(error instanceof McpUnsupportedFeatureError
-        ? result('unsupported', 'unsupported-feature')
-        : result('failed', error instanceof McpTimeoutError ? 'timeout' : 'server-error'));
+      return remember(error instanceof McpOutcomeUnknownError
+        ? result('failed', 'server-error', undefined, true)
+        : error instanceof McpUnsupportedFeatureError
+          ? result('unsupported', 'unsupported-feature')
+          : result('failed', error instanceof McpTimeoutError ? 'timeout' : 'server-error'));
     }
   }
 
@@ -321,7 +323,11 @@ class HttpMcpClient implements ProjectMcpClient {
   }
 
   async callTool(name: string, args: Readonly<Record<string, unknown>>): Promise<JsonRecord> {
-    return this.request('tools/call', { name, arguments: args });
+    try { return await this.request('tools/call', { name, arguments: args }); }
+    catch (error) {
+      if (error instanceof McpRemoteUnavailableError) throw new McpOutcomeUnknownError();
+      throw error;
+    }
   }
 
   sensitiveValues(): readonly string[] {
@@ -476,6 +482,7 @@ function parseMcpEventStream(text: string, expectedId: number): JsonRecord {
 }
 
 class McpRemoteUnavailableError extends Error {}
+class McpOutcomeUnknownError extends Error {}
 class McpUnsupportedFeatureError extends Error {}
 
 class StdioMcpClient implements ProjectMcpClient {

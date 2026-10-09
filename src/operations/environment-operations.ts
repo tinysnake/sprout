@@ -365,7 +365,7 @@ export class EnvironmentOperations {
           return { status: 'failed', reason: 'worker-refused' };
         }
         const result = sanitizeMcpCallResult(rawResult, processId, operationId);
-        if (result.status === 'unsupported' || result.reason === 'timeout') {
+        if (rawResult.outcomeUnknown === true || result.status === 'unsupported' || result.reason === 'timeout') {
           await this.#store.saveMcpOperation({ ...operationIdentity, state: 'uncertain', updatedAt: this.#clock() }).catch(() => undefined);
           await this.#noteUncertainMcp(scope);
           await closeProcess();
@@ -1083,6 +1083,7 @@ function sanitizeMcpCallResult(
   operationId: string,
 ): { readonly status: 'completed' | 'failed' | 'unsupported'; readonly text?: string; readonly reason?: string } {
   if (!result || result.processId !== processId || result.operationId !== operationId || !['completed', 'failed', 'unsupported'].includes(result.status) ||
+      (result.outcomeUnknown !== undefined && (result.outcomeUnknown !== true || result.status !== 'failed' || result.reason !== 'server-error')) ||
       (result.reason !== undefined && !['unknown-tool', 'invalid-arguments', 'server-error', 'invalid-result', 'unsupported-feature', 'timeout', 'worker-refused'].includes(result.reason)) ||
       (result.text !== undefined && typeof result.text !== 'string')) return { status: 'failed', reason: 'worker-refused' };
   let safeText = result.text === undefined ? undefined : sanitizeOperatorText(result.text, { fallback: 'MCP tool returned no text.', maxLength: 32_000 });
