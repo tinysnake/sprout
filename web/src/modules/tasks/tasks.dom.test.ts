@@ -123,6 +123,10 @@ function appServices(conflictCodes: readonly string[] = [], snapshot = overview)
   });
   const allTasks = [
     task('agent-led-idle', 'idle'),
+    task('host-run-task', 'idle', {
+      executionPlacement: { mode: 'host-run', engineHost: { kind: 'sprout', id: 'sprout-test', profile: { platform: 'macos', boundary: 'shared-host' } } },
+      processExecutionMode: 'host-run',
+    }),
     task('mode-mismatch', 'idle', {
       executionPlacement: { mode: 'host-run', engineHost: { kind: 'sprout', id: 'sprout-test', profile: { platform: 'macos', boundary: 'shared-host' } } },
       processExecutionMode: 'environment-hosted',
@@ -322,6 +326,41 @@ test('Project Tasks renders distinct production lifecycle states and keeps activ
     assert.ok(calls.includes('content-version:proposal-a:1'), 'proposal detail loads the current content through the version endpoint');
     app.unmount();
   } finally {
+    await cleanup();
+  }
+});
+
+test('Host-run Task approval shows engine placement and does not require Environment model readiness', async () => {
+  const { doc, vite, cleanup } = await setupHarness();
+  let app: { unmount(): void } | undefined;
+  try {
+    const hostRunOverview: ProjectOverviewData = {
+      ...overview,
+      environments: overview.environments.map((environment) => ({ ...environment, trafficLight: 'red' as const,
+        trafficLightReason: 'No Environment engine model is ready.' })),
+      compatibility: overview.compatibility.map((row) => ({ ...row, executionMode: 'host-run' as const })),
+    };
+    const mounted = await mountTasks(vite, doc, [], hostRunOverview);
+    app = mounted.app;
+    await mounted.router.push({ name: 'project-task-proposal', params: { proposalId: 'proposal-a' }, query: { project: projectId } });
+    await settle();
+    clickButton(doc, 'Approve & Begin');
+    await settle();
+    const environment = doc.querySelector<HTMLSelectElement>('#begin-environment');
+    assert.ok(environment);
+    assert.equal(environment.selectedOptions[0]?.disabled, false);
+    assert.match(doc.querySelector('[data-execution-placement]')?.textContent ?? '', /Pi engine runs on Sprout/);
+    assert.match(doc.querySelector('[data-execution-placement]')?.textContent ?? '', /Task-held lease/);
+    assert.equal(doc.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled, false);
+
+    await mounted.router.push({ name: 'project-tasks', query: { project: projectId } });
+    await settle();
+    await mounted.router.push({ name: 'project-task-detail', params: { taskId: 'host-run-task' }, query: { project: projectId } });
+    await settle();
+    assert.match(doc.querySelector('[data-task-engine-placement]')?.textContent ?? '', /Sprout-host Pi/);
+    assert.match(doc.body.textContent ?? '', /Task context and Project workspace operations on the selected Environment Worker/);
+  } finally {
+    app?.unmount();
     await cleanup();
   }
 });

@@ -134,6 +134,8 @@ const environmentOptions = computed(() => {
       const environment = snapshot.environments.find((row) => row.environmentInstanceId === entry.environmentInstanceId || row.id === entry.environmentInstanceId);
       const compatibility = snapshot.compatibility.filter((row) => row.environmentInstanceId === entry.environmentInstanceId && activeIds.has(row.agentId));
       const compatibleAgentIds = compatibility.filter((row) => row.available === true).map((row) => row.agentId);
+      const executionMode = compatibility.find((row) => row.executionMode !== undefined)?.executionMode;
+      const hostRun = executionMode === 'host-run';
       // The overall traffic light includes unrelated engines and stale probes.
       // Use independent safety/connectivity facts and per-Agent compatibility;
       // begin admission still owns the authoritative eligibility and lease gates.
@@ -149,7 +151,7 @@ const environmentOptions = computed(() => {
                 ? 'Worker protocol compatibility is not confirmed'
                 : environment.capabilityPermissions['agent-run'] !== true
                   ? 'Agent run capability is not granted'
-                  : environment.trafficLight === 'red'
+                  : !hostRun && environment.trafficLight === 'red'
                     ? environment.trafficLightReason || 'Environment readiness is blocked'
                     : compatibleAgentIds.length === 0
                       ? compatibility.length === 0 || compatibility.some((row) => row.available === undefined)
@@ -162,6 +164,7 @@ const environmentOptions = computed(() => {
         enabled: unavailableReason === '',
         unavailableReason,
         compatibleAgentIds,
+        ...(executionMode !== undefined ? { executionMode } : {}),
       };
     });
 });
@@ -175,6 +178,13 @@ const beginLeadOptions = computed(() => {
 });
 const beginSelectionReady = computed(() => environmentOptions.value.some((entry) => entry.id === beginEnvironmentId.value && entry.enabled)
   && beginLeadOptions.value.some((entry) => entry.key === beginLeadKey.value));
+const beginExecutionMode = computed(() => environmentOptions.value.find((entry) => entry.id === beginEnvironmentId.value)?.executionMode);
+const selectedTaskEnginePlacement = computed(() => {
+  const placement = selectedTask.value?.task.executionPlacement;
+  if (placement?.mode === 'host-run') return 'Sprout-host Pi; Task context and Project workspace operations on the selected Environment Worker';
+  if (placement?.mode === 'environment-hosted') return 'Selected Environment Worker';
+  return 'Unavailable';
+});
 const filters = ['all', 'proposed', 'active', 'validation', 'blocked', 'recovery', 'ended', 'stopped', 'cancelled'] as const;
 const taskLeadOptions = computed(() => [
   ...(currentHuman.value ? [{ key: actorKey({ memberId: currentHuman.value.memberId, memberKind: 'human' }), label: 'You · Human Task lead' }] : []),
@@ -945,6 +955,8 @@ onMounted(() => { void loadIndex(); });
                 <label class="flex flex-col gap-1 text-xs">Environment instance<select id="begin-environment" v-model="beginEnvironmentId" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3" required><option value="" disabled>Select Environment</option><option v-for="environment in environmentOptions" :key="environment.id" :value="environment.id" :disabled="!environment.enabled">{{ environment.name }}{{ environment.enabled ? '' : ` · ${environment.unavailableReason}` }}</option></select></label>
                 <label class="flex flex-col gap-1 text-xs">Task lead<select id="begin-lead" v-model="beginLeadKey" class="min-h-[44px] rounded border bg-[var(--bg-surface)] px-3" required><option v-for="lead in beginLeadOptions" :key="lead.key" :value="lead.key">{{ lead.label }}</option></select></label>
                 <p data-lead-guidance class="sm:col-span-2 text-xs text-[var(--text-secondary)]">{{ beginEnvironmentId ? 'Choose yourself or a compatible Project Agent as Task lead. An Agent lead receives an initial run after begin; a Human lead does not.' : 'Select an available Environment to see eligible Agent leads. A Task lead may be you or a compatible Project Agent.' }}</p>
+                <p v-if="beginEnvironmentId && beginExecutionMode === 'host-run'" data-execution-placement class="sm:col-span-2 text-xs text-[var(--text-secondary)]">The Pi engine runs on Sprout. Task context, Project workspace operations, and selected Project MCP tools run through this Environment Worker under the Task-held lease.</p>
+                <p v-else-if="beginEnvironmentId" data-execution-placement class="sm:col-span-2 text-xs text-[var(--text-secondary)]">The Agent engine, Task context, and Project workspace operations run through this Environment Worker under the Task-held lease.</p>
                 <p v-if="!environmentOptions.some((environment) => environment.enabled)" data-begin-guidance class="sm:col-span-2 text-xs text-[var(--text-muted)]">No available Environment with a compatible Agent is confirmed. {{ environmentOptions.map((environment) => `${environment.name}: ${environment.unavailableReason}`).join('; ') || 'Assign an Environment and workspace in Project resources.' }} Review Project resources before beginning this proposal.</p>
                 <div class="sm:col-span-2 flex flex-wrap gap-2"><Button type="submit" variant="primary" size="sm" class="min-h-[44px]" :disabled="!canControl || !beginSelectionReady">Confirm approve and begin</Button><Button type="button" variant="ghost" size="sm" class="min-h-[44px]" @click="beginOpen = false">Cancel</Button></div>
               </form>
@@ -968,13 +980,14 @@ onMounted(() => { void loadIndex(); });
               <Button variant="secondary" size="sm" class="min-h-[44px]" :disabled="loading" @click="refresh">Refresh</Button>
             </div>
             <section class="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] overflow-hidden">
-              <button type="button" class="w-full min-h-[48px] p-3 flex items-center justify-between gap-2 text-left" :aria-expanded="lifecycleExpanded" @click="lifecycleExpanded = !lifecycleExpanded"><span class="font-mono text-xs sm:text-sm">{{ lifecycleSentence(selectedTask.task) }}</span><Icon :name="lifecycleExpanded ? 'chevron-down' : 'chevron-right'" :size="15" /></button>
+              <button data-task-lifecycle-toggle type="button" class="w-full min-h-[48px] p-3 flex items-center justify-between gap-2 text-left" :aria-expanded="lifecycleExpanded" @click="lifecycleExpanded = !lifecycleExpanded"><span class="font-mono text-xs sm:text-sm">{{ lifecycleSentence(selectedTask.task) }}</span><Icon :name="lifecycleExpanded ? 'chevron-down' : 'chevron-right'" :size="15" /></button>
               <div v-if="lifecycleExpanded" class="border-t border-[var(--border-subtle)] p-3 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2 text-xs">
                 <div class="rounded bg-[var(--bg-surface-elevated)] p-2"><span class="block text-[var(--text-muted)]">Task lifecycle</span><strong>{{ taskStage(selectedTask.task) }}</strong></div>
                 <div class="rounded bg-[var(--bg-surface-elevated)] p-2"><span class="block text-[var(--text-muted)]">Agent run lifecycle</span><strong>{{ taskRunState(selectedTask.task) }}</strong></div>
                 <div class="rounded bg-[var(--bg-surface-elevated)] p-2"><span class="block text-[var(--text-muted)]">Task lease</span><strong>{{ leaseState(selectedTask.task) }}{{ selectedTask.task.environmentInstanceId ? ` · ${overview?.environments.find((environment) => environment.environmentInstanceId === selectedTask.task.environmentInstanceId)?.displayName ?? 'Environment'}` : '' }}</strong></div>
                 <div class="rounded bg-[var(--bg-surface-elevated)] p-2"><span class="block text-[var(--text-muted)]">Task context</span><strong>{{ selectedTask.task.taskContextState }}</strong></div>
                 <div class="rounded bg-[var(--bg-surface-elevated)] p-2"><span class="block text-[var(--text-muted)]">Recorded execution mode</span><strong>{{ selectedTask.task.executionPlacement?.mode ?? 'Unknown' }}</strong></div>
+                <div data-task-engine-placement class="rounded bg-[var(--bg-surface-elevated)] p-2"><span class="block text-[var(--text-muted)]">Engine and workspace placement</span><strong>{{ selectedTaskEnginePlacement }}</strong></div>
                 <div class="rounded bg-[var(--bg-surface-elevated)] p-2"><span class="block text-[var(--text-muted)]">Current Sprout mode</span><strong>{{ selectedTask.task.processExecutionMode ?? 'Unavailable' }}</strong></div>
                 <div class="rounded bg-[var(--bg-surface-elevated)] p-2"><span class="block text-[var(--text-muted)]">Content version</span><strong>v{{ taskContentVersion }}</strong></div>
                 <div class="rounded bg-[var(--bg-surface-elevated)] p-2"><span class="block text-[var(--text-muted)]">Task lead</span><strong>{{ actorName(taskContent?.lead) }}</strong></div>

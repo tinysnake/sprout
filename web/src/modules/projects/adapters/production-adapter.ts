@@ -58,6 +58,7 @@ export class ProductionProjectService implements ProjectManagementService {
               agentId,
               environmentInstanceId: entry.environmentInstanceId,
               ...(result !== undefined ? { available: result.environmentAvailable } : {}),
+              ...(result?.executionMode !== undefined ? { executionMode: result.executionMode } : {}),
               ...(result?.unavailableReason !== undefined ? { unavailableReason: result.unavailableReason } : {}),
             };
           } catch {

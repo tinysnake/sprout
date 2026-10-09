@@ -944,6 +944,21 @@ export class RunOrchestrator {
       return { ok: false, reason: `unknown agent ${agentId}` };
     }
     const options = effectiveWorkOptions(agent);
+    if (this.#executionStrategy.mode === 'host-run') {
+      const host = this.#hostPi;
+      if (host === undefined) return { ok: false, reason: 'Host-run execution has no configured local Pi Engine profile' };
+      const option = options.find(candidate => candidate.engine === 'pi'
+        && candidate.workModel === host.authorizedModel
+        && isHostPiEffortSupported(candidate.effort || 'medium'));
+      if (option === undefined) return { ok: false, reason: 'no configured work option is authorized by the Sprout-host Pi profile' };
+      const readiness = await host.readiness();
+      if (readiness.status !== 'ready' || readiness.installation !== 'ready'
+        || readiness.authentication !== 'ready' || readiness.modelAvailability !== 'available'
+        || readiness.adapterControls !== 'ready') {
+        return { ok: false, reason: 'Sprout-host Pi model, authentication, installation, or adapter controls are not confirmed ready' };
+      }
+      return { ok: true, option };
+    }
     const observed = this.#engineFacts
       ? await this.#engineFacts(environmentInstanceId)
       : undefined;

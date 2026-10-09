@@ -90,6 +90,7 @@ function compatibilityOf(
   if (projection === undefined) return undefined;
   return {
     environmentAvailable: projection.available,
+    ...(projection.executionMode !== undefined ? { executionMode: projection.executionMode } : {}),
     ...(projection.firstAvailable !== undefined
       ? { firstAvailableOptionId: projection.firstAvailable.id }
       : {}),

@@ -39,7 +39,11 @@ test('execution strategy and admission facts are immutable and Host-run refuses 
   assert.ok(Object.isFrozen(hostRun.admission));
   assert.deepEqual(environmentHosted.admission, { available: true });
   assert.equal(hostRun.admission.available, false);
+  assert.equal(hostRun.taskAdmission.available, false);
   assert.match(hostRun.admission.refusal ?? '', /Host-run execution is unavailable/);
+  const supportedHostRun = createExecutionStrategy('host-run', true);
+  assert.equal(supportedHostRun.admission.available, true);
+  assert.equal(supportedHostRun.taskAdmission.available, true);
 });
 
 test('invalid service arguments exit before host configuration, database, or listener setup', { timeout }, async () => {

@@ -11,7 +11,13 @@ import { ProductionProjectService } from './production-adapter.ts';
 test('the Project production composition joins durable Project, Agent, Environment, workspace, and compatibility facts', async () => {
   const project = createInitialProjectFixtures()[0]!;
   const envRows = await new FixtureEnvironmentService().listEnvironments();
-  const agentService = new FixtureAgentService();
+  class HostRunAgentService extends FixtureAgentService {
+    override async compatibilityForEnvironment(agentId: string, environmentInstanceId: string) {
+      const result = await super.compatibilityForEnvironment(agentId, environmentInstanceId);
+      return result ? { ...result, executionMode: 'host-run' as const } : result;
+    }
+  }
+  const agentService = new HostRunAgentService();
   const calls: string[] = [];
   const projectPort = {
     async listProjects() { calls.push('projects:list'); return [project]; },
@@ -49,6 +55,7 @@ test('the Project production composition joins durable Project, Agent, Environme
   assert.equal(overview.environments.some((environment) => environment.id === 'env-ready' && environment.environmentInstanceId === 'inst-ready'), true);
   assert.equal(overview.access[0]?.current?.path, 'repos/sprout');
   assert.equal(overview.compatibility[0]?.available, true);
+  assert.equal(overview.compatibility[0]?.executionMode, 'host-run');
   assert.deepEqual(overview.bindingReadiness[0], {
     environmentInstanceId: 'inst-ready', bindingId: 'binding-a', generation: 7, status: 'blocked', reason: 'worker-offline',
   });
