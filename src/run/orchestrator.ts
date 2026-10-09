@@ -145,7 +145,8 @@ export interface RunOrchestratorOptions {
   readonly executionPlacementForEnvironment?: (environmentInstanceId: string) => ExecutionPlacement;
   /** Core-owned Host-run workspace operation attachment; never a model target selector. */
   readonly remoteWorkspace?: (projectId: string, agentId: string, runId: string,
-    onLeaseAcquired: (leaseId: string) => Promise<void>) => Promise<import('../engine/port.ts').RemoteWorkspaceTools | undefined>;
+    onLeaseAcquired: (leaseId: string) => Promise<void>,
+    containingLease?: import('../operations/environment-operations.ts').WorkspaceContainingLease) => Promise<import('../engine/port.ts').RemoteWorkspaceTools | undefined>;
   /** Project authority determines whether the selected MCP configuration is active. */
   readonly projectMcpSelected?: (projectId: string) => Promise<boolean>;
   /** Attaches MCP tools after the orchestrator has acquired their containing run lease. */
@@ -733,6 +734,7 @@ export class RunOrchestrator {
     let remoteWorkspace: import('../engine/port.ts').RemoteWorkspaceTools | undefined;
     let remoteSettlementUnknown = false;
     let remoteEnvironmentInstanceId: string | undefined;
+    let containingLeaseCanRelease = false;
     try {
       const assembled = await this.#assembleInput(initial, agent, running.id);
       const instructions = appendBootstrap(assembled.instructions, taskBootstrapInstructions);
@@ -770,7 +772,17 @@ export class RunOrchestrator {
         const environmentInstanceId = remoteEnvironmentInstanceId;
         if (environmentInstanceId === undefined) throw new Error('remote Environment was not pinned before lease acquisition');
         prepared = await this.#advance(prepared, { environmentInstanceId, leaseId });
-      });
+      }, initial.leaseId !== undefined && initial.environmentInstanceId !== undefined ? (() => {
+        const lease = this.#pool.getLease(initial.leaseId);
+        if (!lease) throw new Error('Containing lease is unavailable');
+        return {
+          environmentInstanceId: lease.instanceId, leaseId: lease.id, runId: initial.id,
+          holderKind: lease.holderKind ?? 'run', holderId: lease.holderId,
+          ...(lease.taskId !== undefined ? { taskId: lease.taskId } : {}),
+          leaseCapability: lease.capability === 'agent-run' ? 'agent-run' as const : 'project-mcp' as const,
+          canRelease: () => containingLeaseCanRelease,
+        };
+      })() : undefined);
       remoteEnvironmentInstanceId = remoteWorkspace?.binding.environmentInstanceId;
       let attempt = await this.#runSession(
         host, agent, option, assembled.prompt, prepared, stored?.key, instructions,
@@ -810,13 +822,18 @@ export class RunOrchestrator {
           catch { stopCertain = false; }
         }
         if (!stopCertain) this.#pool.markRecovering(initial.leaseId);
-        else if (initial.taskId === undefined && this.#pool.getLease(initial.leaseId)?.state === 'active') this.#pool.releaseLease(initial.leaseId);
+        containingLeaseCanRelease = stopCertain && initial.taskId === undefined && this.#pool.getLease(initial.leaseId)?.state === 'active';
       }
       try { await remoteWorkspace?.settle?.(remoteSettlementUnknown ? 'unknown' : 'settled'); } catch {
         // Settlement uncertainty protects the Environment; it never converts an
         // already settled run into a second result or releases a lease.
         remoteSettlementUnknown = true;
+        if (initial.leaseId !== undefined) this.#pool.markRecovering(initial.leaseId);
       }
+      // A containing lease may have had no workspace mutations. Never release
+      // before workspace settlement, or after either surface reports uncertainty.
+      if (initial.leaseId !== undefined && containingLeaseCanRelease &&
+          this.#pool.getLease(initial.leaseId)?.state === 'active') this.#pool.releaseLease(initial.leaseId);
     }
   }
 

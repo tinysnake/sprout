@@ -1174,9 +1174,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       // (ADR-0003), and so execution follows the leased instance (F1, #18).
       engines: (requestedInstanceId) => runtimeEnvironment.adapters(requestedInstanceId),
       executionStrategy,
-      remoteWorkspace: async (projectId, agentId, runId, onLeaseAcquired) => {
+      remoteWorkspace: async (projectId, agentId, runId, onLeaseAcquired, containingLease) => {
         if (!environmentOperations) return undefined;
-        try { return await environmentOperations.attach(projectId, agentId, runId, onLeaseAcquired); }
+        try { return await environmentOperations.attach(projectId, agentId, runId, onLeaseAcquired, containingLease); }
         catch { return undefined; }
       },
       projectMcpSelected: async (projectId) => {
