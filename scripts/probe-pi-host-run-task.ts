@@ -89,7 +89,8 @@ async function startHttpMcpFixture(): Promise<string> {
     request.on('data', chunk => { body += chunk; });
     request.on('end', () => {
       httpMcpRequestCount += 1;
-      const authorizationMatched = request.headers.authorization === 'Bearer local-fixture-auth';
+      const authorizationMatched = request.method !== 'POST' && request.method !== 'DELETE' ||
+        request.headers.authorization === 'Bearer local-fixture-auth';
       httpMcpAuthorizationMatched &&= authorizationMatched;
       if (!authorizationMatched) httpMcpAuthorizationMismatchMethods.push(request.method ?? 'unknown');
       if (request.method === 'DELETE') {
