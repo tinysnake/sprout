@@ -365,7 +365,7 @@ export class EnvironmentOperations {
           return { status: 'failed', reason: 'worker-refused' };
         }
         const result = sanitizeMcpCallResult(rawResult, processId, operationId);
-        if (result.status === 'unsupported' || result.reason === 'timeout') {
+        if (rawResult.outcomeUnknown === true || result.status === 'unsupported' || result.reason === 'timeout') {
           await this.#store.saveMcpOperation({ ...operationIdentity, state: 'uncertain', updatedAt: this.#clock() }).catch(() => undefined);
           await this.#noteUncertainMcp(scope);
           await closeProcess();
@@ -934,6 +934,7 @@ function mcpStartupFailureReason(
   result: StartProjectMcpResult,
   toolCount: number,
 ): RemoteProjectMcpStartupError['reason'] {
+  if (result.servers.some(server => server.status === 'unavailable') || result.reason === 'unavailable') return 'remote-unavailable';
   if (result.servers.some(server => server.status === 'missing-dependency') || result.reason === 'missing') return 'missing-dependency';
   if (result.servers.some(server => server.status === 'invalid') || result.reason === 'invalid') return 'invalid-configuration';
   if (result.servers.some(server => server.status === 'unsupported') || result.reason === 'unsupported') return 'unsupported-configuration';
@@ -945,11 +946,11 @@ function sanitizeMcpInspection(result: InspectProjectMcpConfigurationResult): Pi
   if (!result || result.format !== 'claude-code-mcp-json-v1' ||
       !['valid', 'missing', 'invalid', 'unsupported'].includes(result.status) ||
       !Array.isArray(result.servers) || result.servers.length > 64) return undefined;
-  const servers: { name: string; transport: 'stdio' }[] = [];
+  const servers: { name: string; transport: 'stdio' | 'http' }[] = [];
   for (const server of result.servers) {
-    if (!server || Object.keys(server).some(key => key !== 'name' && key !== 'transport') || server.transport !== 'stdio' ||
+    if (!server || Object.keys(server).some(key => key !== 'name' && key !== 'transport') || !['stdio', 'http'].includes(server.transport) ||
         typeof server.name !== 'string' || sanitizeIdentifier(server.name, { fallback: '', kind: 'generic' }) !== server.name) return undefined;
-    servers.push({ name: server.name, transport: 'stdio' });
+    servers.push({ name: server.name, transport: server.transport });
   }
   if (result.status !== 'valid' && servers.length !== 0) return undefined;
   return { status: result.status, servers };
@@ -961,7 +962,7 @@ function safeMcpToolCatalog(result: StartProjectMcpResult): { readonly processId
   const tools: { public: import('../engine/port.ts').ProjectMcpToolDeclaration; workerId: string }[] = [];
   const names = new Set<string>();
   for (const server of result.servers) {
-    if (!server || typeof server.name !== 'string' || !['ready', 'missing-dependency', 'invalid', 'unsupported'].includes(server.status) ||
+    if (!server || typeof server.name !== 'string' || !['ready', 'missing-dependency', 'invalid', 'unsupported', 'unavailable'].includes(server.status) ||
         !Array.isArray(server.tools) || server.tools.length > 128) return undefined;
     if (server.status !== 'ready' && server.tools.length > 0) return undefined;
     const safeServer = sanitizeIdentifier(server.name, { fallback: '', kind: 'generic', maxLength: 64 });
@@ -1082,7 +1083,8 @@ function sanitizeMcpCallResult(
   operationId: string,
 ): { readonly status: 'completed' | 'failed' | 'unsupported'; readonly text?: string; readonly reason?: string } {
   if (!result || result.processId !== processId || result.operationId !== operationId || !['completed', 'failed', 'unsupported'].includes(result.status) ||
-      (result.reason !== undefined && !['unknown-tool', 'invalid-arguments', 'server-error', 'invalid-result', 'timeout', 'worker-refused'].includes(result.reason)) ||
+      (result.outcomeUnknown !== undefined && (result.outcomeUnknown !== true || result.status !== 'failed' || result.reason !== 'server-error')) ||
+      (result.reason !== undefined && !['unknown-tool', 'invalid-arguments', 'server-error', 'invalid-result', 'unsupported-feature', 'timeout', 'worker-refused'].includes(result.reason)) ||
       (result.text !== undefined && typeof result.text !== 'string')) return { status: 'failed', reason: 'worker-refused' };
   let safeText = result.text === undefined ? undefined : sanitizeOperatorText(result.text, { fallback: 'MCP tool returned no text.', maxLength: 32_000 });
   if (safeText !== undefined && Buffer.byteLength(safeText, 'utf8') > 32 * 1024) {

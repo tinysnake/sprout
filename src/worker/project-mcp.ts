@@ -1,8 +1,12 @@
 import { randomUUID, createHash } from 'node:crypto';
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
+import type { RequestOptions } from 'node:http';
 import { lstat, open, realpath } from 'node:fs/promises';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { isAbsolute, join, sep } from 'node:path';
 import { redactSensitiveText, sanitizeIdentifier, sanitizeOperatorText } from '../environment/privacy.ts';
+import { parseProjectMcpManifest, projectMcpServerSecrets, type ProjectMcpManifestServer } from './project-mcp-manifest.ts';
 import type {
   AttachWorkspaceBindingParams,
   CallProjectMcpToolParams,
@@ -20,7 +24,6 @@ import type { WorkerWorkspace } from './workspace.ts';
 const MANIFEST = '.mcp.json';
 const FORMAT = 'claude-code-mcp-json-v1';
 const MAX_MANIFEST_BYTES = 64 * 1024;
-const MAX_SERVER_COUNT = 16;
 const MAX_TOOL_COUNT = 64;
 const MAX_TOTAL_TOOLS = 128;
 const MAX_SCHEMA_BYTES = 24 * 1024;
@@ -40,9 +43,10 @@ export interface ProjectMcpClient {
   discoverTools(): Promise<readonly { readonly name: string; readonly description: string; readonly inputSchema: unknown }[]>;
   callTool(name: string, args: Readonly<Record<string, unknown>>): Promise<JsonRecord>;
   close(): Promise<boolean>;
+  sensitiveValues?(): readonly string[];
 }
 export type ProjectMcpClientLauncher = (
-  server: { readonly name: string; readonly command: string; readonly args: readonly string[]; readonly env: Readonly<Record<string, string>> },
+  server: ProjectMcpManifestServer,
   cwd: string,
   onCreated: (client: ProjectMcpClient) => void,
 ) => Promise<ProjectMcpClient>;
@@ -60,9 +64,7 @@ interface ProjectMcpProcess {
   readonly catalog: StartProjectMcpResult;
   readonly operations: Map<string, { readonly fingerprint: string; readonly result: CallProjectMcpToolResult }>;
 }
-interface ManifestServer { readonly name: string; readonly command: string; readonly args: readonly string[]; readonly env: Readonly<Record<string, string>> }
-
-/** Worker-local stdio supervision for the selected Project MCP manifest. */
+/** Worker-local supervision for the selected Project MCP manifest. */
 export class WorkerProjectMcp {
   readonly #workspace: WorkerWorkspace;
   readonly #environmentInstanceId: string;
@@ -70,7 +72,7 @@ export class WorkerProjectMcp {
   readonly #processes = new Map<string, ProjectMcpProcess>();
   readonly #launchClient: ProjectMcpClientLauncher;
 
-  constructor(workspace: WorkerWorkspace, environmentInstanceId: string, launchClient: ProjectMcpClientLauncher = StdioMcpClient.launch) {
+  constructor(workspace: WorkerWorkspace, environmentInstanceId: string, launchClient: ProjectMcpClientLauncher = launchProjectMcpClient) {
     this.#workspace = workspace;
     this.#environmentInstanceId = environmentInstanceId;
     this.#launchClient = launchClient;
@@ -114,7 +116,7 @@ export class WorkerProjectMcp {
     for (const declaration of manifest.servers) {
       let client: ProjectMcpClient | undefined;
       let trackedServer: McpServerProcess | undefined;
-      const secretValues = Object.values(declaration.env).filter(value => value.length > 0);
+      const secretValues = projectMcpServerSecrets(declaration);
       const trackClient = (created: ProjectMcpClient): void => {
         if (trackedServer) return;
         trackedServer = { name: declaration.name, client: created, tools: new Map(), secretValues };
@@ -124,7 +126,7 @@ export class WorkerProjectMcp {
         client = await this.#launchClient(declaration, binding.root, trackClient);
         trackClient(client);
         const serverProcess = trackedServer;
-        if (!serverProcess) throw new Error('MCP child process identity was not registered');
+        if (!serverProcess) throw new Error('MCP client identity was not registered');
         const advertised = await client.discoverTools();
         if (totalTools + advertised.length > MAX_TOTAL_TOOLS) {
           await client.close();
@@ -133,13 +135,14 @@ export class WorkerProjectMcp {
         }
         const declarations: ProjectMcpToolDeclaration[] = [];
         let rejectedDeclaration = false;
+        const serverSecrets = [...secretValues, ...(serverProcess.client.sensitiveValues?.() ?? [])];
         for (const tool of advertised) {
           const safeTool = sanitizeIdentifier(tool.name, { fallback: '', kind: 'generic', maxLength: 64 });
           const safeServer = sanitizeIdentifier(declaration.name, { fallback: '', kind: 'generic', maxLength: 64 });
           const id = randomUUID();
           const safeName = sanitizeIdentifier(`${safeServer}_${safeTool}`, { fallback: '', kind: 'generic', maxLength: 120 });
-          const description = redactMcpText(sanitizeOperatorText(tool.description, { fallback: 'No description was provided.', maxLength: 1_000 }), secretValues);
-          const schema = sanitizeInputSchema(tool.inputSchema, 0, secretValues);
+          const description = redactMcpText(sanitizeOperatorText(tool.description, { fallback: 'No description was provided.', maxLength: 1_000 }), serverSecrets);
+          const schema = sanitizeInputSchema(tool.inputSchema, 0, serverSecrets);
           if (!safeTool || !safeServer || !safeName || !schema) { rejectedDeclaration = true; continue; }
           const descriptor: ProjectMcpToolDeclaration = { id, server: safeServer, name: safeTool, description, inputSchema: schema };
           serverProcess.tools.set(id, { declaration: descriptor, rawName: tool.name, schema });
@@ -151,7 +154,7 @@ export class WorkerProjectMcp {
         if (client) await client.close();
         publicServers.push({
           name: sanitizeIdentifier(declaration.name, { fallback: 'unknown-server', kind: 'generic', maxLength: 64 }),
-          status: error instanceof SpawnMissingError ? 'missing-dependency' : 'unsupported',
+          status: error instanceof SpawnMissingError ? 'missing-dependency' : error instanceof McpRemoteUnavailableError || error instanceof McpTimeoutError ? 'unavailable' : 'unsupported',
           tools: [],
         });
       }
@@ -161,7 +164,7 @@ export class WorkerProjectMcp {
     const catalog: StartProjectMcpResult = {
       processId,
       status: ready === publicServers.length ? 'ready' : available ? 'partial' : 'blocked',
-      ...(!available ? { reason: publicServers.some(server => server.status === 'missing-dependency') ? 'missing' as const : 'unsupported' as const } : {}),
+      ...(!available ? { reason: publicServers.some(server => server.status === 'missing-dependency') ? 'missing' as const : publicServers.some(server => server.status === 'unavailable') ? 'unavailable' as const : 'unsupported' as const } : {}),
       servers: publicServers,
     };
     this.#processes.set(processId, { id: processId, binding, lease, servers, catalog, operations: new Map() });
@@ -172,9 +175,9 @@ export class WorkerProjectMcp {
     const binding = this.#requireBinding(input);
     const process = this.#processes.get(input.processId);
     const lease = validLease(input);
-    const result = (status: CallProjectMcpToolResult['status'], reason?: CallProjectMcpToolResult['reason'], text?: string): CallProjectMcpToolResult => ({
+    const result = (status: CallProjectMcpToolResult['status'], reason?: CallProjectMcpToolResult['reason'], text?: string, outcomeUnknown = false): CallProjectMcpToolResult => ({
       processId: input.processId, operationId: input.operationId, status,
-      ...(reason !== undefined ? { reason } : {}), ...(text !== undefined ? { text } : {}),
+      ...(reason !== undefined ? { reason } : {}), ...(outcomeUnknown ? { outcomeUnknown: true as const } : {}), ...(text !== undefined ? { text } : {}),
     });
     if (!/^[0-9a-f-]{36}$/i.test(input.operationId) || !process || !lease || !sameBinding(process.binding, binding) || !sameLease(process.lease, lease)) {
       return result('failed', 'worker-refused');
@@ -199,14 +202,18 @@ export class WorkerProjectMcp {
       for (const item of response.content) {
         if (!isRecord(item) || item.type !== 'text' || typeof item.text !== 'string') return remember(result('unsupported', 'invalid-result'));
         if (remaining <= 0) break;
-        const sanitized = redactMcpText(item.text, origin.server.secretValues).slice(0, remaining);
+        const sanitized = redactMcpText(item.text, [...origin.server.secretValues, ...(origin.server.client.sensitiveValues?.() ?? [])]).slice(0, remaining);
         chunks.push(sanitized);
         remaining -= sanitized.length;
       }
       const text = chunks.join('\n');
       return remember(response.isError === true ? result('failed', 'server-error', text) : result('completed', undefined, text));
     } catch (error) {
-      return remember(result('failed', error instanceof McpTimeoutError ? 'timeout' : 'server-error'));
+      return remember(error instanceof McpOutcomeUnknownError
+        ? result('failed', 'server-error', undefined, true)
+        : error instanceof McpUnsupportedFeatureError
+          ? result('unsupported', 'unsupported-feature')
+          : result('failed', error instanceof McpTimeoutError ? 'timeout' : 'server-error'));
     }
   }
 
@@ -242,6 +249,242 @@ export class WorkerProjectMcp {
   }
 }
 
+function launchProjectMcpClient(server: ProjectMcpManifestServer, cwd: string, onCreated: (client: ProjectMcpClient) => void): Promise<ProjectMcpClient> {
+  return server.transport === 'http'
+    ? HttpMcpClient.launch(server, onCreated)
+    : StdioMcpClient.launch(server, cwd, onCreated);
+}
+
+interface HttpMcpReply {
+  readonly statusCode: number;
+  readonly contentType: string;
+  readonly sessionId?: string;
+  readonly body: string;
+}
+
+const MAX_HTTP_RESPONSE_BYTES = 1024 * 1024;
+
+/** Streamable HTTP MCP client. Requests open direct sockets from the Environment Worker. */
+class HttpMcpClient implements ProjectMcpClient {
+  readonly #server: Extract<ProjectMcpManifestServer, { readonly transport: 'http' }>;
+  readonly #endpoint: URL;
+  #sessionId: string | undefined;
+  #initialized = false;
+  #initializationUncertain = false;
+  #initializationRejected = false;
+  #closed = false;
+  #nextId = 0;
+
+  private constructor(server: Extract<ProjectMcpManifestServer, { readonly transport: 'http' }>) {
+    this.#server = server;
+    this.#endpoint = new URL(server.url);
+  }
+
+  static async launch(server: Extract<ProjectMcpManifestServer, { readonly transport: 'http' }>, onCreated: (client: ProjectMcpClient) => void): Promise<HttpMcpClient> {
+    const client = new HttpMcpClient(server);
+    onCreated(client);
+    try {
+      const initialized = await client.request('initialize', {
+        protocolVersion: PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: 'Sprout Worker', version: '1' },
+      });
+      if (initialized.protocolVersion !== PROTOCOL_VERSION || !isRecord(initialized.capabilities) || !isRecord(initialized.capabilities.tools)) {
+        throw new McpUnsupportedFeatureError();
+      }
+      client.#initialized = true;
+      await client.notify('notifications/initialized');
+      return client;
+    } catch (error) {
+      if (!client.#initialized && !client.#initializationRejected && !client.#sessionId) client.#initializationUncertain = true;
+      await client.close();
+      throw error;
+    }
+  }
+
+  async discoverTools(): Promise<readonly { readonly name: string; readonly description: string; readonly inputSchema: unknown }[]> {
+    const tools: { name: string; description: string; inputSchema: unknown }[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 10; page += 1) {
+      const result = await this.request('tools/list', cursor === undefined ? {} : { cursor });
+      if (!Array.isArray(result.tools) || result.tools.length > MAX_TOOL_COUNT ||
+          result.tools.some(tool => !isRecord(tool) || typeof tool.name !== 'string' || tool.name.length > 128)) {
+        throw new McpUnsupportedFeatureError();
+      }
+      for (const tool of result.tools as JsonRecord[]) {
+        tools.push({ name: tool.name as string, description: typeof tool.description === 'string' ? tool.description : '', inputSchema: tool.inputSchema });
+        if (tools.length > MAX_TOOL_COUNT) throw new McpUnsupportedFeatureError();
+      }
+      if (result.nextCursor === undefined) return tools;
+      if (typeof result.nextCursor !== 'string' || result.nextCursor.length > 512) throw new McpUnsupportedFeatureError();
+      cursor = result.nextCursor;
+    }
+    throw new McpUnsupportedFeatureError();
+  }
+
+  async callTool(name: string, args: Readonly<Record<string, unknown>>): Promise<JsonRecord> {
+    try { return await this.request('tools/call', { name, arguments: args }); }
+    catch (error) {
+      if (error instanceof McpRemoteUnavailableError) throw new McpOutcomeUnknownError();
+      throw error;
+    }
+  }
+
+  sensitiveValues(): readonly string[] {
+    return this.#sessionId === undefined ? [] : [this.#sessionId];
+  }
+
+  async close(): Promise<boolean> {
+    if (this.#closed) return true;
+    if (!this.#sessionId) {
+      if (this.#initializationUncertain && !this.#initializationRejected && !this.#initialized) return false;
+      this.#closed = true;
+      return true;
+    }
+    try {
+      const response = await exchangeHttp(this.#endpoint, this.#requestHeaders(), 'DELETE');
+      if (![200, 202, 204, 404].includes(response.statusCode)) return false;
+      this.#closed = true;
+      return true;
+    } catch { return false; }
+  }
+
+  async notify(method: string): Promise<void> {
+    const response = await this.#send({ jsonrpc: '2.0', method });
+    if (![200, 202, 204].includes(response.statusCode) || response.body.trim() !== '') {
+      throw new McpUnsupportedFeatureError();
+    }
+  }
+
+  async request(method: string, params: JsonRecord): Promise<JsonRecord> {
+    if (this.#closed) throw new McpRemoteUnavailableError();
+    const id = ++this.#nextId;
+    const response = await this.#send({ jsonrpc: '2.0', id, method, params });
+    if (response.statusCode !== 200) throw new McpRemoteUnavailableError();
+    const contentType = response.contentType.split(';', 1)[0]?.trim().toLowerCase();
+    let message: unknown;
+    if (contentType === 'application/json') {
+      try { message = JSON.parse(response.body); } catch { throw new McpUnsupportedFeatureError(); }
+    } else if (contentType === 'text/event-stream') {
+      message = parseMcpEventStream(response.body, id);
+    } else {
+      throw new McpUnsupportedFeatureError();
+    }
+    if (!isRecord(message) || message.jsonrpc !== '2.0' || message.id !== id) throw new McpUnsupportedFeatureError();
+    if (isRecord(message.error)) throw new McpRemoteUnavailableError();
+    if (!isRecord(message.result)) throw new McpUnsupportedFeatureError();
+    return message.result;
+  }
+
+  async #send(message: JsonRecord): Promise<HttpMcpReply> {
+    try {
+      const body = JSON.stringify(message);
+      if (Buffer.byteLength(body, 'utf8') > MAX_HTTP_RESPONSE_BYTES) throw new McpUnsupportedFeatureError();
+      const response = await exchangeHttp(this.#endpoint, this.#requestHeaders(), 'POST', body);
+      if (response.sessionId !== undefined) {
+        if (this.#sessionId !== undefined && this.#sessionId !== response.sessionId) throw new McpUnsupportedFeatureError();
+        this.#sessionId = response.sessionId;
+      }
+      if (response.statusCode >= 400 && response.statusCode < 500) this.#initializationRejected = true;
+      if (response.statusCode === 401 || response.statusCode === 403) throw new McpRemoteUnavailableError();
+      if (response.statusCode < 200 || response.statusCode >= 300) throw new McpRemoteUnavailableError();
+      return response;
+    } catch (error) {
+      const safeError = error instanceof McpTimeoutError || error instanceof McpUnsupportedFeatureError || error instanceof McpRemoteUnavailableError
+        ? error : new McpRemoteUnavailableError();
+      if (!this.#initialized && !this.#sessionId) this.#initializationUncertain = true;
+      throw safeError;
+    }
+  }
+
+  #requestHeaders(): Record<string, string> {
+    return {
+      ...this.#server.headers,
+      accept: 'application/json, text/event-stream',
+      'content-type': 'application/json',
+      'mcp-protocol-version': PROTOCOL_VERSION,
+      ...(this.#sessionId !== undefined ? { 'mcp-session-id': this.#sessionId } : {}),
+    };
+  }
+}
+
+function exchangeHttp(endpoint: URL, headers: Record<string, string>, method: 'POST' | 'DELETE', body?: string): Promise<HttpMcpReply> {
+  return new Promise((resolve, reject) => {
+    const transport = endpoint.protocol === 'https:' ? httpsRequest : httpRequest;
+    const options: RequestOptions = { method, headers, agent: false };
+    let settled = false;
+    let size = 0;
+    const chunks: Buffer[] = [];
+    const finish = (error?: Error, response?: HttpMcpReply): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else if (response) resolve(response);
+      else reject(new McpRemoteUnavailableError());
+    };
+    const request = transport(endpoint, options, response => {
+      response.on('data', (chunk: Buffer | string) => {
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        size += bytes.length;
+        if (size > MAX_HTTP_RESPONSE_BYTES) {
+          response.destroy();
+          finish(new McpUnsupportedFeatureError());
+          return;
+        }
+        chunks.push(bytes);
+      });
+      response.on('end', () => {
+        const sessionHeader = response.headers['mcp-session-id'];
+        const sessionId = typeof sessionHeader === 'string' && /^[\x21-\x7e]{1,256}$/.test(sessionHeader) ? sessionHeader : undefined;
+        if (sessionHeader !== undefined && sessionId === undefined) {
+          finish(new McpUnsupportedFeatureError());
+          return;
+        }
+        finish(undefined, {
+          statusCode: response.statusCode ?? 0,
+          contentType: typeof response.headers['content-type'] === 'string' ? response.headers['content-type'] : '',
+          ...(sessionId !== undefined ? { sessionId } : {}),
+          body: Buffer.concat(chunks).toString('utf8'),
+        });
+      });
+      response.on('error', error => finish(error instanceof Error ? error : new McpRemoteUnavailableError()));
+    });
+    request.on('error', error => finish(error instanceof Error ? error : new McpRemoteUnavailableError()));
+    const timer = setTimeout(() => {
+      request.destroy(new McpTimeoutError());
+      finish(new McpTimeoutError());
+    }, REQUEST_TIMEOUT_MS);
+    timer.unref();
+    request.end(body);
+  });
+}
+
+function parseMcpEventStream(text: string, expectedId: number): JsonRecord {
+  let data: string[] = [];
+  let result: JsonRecord | undefined;
+  const consume = (): void => {
+    if (data.length === 0) return;
+    const payload = data.join('\n');
+    data = [];
+    let message: unknown;
+    try { message = JSON.parse(payload); } catch { throw new McpUnsupportedFeatureError(); }
+    if (!isRecord(message) || message.jsonrpc !== '2.0' || message.id !== expectedId) throw new McpUnsupportedFeatureError();
+    result = message;
+  };
+  for (const line of text.split(/\r?\n/)) {
+    if (line === '') consume();
+    else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+  }
+  consume();
+  if (!result) throw new McpUnsupportedFeatureError();
+  return result;
+}
+
+class McpRemoteUnavailableError extends Error {}
+class McpOutcomeUnknownError extends Error {}
+class McpUnsupportedFeatureError extends Error {}
+
 class StdioMcpClient implements ProjectMcpClient {
   readonly #child: ChildProcessWithoutNullStreams;
   readonly #pending = new Map<number, { resolve(value: JsonRecord): void; reject(error: Error): void; timer: NodeJS.Timeout }>();
@@ -259,7 +502,7 @@ class StdioMcpClient implements ProjectMcpClient {
     child.on('close', () => { this.#closed = true; this.#failPending(new Error('MCP process exited')); });
   }
 
-  static async launch(server: ManifestServer, cwd: string, onCreated: (client: ProjectMcpClient) => void): Promise<StdioMcpClient> {
+  static async launch(server: Extract<ProjectMcpManifestServer, { readonly transport: 'stdio' }>, cwd: string, onCreated: (client: ProjectMcpClient) => void): Promise<StdioMcpClient> {
     const child = spawn(server.command, [...server.args], {
       cwd,
       env: mcpChildEnvironment(server.env),
@@ -384,7 +627,7 @@ class StdioMcpClient implements ProjectMcpClient {
 class SpawnMissingError extends Error {}
 class McpTimeoutError extends Error {}
 
-async function readManifest(root: string): Promise<{ readonly status: 'valid'; readonly servers: readonly ManifestServer[] } | { readonly status: 'missing' | 'invalid' | 'unsupported' }> {
+async function readManifest(root: string): Promise<{ readonly status: 'valid'; readonly servers: readonly ProjectMcpManifestServer[] } | { readonly status: 'missing' | 'invalid' | 'unsupported' }> {
   try {
     const path = join(root, MANIFEST);
     const physicalRoot = await realpath(root);
@@ -398,21 +641,8 @@ async function readManifest(root: string): Promise<{ readonly status: 'valid'; r
       if (bytesRead > MAX_MANIFEST_BYTES) return { status: 'unsupported' };
       const text = buffer.subarray(0, bytesRead).toString('utf8');
       if (text.includes('\uFFFD')) return { status: 'invalid' };
-      const raw: unknown = JSON.parse(text);
-      if (!isRecord(raw) || Object.keys(raw).some(key => key !== 'mcpServers') || !isRecord(raw.mcpServers)) return { status: 'unsupported' };
-      const entries = Object.entries(raw.mcpServers);
-      if (entries.length > MAX_SERVER_COUNT) return { status: 'unsupported' };
-      const servers: ManifestServer[] = [];
-      for (const [name, value] of entries) {
-        if (!isRecord(value) || Object.keys(value).some(key => !['type', 'command', 'args', 'env'].includes(key)) ||
-            (value.type !== undefined && value.type !== 'stdio') || typeof value.command !== 'string' || value.command.trim() === '' || value.command.length > 512 ||
-            value.args !== undefined && (!Array.isArray(value.args) || value.args.length > 100 || value.args.some(arg => typeof arg !== 'string' || arg.length > 4096)) ||
-            value.env !== undefined && !validEnvironment(value.env)) return { status: 'unsupported' };
-        const safeName = sanitizeIdentifier(name, { fallback: '', kind: 'generic', maxLength: 64 });
-        if (!safeName || servers.some(row => sanitizeIdentifier(row.name, { fallback: '', kind: 'generic' }) === safeName)) return { status: 'unsupported' };
-        servers.push({ name, command: value.command, args: (value.args as string[] | undefined) ?? [], env: (value.env as Record<string, string> | undefined) ?? {} });
-      }
-      return { status: 'valid', servers };
+      const parsed = parseProjectMcpManifest(JSON.parse(text));
+      return parsed.status === 'valid' ? parsed : { status: 'unsupported' };
     } finally { await handle.close(); }
   } catch (error) {
     return { status: typeof error === 'object' && error !== null && (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'invalid' };
@@ -506,9 +736,6 @@ function validateValue(schema: JsonRecord, value: unknown, depth: number): boole
 }
 
 function enumMatches(enumValues: unknown, value: unknown): boolean { return enumValues === undefined || (Array.isArray(enumValues) && enumValues.some(item => item === value)); }
-function validEnvironment(value: unknown): value is Record<string, string> {
-  return isRecord(value) && Object.keys(value).length <= 64 && Object.entries(value).every(([key, item]) => /^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(key) && typeof item === 'string' && item.length <= 4096);
-}
 function mcpChildEnvironment(overrides: Readonly<Record<string, string>>): Record<string, string> {
   const inheritedKeys = ['PATH', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'TMP', 'TEMP', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ'];
   const environment: Record<string, string> = {};

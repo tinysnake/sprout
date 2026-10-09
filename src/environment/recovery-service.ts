@@ -149,13 +149,12 @@ export interface EnvironmentRecoveryServiceOptions {
   readonly idFactory?: () => string;
   /** The operator identity recorded on a Force Release outcome. */
   readonly operatorActor?: string;
+  /** Follow the evidence-gated Human release with durable operation dispositions for that lease. */
+  readonly onConfirmedLeaseRelease?: (leaseId: string) => Promise<void>;
   /**
-   * Invoked after any recovery record change (E2, #116).
-   *
-   * The dynamic Environment catalog observes open recovery, reconnect, evidence
-   * synchronization, and resolution through this hook, so an instance's work
-   * safety and eligibility follow the recovery state without a restart. An
-   * observation only; it must never throw or be awaited as authority.
+   * A recovery change (open, reconnect, evidence, resolve, Force Release) is a
+   * work-safety fact for the catalog, so eligibility follows it without a restart.
+   * This observer must not throw or be awaited as authority.
    */
   readonly onMutation?: () => void;
 }
@@ -185,6 +184,7 @@ export class EnvironmentRecoveryService {
   readonly #clock: () => number;
   readonly #idFactory: () => string;
   readonly #operatorActor: string;
+  readonly #onConfirmedLeaseRelease: EnvironmentRecoveryServiceOptions['onConfirmedLeaseRelease'];
   readonly #onMutation: (() => void) | undefined;
 
   constructor(options: EnvironmentRecoveryServiceOptions) {
@@ -197,6 +197,7 @@ export class EnvironmentRecoveryService {
     this.#clock = options.clock ?? Date.now;
     this.#idFactory = options.idFactory ?? (() => `recovery-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
     this.#operatorActor = options.operatorActor ?? 'operator';
+    this.#onConfirmedLeaseRelease = options.onConfirmedLeaseRelease;
     this.#onMutation = options.onMutation;
   }
 
@@ -500,7 +501,7 @@ export class EnvironmentRecoveryService {
         'A Task-held lease is resumed or discarded, not released.',
       );
     }
-    return this.#resolveOrdinary(
+    const result = await this.#resolveOrdinary(
       record,
       'released',
       decision,
@@ -512,6 +513,8 @@ export class EnvironmentRecoveryService {
         }
       },
     );
+    try { await this.#onConfirmedLeaseRelease?.(leaseId); } catch { /* Keep the durable operation uncertain if its disposition cannot be saved. */ }
+    return result;
   }
 
   /**

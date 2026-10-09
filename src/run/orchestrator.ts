@@ -1017,7 +1017,8 @@ export class RunOrchestrator {
     switch (reason) {
       case 'missing-dependency': return 'Project MCP could not start because a configured server dependency is missing on the Worker. Install the server dependency on the assigned Environment and retry.';
       case 'invalid-configuration': return 'Project MCP could not start because the selected .mcp.json configuration is invalid. Correct it in the bound Project workspace and retry.';
-      case 'unsupported-configuration': return 'Project MCP could not start because the selected configuration or server features are unsupported. Use a stdio server that exposes tools and retry.';
+      case 'unsupported-configuration': return 'Project MCP could not start because the selected configuration or server features are unsupported. Use a supported stdio or HTTP server that exposes tools and retry.';
+      case 'remote-unavailable': return 'Project MCP could not reach or authorize the selected remote server from the Environment Worker. Check the remote endpoint and its configured authorization, then retry.';
       case 'no-tools': return 'Project MCP started, but the server exposed no supported tools. Configure a server with an MCP tools capability and retry.';
       case 'worker-refused': return 'The Environment Worker refused Project MCP startup. Check its connection, approval, and capability permission, then retry.';
     }

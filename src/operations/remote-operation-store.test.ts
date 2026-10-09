@@ -28,6 +28,10 @@ test('memory MCP identity store fences identity conflicts and lists unresolved p
   await assert.rejects(store.saveMcpProcess({ ...processIdentity, fingerprint: 'different' }), /identity conflict/);
   await store.saveMcpProcess({ ...processIdentity, state: 'stopped', updatedAt: 102 });
   assert.deepEqual(await store.listOpenMcpProcesses('environment-1'), []);
+  await store.saveMcpOperation({ ...operationIdentity, state: 'uncertain', updatedAt: 103 });
+  await store.resolveUncertainMcpOperationsForLease('lease-1', 104);
+  await store.saveMcpOperation({ ...operationIdentity, state: 'uncertain', updatedAt: 105 });
+  assert.deepEqual(await store.getMcpOperation('operation-1'), { ...operationIdentity, state: 'resolved-uncertain', updatedAt: 104 });
 });
 
 test('SQLite MCP process and operation identities survive reopen with Task lease scope', async () => {
@@ -47,6 +51,10 @@ test('SQLite MCP process and operation identities survive reopen with Task lease
     assert.deepEqual(await reopened.getMcpProcess('process-1'), processIdentity);
     assert.deepEqual(await reopened.getMcpOperation('operation-1'), operationIdentity);
     assert.deepEqual(await reopened.listOpenMcpProcesses('environment-1'), [processIdentity]);
+    await reopened.saveMcpOperation({ ...operationIdentity, state: 'uncertain', updatedAt: 103 });
+    await reopened.resolveUncertainMcpOperationsForLease('lease-1', 104);
+    await reopened.saveMcpOperation({ ...operationIdentity, state: 'uncertain', updatedAt: 105 });
+    assert.deepEqual(await reopened.getMcpOperation('operation-1'), { ...operationIdentity, state: 'resolved-uncertain', updatedAt: 104 });
     await reopened.saveMcpProcess({ ...processIdentity, state: 'stopped', updatedAt: 102 });
     assert.deepEqual(await reopened.listOpenMcpProcesses('environment-1'), []);
     await assert.rejects(reopened.saveMcpOperation({ ...operationIdentity, fingerprint: 'different' }), /identity conflict/);

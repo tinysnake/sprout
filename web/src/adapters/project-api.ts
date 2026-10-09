@@ -24,7 +24,7 @@ export interface ProjectMcpConfigurationSelection {
 
 export interface ProjectMcpServerDescriptor {
   readonly name: string;
-  readonly transport: 'stdio';
+  readonly transport: 'stdio' | 'http';
 }
 
 export interface ProjectMcpInspectionView {

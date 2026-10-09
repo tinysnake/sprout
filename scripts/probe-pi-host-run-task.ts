@@ -1,4 +1,5 @@
-import { createServer } from 'node:net';
+import { createServer as createNetServer } from 'node:net';
+import { createServer, type Server } from 'node:http';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -24,7 +25,7 @@ const root = await mkdtemp(join(tmpdir(), 'sprout-host-task-probe-'));
 let runtime: Awaited<ReturnType<typeof createRuntime>> | undefined;
 let taskLeaseId: string | undefined;
 let stage = 'host-pi-profile';
-const observedOperations: { readonly kind: string; readonly status: string; readonly failure: string; readonly inputMatchedExpected: boolean; readonly inputFacts: readonly string[]; readonly bindingMatched: boolean; readonly taskLeaseHeld: boolean }[] = [];
+const observedOperations: { readonly kind: string; readonly status: string; readonly failure: string; readonly inputMatchedExpected: boolean; readonly inputFacts: readonly string[]; readonly bindingMatched: boolean; readonly taskLeaseHeld: boolean; readonly outputMatchedExpected?: boolean }[] = [];
 const remoteFailureCodes = new Set([
   'invalid-path', 'not-text', 'file-too-large', 'content-conflict', 'invalid-patch', 'operation-limit',
   'command-not-allowed', 'command-timeout', 'run-context-unavailable', 'not-found', 'unsupported',
@@ -35,6 +36,11 @@ const remoteFailureCodes = new Set([
 
 const taskCommandArgs = ['--version'];
 const taskFixturePath = 'README';
+let httpMcpServer: Server | undefined;
+let httpMcpRequestCount = 0;
+let httpMcpCallCount = 0;
+let httpMcpAuthorizationMatched = true;
+const httpMcpAuthorizationMismatchMethods: string[] = [];
 let runPromptNamesTarget = false;
 let runPromptContainsExactRead = false;
 
@@ -53,7 +59,7 @@ function report(facts: Record<string, unknown>): void {
 
 async function availablePortInAssignedRange(): Promise<number> {
   for (let port = 41000; port <= 41009; port++) {
-    const server = createServer();
+    const server = createNetServer();
     const available = await new Promise<boolean>((resolveProbe) => {
       server.once('error', () => resolveProbe(false));
       server.listen(port, 'localhost', () => server.close(() => resolveProbe(true)));
@@ -61,6 +67,85 @@ async function availablePortInAssignedRange(): Promise<number> {
     if (available) return port;
   }
   throw new Error('assigned-port-block-unavailable');
+}
+
+async function availableMcpPort(): Promise<number> {
+  for (let port = 41010; port <= 41019; port++) {
+    const server = createNetServer();
+    const available = await new Promise<boolean>((resolveProbe) => {
+      server.once('error', () => resolveProbe(false));
+      server.listen(port, 'localhost', () => server.close(() => resolveProbe(true)));
+    });
+    if (available) return port;
+  }
+  throw new Error('assigned-mcp-port-block-unavailable');
+}
+
+async function startHttpMcpFixture(): Promise<string> {
+  const port = await availableMcpPort();
+  httpMcpServer = createServer((request, response) => {
+    let body = '';
+    request.setEncoding('utf8');
+    request.on('data', chunk => { body += chunk; });
+    request.on('end', () => {
+      httpMcpRequestCount += 1;
+      const authorizationMatched = request.method !== 'POST' && request.method !== 'DELETE' ||
+        request.headers.authorization === 'Bearer local-fixture-auth';
+      httpMcpAuthorizationMatched &&= authorizationMatched;
+      if (!authorizationMatched) httpMcpAuthorizationMismatchMethods.push(request.method ?? 'unknown');
+      if (request.method === 'DELETE') {
+        response.writeHead(204).end();
+        return;
+      }
+      if (request.method !== 'POST') {
+        response.writeHead(405).end();
+        return;
+      }
+      let message: { readonly id?: number; readonly method: string; readonly params?: { readonly name?: string; readonly arguments?: { readonly text?: string } } };
+      try { message = JSON.parse(body) as typeof message; }
+      catch { response.writeHead(400).end(); return; }
+      if (message.method === 'initialize') {
+        response.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': 'local-http-fixture-session' }).end(JSON.stringify({
+          jsonrpc: '2.0', id: message.id,
+          result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'fixture', version: '1' } },
+        }));
+      } else if (message.method === 'notifications/initialized') {
+        response.writeHead(202).end();
+      } else if (message.method === 'tools/list') {
+        const result = {
+          jsonrpc: '2.0', id: message.id,
+          result: { tools: [{ name: 'http_echo', description: 'Return a fixed bounded HTTP fixture result.', inputSchema: {
+            type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false,
+          } }] },
+        };
+        response.writeHead(200, { 'content-type': 'text/event-stream' }).end(['event: message', `data: ${JSON.stringify(result)}`, '', ''].join(String.fromCharCode(10)));
+      } else if (message.method === 'tools/call') {
+        httpMcpCallCount += 1;
+        const text = message.params?.name === 'http_echo' && message.params.arguments?.text === 'HTTP_OK' ? 'HTTP_OK' : 'HTTP_DIFFERENT';
+        response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+          jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text }] },
+        }));
+      } else {
+        response.writeHead(400).end();
+      }
+    });
+  });
+  await new Promise<void>((resolveListen, reject) => {
+    httpMcpServer!.once('error', reject);
+    httpMcpServer!.listen(port, 'localhost', resolveListen);
+  });
+  return `http://localhost:${port}/mcp`;
+}
+
+function waitForBounded<T>(promise: Promise<T>, timeoutMs = 90_000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    promise,
+    new Promise<T>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('model-turn-timeout')), timeoutMs);
+      timer.unref();
+    }),
+  ]).finally(() => { if (timer !== undefined) clearTimeout(timer); });
 }
 
 function relativePathShape(value: string | undefined): string {
@@ -142,18 +227,24 @@ function observeTaskCapabilities(adapter: HostPiEngineAdapter): HostPiEngineAdap
         } } : {}),
       };
       const mcp = request.remoteProjectMcp;
+      const stdioToolName = mcp?.tools.find(tool => tool.description === 'Echo the supplied text.')?.name;
+      const httpToolName = mcp?.tools.find(tool => tool.description === 'Return a fixed bounded HTTP fixture result.')?.name;
       const observedMcp: RemoteProjectMcpTools | undefined = mcp ? {
         ...mcp,
         async call(name, arguments_) {
           const response = await mcp.call(name, arguments_);
+          const isStdio = name === stdioToolName;
+          const isHttp = name === httpToolName;
+          const expectedText = isStdio ? 'STDIO_OK' : isHttp ? 'HTTP_OK' : '';
           observedOperations.push({
-            kind: 'mcp',
+            kind: isStdio ? 'mcp-stdio' : isHttp ? 'mcp-http' : 'mcp-unknown',
             status: response.status,
             failure: response.reason === undefined ? 'none' : 'mcp-operation-failed',
-            inputMatchedExpected: name === mcp.tools.find(tool => tool.name === name)?.name && arguments_.text === 'MCP_OK',
-            inputFacts: [`tool:${mcp.tools.some(tool => tool.name === name) ? 'advertised' : 'unadvertised'}`, `text:${arguments_.text === 'MCP_OK' ? 'expected' : 'different'}`],
+            inputMatchedExpected: expectedText !== '' && arguments_.text === expectedText,
+            inputFacts: [`tool:${isStdio || isHttp ? 'advertised' : 'unadvertised'}`, `text:${arguments_.text === expectedText ? 'expected' : 'different'}`],
             bindingMatched: bindingsMatch(mcp.binding, workspace.binding),
             taskLeaseHeld: taskLeaseHeld(),
+            outputMatchedExpected: response.status === 'completed' && response.text === expectedText,
           });
           return response;
         },
@@ -247,6 +338,7 @@ try {
       });
       await mkdir(workspacePath, { recursive: true });
       await writeFile(join(workspacePath, taskFixturePath), 'before');
+      const httpUrl = await startHttpMcpFixture();
       const mcpServer = `import { createInterface } from 'node:readline';
 const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
 createInterface({ input: process.stdin }).on('line', line => {
@@ -256,7 +348,10 @@ createInterface({ input: process.stdin }).on('line', line => {
   if (request.method === 'tools/call') send({ jsonrpc: '2.0', id: request.id, result: { content: [{ type: 'text', text: request.params.arguments.text }] } });
 });`;
       await writeFile(join(workspacePath, '.mcp.json'), JSON.stringify({
-        mcpServers: { fixture: { command: process.execPath, args: ['--input-type=module', '-e', mcpServer] } },
+        mcpServers: {
+          fixture: { command: process.execPath, args: ['--input-type=module', '-e', mcpServer] },
+          'http-fixture': { type: 'http', url: httpUrl, headers: { Authorization: 'Bearer local-fixture-auth' } },
+        },
       }));
 
       stage = 'task-approval';
@@ -266,9 +361,10 @@ createInterface({ input: process.stdin }).on('line', line => {
         goal: 'Use the authorized Project workspace and Project MCP tools in one bounded activation.',
         constraints: [
           'Use only the provided tools and do not disclose file contents.',
-          `The only file to read and edit is ${taskFixturePath} (no extension) at the root of the authorized Project workspace. Its initial content is before; replace it with after using remote_edit.`,          'Remote file paths are relative to the Project workspace root, not the Pi session or Task context directory. The remote command starts at the Project workspace root; omit cwd.',
+          `The only file to read and edit is ${taskFixturePath} (no extension) at the root of the authorized Project workspace. Its initial content is before; replace it with after using remote_edit.`,
+          'Remote file paths are relative to the Project workspace root, not the Pi session or Task context directory. The remote command starts at the Project workspace root; omit cwd.',
         ],
-        validationCriteria: ['Remote read, edit, command, and Project MCP calls succeed under the Task lease, then the Project file persists after safe Task end.'],
+        validationCriteria: ['Remote read, edit, command, and both stdio and HTTP Project MCP calls succeed under the Task lease, then the Project file persists after safe Task end.'],
       });
       const begun = await runtime.taskAdmissions.beginForHuman(proposal.id, {
         expectedRevision: proposal.revision,
@@ -288,15 +384,16 @@ createInterface({ input: process.stdin }).on('line', line => {
         const advanced = await runtime.taskAdmissions.advanceForHuman(taskId, {
           targetAgentId: 'scout',
           reason: 'Run the bounded workspace and MCP check.',
-          prompt: `Use only these four tools once each in this order: remote_read, remote_edit, remote_command, then the available Project MCP echo tool. The exact single file is ${taskFixturePath} with no extension at the root of the authorized Project workspace, not the Pi session or Task context directory. First call remote_read with exactly {"path":"${taskFixturePath}"}. Next call remote_edit on that same file with exactly {"path":"${taskFixturePath}","oldText":"before","newText":"after"}. Then call remote_command with executable "node" and args ${JSON.stringify(taskCommandArgs)}; omit cwd because it runs from the Project workspace root. Finally call the advertised echo Project MCP tool once with {"text":"MCP_OK"}. Do not call remote_search or any other tool, repeat calls, or include tool arguments, file contents, or command output in your final response. Report the check result in one short sentence.`,
+          prompt: `Use exactly these five tools once each in this order: remote_read, remote_edit, remote_command, mcp_fixture_echo, mcp_http-fixture_http_echo. The exact single file is ${taskFixturePath} with no extension at the root of the authorized Project workspace, not the Pi session or Task context directory. First call remote_read with exactly {"path":"${taskFixturePath}"}. Next call remote_edit on that same file with exactly {"path":"${taskFixturePath}","oldText":"before","newText":"after"}. Then call remote_command with executable "node" and args ${JSON.stringify(taskCommandArgs)}; omit cwd because it runs from the Project workspace root. Call mcp_fixture_echo once with exactly {"text":"STDIO_OK"}. Call mcp_http-fixture_http_echo once with exactly {"text":"HTTP_OK"}. Do not call remote_search or any other tool, repeat calls, or include tool arguments, file contents, or command output in your final response. Report the check result in one short sentence.`,
         });
-        const settledRun = await runtime.orchestrator.waitFor(advanced.runId);
+        const settledRun = await waitForBounded(runtime.orchestrator.waitFor(advanced.runId));
         const afterRunTask = await runtime.tasks.get(taskId);
         const nestedRunUsedTaskLease = settledRun.leaseId === taskLeaseId;
         const activeAfterRun = taskLeaseHeld();
-        const requiredOperationsComplete = ['mcp', 'read', 'edit', 'command'].every(kind =>
+        const requiredOperationsComplete = ['mcp-stdio', 'mcp-http', 'read', 'edit', 'command'].every(kind =>
           observedOperations.filter(operation => operation.kind === kind && operation.status === 'completed' &&
-            operation.inputMatchedExpected && operation.bindingMatched && operation.taskLeaseHeld).length === 1);
+            operation.inputMatchedExpected && operation.bindingMatched && operation.taskLeaseHeld &&
+            (kind !== 'mcp-stdio' && kind !== 'mcp-http' || operation.outputMatchedExpected === true)).length === 1);
         const operationsWithinBound = observedOperations.length <= 10;
         const operationsComplete = requiredOperationsComplete && operationsWithinBound &&
           observedOperations.every(operation => operation.bindingMatched && operation.taskLeaseHeld);
@@ -326,6 +423,7 @@ createInterface({ input: process.stdin }).on('line', line => {
           }
         }
         const accepted = runSettledSafely && operationsComplete && remoteFileEdited && remoteCommandPassed &&
+          httpMcpAuthorizationMatched && httpMcpAuthorizationMismatchMethods.length === 0 &&
           taskEndedSafely && workspacePersistsAfterTaskEnd;
         report({
           outcome: accepted ? 'model-issued-host-run-task-passed' : 'model-issued-host-run-task-incomplete',
@@ -346,6 +444,11 @@ createInterface({ input: process.stdin }).on('line', line => {
           taskIdleAfterRun: afterRunTask?.environmentLifecycleState === 'idle',
           remoteFileEdited,
           remoteCommandPassed,
+          httpMcpRequests: httpMcpRequestCount,
+          httpMcpToolCalls: httpMcpCallCount,
+          httpMcpAuthorizationMatched,
+          httpMcpAuthorizationMismatchMethods,
+          bothMcpToolsAdvertised: observedOperations.filter(operation => operation.kind === 'mcp-stdio' || operation.kind === 'mcp-http').length === 2,
           taskEndedSafely,
           workspacePersistsAfterTaskEnd,
           finalLeaseState: runtime.pool.getLease(taskLeaseId)?.state ?? 'missing',
@@ -359,5 +462,6 @@ createInterface({ input: process.stdin }).on('line', line => {
   process.exitCode = 2;
 } finally {
   if (runtime) await runtime.close().catch(() => undefined);
+  if (httpMcpServer?.listening) await new Promise<void>(resolveClose => httpMcpServer!.close(() => resolveClose()));
   await rm(root, { recursive: true, force: true });
 }

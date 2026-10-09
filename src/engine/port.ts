@@ -215,8 +215,8 @@ export interface RemoteProjectMcpTools {
 }
 
 export class RemoteProjectMcpStartupError extends Error {
-  readonly reason: 'missing-dependency' | 'invalid-configuration' | 'unsupported-configuration' | 'no-tools' | 'worker-refused';
-  constructor(reason: 'missing-dependency' | 'invalid-configuration' | 'unsupported-configuration' | 'no-tools' | 'worker-refused') {
+  readonly reason: 'missing-dependency' | 'invalid-configuration' | 'unsupported-configuration' | 'remote-unavailable' | 'no-tools' | 'worker-refused';
+  constructor(reason: 'missing-dependency' | 'invalid-configuration' | 'unsupported-configuration' | 'remote-unavailable' | 'no-tools' | 'worker-refused') {
     super(`Project MCP startup failed (${reason})`);
     this.name = 'RemoteProjectMcpStartupError';
     this.reason = reason;
