@@ -128,8 +128,8 @@ const DOTTED_HOST_TOKEN_PATTERN = new RegExp(`^${DOTTED_HOST_SOURCE}$`);
  */
 const KNOWN_PROJECT_FILE_EXTENSIONS = new Set(
   String.raw`
-    adoc ai app avi avif aac bash bib bmp bz2 c cc cfg cjs conf cpp cts css csv
-    doc docx epub err flac gif gql graphql gz h hpp heic htm html ipynb ini io
+    adoc ai app avi avif aac bash bib bmp bz2 c cc cfg cjs com conf cpp cts css csv
+    dll doc docx epub err exe flac gif gql graphql gz h hpp heic htm html ipynb ini io
     java jpeg jpg js json json5 jsonc jsx kt kts less lock log m4a md mdx me mov
     mp3 mpeg mpg mts mjs mkv mobi ogg odt ods odp pdf png ppt pptx properties
     pro proto py rb rar rst rs rtf sass scss sh so sql svg svelte tar tex tgz tif
