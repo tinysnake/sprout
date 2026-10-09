@@ -501,10 +501,6 @@ export class WorkerWorkspaceFiles {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 async function stopProcessGroup(pid: number, control: WorkspaceCommandProcessControl): Promise<boolean> {
   if (process.platform === 'win32') return false;
   const alive = control.groupAlive ?? defaultProcessGroupAlive;

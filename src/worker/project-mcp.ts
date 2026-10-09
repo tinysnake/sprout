@@ -1,7 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
-import type { IncomingMessage, RequestOptions } from 'node:http';
+import type { RequestOptions } from 'node:http';
 import { lstat, open, realpath } from 'node:fs/promises';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { isAbsolute, join, sep } from 'node:path';
