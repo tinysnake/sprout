@@ -44,6 +44,8 @@ interface CodexItem {
   readonly status?: string;
   readonly exitCode?: number | null;
   readonly aggregatedOutput?: string | null;
+  readonly tool?: string;
+  readonly success?: boolean | null;
 }
 
 interface CodexTurn {
@@ -76,6 +78,10 @@ export function mapCodexNotification(
         const what = firstCommandAction(item) ?? item.command ?? 'command';
         return { events: [{ type: 'tool-call', name: 'shell', detail: what }] };
       }
+      if (item?.type === 'dynamicToolCall' && typeof item.tool === 'string') {
+        const name = dynamicToolEventName(item.tool);
+        return { events: [{ type: 'tool-call', name, detail: name }] };
+      }
       if (item?.type === 'reasoning') {
         return { events: [{ type: 'notice', text: 'reasoning' }] };
       }
@@ -93,6 +99,14 @@ export function mapCodexNotification(
         const output = item.aggregatedOutput ?? undefined;
         const summary = output ?? `exit ${item.exitCode ?? 'unknown'}`;
         return { events: [{ type: 'tool-output', text: summary }] };
+      }
+      if (item?.type === 'dynamicToolCall' && typeof item.tool === 'string') {
+        const name = dynamicToolEventName(item.tool);
+        const status = item.success === true ? 'completed' : 'failed';
+        const text = name === 'project-mcp' ? `Project MCP tool ${status}.`
+          : name === 'remote-tool' ? `Remote tool ${status}.`
+            : `Remote ${name} ${status}.`;
+        return { events: [{ type: 'notice', text }] };
       }
       return { events: [] };
     }
@@ -160,6 +174,17 @@ function failTurn(cause: EngineTurnFailureCause): CodexNotificationOutcome {
       ...(isRetryableEngineTurnFailure(cause) ? { retryable: true as const } : {}),
     },
   };
+}
+
+function dynamicToolEventName(tool: string): string {
+  const workspaceOperation = tool.startsWith('sprout_workspace_')
+    ? tool.slice('sprout_workspace_'.length)
+    : undefined;
+  if (workspaceOperation !== undefined && ['read', 'search', 'edit', 'patch', 'command'].includes(workspaceOperation)) {
+    return workspaceOperation;
+  }
+  if (tool.startsWith('sprout_project_mcp_') && /^sprout_project_mcp_[a-f0-9]{16}$/.test(tool)) return 'project-mcp';
+  return 'remote-tool';
 }
 
 function firstCommandAction(item: CodexItem): string | undefined {

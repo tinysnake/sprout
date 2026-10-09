@@ -6,18 +6,21 @@ import { PassThrough } from 'node:stream';
 
 
 import { CodexEngineAdapter, type CodexProcess } from './codex.ts';
+import { createCodexDynamicToolBridge } from './codex-tools.ts';
 import { sanitizedTurnFailure } from './turn-failure.ts';
 
 import { EngineResumeRefusedError } from './port.ts';
 
-import type { AgentRunEvent } from './port.ts';
+import type { AgentRunEvent, RemoteProjectMcpTools, RemoteWorkspaceTools } from './port.ts';
 
 
 interface WireMessage {
   readonly jsonrpc?: string;
-  readonly id?: number;
+  readonly id?: number | string;
   readonly method?: string;
   readonly params?: unknown;
+  readonly result?: unknown;
+  readonly error?: unknown;
 }
 
 
@@ -36,6 +39,7 @@ class FakeCodexServer {
   readonly #out = new PassThrough();
   readonly requests: { method: string; params: unknown }[] = [];
   readonly notifications: string[] = [];
+  readonly responses: { readonly id: number | string; readonly result?: unknown; readonly error?: unknown }[] = [];
   #buffer = '';
   #script: Script;
   #onExit: ((code: number | null) => void) | undefined;
@@ -86,6 +90,10 @@ class FakeCodexServer {
     this.#out.write(`${JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32_601, message, ...(data !== undefined ? { data } : {}) } })}\n`);
   }
 
+  requestFromServer(method: string, params: unknown, id = 900): void {
+    this.#out.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+  }
+
   notify(method: string, params: unknown): void {
     this.#out.write(`${JSON.stringify({ jsonrpc: '2.0', method, params })}\n`);
   }
@@ -93,11 +101,17 @@ class FakeCodexServer {
   #dispatch(line: string): void {
     if (line.trim() === '') return;
     const message = JSON.parse(line) as WireMessage;
-    if (typeof message.method !== 'string') return;
+    if (typeof message.method !== 'string') {
+      if (typeof message.id === 'number' || typeof message.id === 'string') {
+        this.responses.push({ id: message.id, ...(message.result !== undefined ? { result: message.result } : {}), ...(message.error !== undefined ? { error: message.error } : {}) });
+      }
+      return;
+    }
     if (message.id === undefined) {
       this.notifications.push(message.method);
       return;
     }
+    if (typeof message.id !== 'number') return;
     this.requests.push({ method: message.method, params: message.params });
     this.#script({ id: message.id, method: message.method, params: message.params }, this);
   }
@@ -118,6 +132,181 @@ async function collect(turn: { events: AsyncIterable<AgentRunEvent> }): Promise<
   return events;
 }
 
+
+test('Codex publishes typed remote tools and dispatches app-server dynamic tool calls', async () => {
+  let remoteReadCalls = 0;
+  const remoteWorkspace: RemoteWorkspaceTools = {
+    binding: { projectId: 'project-remote', environmentInstanceId: 'environment-remote', bindingId: 'binding-remote',
+      generation: 3, connectionEpoch: 2, workspaceId: 'workspace-remote' },
+    operations: ['read'],
+    async read(path) {
+      remoteReadCalls += 1;
+      assert.equal(path, 'src/remote.txt');
+      return { operationId: 'remote-read', projectId: 'project-remote', environmentInstanceId: 'environment-remote',
+        bindingId: 'binding-remote', generation: 3, connectionEpoch: 2, workspaceId: 'workspace-remote',
+        operation: 'read', status: 'completed', path, content: 'REMOTE_ONLY' };
+    },
+    async search() { throw new Error('unexpected search'); },
+    async inspect() { return { status: 'completed' }; },
+    async cancel() { return { accepted: false, status: 'not-found' }; },
+  };
+  const server = new FakeCodexServer((request, self) => {
+    if (request.method === 'initialize') self.respond(request.id, {});
+    if (request.method === 'thread/start') self.respond(request.id, { thread: { id: 'thread-remote' } });
+    if (request.method === 'turn/start') {
+      self.respond(request.id, { turn: { id: 'turn-remote' } });
+      setImmediate(() => {
+        self.notify('item/started', { item: { type: 'dynamicToolCall', namespace: null,
+          tool: 'sprout_workspace_read', arguments: { path: 'src/remote.txt' } } });
+        self.requestFromServer('item/tool/call', { threadId: 'thread-remote', turnId: 'turn-remote', callId: 'call-remote',
+          namespace: null, tool: 'sprout_workspace_read', arguments: { path: 'src/remote.txt' } });
+        setImmediate(() => {
+          const response = self.responses.find(row => row.id === 900)?.result as { contentItems?: readonly { type: string; text?: string }[]; success?: boolean } | undefined;
+          self.notify('item/completed', { item: { type: 'dynamicToolCall', namespace: null, tool: 'sprout_workspace_read',
+            arguments: { path: 'src/remote.txt' }, status: 'completed', contentItems: response?.contentItems, success: response?.success } });
+          self.notify('item/completed', { item: { type: 'agentMessage', text: 'Read the selected remote file.' } });
+          self.notify('turn/completed', { turn: { id: 'turn-remote', status: 'completed', error: null } });
+        });
+      });
+    }
+  });
+  const session = await startAdapter(server).startSession({ agentId: 'agent-remote', workingDirectory: '/tmp', remoteWorkspace });
+  const turn = session.run('Read src/remote.txt.');
+  const events = await collect(turn);
+  assert.equal((await turn.completion).status, 'completed');
+  const initialization = server.requests.find(row => row.method === 'initialize')?.params as Record<string, unknown>;
+  assert.deepEqual(initialization.capabilities, { experimentalApi: true });
+  const start = server.requests.find(row => row.method === 'thread/start')?.params as Record<string, unknown>;
+  assert.deepEqual(start.dynamicTools, [{ type: 'function', name: 'sprout_workspace_read',
+    description: 'Read a file from the selected remote Project workspace.',
+    inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false } }]);
+  assert.equal(remoteReadCalls, 1);
+  assert.equal((server.responses.find(row => row.id === 900)?.result as { success?: boolean } | undefined)?.success, true);
+  assert.ok(events.some(event => event.type === 'tool-call' && event.name === 'read'));
+  assert.ok(events.some(event => event.type === 'notice' && event.text === 'Remote read completed.'));
+  assert.equal(JSON.stringify(events).includes('REMOTE_ONLY'), false, 'remote file content is not persisted in Codex Run events');
+  await session.close();
+});
+
+
+test('Codex maps only the selected Worker MCP catalog and keeps remote results out of Run events', async () => {
+  const calls: { readonly name: string; readonly arguments: Readonly<Record<string, unknown>> }[] = [];
+  const remoteProjectMcp: RemoteProjectMcpTools = {
+    binding: { projectId: 'project-mcp', environmentInstanceId: 'environment-mcp', bindingId: 'binding-mcp',
+      generation: 2, connectionEpoch: 3, workspaceId: 'workspace-mcp' },
+    tools: [{ name: 'lookup_private_record', description: 'Look up a remote record.',
+      inputSchema: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'], additionalProperties: false } }],
+    async call(name, arguments_) {
+      calls.push({ name, arguments: arguments_ });
+      return { status: 'completed', text: 'PRIVATE_REMOTE_MCP_RESULT' };
+    },
+    async close() { return 'stopped'; },
+  };
+  let dynamicName = '';
+  const server = new FakeCodexServer((request, self) => {
+    if (request.method === 'initialize') self.respond(request.id, {});
+    if (request.method === 'thread/start') {
+      const params = request.params as { dynamicTools?: readonly { name: string }[] };
+      dynamicName = params.dynamicTools?.[0]?.name ?? '';
+      self.respond(request.id, { thread: { id: 'thread-mcp' } });
+    }
+    if (request.method === 'turn/start') {
+      self.respond(request.id, { turn: { id: 'turn-mcp' } });
+      setImmediate(() => {
+        const arguments_ = { key: 'record-7' };
+        self.notify('item/started', { item: { type: 'dynamicToolCall', namespace: null, tool: dynamicName, arguments: arguments_ } });
+        self.requestFromServer('item/tool/call', { threadId: 'thread-mcp', turnId: 'turn-mcp', callId: 'call-mcp',
+          namespace: null, tool: dynamicName, arguments: arguments_ });
+        setImmediate(() => {
+          const response = self.responses.find(row => row.id === 900)?.result as { success?: boolean } | undefined;
+          self.notify('item/completed', { item: { type: 'dynamicToolCall', namespace: null, tool: dynamicName,
+            status: 'completed', success: response?.success } });
+          self.notify('item/completed', { item: { type: 'agentMessage', text: 'The selected MCP lookup completed.' } });
+          self.notify('turn/completed', { turn: { id: 'turn-mcp', status: 'completed', error: null } });
+        });
+      });
+    }
+  });
+  const session = await startAdapter(server).startSession({ agentId: 'agent-mcp', workingDirectory: '/tmp', remoteProjectMcp });
+  const turn = session.run('Look up the authorized remote record.');
+  const events = await collect(turn);
+  assert.equal((await turn.completion).status, 'completed');
+  assert.match(dynamicName, /^sprout_project_mcp_[a-f0-9]{16}$/);
+  assert.deepEqual(calls, [{ name: 'lookup_private_record', arguments: { key: 'record-7' } }]);
+  assert.equal((server.responses.find(row => row.id === 900)?.result as { success?: boolean } | undefined)?.success, true);
+  assert.ok(events.some(event => event.type === 'tool-call' && event.name === 'project-mcp'));
+  assert.ok(events.some(event => event.type === 'notice' && event.text === 'Project MCP tool completed.'));
+  assert.equal(JSON.stringify(events).includes('PRIVATE_REMOTE_MCP_RESULT'), false);
+  await session.close();
+  await remoteProjectMcp.close();
+});
+
+
+test('Codex resumes with the current Worker MCP catalog and refuses stale tool names', async () => {
+  const schema = { type: 'object', properties: { key: { type: 'string' } }, required: ['key'], additionalProperties: false };
+  const staleCatalog: RemoteProjectMcpTools = {
+    binding: { projectId: 'project-mcp', environmentInstanceId: 'environment-mcp', bindingId: 'binding-old',
+      generation: 1, connectionEpoch: 2, workspaceId: 'workspace-mcp' },
+    tools: [{ name: 'lookup_old', description: 'Old catalog entry.', inputSchema: schema }],
+    async call() { throw new Error('stale tool must not be invoked'); },
+    async close() { return 'stopped'; },
+  };
+  const currentCalls: string[] = [];
+  const currentCatalog: RemoteProjectMcpTools = {
+    binding: { projectId: 'project-mcp', environmentInstanceId: 'environment-mcp', bindingId: 'binding-current',
+      generation: 2, connectionEpoch: 3, workspaceId: 'workspace-mcp' },
+    tools: [{ name: 'lookup_current', description: 'Current catalog entry.', inputSchema: schema }],
+    async call(name) { currentCalls.push(name); return { status: 'completed', text: 'CURRENT_RESULT' }; },
+    async close() { return 'stopped'; },
+  };
+  const staleName = createCodexDynamicToolBridge({ remoteProjectMcp: staleCatalog }).specs[0]!.name;
+  let currentName = '';
+  const server = new FakeCodexServer((request, self) => {
+    if (request.method === 'initialize') self.respond(request.id, {});
+    if (request.method === 'thread/resume') {
+      const params = request.params as { dynamicTools?: readonly { name: string }[] };
+      currentName = params.dynamicTools?.[0]?.name ?? '';
+      self.respond(request.id, { thread: { id: 'thread-resumed-mcp' } });
+    }
+    if (request.method === 'turn/start') {
+      self.respond(request.id, { turn: { id: 'turn-resumed-mcp' } });
+      setImmediate(() => {
+        self.requestFromServer('item/tool/call', { threadId: 'thread-resumed-mcp', turnId: 'turn-resumed-mcp', callId: 'stale-call',
+          namespace: null, tool: staleName, arguments: { key: 'old' } }, 900);
+        setImmediate(() => {
+          self.requestFromServer('item/tool/call', { threadId: 'thread-resumed-mcp', turnId: 'turn-resumed-mcp', callId: 'current-call',
+            namespace: null, tool: currentName, arguments: { key: 'current' } }, 901);
+          setImmediate(() => {
+            const stale = self.responses.find(row => row.id === 900)?.result as { success?: boolean } | undefined;
+            const current = self.responses.find(row => row.id === 901)?.result as { success?: boolean } | undefined;
+            self.notify('item/completed', { item: { type: 'dynamicToolCall', namespace: null, tool: staleName,
+              status: 'failed', success: stale?.success } });
+            self.notify('item/completed', { item: { type: 'dynamicToolCall', namespace: null, tool: currentName,
+              status: 'completed', success: current?.success } });
+            self.notify('item/completed', { item: { type: 'agentMessage', text: 'Current MCP catalog used.' } });
+            self.notify('turn/completed', { turn: { id: 'turn-resumed-mcp', status: 'completed', error: null } });
+          });
+        });
+      });
+    }
+  });
+  const session = await startAdapter(server).startSession({ agentId: 'agent-mcp', workingDirectory: '/tmp',
+    resumeSessionKey: 'thread-resumed-mcp', remoteProjectMcp: currentCatalog });
+  const turn = session.run('Use the current Project MCP catalog.');
+  const events = await collect(turn);
+  assert.equal((await turn.completion).status, 'completed');
+  const resume = server.requests.find(row => row.method === 'thread/resume')?.params as { dynamicTools?: readonly { name: string }[] };
+  assert.deepEqual(resume.dynamicTools?.map(tool => tool.name), [currentName]);
+  assert.notEqual(currentName, staleName);
+  assert.equal((server.responses.find(row => row.id === 900)?.result as { success?: boolean } | undefined)?.success, false);
+  assert.equal((server.responses.find(row => row.id === 901)?.result as { success?: boolean } | undefined)?.success, true);
+  assert.deepEqual(currentCalls, ['lookup_current']);
+  assert.ok(events.some(event => event.type === 'notice' && event.text === 'Project MCP tool failed.'));
+  assert.ok(events.some(event => event.type === 'notice' && event.text === 'Project MCP tool completed.'));
+  assert.equal(JSON.stringify(events).includes('CURRENT_RESULT'), false);
+  await session.close();
+  await currentCatalog.close();
+});
 
 test('the adapter initialises, starts a thread, and launches the app-server transport', async () => {
   const server = new FakeCodexServer((request, self) => {

@@ -8,6 +8,7 @@ import { ScriptedEngineAdapter } from './engine/scripted.ts';
 import { createSessionEventProgressState, sessionEventDisposition } from './engine/pi-runner-events.ts';
 import { mapPiEvent, newPiTurnState } from './engine/pi-protocol.ts';
 import type { HostPiEngineAdapter } from './engine/pi-host.ts';
+import type { HostCodexEngineAdapter } from './engine/codex-host.ts';
 import type { AgentRunEvent, RemoteWorkspaceOperationResult, StartSessionRequest } from './engine/port.ts';
 import { toRunView } from './web/views.ts';
 import type { ProjectMcpClientLauncher } from './worker/project-mcp.ts';
@@ -22,21 +23,25 @@ import {
   waitFor,
 } from './runtime-test-harness.ts';
 
-test('Host-run without a leased Work Environment refuses an authorized Project read', async (t) => {
+for (const hostEngine of ['pi', 'codex'] as const) test(`a selected Host-run ${hostEngine} Work Environment leases authorized Project reads`, async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-remote-read-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const workerRoot = join(directory, 'worker-workspaces');
   const keyPath = join(directory, 'worker-key.pem');
   const model = 'provider/model-host';
   const runtimeProject = { ...project(), memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }] };
+  const profileId = `profile-runtime-remote-read-${hostEngine}`;
   const localEngine = new ScriptedEngineAdapter({ turns: [scriptedTurn('I read the remote sentinel.')] });
   const observed: RemoteWorkspaceOperationResult[] = [];
-  const hostPi = {
-    id: 'pi', profileId: 'profile-runtime-remote-read', authorizedModel: model,
+  const host = {
+    id: hostEngine, profileId, authorizedModel: model,
     capabilities: localEngine.capabilities,
+    supportsEffort: () => true,
     async readiness() {
-      return { profileId: 'profile-runtime-remote-read', engine: 'pi', status: 'ready', installation: 'ready',
-        authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready', version: '1.0.4', observedAt: 1 };
+      return { profileId, engine: hostEngine, status: 'ready', installation: 'ready',
+        authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready',
+        ...(hostEngine === 'codex' ? { version: '0.159.3', supportedEfforts: ['medium'] } : { version: '1.0.4' }),
+        observedAt: 1 };
     },
     async startSession(request: StartSessionRequest) {
       assert.ok(request.remoteWorkspace, 'Runtime supplies its pinned workspace boundary');
@@ -60,21 +65,21 @@ test('Host-run without a leased Work Environment refuses an authorized Project r
         close: () => session.close(),
       };
     },
-  } as unknown as HostPiEngineAdapter;
+  } as unknown as HostPiEngineAdapter | HostCodexEngineAdapter;
   const runtime = await createRuntime({
     configuration: hostConfiguration({
       executionMode: 'host-run', environmentSource: 'enrollment',
       runtimeConfiguration: {
         agents: [{
-          id: 'scout', name: 'scout', engine: 'pi', capability: 'agent-run', model, effort: 'medium',
-          workOptions: [{ id: 'host-pi', engine: 'pi', workModel: model, effort: 'medium' }],
+          id: 'scout', name: 'scout', engine: hostEngine, capability: 'agent-run', model, effort: 'medium',
+          workOptions: [{ id: `host-${hostEngine}`, engine: hostEngine, workModel: model, effort: 'medium' }],
         }],
         project: runtimeProject,
       },
       databasePath: join(directory, 'state.db'),
     }),
     projectRoot: '/synthetic/project-root',
-    hostPi,
+    ...(hostEngine === 'pi' ? { hostPi: host as HostPiEngineAdapter } : { hostCodex: host as HostCodexEngineAdapter }),
   });
 
   try {
@@ -85,11 +90,11 @@ test('Host-run without a leased Work Environment refuses an authorized Project r
       publicKey: workerPublicKey(identity.privateKey),
       platform: 'macos',
       protocolVersion: '3.0',
-      capabilityRequests: ['read-only-investigation'],
+      capabilityRequests: ['agent-run', 'read-only-investigation'],
       engineFacts: [],
     });
     await runtime.enrollments.approve(enrollment.enrollment.id, {
-      capabilityPermissions: { 'read-only-investigation': true },
+      capabilityPermissions: { 'agent-run': true, 'read-only-investigation': true },
     });
     await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, workerRoot);
     const info = await runtime.enrollmentEnvironment.info?.(INSTANCE_ID);
@@ -114,22 +119,22 @@ test('Host-run without a leased Work Environment refuses an authorized Project r
     assert.equal(readFileSync(join(workerRoot, 'repos', 'remote-read', 'sentinel.txt'), 'utf8'), 'REMOTE_WORKER_SENTINEL');
 
     const { id } = await runtime.orchestrator.submit({
-      agentId: 'scout', projectId: 'remote-read-project', prompt: 'Read sentinel.txt.',
+      agentId: 'scout', projectId: 'remote-read-project', workEnvironmentInstanceId: INSTANCE_ID, prompt: 'Read sentinel.txt.',
     });
     const run = await runtime.orchestrator.waitFor(id);
     if (run.status !== 'completed') throw new Error(`Host-run failed: ${run.failure ?? 'no failure detail'}`);
     assert.equal(run.executionMode, 'host-run');
-    assert.equal(run.engineHostProfileId, 'profile-runtime-remote-read');
+    assert.equal(run.engineHostProfileId, profileId);
     assert.equal(observed.length, 1);
-    assert.equal(observed[0]?.status, 'failed');
-    assert.equal(observed[0]?.failure, 'lease-required');
-    assert.equal(runtime.pool.leases().length, 0, 'the run performs no lazy acquisition');
+    assert.equal(observed[0]?.status, 'completed');
+    assert.equal(observed[0]?.content, 'REMOTE_WORKER_SENTINEL');
+    assert.ok(runtime.pool.leases().every(row => row.state === 'released'), 'the selected Agent-run lease releases after settled remote reading');
   } finally {
     await runtime.close();
   }
 });
 
-test('standalone Host-run keeps Environment history but refuses bound reads without a lease', async (t) => {
+test('selected Host-run keeps scoped Environment history while independent conversations stay detached', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-binding-switch-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const model = 'provider/model-binding-switch';
@@ -204,10 +209,10 @@ test('standalone Host-run keeps Environment history but refuses bound reads with
       const enrollment = await runtime.enrollments.requestEnrollment({
         environmentInstanceId: environment, displayName: `Binding switch Worker ${index}`,
         publicKey: workerPublicKey(identity.privateKey), platform: 'macos', protocolVersion: '3.0',
-        capabilityRequests: ['read-only-investigation'], engineFacts: [],
+        capabilityRequests: ['agent-run', 'read-only-investigation'], engineFacts: [],
       });
       await runtime.enrollments.approve(enrollment.enrollment.id, {
-        capabilityPermissions: { 'read-only-investigation': true },
+        capabilityPermissions: { 'agent-run': true, 'read-only-investigation': true },
       });
       await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, root);
     }
@@ -242,13 +247,13 @@ test('standalone Host-run keeps Environment history but refuses bound reads with
     const unavailable = await submit('binding-switch-unauthorized', 'Use only the requested Environment.');
     const retainedBindingUnavailable = await submit(undefined, 'Keep the last selected Environment; fail closed.');
 
-    assert.equal(runA.status, 'completed');
-    assert.equal(runB.status, 'completed');
-    assert.equal(runBResume.status, 'completed');
-    assert.equal(isolatedScope.status, 'completed');
+    if (runA.status !== 'completed') throw new Error(`Environment A run failed: ${runA.failure ?? 'no failure detail'}`);
+    if (runB.status !== 'completed') throw new Error(`Environment B run failed: ${runB.failure ?? 'no failure detail'}`);
+    if (runBResume.status !== 'completed') throw new Error(`Environment B resume failed: ${runBResume.failure ?? 'no failure detail'}`);
+    if (isolatedScope.status !== 'completed') throw new Error(`Independent conversation failed: ${isolatedScope.failure ?? 'no failure detail'}`);
     assert.equal(isolatedScope.requestedWorkEnvironmentInstanceId, undefined);
-    assert.equal(isolatedScope.workspaceBinding?.environmentInstanceId, environmentA,
-      'a new conversation does not inherit B from another conversation and follows only the Project default');
+    assert.equal(isolatedScope.workspaceBinding, undefined,
+      'a new conversation does not inherit another conversation’s Work Environment');
     assert.equal(unavailable.status, 'failed');
     assert.equal(unavailable.workspaceBindingStatus, 'unavailable');
     assert.equal(retainedBindingUnavailable.status, 'failed', 'a revoked retained binding cannot fall back to Environment A');
@@ -264,9 +269,12 @@ test('standalone Host-run keeps Environment history but refuses bound reads with
       'the latest authorized binding stays selected when the next activation omits a selector');
     assert.equal(retainedBindingUnavailable.requestedWorkEnvironmentInstanceId, environmentB,
       'an unavailable retained binding stays the attempted binding instead of selecting another grant');
-    assert.equal(reads[0]?.failure, 'lease-required');
-    assert.equal(reads[1]?.failure, 'lease-required');
-    assert.equal(reads[2]?.failure, 'lease-required');
+    if (reads[0]?.status !== 'completed') throw new Error(`Environment A read failed: ${JSON.stringify(reads[0])}`);
+    assert.equal(reads[0]?.content, environmentA);
+    if (reads[1]?.status !== 'completed') throw new Error(`Environment B read failed: ${JSON.stringify(reads[1])}`);
+    assert.equal(reads[1]?.content, environmentB);
+    if (reads[2]?.status !== 'completed') throw new Error(`Environment B resumed read failed: ${JSON.stringify(reads[2])}`);
+    assert.equal(reads[2]?.content, environmentB);
     assert.equal(starts[0]?.resumeSessionKey, undefined);
     assert.equal(starts[1]?.resumeSessionKey, undefined, 'Environment B cannot resume Environment A native history');
     assert.equal(starts[2]?.resumeSessionKey, 'scripted-key-2', 'same current grant resumes its native session');
@@ -274,20 +282,19 @@ test('standalone Host-run keeps Environment history but refuses bound reads with
     assert.match(promptB, /Sprout switched the current Work Environment from composition-instance to z-binding-switch-instance-b/);
     assert.match(starts[1]?.instructions ?? '', /Sprout current workspace and capability snapshot/);
     assert.match(starts[1]?.instructions ?? '', /Environment: z-binding-switch-instance-b/);
-    assert.ok(starts[1]?.instructions?.includes('Remote workspace operations: none'));
+    assert.match(starts[1]?.instructions ?? '', /Remote workspace operations: read, search, edit, patch, command/);
     assert.match(starts[1]?.instructions ?? '', /Binding change: Sprout switched the current Work Environment from composition-instance to z-binding-switch-instance-b/);
     assert.match(promptB, /Environment composition-instance, relative workspace at binding generation 1: Completed work in Environment A\./);
     assert.match(starts[2]?.instructions ?? '', /Sprout current workspace and capability snapshot/,
       'native resume reconstructs the current state in the session system prompt');
     assert.match(starts[2]?.instructions ?? '', /Environment: z-binding-switch-instance-b/);
-    assert.match(starts[3]?.instructions ?? '', /Status: active/);
-    assert.match(starts[3]?.instructions ?? '', /Environment: composition-instance/);
-    assert.equal(starts[3]?.remoteWorkspace?.binding.environmentInstanceId, environmentA,
-      'a separate conversation resolves the Project default instead of inheriting Environment B');
+    assert.match(starts[3]?.instructions ?? '', /Status: detached/);
+    assert.equal(starts[3]?.remoteWorkspace, undefined,
+      'an independent ordinary conversation does not contact the default Worker');
     const staleRead = await starts[0]?.remoteWorkspace?.read('origin.txt');
-    assert.equal(staleRead?.status, 'failed', 'a prior generation cannot call after the new binding is published');
+    if (staleRead?.status !== 'failed') throw new Error(`Prior binding read was not rejected: ${JSON.stringify(staleRead)}`);
     assert.equal(reads.length, 3, 'the stale call never executes against either Worker');
-    assert.equal(runtime.pool.leases().length, 0, 'selected read-only Work Environments do not acquire leases lazily');
+    assert.ok(runtime.pool.leases().every(row => row.state === 'released'), 'selected read-only Work Environment leases release after the run');
   } finally {
     await runtime.close();
   }
@@ -607,7 +614,7 @@ test('Host-run Task calls typed Project MCP tools under its Task-held Environmen
   }
 });
 
-test('Host-run without a containing lease refuses edit, patch, and command without changing remote work', async (t) => {
+test('selected Host-run performs remote edits and commands under an Agent-run lease', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-remote-mutation-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const workerRoot = join(directory, 'worker-workspaces');
@@ -639,8 +646,9 @@ test('Host-run without a containing lease refuses edit, patch, and command witho
         authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready', version: '1.0.4', observedAt: 1 };
     },
     async startSession(request: StartSessionRequest) {
-      assert.deepEqual(request.remoteWorkspace?.operations, [], 'the Host-run has no lease and receives no bound tools');
-      const tools = request.remoteWorkspace!;
+      assert.ok(request.remoteWorkspace, 'a selected Work Environment provides its bound workspace tools');
+      assert.ok((request.remoteWorkspace.operations?.length ?? 0) > 0);
+      const tools = request.remoteWorkspace;
       const runEvents: AgentRunEvent[] = [];
       const turnState = newPiTurnState();
       const eventState = {
@@ -748,15 +756,9 @@ test('Host-run without a containing lease refuses edit, patch, and command witho
       runContextRecycled = true;
     };
     const execute = runtime.enrollmentEnvironment.executeWorkspaceFileOperation.bind(runtime.enrollmentEnvironment);
-    let loseNextResponse = true;
     runtime.enrollmentEnvironment.executeWorkspaceFileOperation = async (environmentInstanceId, input, onProgress) => {
       workerDispatches++;
-      const result = await execute(environmentInstanceId, input, onProgress);
-      if (loseNextResponse && (input.operation === 'edit' || input.operation === 'patch')) {
-        loseNextResponse = false;
-        throw new Error('simulated Worker response loss');
-      }
-      return result;
+      return await execute(environmentInstanceId, input, onProgress);
     };
     await runtime.projectService.create({ id: 'remote-mutation-project', displayName: 'Remote mutation Project' });
     await runtime.projectService.addMembership('remote-mutation-project', { agentId: 'scout' });
@@ -767,7 +769,8 @@ test('Host-run without a containing lease refuses edit, patch, and command witho
     mkdirSync(join(workerRoot, 'repos', 'remote-mutation', 'src'), { recursive: true });
     writeFileSync(join(workerRoot, 'repos', 'remote-mutation', 'src', 'target.txt'), pathSentinel);
 
-    const submitted = await runtime.orchestrator.submit({ agentId: 'scout', projectId: 'remote-mutation-project', prompt: 'Edit and patch the remote file.' });
+    const submitted = await runtime.orchestrator.submit({ agentId: 'scout', projectId: 'remote-mutation-project',
+      workEnvironmentInstanceId: INSTANCE_ID, prompt: 'Edit and patch the remote file.' });
     const run = await runtime.orchestrator.waitFor(submitted.id);
     if (run.status !== 'completed') throw new Error(`Host-run failed: ${run.failure ?? 'no failure detail'}`);
     const projection = toRunView(run);
@@ -777,36 +780,34 @@ test('Host-run without a containing lease refuses edit, patch, and command witho
       assert.ok(!persistedEvents.includes(sentinel), `persisted Run events omit ${sentinel.startsWith('/') ? 'the host path' : 'the credential'}`);
       assert.ok(!projectedEvents.includes(sentinel), `Web Run projection omits ${sentinel.startsWith('/') ? 'the host path' : 'the credential'}`);
     }
-    assert.match(persistedEvents, /Remote edit failed\./, 'remote edit status is visible independently of the model summary');
-    assert.doesNotMatch(persistedEvents, /REMOTE_COMMAND_OK/);
+    assert.match(persistedEvents, /Remote edit completed\./, 'remote edit status is visible independently of the model summary');
+    assert.match(persistedEvents, /REMOTE_COMMAND_OK/, 'sanitized remote command progress is visible during the selected run');
     assert.deepEqual(projection.events, run.events, 'the Web Run projection carries the sanitized persisted events');
-    const commandOutcomeIndex = run.events.findIndex(event => event.type === 'notice' && event.text === 'Remote command failed.');
+    const commandOutcomeIndex = run.events.findIndex(event => event.type === 'notice' && event.text === 'Remote command completed.');
     const summaryIndex = run.events.findIndex(event => event.type === 'message' && event.final);
-    assert.ok(commandOutcomeIndex >= 0 && summaryIndex > commandOutcomeIndex, 'the refusal is visible before the model summary');
-    assert.deepEqual(observed.map(result => result.status), ['failed', 'failed', 'failed']);
-    assert.equal(observed[0]?.failure, 'containing-lease-unavailable');
-    assert.equal(inspection?.status, 'not-found');
-    assert.equal(conflictingReplay?.failure, 'containing-lease-unavailable');
-    assert.equal(matchingReplay?.failure, 'containing-lease-unavailable');
-    assert.equal(workerDispatches, 0, 'edit, patch, and command never reach the Worker');
-    assert.deepEqual(commandProgress, []);
+    assert.ok(commandOutcomeIndex >= 0 && summaryIndex > commandOutcomeIndex, 'the result is visible before the model summary');
+    assert.deepEqual(observed.map(result => result.status), ['completed', 'completed', 'completed']);
+    assert.equal(inspection?.status, 'completed');
+    assert.equal(conflictingReplay?.failure, 'operation-identity-conflict');
+    assert.equal(matchingReplay?.status, 'failed');
+    assert.equal(matchingReplay?.failure, 'operation-outcome-inspection-required');
+    assert.equal(workerDispatches, 3, 'edit, patch, and command run under the selected Agent-run lease');
+    assert.ok(commandProgress.some(progress => progress.text.includes('REMOTE_COMMAND_OK')));
     assert.equal(observed[2]?.operation, 'command');
-    assert.equal(observed[2]?.failure, 'containing-lease-unavailable');
     assert.ok(observed.every(result => result.environmentInstanceId === INSTANCE_ID && result.bindingId === access.current?.bindingId));
-    assert.equal(readFileSync(join(workerRoot, 'repos', 'remote-mutation', 'src', 'target.txt'), 'utf8'), pathSentinel,
-      'all refused operations preserve the remote workspace bytes');
+    assert.equal(readFileSync(join(workerRoot, 'repos', 'remote-mutation', 'src', 'target.txt'), 'utf8'), 'REMOTE_PATCHED');
     assert.equal(readFileSync(localFile, 'utf8'), 'LOCAL_SENTINEL');
-    assert.deepEqual(leasesDuringRun, []);
-    assert.equal(leaseStateWhenRunContextPrepared, undefined);
-    assert.equal(runContext, undefined);
-    assert.equal(runContextRecycled, false);
-    assert.equal(runtime.pool.leases().length, 0, 'no lease was acquired by a workspace operation');
+    assert.ok(leasesDuringRun.some(lease => lease.capability === 'agent-run'), 'remote calls share the Orchestrator Agent-run lease');
+    assert.equal(leaseStateWhenRunContextPrepared, 'active');
+    assert.ok(runContext);
+    assert.equal(runContextRecycled, true);
+    assert.ok(runtime.pool.leases().every(row => row.state === 'released'), 'the Agent-run lease releases after settled remote work');
 
     const replay = conflictingReplay!;
-    assert.equal(replay.failure, 'containing-lease-unavailable');
-    assert.equal(readFileSync(join(workerRoot, 'repos', 'remote-mutation', 'src', 'target.txt'), 'utf8'), pathSentinel);
+    assert.equal(replay.failure, 'operation-identity-conflict');
+    assert.equal(readFileSync(join(workerRoot, 'repos', 'remote-mutation', 'src', 'target.txt'), 'utf8'), 'REMOTE_PATCHED');
     const sameIdentity = matchingReplay!;
-    assert.equal(sameIdentity.failure, 'containing-lease-unavailable');
+    assert.equal(sameIdentity.failure, 'operation-outcome-inspection-required');
 
     const holder = await runtime.pool.acquireBoundOperationLeaseRevalidated({
       instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'other-agent', runId: 'other-run', ttlMs: 60_000,
@@ -815,7 +816,7 @@ test('Host-run without a containing lease refuses edit, patch, and command witho
     const blockedTools = await runtime.environmentOperations.attach('remote-mutation-project', 'scout', 'blocked-run');
     const blocked = await blockedTools.edit!('src/target.txt', 'REMOTE_PATCHED', 'SHOULD_NOT_APPLY', 'blocked-edit-1');
     assert.equal(blocked.failure, 'containing-lease-unavailable');
-    assert.equal(readFileSync(join(workerRoot, 'repos', 'remote-mutation', 'src', 'target.txt'), 'utf8'), pathSentinel);
+    assert.equal(readFileSync(join(workerRoot, 'repos', 'remote-mutation', 'src', 'target.txt'), 'utf8'), 'REMOTE_PATCHED');
     assert.equal(runtime.pool.getLease(holder.lease.id)?.state, 'active', 'refused workspace tools do not alter the competing lease');
     runtime.pool.releaseLease(holder.lease.id);
   } finally {
@@ -823,21 +824,16 @@ test('Host-run without a containing lease refuses edit, patch, and command witho
   }
 });
 
-test('an unselected Host-run Work Environment refuses bound commands without acquiring a lease', async (t) => {
+test('an ordinary Host-run Message stays detached from a bound Worker and acquires no lease', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-remote-command-cancel-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const workerRoot = join(directory, 'worker-workspaces');
   const hostRoot = join(directory, 'host-project');
   const keyPath = join(directory, 'worker-key.pem');
   const model = 'provider/model-host';
-  const localEngine = new ScriptedEngineAdapter({ turns: [] });
-  let commandResult: Promise<RemoteWorkspaceOperationResult> | undefined;
-  let remoteTools: NonNullable<StartSessionRequest['remoteWorkspace']> | undefined;
+  const localEngine = new ScriptedEngineAdapter({ turns: [scriptedTurn('A normal Host-run reply.')] });
+  let remoteWorkspaceAttached = false;
   let workerDispatches = 0;
-  let resolveCommandAttempt!: (result: RemoteWorkspaceOperationResult) => void;
-  const commandAttempt = new Promise<RemoteWorkspaceOperationResult>(resolve => { resolveCommandAttempt = resolve; });
-  let settleCompletion!: (result: { readonly status: 'interrupted' }) => void;
-  const completion = new Promise<{ readonly status: 'interrupted' }>(resolve => { settleCompletion = resolve; });
   const hostPi = {
     id: 'pi', profileId: 'profile-runtime-remote-command-cancel', authorizedModel: model,
     capabilities: localEngine.capabilities,
@@ -846,22 +842,8 @@ test('an unselected Host-run Work Environment refuses bound commands without acq
         authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready', version: '1.0.4', observedAt: 1 };
     },
     async startSession(request: StartSessionRequest) {
-      const tools = request.remoteWorkspace!;
-      remoteTools = tools;
-      return {
-        sessionId: 'command-cancel-session', engineSessionKey: 'command-cancel-session',
-        run() {
-          commandResult = tools.command!('node', ['-e', "process.stdout.write('STARTED\\n');setInterval(()=>{},1000)"],
-            { timeoutMs: 10_000 }, 'sdk-command-cancel-1');
-          void commandResult.then(result => {
-            resolveCommandAttempt(result);
-            settleCompletion({ status: 'interrupted' });
-          });
-          return { events: (async function* () {})(), completion };
-        },
-        async interrupt() { return true; },
-        async close() { settleCompletion({ status: 'interrupted' }); },
-      };
+      remoteWorkspaceAttached = request.remoteWorkspace !== undefined;
+      return localEngine.startSession(request);
     },
   } as unknown as HostPiEngineAdapter;
   const runtime = await createRuntime({
@@ -896,15 +878,12 @@ test('an unselected Host-run Work Environment refuses bound commands without acq
     await runtime.projectService.addMembership('remote-command-cancel-project', { agentId: 'scout' });
     await runtime.projectAccess.grant({ projectId: 'remote-command-cancel-project', environmentInstanceId: INSTANCE_ID,
       selection: { kind: 'relative', path: 'repos/remote-command-cancel' } });
-    const submitted = await runtime.orchestrator.submit({ agentId: 'scout', projectId: 'remote-command-cancel-project', prompt: 'Run a remote command.' });
-    const refused = await commandAttempt;
-    assert.equal(refused.status, 'failed');
-    assert.equal(refused.failure, 'containing-lease-unavailable');
-    assert.deepEqual(remoteTools?.operations, [], 'the run receives no bound workspace operation catalog');
-    assert.equal(workerDispatches, 0, 'the refused command performs no remote operation');
-    assert.equal(runtime.pool.leases().length, 0, 'a run with no selected leased Work Environment acquires no lease');
-    await waitFor(async () => (await runtime.orchestrator.load(submitted.id))?.status === 'interrupted', 'the run settles after refusing bound work');
-    assert.equal((await runtime.orchestrator.load(submitted.id))?.status, 'interrupted');
+    const submitted = await runtime.orchestrator.submit({ agentId: 'scout', projectId: 'remote-command-cancel-project', prompt: 'Reply without touching the workspace.' });
+    const run = await runtime.orchestrator.waitFor(submitted.id);
+    assert.equal(run.status, 'completed');
+    assert.equal(remoteWorkspaceAttached, false, 'the ordinary Message receives no remote workspace catalog');
+    assert.equal(workerDispatches, 0, 'the ordinary Message issues no Worker operation');
+    assert.equal(runtime.pool.leases().length, 0, 'the ordinary Message acquires no Environment lease');
   } finally {
     await runtime.close();
   }

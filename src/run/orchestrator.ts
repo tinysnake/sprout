@@ -12,14 +12,17 @@ import type { EnvironmentPool } from '../environment/pool.ts';
 import type { BindingGenerationFence } from '../environment/binding-generation-fence.ts';
 import type { AgentRunEvent, EngineAdapter, EngineSession, EngineTurnResult } from '../engine/port.ts';
 import { EngineResumeRefusedError, RemoteProjectMcpStartupError } from '../engine/port.ts';
-import { HostPiEngineAdapter, isHostPiEffortSupported } from '../engine/pi-host.ts';
+import { HostPiEngineAdapter } from '../engine/pi-host.ts';
+import { HostCodexEngineAdapter } from '../engine/codex-host.ts';
+import { hostRunEffortSupported } from '../engine/host-profile.ts';
+import type { HostRunEngineAdapter } from '../engine/host-profile.ts';
 import { createIdFactory, type IdFactory } from '../ids.ts';
 import { assembleProjectContract, renderProjectContract } from '../project/contract.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
 import type { EnvironmentPreference } from '../environment/model.ts';
 import { resolveEnvironmentInstance, workspaceFor } from '../project/resolve.ts';
 import { sanitizeWorkspacePath } from '../project/access.ts';
-import { buildHandOffContext, previousRun, renderHandOffPrompt, shouldAttachHandOff } from './hand-off.ts';
+import { buildHandOffContext, renderHandOffPrompt, shouldAttachHandOff } from './hand-off.ts';
 import { BindingGenerationRegistry } from './binding-generation.ts';
 import { currentRunWorkspaceBinding, renderCurrentWorkspaceSnapshot } from './binding-context.ts';
 import type { AgentRun, AgentRunStatus, RunFailureClass, RunObserver, RunWorkspaceBinding } from './model.ts';
@@ -71,8 +74,9 @@ export interface RunOrchestratorOptions {
   readonly engines:
     | ReadonlyMap<string, EngineAdapter>
     | ((environmentInstanceId: string) => Promise<ReadonlyMap<string, EngineAdapter>>);
-  /** Separate local Engine profile for runs that do not acquire an Environment lease. */
+  /** Separate local Engine profiles for runs that do not acquire an Environment lease. */
   readonly hostPi?: HostPiEngineAdapter;
+  readonly hostCodex?: HostCodexEngineAdapter;
   readonly agents: AgentRegistry;
   /** Current Agent configuration authority; when supplied it also owns lifecycle refusal. */
   readonly resolveAgent?: (agentId: string) => Promise<AgentDefinition | undefined>;
@@ -255,7 +259,7 @@ type SessionAttempt =
 export class RunOrchestrator {
   readonly #taskGroupPosts: RunOrchestratorOptions['taskGroupPosts'];
   readonly #engines: RunOrchestratorOptions['engines'];
-  readonly #hostPi: HostPiEngineAdapter | undefined;
+  readonly #hostEngines: ReadonlyMap<string, HostRunEngineAdapter>;
   readonly #agents: AgentRegistry;
   readonly #resolveAgent: (agentId: string) => Promise<AgentDefinition | undefined>;
   readonly #projects: ProjectRegistry | undefined;
@@ -302,7 +306,10 @@ export class RunOrchestrator {
   constructor(options: RunOrchestratorOptions) {
     this.#taskGroupPosts = options.taskGroupPosts;
     this.#engines = options.engines;
-    this.#hostPi = options.hostPi;
+    const hostEngines: [string, HostRunEngineAdapter][] = [];
+    if (options.hostPi !== undefined) hostEngines.push(['pi', options.hostPi]);
+    if (options.hostCodex !== undefined) hostEngines.push(['codex', options.hostCodex]);
+    this.#hostEngines = new Map(hostEngines);
     this.#agents = options.agents;
     this.#resolveAgent = options.resolveAgent ?? (async (id) => this.#agents.get(id));
     this.#projects = options.projects;
@@ -644,8 +651,16 @@ export class RunOrchestrator {
     agent: AgentDefinition,
     request: SubmitRunRequest,
   ): Promise<{ id: string }> {
+    let attemptedWorkEnvironmentInstanceId = request.workEnvironmentInstanceId;
     const refuse = async (message: string): Promise<{ id: string }> => {
-      const unavailable = await this.#advance(initial, { workspaceBindingStatus: 'unavailable' });
+      const unavailable = await this.#advance(initial, {
+        workspaceBindingStatus: 'unavailable',
+        ...(attemptedWorkEnvironmentInstanceId !== undefined ? {
+          requestedWorkEnvironmentInstanceId: sanitizeIdentifier(attemptedWorkEnvironmentInstanceId, {
+            fallback: 'unknown-environment', kind: 'generic',
+          }),
+        } : {}),
+      });
       await this.settleTaskRun(await this.#finish(unavailable, 'failed', { status: 'failed', message }, 'admission'));
       return { id: initial.id };
     };
@@ -658,7 +673,7 @@ export class RunOrchestrator {
     } else if (request.environmentInstanceId !== undefined || request.environmentLeaseId !== undefined ||
         request.environmentPreference !== undefined || request.projectWorkspaceId !== undefined ||
         request.projectWorkspacePath !== undefined || request.taskBootstrapInstructions !== undefined) {
-      return refuse('Host-run Pi accepts one-round Message conversations or Task runs with lifecycle-owned Environment bindings');
+      return refuse('Host-run accepts one-round Message conversations or Task runs with lifecycle-owned Environment bindings');
     }
     const projects = this.#projects?.forAgent(agent.id) ?? [];
     const selectedProject = request.projectId === undefined
@@ -669,15 +684,18 @@ export class RunOrchestrator {
         ? `agent ${agent.id} has no Project authority for a Host-run conversation`
         : `agent ${agent.id} is not a member of project ${request.projectId}`);
     }
-    const host = this.#hostPi;
-    if (host === undefined) return refuse('Host-run execution has no configured local Pi Engine profile');
     const options = effectiveWorkOptions(agent);
-    const option = options.find(candidate =>
-      candidate.engine === 'pi' && candidate.workModel === host.authorizedModel &&
-      isHostPiEffortSupported(candidate.effort || 'medium'));
-    if (option === undefined) {
-      return refuse(`agent ${agent.id} has no Pi work option authorized by the local Engine profile`);
+    let selectedOption: { readonly option: AgentWorkOption; readonly host: HostRunEngineAdapter } | undefined;
+    for (const candidate of options) {
+      const candidateHost = this.#hostEngines.get(candidate.engine);
+      if (candidateHost !== undefined && candidate.workModel === candidateHost.authorizedModel &&
+          hostRunEffortSupported(candidateHost, candidate.effort || 'medium')) {
+        selectedOption = { option: candidate, host: candidateHost };
+        break;
+      }
     }
+    if (selectedOption === undefined) return refuse(`agent ${agent.id} has no work option authorized by a configured Host Engine profile`);
+    const { option, host } = selectedOption;
     const readiness = await host.readiness(true);
     if (readiness.status !== 'ready') {
       const reason = readiness.authentication === 'not-ready'
@@ -685,11 +703,11 @@ export class RunOrchestrator {
         : readiness.modelAvailability === 'unavailable'
           ? 'the exact authorized model is unavailable'
           : readiness.adapterControls === 'unavailable'
-            ? 'required isolation controls are unavailable'
+            ? 'required isolated Engine controls are unavailable'
             : readiness.installation !== 'ready'
-              ? 'the installed Pi runtime is unavailable'
+              ? 'the pinned Engine runtime is unavailable'
               : 'readiness is unknown';
-      return refuse(`Host-run Pi admission failed for this Engine profile: ${reason}`);
+      return refuse(`Host-run ${host.id} admission failed for this Engine profile: ${reason}`);
     }
     const previousActivations = (await this.#runHistory())
       .filter((prior) => prior.agentId === agent.id && prior.projectId === selectedProject.id &&
@@ -701,11 +719,13 @@ export class RunOrchestrator {
     const selectedWorkEnvironmentInstanceId = taskBound
       ? undefined
       : request.workEnvironmentInstanceId ?? retainedWorkEnvironmentInstanceId;
+    attemptedWorkEnvironmentInstanceId = selectedWorkEnvironmentInstanceId;
     const retainedBinding = selectedWorkEnvironmentInstanceId !== undefined && selectedProject.id !== undefined
       ? await this.#workspaceBinding?.(selectedProject.id, selectedWorkEnvironmentInstanceId)
       : undefined;
     let mcpEnvironmentInstanceId: string | undefined = taskBound ? request.environmentInstanceId : undefined;
     let mcpLeaseId: string | undefined = taskBound ? request.environmentLeaseId : undefined;
+    let workspaceLeaseId: string | undefined = taskBound ? request.environmentLeaseId : undefined;
     let stopAdmissionKeepalive: (() => void) | undefined;
     if (taskBound) {
       const taskLease = mcpLeaseId === undefined ? undefined : this.#pool.getLease(mcpLeaseId);
@@ -717,40 +737,67 @@ export class RunOrchestrator {
     const mcpSelected = this.#projectMcpSelected !== undefined && await this.#projectMcpSelected(selectedProject.id);
     if (mcpSelected) {
       if (!this.#remoteProjectMcp) return refuse('Project MCP is selected but no Worker MCP bridge is configured');
-      if (taskBound) {
-        const resolution = resolveEnvironmentInstance({ projects: [selectedProject], capability: 'project-mcp', environmentPreference: { kind: 'instance', id: mcpEnvironmentInstanceId! } }, this.#pool);
-        if (!resolution.ok || resolution.instanceId !== mcpEnvironmentInstanceId) return refuse('Project MCP is not authorized for the Task Environment');
-      } else {
-        const resolution = resolveEnvironmentInstance({ projects: [selectedProject], capability: 'project-mcp',
-          ...(selectedWorkEnvironmentInstanceId !== undefined
+      const resolution = resolveEnvironmentInstance({ projects: [selectedProject], capability: 'project-mcp',
+        ...(taskBound
+          ? { environmentPreference: { kind: 'instance', id: mcpEnvironmentInstanceId! } }
+          : selectedWorkEnvironmentInstanceId !== undefined
             ? { environmentPreference: { kind: 'instance', id: selectedWorkEnvironmentInstanceId } }
             : {}) }, this.#pool);
-        if (!resolution.ok || (selectedWorkEnvironmentInstanceId !== undefined && resolution.instanceId !== selectedWorkEnvironmentInstanceId)) {
-          return refuse(selectedWorkEnvironmentInstanceId !== undefined
+      if (!resolution.ok || (taskBound && resolution.instanceId !== mcpEnvironmentInstanceId) ||
+          (!taskBound && selectedWorkEnvironmentInstanceId !== undefined && resolution.instanceId !== selectedWorkEnvironmentInstanceId)) {
+        return refuse(taskBound
+          ? 'Project MCP is not authorized for the Task Environment'
+          : selectedWorkEnvironmentInstanceId !== undefined
             ? 'the selected Work Environment is not authorized for Project MCP'
             : 'Project MCP is selected but no authorized leased Environment is available');
-        }
+      }
+      mcpEnvironmentInstanceId = resolution.instanceId;
+      if (!taskBound && selectedWorkEnvironmentInstanceId === undefined) {
         const acquired = await this.#pool.acquireLeaseRevalidated({
           instanceId: resolution.instanceId, capability: 'project-mcp', holderId: initial.id, runId: initial.id, ttlMs: this.#leaseTtlMs,
         });
         if (!acquired.ok) return refuse(`Project MCP Environment lease is unavailable (${acquired.reason})`);
-        mcpEnvironmentInstanceId = resolution.instanceId;
         mcpLeaseId = acquired.lease.id;
-        // Own cleanup before persistence, binding-lock waits, or Worker discovery can suspend admission.
         stopAdmissionKeepalive = this.#pool.keepLeaseUntilCleanup(mcpLeaseId, this.#leaseTtlMs);
+        workspaceLeaseId = mcpLeaseId;
       }
     }
+    if (!taskBound && selectedWorkEnvironmentInstanceId !== undefined) {
+      const resolution = resolveEnvironmentInstance({ projects: [selectedProject], capability: 'agent-run',
+        environmentPreference: { kind: 'instance', id: selectedWorkEnvironmentInstanceId } }, this.#pool);
+      if (!resolution.ok || resolution.instanceId !== selectedWorkEnvironmentInstanceId) {
+        stopAdmissionKeepalive?.();
+        return refuse('the selected Work Environment is not authorized for Agent-run operations');
+      }
+      const acquired = await this.#pool.acquireLeaseRevalidated({
+        instanceId: resolution.instanceId, capability: 'agent-run', holderId: initial.id, runId: initial.id, ttlMs: this.#leaseTtlMs,
+      });
+      if (!acquired.ok) {
+        stopAdmissionKeepalive?.();
+        return refuse(`Work Environment Agent-run lease is unavailable (${acquired.reason})`);
+      }
+      workspaceLeaseId = acquired.lease.id;
+      if (mcpSelected) {
+        mcpLeaseId = workspaceLeaseId;
+        mcpEnvironmentInstanceId = resolution.instanceId;
+      }
+      stopAdmissionKeepalive?.();
+      stopAdmissionKeepalive = this.#pool.keepLeaseUntilCleanup(workspaceLeaseId, this.#leaseTtlMs);
+    }
+    const runEnvironmentInstanceId = mcpEnvironmentInstanceId ??
+      (taskBound ? request.environmentInstanceId : selectedWorkEnvironmentInstanceId);
+    const primaryLeaseId = workspaceLeaseId ?? mcpLeaseId;
     const recorded: AgentRun = {
       ...initial,
       projectId: selectedProject.id,
-      ...(mcpEnvironmentInstanceId !== undefined ? { environmentInstanceId: mcpEnvironmentInstanceId } : {}),
+      ...(runEnvironmentInstanceId !== undefined ? { environmentInstanceId: runEnvironmentInstanceId } : {}),
       ...(selectedWorkEnvironmentInstanceId !== undefined ? {
         requestedWorkEnvironmentInstanceId: sanitizeIdentifier(selectedWorkEnvironmentInstanceId, {
           fallback: 'unknown-environment', kind: 'generic',
         }),
       } : {}),
       ...(retainedBinding !== undefined ? { workspaceBinding: retainedBinding } : {}),
-      ...(mcpLeaseId !== undefined ? { leaseId: mcpLeaseId } : {}),
+      ...(primaryLeaseId !== undefined ? { leaseId: primaryLeaseId } : {}),
       executionMode: 'host-run',
       engineHostProfileId: host.profileId,
       executionPlacement: {
@@ -771,11 +818,12 @@ export class RunOrchestrator {
     try {
       await this.#store.save(recorded);
     } catch (error) {
-      if (mcpLeaseId !== undefined && !taskBound) this.#pool.releaseLease(mcpLeaseId);
+      if (primaryLeaseId !== undefined && !taskBound) this.#pool.releaseLease(primaryLeaseId);
       stopAdmissionKeepalive?.();
       throw error;
     }
-    const execute = () => this.#executeHostRun(recorded, agent, host, option, mcpSelected, selectedWorkEnvironmentInstanceId, stopAdmissionKeepalive);
+    const execute = () => this.#executeHostRun(recorded, agent, host, option, mcpSelected,
+      selectedWorkEnvironmentInstanceId, workspaceLeaseId, mcpLeaseId, stopAdmissionKeepalive);
     const settled = (recorded.taskId === undefined
       ? this.#bindingGenerations.withLock(bindingGenerationScope(recorded), execute)
       : execute()).then((run) => this.settleTaskRun(run)).finally(() => stopAdmissionKeepalive?.());
@@ -786,23 +834,19 @@ export class RunOrchestrator {
   async #executeHostRun(
     initial: AgentRun,
     agent: AgentDefinition,
-    host: HostPiEngineAdapter,
+    host: HostRunEngineAdapter,
     option: AgentWorkOption,
     useProjectMcp: boolean,
     requestedWorkEnvironmentInstanceId: string | undefined,
+    workspaceLeaseId: string | undefined,
+    mcpLeaseId: string | undefined,
     stopAdmissionKeepalive: (() => void) | undefined,
   ): Promise<AgentRun> {
     if (this.#stopRequests.has(initial.id)) {
       if (initial.leaseId !== undefined && initial.taskId === undefined) this.#pool.releaseLease(initial.leaseId);
       return this.#finish(initial, 'interrupted', { status: 'interrupted' });
     }
-    const previous = previousRun(await this.#runHistory(), {
-      agentId: initial.agentId,
-      currentRunId: initial.id,
-      currentCreatedAt: initial.createdAt,
-      ...(initial.projectId !== undefined ? { projectId: initial.projectId } : {}),
-    });
-    const previousActivationWasBound = previous?.workspaceBinding !== undefined;
+    const previousActivationWasBound = initial.workspaceBinding !== undefined;
     let prepared = await this.#advance(initial, { status: 'running', workspaceBindingStatus: 'staging' });
     let remoteProjectMcp: import('../engine/port.ts').RemoteProjectMcpTools | undefined;
     let mcpMayHaveStarted = false;
@@ -814,12 +858,12 @@ export class RunOrchestrator {
     let catalogPublished = false;
     let outcome = prepared;
     try {
-      if (useProjectMcp && initial.leaseId !== undefined && initial.environmentInstanceId) {
+      if (useProjectMcp && mcpLeaseId !== undefined && initial.environmentInstanceId) {
         if (!this.#remoteProjectMcp) throw new Error('Project MCP Worker bridge is unavailable');
-        const lease = this.#pool.getLease(initial.leaseId);
+        const lease = this.#pool.getLease(mcpLeaseId);
         if (!lease) throw new Error('Project MCP lease is unavailable');
         remoteProjectMcp = await this.#remoteProjectMcp(initial.projectId ?? '', agent.id, {
-          environmentInstanceId: initial.environmentInstanceId, leaseId: initial.leaseId, runId: initial.id,
+          environmentInstanceId: lease.instanceId, leaseId: lease.id, runId: initial.id,
           holderKind: lease.holderKind ?? 'run', holderId: lease.holderId,
           ...(lease.taskId !== undefined ? { taskId: lease.taskId } : {}),
           leaseCapability: lease.capability === 'agent-run' ? 'agent-run' : 'project-mcp',
@@ -827,24 +871,28 @@ export class RunOrchestrator {
         });
         mcpMayHaveStarted = true;
       }
-      remoteWorkspace = await this.#remoteWorkspace?.(initial.projectId ?? '', agent.id, initial.id,
-        initial.leaseId !== undefined && initial.environmentInstanceId ? (() => {
-        const lease = this.#pool.getLease(initial.leaseId);
-        if (!lease) throw new Error('Containing lease is unavailable');
-        return {
-          environmentInstanceId: lease.instanceId, leaseId: lease.id, runId: initial.id,
-          holderKind: lease.holderKind ?? 'run', holderId: lease.holderId,
-          ...(lease.taskId !== undefined ? { taskId: lease.taskId } : {}),
-          leaseCapability: lease.capability === 'agent-run' ? 'agent-run' as const : 'project-mcp' as const,
-          ...(bindingFence !== undefined ? { bindingFence } : {}),
-          canRelease: () => containingLeaseCanRelease,
-        };
-      })() : undefined, {
-        ...(requestedWorkEnvironmentInstanceId !== undefined
-          ? { environmentInstanceId: requestedWorkEnvironmentInstanceId }
-          : initial.environmentInstanceId !== '' ? { environmentInstanceId: initial.environmentInstanceId } : {}),
-        ...(bindingFence !== undefined ? { bindingFence } : {}),
-      });
+      const workspaceTarget = initial.taskId !== undefined
+        ? initial.environmentInstanceId
+        : requestedWorkEnvironmentInstanceId ?? (useProjectMcp ? initial.environmentInstanceId : undefined);
+      if (workspaceTarget !== undefined && workspaceLeaseId !== undefined) {
+        remoteWorkspace = await this.#remoteWorkspace?.(initial.projectId ?? '', agent.id, initial.id,
+          (() => {
+            const lease = this.#pool.getLease(workspaceLeaseId);
+            if (!lease) throw new Error('Containing lease is unavailable');
+            return {
+              environmentInstanceId: lease.instanceId, leaseId: lease.id, runId: initial.id,
+              holderKind: lease.holderKind ?? 'run', holderId: lease.holderId,
+              ...(lease.taskId !== undefined ? { taskId: lease.taskId } : {}),
+              leaseCapability: lease.capability === 'agent-run' ? 'agent-run' as const : 'project-mcp' as const,
+              ...(bindingFence !== undefined ? { bindingFence } : {}),
+              canRelease: () => containingLeaseCanRelease,
+            };
+          })(),
+          {
+            environmentInstanceId: workspaceTarget,
+            ...(bindingFence !== undefined ? { bindingFence } : {}),
+          });
+      }
       if (remoteWorkspace !== undefined) {
         // Workspace attachment has started the same renewal policy; hand off without a gap.
         stopAdmissionKeepalive?.();
@@ -876,13 +924,13 @@ export class RunOrchestrator {
       const currentSnapshot = renderCurrentWorkspaceSnapshot(
         binding, hasBinding ? 'active' : 'detached', assembled.handOff?.bindingChange,
       );
-      // Host-run Pi receives Task facts in assembled.prompt. The Worker bootstrap
-      // points at .sprout Task files, which the remote Project tools intentionally
-      // do not expose and the host-profile working directory cannot read.
+      // Host-run Engines receive Task facts in assembled.prompt. The Worker bootstrap
+      // points at .sprout Task files, which remote Project tools intentionally do
+      // not expose and the host-profile working directory cannot read.
       const instructions = appendBootstrap(assembled.instructions, currentSnapshot);
       if (assembled.handOff !== undefined) prepared = await this.#advance(prepared, { handOff: assembled.handOff });
       const prompt = assembled.prompt;
-      const workingDirectory = `host-profile:${host.profileId}:agent:${agent.id}`;
+      const workingDirectory = `host-profile:${host.id}:${host.profileId}:agent:${agent.id}`;
       const placement = initial.executionPlacement;
       const scope = initial.sessionKeyScope;
       const sessionWorkingDirectory = sessionWorkingDirectoryForBinding(
@@ -892,7 +940,7 @@ export class RunOrchestrator {
         isEngineHostedPlacement(placement) && scope !== undefined
         ? {
             agentId: agent.id,
-            engine: 'pi',
+            engine: host.id,
             environmentInstanceId: '',
             executionPlacement: placement,
             scope,
@@ -945,7 +993,7 @@ export class RunOrchestrator {
       remoteSettlementUnknown = true;
       const message = error instanceof RemoteProjectMcpStartupError
         ? this.#projectMcpStartupFailureMessage(error.reason)
-        : 'Host-run Pi execution failed';
+        : 'Host-run Engine execution failed';
       const recoveryLeaseId = prepared.leaseId ?? initial.leaseId;
       const recovering = recoveryLeaseId !== undefined && this.#pool.getLease(recoveryLeaseId)?.state === 'recovering';
       prepared = await this.#advance(prepared, {
@@ -968,6 +1016,8 @@ export class RunOrchestrator {
         remoteSettlementUnknown = true;
         if (initial.leaseId !== undefined) this.#pool.markRecovering(initial.leaseId);
       }
+      if (initial.leaseId !== undefined && initial.taskId === undefined && !remoteSettlementUnknown &&
+          this.#pool.getLease(initial.leaseId)?.state === 'active') this.#pool.releaseLease(initial.leaseId);
       if (remoteWorkspace === undefined && initial.leaseId !== undefined && containingLeaseCanRelease &&
           this.#pool.getLease(initial.leaseId)?.state === 'active') this.#pool.releaseLease(initial.leaseId);
       const recoveryLeaseId = prepared.leaseId ?? initial.leaseId;
@@ -1088,19 +1138,22 @@ export class RunOrchestrator {
     }
     const options = effectiveWorkOptions(agent);
     if (this.#executionStrategy.mode === 'host-run') {
-      const host = this.#hostPi;
-      if (host === undefined) return { ok: false, reason: 'Host-run execution has no configured local Pi Engine profile' };
-      const option = options.find(candidate => candidate.engine === 'pi'
-        && candidate.workModel === host.authorizedModel
-        && isHostPiEffortSupported(candidate.effort || 'medium'));
-      if (option === undefined) return { ok: false, reason: 'no configured work option is authorized by the Sprout-host Pi profile' };
-      const readiness = await host.readiness();
+      let selected: { readonly option: AgentWorkOption; readonly host: HostRunEngineAdapter } | undefined;
+      for (const option of options) {
+        const host = this.#hostEngines.get(option.engine);
+        if (host !== undefined && option.workModel === host.authorizedModel && hostRunEffortSupported(host, option.effort || 'medium')) {
+          selected = { option, host };
+          break;
+        }
+      }
+      if (selected === undefined) return { ok: false, reason: 'no configured work option is authorized by a Sprout-host Engine profile' };
+      const readiness = await selected.host.readiness();
       if (readiness.status !== 'ready' || readiness.installation !== 'ready'
         || readiness.authentication !== 'ready' || readiness.modelAvailability !== 'available'
         || readiness.adapterControls !== 'ready') {
-        return { ok: false, reason: 'Sprout-host Pi model, authentication, installation, or adapter controls are not confirmed ready' };
+        return { ok: false, reason: `Sprout-host ${selected.host.id} model, authentication, installation, or adapter controls are not confirmed ready` };
       }
-      return { ok: true, option };
+      return { ok: true, option: selected.option };
     }
     const observed = this.#engineFacts
       ? await this.#engineFacts(environmentInstanceId)

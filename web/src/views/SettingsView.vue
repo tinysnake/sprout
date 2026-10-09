@@ -662,8 +662,37 @@ function handleStatusKey(e: KeyboardEvent, tab: SettingsCategoryTab) {
               </div>
             </div>
           </section>
+          <section class="card settings-card p-4 sm:p-5 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-4 shadow-xs lg:col-span-2" data-settings-section="host-codex-readiness" :data-host-codex-readiness="settingsData?.hostCodex?.status ?? 'unknown'">
+            <div class="flex items-center justify-between gap-2 flex-wrap">
+              <h3 class="text-xs uppercase tracking-wider font-bold text-[var(--text-muted)] flex items-center gap-1.5">
+                <Icon name="server" :size="14" />
+                <span>Sprout-host Codex readiness</span>
+              </h3>
+              <Badge :variant="settingsData?.hostCodex?.status === 'ready' ? 'success' : 'warning'">{{ settingsData?.hostCodex?.status ?? 'Unknown' }}</Badge>
+            </div>
+            <p class="text-xs text-[var(--text-secondary)]">This non-inference probe checks the pinned Codex version, local authentication, the exact configured model, and remote-tool controls. It does not send a model request or depend on an Environment Worker. Local readiness does not establish host-authority exclusion; production Codex Host-run remains blocked by the outstanding prerequisite recorded in #248.</p>
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+              <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
+                <span class="text-[10px] uppercase font-bold text-[var(--text-muted)] block">Installation</span>
+                <strong>{{ settingsData?.hostCodex?.installation ?? 'Not configured' }}</strong>
+                <span v-if="settingsData?.hostCodex?.version" class="block text-[10px] text-[var(--text-muted)]">Codex {{ settingsData.hostCodex.version }}</span>
+              </div>
+              <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
+                <span class="text-[10px] uppercase font-bold text-[var(--text-muted)] block">Authentication</span>
+                <strong>{{ settingsData?.hostCodex?.authentication ?? 'Unknown' }}</strong>
+              </div>
+              <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
+                <span class="text-[10px] uppercase font-bold text-[var(--text-muted)] block">Exact model</span>
+                <strong>{{ settingsData?.hostCodex?.modelAvailability ?? 'Unknown' }}</strong>
+              </div>
+              <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
+                <span class="text-[10px] uppercase font-bold text-[var(--text-muted)] block">Remote-only controls</span>
+                <strong>{{ settingsData?.hostCodex?.adapterControls ?? 'Unknown' }}</strong>
+              </div>
+            </div>
+          </section>
 
-            <!-- Card 1: Sprout instance and compatibility -->
+          <!-- Card 1: Sprout instance and compatibility -->
             <section class="card settings-card p-4 sm:p-5 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-4 shadow-xs" data-settings-section="compatibility">
             <div class="flex items-center justify-between gap-2">
               <h3 class="text-xs uppercase tracking-wider font-bold text-[var(--text-muted)] flex items-center gap-1.5">

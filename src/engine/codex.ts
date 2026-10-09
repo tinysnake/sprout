@@ -18,6 +18,7 @@ import { EngineResumeRefusedError } from './port.ts';
 import { JsonRpcError, JsonRpcTransportError, LineJsonRpcTransport, type JsonRpcTransport } from './jsonrpc.ts';
 import { EventQueue } from './event-queue.ts';
 import { mapCodexNotification, type CodexTurnState } from './codex-protocol.ts';
+import { createCodexDynamicToolBridge, type CodexDynamicToolSpec } from './codex-tools.ts';
 import { classifyEngineTurnFailure, isRetryableEngineTurnFailure, sanitizedTurnFailure } from './turn-failure.ts';
 
 /**
@@ -61,6 +62,8 @@ export interface CodexAdapterOptions {
   readonly sandbox?: CodexSandboxMode;
   /** Overrides for tests; production uses the real child process. */
   readonly spawnProcess?: (binaryPath: string, args: readonly string[], env?: NodeJS.ProcessEnv) => CodexProcess;
+  /** Version string attached to provider-usage observations. */
+  readonly sourceVersion?: string;
 }
 
 export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
@@ -97,6 +100,10 @@ export class CodexEngineAdapter implements EngineAdapter {
     const args = ['app-server', '--listen', 'stdio://', ...(this.#options.args ?? [])];
     const env = request.sessionEnvironment === undefined ? this.#options.env
       : { ...(this.#options.env ?? globalThis.process.env), ...request.sessionEnvironment };
+    const dynamicTools = createCodexDynamicToolBridge({
+      ...(request.remoteWorkspace !== undefined ? { remoteWorkspace: request.remoteWorkspace } : {}),
+      ...(request.remoteProjectMcp !== undefined ? { remoteProjectMcp: request.remoteProjectMcp } : {}),
+    });
     const process = this.#options.spawnProcess
       ? this.#options.spawnProcess(binaryPath, args, env)
       : spawnCodex(binaryPath, args, env);
@@ -118,6 +125,7 @@ export class CodexEngineAdapter implements EngineAdapter {
     try {
       await transport.request('initialize', {
         clientInfo: { name: 'sprout', version: '0.0.0' },
+        ...(dynamicTools.specs.length > 0 ? { capabilities: { experimentalApi: true } } : {}),
       });
     } catch (error) {
       transport.close();
@@ -135,7 +143,7 @@ export class CodexEngineAdapter implements EngineAdapter {
     // closed before rethrowing, because a refused resume must not leak a process.
     let started: { thread: { id: string } };
     try {
-      started = await this.#openThread(transport, request);
+      started = await this.#openThread(transport, request, dynamicTools.specs);
     } catch (error) {
       transport.close();
       process.kill('SIGTERM');
@@ -162,6 +170,8 @@ export class CodexEngineAdapter implements EngineAdapter {
       process,
       threadId: started.thread.id,
       agentId: request.agentId,
+      toolBridge: dynamicTools,
+      sourceVersion: this.#options.sourceVersion ?? 'codex-cli 0.154.0',
     });
     return session;
   }
@@ -170,6 +180,7 @@ export class CodexEngineAdapter implements EngineAdapter {
   async #openThread(
     transport: JsonRpcTransport,
     request: StartSessionRequest,
+    dynamicTools: readonly CodexDynamicToolSpec[],
   ): Promise<{ thread: { id: string } }> {
     if (request.resumeSessionKey !== undefined) {
       return transport.request<{ thread: { id: string } }>('thread/resume', {
@@ -182,6 +193,7 @@ export class CodexEngineAdapter implements EngineAdapter {
           ? { config: { model_reasoning_effort: request.effort } }
           : {}),
         ...(request.instructions !== undefined ? { baseInstructions: request.instructions } : {}),
+        ...(dynamicTools.length > 0 ? { dynamicTools } : {}),
       });
     }
     return transport.request<{ thread: { id: string } }>('thread/start', {
@@ -193,6 +205,7 @@ export class CodexEngineAdapter implements EngineAdapter {
         ? { config: { model_reasoning_effort: request.effort } }
         : {}),
       ...(request.instructions !== undefined ? { baseInstructions: request.instructions } : {}),
+      ...(dynamicTools.length > 0 ? { dynamicTools } : {}),
     });
   }
 }
@@ -259,6 +272,8 @@ interface CodexSessionOptions {
   readonly process: CodexProcess;
   readonly threadId: string;
   readonly agentId: string;
+  readonly toolBridge: ReturnType<typeof createCodexDynamicToolBridge>;
+  readonly sourceVersion: string;
 }
 
 export class CodexSession implements EngineSession {
@@ -272,6 +287,8 @@ export class CodexSession implements EngineSession {
   readonly #transport: JsonRpcTransport;
   readonly #process: CodexProcess;
   readonly #threadId: string;
+  readonly #toolBridge: ReturnType<typeof createCodexDynamicToolBridge>;
+  readonly #sourceVersion: string;
   #turnId: string | undefined;
   /** Usage updates are keyed by turn because Codex emits them separately. */
   readonly #tokenUsageByTurnId = new Map<string, CodexTurnUsageEntry>();
@@ -290,6 +307,8 @@ export class CodexSession implements EngineSession {
     this.#transport = options.transport;
     this.#process = options.process;
     this.#threadId = options.threadId;
+    this.#toolBridge = options.toolBridge;
+    this.#sourceVersion = options.sourceVersion;
     this.sessionId = options.threadId;
     this.engineSessionKey = options.threadId;
   }
@@ -308,6 +327,7 @@ export class CodexSession implements EngineSession {
       if (settled) return;
       settled = true;
       this.#settleTurn = undefined;
+      this.#turnId = undefined;
       const usageEntry = completedTurnId === undefined ? undefined : this.#tokenUsageByTurnId.get(completedTurnId);
       if (completedTurnId !== undefined) this.#tokenUsageByTurnId.delete(completedTurnId);
       const completed: EngineTurnResult = usageEntry === undefined ? result : {
@@ -318,7 +338,7 @@ export class CodexSession implements EngineSession {
         ...(usageEntry.costEstimate !== undefined ? { costEstimate: usageEntry.costEstimate } : {}),
         billingBasis: usageEntry.billingBasis ?? 'unknown',
         source: 'codex-protocol:thread/tokenUsage/updated',
-        sourceVersion: 'codex-cli 0.154.0',
+        sourceVersion: this.#sourceVersion,
       };
       if (completed.status === 'failed') queue.fail(new Error(completed.message));
       else queue.end();
@@ -331,7 +351,7 @@ export class CodexSession implements EngineSession {
         // Usage is not on turn/completed for app-server. `last` is the metric
         // for this turn; `total` belongs to the whole resumed thread and would
         // overstate a single AgentRun.
-        const update = readCodexTokenUsage(notification.params);
+        const update = readCodexTokenUsage(notification.params, this.#sourceVersion);
         if (update !== undefined) this.#tokenUsageByTurnId.set(update.turnId, update);
         return;
       }
@@ -341,6 +361,26 @@ export class CodexSession implements EngineSession {
     });
 
     const onClose = this.#transport.onServerRequest((request) => {
+      if (request.method === 'item/tool/call' && this.#toolBridge.specs.length > 0) {
+        const params = request.params as { threadId?: unknown; turnId?: unknown; namespace?: unknown; tool?: unknown; arguments?: unknown } | undefined;
+        if (params?.threadId !== this.#threadId || this.#turnId === undefined || params.turnId !== this.#turnId ||
+            params?.namespace !== null || typeof params.tool !== 'string') {
+          this.#transport.respond(request.id, {
+            contentItems: [{ type: 'inputText', text: 'The selected remote capability is no longer available.' }],
+            success: false,
+          });
+          return;
+        }
+        void this.#toolBridge.call(params.tool, params.arguments).then(result => {
+          this.#transport.respond(request.id, result);
+        }, () => {
+          this.#transport.respond(request.id, {
+            contentItems: [{ type: 'inputText', text: 'The selected remote capability is no longer available.' }],
+            success: false,
+          });
+        });
+        return;
+      }
       // M1 runs read-only and non-interactive, so approval prompts are declined
       // rather than silently hanging the turn.
       this.#transport.respondError(request.id, -32_601, 'sprout runs non-interactively');
@@ -386,14 +426,15 @@ export class CodexSession implements EngineSession {
     // if it is wedged, unresponsive, or already gone, awaiting `turn/interrupt`
     // would hang the user's stop command. `settleTurn` is idempotent, so a real
     // `turn/completed` arriving later remains harmless.
+    const activeTurnId = this.#turnId;
     this.#settleTurn?.({ status: 'interrupted' });
 
-    if (this.#closed || !this.#turnId) return false;
+    if (this.#closed || !activeTurnId) return false;
 
     // Best-effort: ask the engine to stop too, so it does not keep burning
     // tokens on work nobody will read.
     void this.#transport
-      .request('turn/interrupt', { threadId: this.#threadId, turnId: this.#turnId })
+      .request('turn/interrupt', { threadId: this.#threadId, turnId: activeTurnId })
       .catch(() => undefined);
     return true;
   }
@@ -423,7 +464,7 @@ export class CodexSession implements EngineSession {
 }
 
 /** Read Codex's per-turn `last` breakdown without trusting arbitrary JSON-RPC. */
-function readCodexTokenUsage(params: unknown): CodexTurnUsageEntry | undefined {
+function readCodexTokenUsage(params: unknown, sourceVersion: string): CodexTurnUsageEntry | undefined {
   if (typeof params !== 'object' || params === null) return undefined;
   const update = params as Record<string, unknown>;
   if (typeof update['turnId'] !== 'string') return undefined;
@@ -475,7 +516,7 @@ function readCodexTokenUsage(params: unknown): CodexTurnUsageEntry | undefined {
     costEstimate = extractProviderCostEstimate({
       estimatedUsd,
       source: 'codex.turn_cost',
-      sourceVersion: '0.154.0',
+      sourceVersion,
       valuedAt: Date.now(),
     });
   }

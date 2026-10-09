@@ -5,13 +5,13 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import type { HostEngineReadiness, HostRunEngineAdapter } from './host-profile.ts';
 
 import { EventQueue } from './event-queue.ts';
 import { mapPiEvent, newPiTurnState } from './pi-protocol.ts';
 import {
   EngineResumeRefusedError,
   EngineStartError,
-  type EngineAdapter,
   type EngineSession,
   type EngineTurn,
   type EngineTurnResult,
@@ -28,16 +28,8 @@ const FAILURE_STAGES = new Set([
 ]);
 const FAILURE_CODES = new Set(['invalid', 'other', 'missing', 'unsupported', 'not-ready', 'resume-refused', 'control-violation']);
 
-export interface HostPiReadiness {
-  readonly profileId: string;
+export interface HostPiReadiness extends HostEngineReadiness {
   readonly engine: 'pi';
-  readonly status: 'ready' | 'unavailable' | 'unknown';
-  readonly installation: 'ready' | 'missing' | 'unsupported' | 'unknown';
-  readonly authentication: 'ready' | 'not-ready' | 'unknown';
-  readonly modelAvailability: 'available' | 'unavailable' | 'unknown';
-  readonly adapterControls: 'ready' | 'unavailable' | 'unknown';
-  readonly version?: string;
-  readonly observedAt: number;
 }
 
 export interface HostPiAdapterOptions {
@@ -106,7 +98,7 @@ export function hostEngineProfileId(runnerRoot: string): string {
  * Pi on the Sprout host, with a profile-local model grant and the accepted macOS
  * file isolation policy. Readiness is measured in a sandboxed non-inference child.
  */
-export class HostPiEngineAdapter implements EngineAdapter {
+export class HostPiEngineAdapter implements HostRunEngineAdapter {
   readonly id = 'pi';
   readonly capabilities = {
     streaming: 'incremental',
@@ -161,6 +153,10 @@ export class HostPiEngineAdapter implements EngineAdapter {
     this.#cachedReadiness = result;
     this.#readinessAt = this.#clock();
     return result;
+  }
+
+  supportsEffort(effort: string): boolean {
+    return EFFORTS.has(effort);
   }
 
   async startSession(request: StartSessionRequest): Promise<EngineSession> {

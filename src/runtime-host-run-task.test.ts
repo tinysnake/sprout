@@ -5,28 +5,33 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ScriptedEngineAdapter } from './engine/scripted.ts';
 import type { HostPiEngineAdapter } from './engine/pi-host.ts';
+import type { HostCodexEngineAdapter } from './engine/codex-host.ts';
 import type { StartSessionRequest } from './engine/port.ts';
 import { loadOrCreateWorkerIdentity, workerPublicKey } from './worker/enrollment-connector.ts';
 import { toTaskContextState } from './web/views.ts';
 import { connectRuntimeWorker, createRuntime, hostConfiguration, INSTANCE_ID, project, scriptedTurn } from './runtime-test-harness.ts';
 
-test('Human-authorized Host-run Task uses Sprout Pi and keeps workspace and MCP under its Environment lease', async (t) => {
+for (const hostEngine of ['pi', 'codex'] as const) test(`Human-authorized Host-run Task uses Sprout ${hostEngine} and keeps workspace and MCP under its Environment lease`, async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-host-task-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const workerRoot = join(directory, 'worker');
   const workspace = join(workerRoot, 'repos', 'host-task');
   const keyPath = join(directory, 'worker-key.pem');
   const model = 'provider/model-host';
+  const profileId = `host-task-profile-${hostEngine}`;
   const engine = new ScriptedEngineAdapter({ turns: [scriptedTurn('Task step completed.')] });
   let runToolsUsed = false;
   let hostInstructions = '';
   let sessionPrompt = '';
   let runtime: Awaited<ReturnType<typeof createRuntime>>;
-  const hostPi = {
-    id: 'pi', profileId: 'host-task-profile', authorizedModel: model, capabilities: engine.capabilities,
+  const host = {
+    id: hostEngine, profileId, authorizedModel: model, capabilities: engine.capabilities,
+    supportsEffort: () => true,
     async readiness() {
-      return { profileId: 'host-task-profile', engine: 'pi', status: 'ready', installation: 'ready', authentication: 'ready',
-        modelAvailability: 'available', adapterControls: 'ready', version: '1.0.4', observedAt: 1 };
+      return { profileId, engine: hostEngine, status: 'ready', installation: 'ready', authentication: 'ready',
+        modelAvailability: 'available', adapterControls: 'ready',
+        ...(hostEngine === 'codex' ? { version: '0.159.3', supportedEfforts: ['medium'] } : { version: '1.0.4' }),
+        observedAt: 1 };
     },
     async startSession(request: StartSessionRequest) {
       hostInstructions = request.instructions ?? '';
@@ -68,16 +73,17 @@ test('Human-authorized Host-run Task uses Sprout Pi and keeps workspace and MCP 
         close: session.close.bind(session),
       };
     },
-  } as unknown as HostPiEngineAdapter;
+  } as unknown as HostPiEngineAdapter | HostCodexEngineAdapter;
 
   runtime = await createRuntime({ configuration: hostConfiguration({
     executionMode: 'host-run', environmentSource: 'enrollment', databasePath: join(directory, 'state.db'),
     runtimeConfiguration: {
-      agents: [{ id: 'scout', name: 'Scout', engine: 'pi', capability: 'agent-run', model, effort: 'medium',
-        workOptions: [{ id: 'host-pi', engine: 'pi', workModel: model, effort: 'medium' }] }],
+      agents: [{ id: 'scout', name: 'Scout', engine: hostEngine, capability: 'agent-run', model, effort: 'medium',
+        workOptions: [{ id: `host-${hostEngine}`, engine: hostEngine, workModel: model, effort: 'medium' }] }],
       project: { ...project(), memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }] },
     },
-  }), projectRoot: '/synthetic/project-root', hostPi });
+  }), projectRoot: '/synthetic/project-root',
+    ...(hostEngine === 'pi' ? { hostPi: host as HostPiEngineAdapter } : { hostCodex: host as HostCodexEngineAdapter }) });
   try {
     const identity = loadOrCreateWorkerIdentity(keyPath);
     const enrollment = await runtime.enrollments.requestEnrollment({
@@ -132,6 +138,8 @@ test('Human-authorized Host-run Task uses Sprout Pi and keeps workspace and MCP 
     const settled = await runtime.orchestrator.waitFor(advanced.runId);
     assert.equal(settled.status, 'completed', settled.failure ?? 'Host-run Task failed');
     assert.equal(settled.executionPlacement?.mode, 'host-run');
+    assert.equal(settled.executionPlacement?.engineHost?.id, profileId);
+    assert.equal(settled.workOption?.engine, hostEngine);
     assert.equal(settled.leaseId, taskLeaseId);
     assert.equal(runToolsUsed, true);
     assert.equal(hostInstructions.includes('Sprout Task bootstrap'), false);

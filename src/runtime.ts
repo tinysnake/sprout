@@ -19,6 +19,9 @@ import {
 import type { CollaborationStore } from './collaboration/store.ts';
 import type { EngineAdapter } from './engine/port.ts';
 import { createProductionHostPiAdapter, isHostPiEffortSupported, type HostPiEngineAdapter, type HostPiReadiness } from './engine/pi-host.ts';
+import { createProductionHostCodexAdapter, type HostCodexEngineAdapter, type HostCodexReadiness } from './engine/codex-host.ts';
+import { hostRunEffortSupported } from './engine/host-profile.ts';
+import type { HostEngineReadiness, HostRunEngineAdapter } from './engine/host-profile.ts';
 import type { EnvironmentDefinition, EnvironmentInstance } from './environment/model.ts';
 import {
   ADMISSION_CAPABILITY,
@@ -373,8 +376,11 @@ export interface SproutRuntime {
   readonly executionStrategy: ExecutionStrategy;
   /** The optional Sprout-host Pi profile used by Host-run conversations. */
   readonly hostPi: HostPiEngineAdapter | undefined;
-  /** A non-inference readiness observation independent of Environment Workers. */
+  /** The optional Sprout-host Codex profile used by Host-run conversations. */
+  readonly hostCodex: HostCodexEngineAdapter | undefined;
+  /** Non-inference readiness observations independent of Environment Workers. */
   hostPiReadiness(): Promise<HostPiReadiness | undefined>;
+  hostCodexReadiness(): Promise<HostCodexReadiness | undefined>;
   /**
    * The enrollment-backed outbound Worker gateway and its connection epochs
    * (#115). Present so Web-created pending enrollments have a machine channel.
@@ -432,6 +438,8 @@ export interface SproutRuntimeOptions {
   readonly environment?: RuntimeEnvironment;
   /** Injected local Pi Engine profile for Host-run composition and tests. */
   readonly hostPi?: HostPiEngineAdapter;
+  /** Injected local Codex Engine profile for Host-run composition and tests. */
+  readonly hostCodex?: HostCodexEngineAdapter;
   /**
    * Overrides the production SQLite stores.
    *
@@ -513,6 +521,60 @@ export function projectHostPiCompatibility(
   };
 }
 
+export function projectHostRunCompatibility(
+  workOptions: readonly AgentWorkOption[],
+  hosts: readonly HostRunEngineAdapter[],
+  readinessByEngine: ReadonlyMap<string, HostEngineReadiness>,
+): AgentCompatibilityProjection {
+  const hostByEngine = new Map(hosts.map(host => [host.id, host] as const));
+  const options = workOptions.map(option => {
+    const host = hostByEngine.get(option.engine);
+    const readiness = readinessByEngine.get(option.engine);
+    let state: OptionAvailabilityState;
+    let reason: string;
+    if (host === undefined) {
+      state = 'unknown';
+      reason = `No Sprout-host ${option.engine} profile is configured.`;
+    } else if (option.workModel !== host.authorizedModel) {
+      state = 'model-unavailable';
+      reason = `The exact work model is not authorized by the Sprout-host ${option.engine} profile.`;
+    } else if (!hostRunEffortSupported(host, option.effort || 'medium')) {
+      state = 'model-unavailable';
+      reason = `The requested ${option.engine} effort is not supported by the selected model.`;
+    } else if (readiness === undefined || readiness.status === 'unknown') {
+      state = 'unknown';
+      reason = `Sprout-host ${option.engine} readiness is unknown.`;
+    } else if (readiness.installation === 'missing' || readiness.installation === 'unsupported') {
+      state = 'missing';
+      reason = `The pinned ${option.engine} runtime is unavailable on the Sprout host.`;
+    } else if (readiness.authentication === 'not-ready') {
+      state = 'login-required';
+      reason = `${option.engine} authentication is not ready for the Sprout-host profile.`;
+    } else if (readiness.modelAvailability === 'unavailable') {
+      state = 'model-unavailable';
+      reason = `The exact authorized model is unavailable on the Sprout host.`;
+    } else if (readiness.adapterControls === 'unavailable') {
+      state = 'model-unavailable';
+      reason = `Required isolated ${option.engine} controls are unavailable on the Sprout host.`;
+    } else if (readiness.status === 'unavailable') {
+      state = 'unknown';
+      reason = `Sprout-host ${option.engine} readiness is unavailable or unverified.`;
+    } else {
+      state = 'available';
+      reason = `The exact ${option.engine} model and effort are ready on the Sprout host.`;
+    }
+    return { option, state, reason };
+  });
+  const firstAvailable = options.find(option => option.state === 'available');
+  return {
+    options,
+    available: firstAvailable !== undefined,
+    ...(firstAvailable !== undefined ? { firstAvailable: firstAvailable.option } : {}),
+    ...(firstAvailable === undefined ? { unavailableReason: options[0]?.reason ?? 'No work option is configured.' } : {}),
+    explanation: 'Host-run compatibility uses only configured Sprout-host Engine profiles. It does not inspect Environment readiness; Project membership, lease authority, and exact model grants are checked again at run admission.',
+  };
+}
+
 function taskGroupSyncInput(task: Task): TaskGroupSyncInput | undefined {
   const admission = task.admission;
   if (admission === undefined) return undefined;
@@ -585,7 +647,13 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
   const hostPi = options.hostPi ?? (options.environment === undefined
     ? createProductionHostPiAdapter(process.env, { providerRoot: join(projectRoot, '..', 'pi-extensions', 'pi-magpie') })
     : undefined);
-  const executionStrategy = createExecutionStrategy(configuration.executionMode, hostPi !== undefined);
+  const hostCodex = options.hostCodex ?? (options.environment === undefined
+    ? createProductionHostCodexAdapter(process.env)
+    : undefined);
+  const hostProfiles: HostRunEngineAdapter[] = [];
+  if (hostPi !== undefined) hostProfiles.push(hostPi);
+  if (hostCodex !== undefined) hostProfiles.push(hostCodex);
+  const executionStrategy = createExecutionStrategy(configuration.executionMode, hostProfiles.length > 0);
 
   /**
    * The host facts carrier and platform selection both depend on.
@@ -1191,6 +1259,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         return environmentOperations.attachProjectMcpTools(projectId, agentId, scope);
       },
       ...(hostPi !== undefined ? { hostPi } : {}),
+      ...(hostCodex !== undefined ? { hostCodex } : {}),
       executionPlacementForEnvironment,
       agents,
       resolveAgent,
@@ -1958,6 +2027,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     operations = new OperatorDiagnostics({ store: stores.operations ?? new MemoryOperationalStore(), schema: stores.schemaVersion ?? null, auth: operatorSessions, enrollments, recovery,
       executionStrategy,
       hostPiReadiness: () => hostPi === undefined ? Promise.resolve(undefined) : hostPi.readiness(),
+  hostCodexReadiness: () => hostCodex === undefined ? Promise.resolve(undefined) : hostCodex.readiness(),
       connected: (instanceId) => workerGateway.liveFor(instanceId) !== undefined,
       run: async (id) => {
         const run = orchestrator.get(id) ?? await durableStores.runs.get(id);
@@ -2161,8 +2231,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           onMutation: scheduleCatalogRefresh,
           compatibility: async (agent: Agent, requestedInstanceId?: string) => {
             if (executionStrategy.mode === 'host-run') {
-              const readiness = hostPi === undefined ? undefined : await hostPi.readiness();
-              const projection = projectHostPiCompatibility(currentOptions(agent), hostPi, readiness);
+              const readinessByEngine = new Map<string, HostEngineReadiness>();
+              for (const host of hostProfiles) readinessByEngine.set(host.id, await host.readiness());
+              const projection = projectHostRunCompatibility(currentOptions(agent), hostProfiles, readinessByEngine);
               return {
                 agentId: agent.id,
                 ...(requestedInstanceId !== undefined ? { environmentInstanceId: requestedInstanceId } : {}),
@@ -2283,11 +2354,15 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       environmentSource,
       executionStrategy,
       hostPi,
+      hostCodex,
       engines,
       refreshEnvironmentCatalog,
 
       async hostPiReadiness(): Promise<HostPiReadiness | undefined> {
         return hostPi === undefined ? undefined : hostPi.readiness(true);
+      },
+      async hostCodexReadiness(): Promise<HostCodexReadiness | undefined> {
+        return hostCodex === undefined ? undefined : hostCodex.readiness(true);
       },
 
       /** Reconcile runs, then Task lifecycle, then recovery records, then

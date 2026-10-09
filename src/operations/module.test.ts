@@ -83,8 +83,9 @@ test('export selects typed facts from enrollment, readiness and recovery without
   await assert.rejects(operations.settings(session.session.id));
 });
 
-test('Host Pi Settings projects local readiness facts without exposing its profile identity', async () => {
+test('Host Pi and Codex Settings project local readiness facts without exposing profile identities', async () => {
   const secretProfileId = 'opaque-local-profile-id';
+  const secretCodexProfileId = 'opaque-codex-profile-id';
   const auth = new OperatorSessionService({ store: new InMemoryOperatorSessionStore() });
   await auth.initializeOrRecover('synthetic-credential');
   const login = (await auth.signIn('synthetic-credential'))!;
@@ -98,6 +99,11 @@ test('Host Pi Settings projects local readiness facts without exposing its profi
       authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready',
       version: '1.0.4', observedAt: 1_000,
     }),
+    hostCodexReadiness: async () => ({
+      profileId: secretCodexProfileId, engine: 'codex', status: 'ready', installation: 'ready',
+      authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready',
+      version: '0.159.3', supportedEfforts: ['medium'], observedAt: 1_000,
+    }),
     enrollments: { list: async () => [] } as never,
     recovery: { list: async () => [] } as never,
   });
@@ -107,5 +113,10 @@ test('Host Pi Settings projects local readiness facts without exposing its profi
     status: 'ready', installation: 'ready', authentication: 'ready',
     modelAvailability: 'available', adapterControls: 'ready', version: '1.0.4',
   });
+  assert.deepEqual(settings.hostCodex, {
+    status: 'ready', installation: 'ready', authentication: 'ready',
+    modelAvailability: 'available', adapterControls: 'ready', version: '0.159.3',
+  });
   assert.equal(JSON.stringify(settings).includes(secretProfileId), false);
+  assert.equal(JSON.stringify(settings).includes(secretCodexProfileId), false);
 });
