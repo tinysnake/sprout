@@ -707,6 +707,7 @@ export class RunOrchestrator {
       : undefined;
     let mcpEnvironmentInstanceId: string | undefined = taskBound ? request.environmentInstanceId : undefined;
     let mcpLeaseId: string | undefined = taskBound ? request.environmentLeaseId : undefined;
+    let stopAdmissionKeepalive: (() => void) | undefined;
     if (taskBound) {
       const taskLease = mcpLeaseId === undefined ? undefined : this.#pool.getLease(mcpLeaseId);
       if (!taskLease || taskLease.state !== 'active' || taskLease.instanceId !== mcpEnvironmentInstanceId ||
@@ -736,6 +737,8 @@ export class RunOrchestrator {
         if (!acquired.ok) return refuse(`Project MCP Environment lease is unavailable (${acquired.reason})`);
         mcpEnvironmentInstanceId = resolution.instanceId;
         mcpLeaseId = acquired.lease.id;
+        // Own cleanup before persistence, binding-lock waits, or Worker discovery can suspend admission.
+        stopAdmissionKeepalive = this.#pool.keepLeaseUntilCleanup(mcpLeaseId, this.#leaseTtlMs);
       }
     }
     const recorded: AgentRun = {
@@ -770,12 +773,13 @@ export class RunOrchestrator {
       await this.#store.save(recorded);
     } catch (error) {
       if (mcpLeaseId !== undefined && !taskBound) this.#pool.releaseLease(mcpLeaseId);
+      stopAdmissionKeepalive?.();
       throw error;
     }
     const execute = () => this.#executeHostRun(recorded, agent, host, option, request.taskBootstrapInstructions, mcpSelected, selectedWorkEnvironmentInstanceId);
     const settled = (recorded.taskId === undefined
       ? this.#bindingGenerations.withLock(bindingGenerationScope(recorded), execute)
-      : execute()).then((run) => this.settleTaskRun(run));
+      : execute()).then((run) => this.settleTaskRun(run)).finally(() => stopAdmissionKeepalive?.());
     this.#settled.set(recorded.id, settled);
     return { id: recorded.id };
   }
