@@ -40,6 +40,7 @@ let httpMcpServer: Server | undefined;
 let httpMcpRequestCount = 0;
 let httpMcpCallCount = 0;
 let httpMcpAuthorizationMatched = true;
+const httpMcpAuthorizationMismatchMethods: string[] = [];
 let runPromptNamesTarget = false;
 let runPromptContainsExactRead = false;
 
@@ -88,7 +89,9 @@ async function startHttpMcpFixture(): Promise<string> {
     request.on('data', chunk => { body += chunk; });
     request.on('end', () => {
       httpMcpRequestCount += 1;
-      httpMcpAuthorizationMatched &&= request.headers.authorization === 'Bearer local-fixture-auth';
+      const authorizationMatched = request.headers.authorization === 'Bearer local-fixture-auth';
+      httpMcpAuthorizationMatched &&= authorizationMatched;
+      if (!authorizationMatched) httpMcpAuthorizationMismatchMethods.push(request.method ?? 'unknown');
       if (request.method === 'DELETE') {
         response.writeHead(204).end();
         return;
@@ -223,17 +226,21 @@ function observeTaskCapabilities(adapter: HostPiEngineAdapter): HostPiEngineAdap
         } } : {}),
       };
       const mcp = request.remoteProjectMcp;
+      const stdioToolName = mcp?.tools.find(tool => tool.description === 'Echo the supplied text.')?.name;
+      const httpToolName = mcp?.tools.find(tool => tool.description === 'Return a fixed bounded HTTP fixture result.')?.name;
       const observedMcp: RemoteProjectMcpTools | undefined = mcp ? {
         ...mcp,
         async call(name, arguments_) {
           const response = await mcp.call(name, arguments_);
-          const expectedText = name === 'mcp_fixture_echo' ? 'STDIO_OK' : name === 'mcp_http_fixture_http_echo' ? 'HTTP_OK' : '';
+          const isStdio = name === stdioToolName;
+          const isHttp = name === httpToolName;
+          const expectedText = isStdio ? 'STDIO_OK' : isHttp ? 'HTTP_OK' : '';
           observedOperations.push({
-            kind: name === 'mcp_fixture_echo' ? 'mcp-stdio' : name === 'mcp_http_fixture_http_echo' ? 'mcp-http' : 'mcp-unknown',
+            kind: isStdio ? 'mcp-stdio' : isHttp ? 'mcp-http' : 'mcp-unknown',
             status: response.status,
             failure: response.reason === undefined ? 'none' : 'mcp-operation-failed',
             inputMatchedExpected: expectedText !== '' && arguments_.text === expectedText,
-            inputFacts: [`tool:${mcp.tools.some(tool => tool.name === name) ? 'advertised' : 'unadvertised'}`, `text:${arguments_.text === expectedText ? 'expected' : 'different'}`],
+            inputFacts: [`tool:${isStdio || isHttp ? 'advertised' : 'unadvertised'}`, `text:${arguments_.text === expectedText ? 'expected' : 'different'}`],
             bindingMatched: bindingsMatch(mcp.binding, workspace.binding),
             taskLeaseHeld: taskLeaseHeld(),
             outputMatchedExpected: response.status === 'completed' && response.text === expectedText,
@@ -376,7 +383,7 @@ createInterface({ input: process.stdin }).on('line', line => {
         const advanced = await runtime.taskAdmissions.advanceForHuman(taskId, {
           targetAgentId: 'scout',
           reason: 'Run the bounded workspace and MCP check.',
-          prompt: `Use exactly these five tools once each in this order: remote_read, remote_edit, remote_command, mcp_fixture_echo, mcp_http_fixture_http_echo. The exact single file is ${taskFixturePath} with no extension at the root of the authorized Project workspace, not the Pi session or Task context directory. First call remote_read with exactly {"path":"${taskFixturePath}"}. Next call remote_edit on that same file with exactly {"path":"${taskFixturePath}","oldText":"before","newText":"after"}. Then call remote_command with executable "node" and args ${JSON.stringify(taskCommandArgs)}; omit cwd because it runs from the Project workspace root. Call mcp_fixture_echo once with {"text":"STDIO_OK"}. Call mcp_http_fixture_http_echo once with {"text":"HTTP_OK"}. Do not call remote_search or any other tool, repeat calls, or include tool arguments, file contents, or command output in your final response. Report the check result in one short sentence.`,
+          prompt: `Use exactly these five tools once each in this order: remote_read, remote_edit, remote_command, mcp_fixture_echo, mcp_http-fixture_http_echo. The exact single file is ${taskFixturePath} with no extension at the root of the authorized Project workspace, not the Pi session or Task context directory. First call remote_read with exactly {"path":"${taskFixturePath}"}. Next call remote_edit on that same file with exactly {"path":"${taskFixturePath}","oldText":"before","newText":"after"}. Then call remote_command with executable "node" and args ${JSON.stringify(taskCommandArgs)}; omit cwd because it runs from the Project workspace root. Call mcp_fixture_echo once with exactly {"text":"STDIO_OK"}. Call mcp_http-fixture_http_echo once with exactly {"text":"HTTP_OK"}. Do not call remote_search or any other tool, repeat calls, or include tool arguments, file contents, or command output in your final response. Report the check result in one short sentence.`,
         });
         const settledRun = await waitForBounded(runtime.orchestrator.waitFor(advanced.runId));
         const afterRunTask = await runtime.tasks.get(taskId);
@@ -415,7 +422,7 @@ createInterface({ input: process.stdin }).on('line', line => {
           }
         }
         const accepted = runSettledSafely && operationsComplete && remoteFileEdited && remoteCommandPassed &&
-          httpMcpRequestCount >= 5 && httpMcpCallCount === 1 && httpMcpAuthorizationMatched &&
+          httpMcpAuthorizationMatched && httpMcpAuthorizationMismatchMethods.length === 0 &&
           taskEndedSafely && workspacePersistsAfterTaskEnd;
         report({
           outcome: accepted ? 'model-issued-host-run-task-passed' : 'model-issued-host-run-task-incomplete',
@@ -439,6 +446,7 @@ createInterface({ input: process.stdin }).on('line', line => {
           httpMcpRequests: httpMcpRequestCount,
           httpMcpToolCalls: httpMcpCallCount,
           httpMcpAuthorizationMatched,
+          httpMcpAuthorizationMismatchMethods,
           bothMcpToolsAdvertised: observedOperations.filter(operation => operation.kind === 'mcp-stdio' || operation.kind === 'mcp-http').length === 2,
           taskEndedSafely,
           workspacePersistsAfterTaskEnd,
