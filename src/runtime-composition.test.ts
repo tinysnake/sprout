@@ -98,6 +98,83 @@ test('run settles and core writes stay loud when usage telemetry fails', async (
   }
 });
 
+test('runtime refuses Task lead override when durable run state is still active despite terminal memory', async () => {
+  await assertRuntimeAuthorityOverrideRefusesDurableState('active', 'run-still-active');
+});
+
+test('runtime refuses Task lead override when durable run state is missing despite terminal memory', async () => {
+  await assertRuntimeAuthorityOverrideRefusesDurableState('missing', 'run-state-unavailable');
+});
+
+test('runtime refuses Task lead override when durable run state cannot be read despite terminal memory', async () => {
+  await assertRuntimeAuthorityOverrideRefusesDurableState('error', 'run-state-unavailable');
+});
+
+test('runtime refuses Task lead override when durable run status is unqueryable despite terminal memory', async () => {
+  await assertRuntimeAuthorityOverrideRefusesDurableState('unknown', 'run-state-unavailable');
+});
+
+async function assertRuntimeAuthorityOverrideRefusesDurableState(
+  durableState: 'active' | 'missing' | 'error' | 'unknown',
+  expectedCode: 'run-still-active' | 'run-state-unavailable',
+): Promise<void> {
+  const stores = inMemoryStores();
+  let durableRead: 'normal' | 'active' | 'missing' | 'error' | 'unknown' = 'normal';
+  const runs = new Proxy(stores.runs, {
+    get(target, property) {
+      if (property === 'get') {
+        return async (runId: string) => {
+          if (durableRead === 'missing') return undefined;
+          if (durableRead === 'error') throw new Error('durable run store read failed');
+          const stored = await target.get(runId);
+          if (durableRead === 'unknown' && stored !== undefined) return { ...stored, status: 'unqueryable' as never };
+          return durableRead === 'active' && stored !== undefined
+            ? { ...stored, status: 'running' as const }
+            : stored;
+        };
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as RuntimeStores['runs'];
+  const runtime = await createRuntime({
+    configuration: hostConfiguration(),
+    projectRoot: '/synthetic/project-root',
+    environment: scriptedEnvironment({
+      adapters: new Map([['scripted', new ScriptedEngineAdapter({ turns: [scriptedTurn('settled')] })]]),
+    }),
+    stores: { ...stores, runs },
+  });
+  try {
+    const { id: runId } = await runtime.orchestrator.submit({ agentId: 'scout', prompt: 'settle before recovery' });
+    assert.equal((await runtime.orchestrator.waitFor(runId)).status, 'completed');
+    assert.equal(runtime.orchestrator.get(runId)?.status, 'completed', 'the in-memory orchestrator reports terminal state');
+    assert.equal((await stores.runs.get(runId))?.status, 'completed', 'the durable record starts terminal');
+
+    const acquired = runtime.pool.acquireLease({
+      instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'scout', runId, ttlMs: 60_000,
+    });
+    assert.equal(acquired.ok, true);
+    if (!acquired.ok) throw new Error('run lease was not admitted');
+    await runtime.recovery.open({ leaseId: acquired.lease.id, cause: 'worker-channel-lost', hadActiveRun: true, runId });
+    assert.equal(runtime.pool.getLease(acquired.lease.id)?.state, 'recovering');
+
+    durableRead = durableState;
+    await assert.rejects(runtime.recovery.authorityOverrideRelease(acquired.lease.id, {
+      authorityTaskId: 'task-lead-authority',
+      environmentInstanceId: INSTANCE_ID,
+      actorId: 'task-lead-agent',
+      actorKind: 'agent',
+      acknowledgedRisks: true,
+      reason: 'The durable run state must control settlement.',
+    }), (error: unknown) => (error as { code?: string }).code === expectedCode);
+    assert.equal(runtime.pool.getLease(acquired.lease.id)?.state, 'recovering',
+      'a durable active or missing record cannot release the recovering lease');
+  } finally {
+    await runtime.close();
+  }
+}
+
 test('runtime composition opens its configured database through the WAL-enabled SqliteStore path', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-wal-'));
   const filename = join(directory, 'runtime.sqlite');

@@ -1335,10 +1335,15 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         try { return await environmentOperations.remoteWorkEvidenceForLease(lease.id); }
         catch { return { ...EMPTY_REMOTE_WORK_RECOVERY_EVIDENCE, journalAvailable: false }; }
       },
+      // Only persisted state can authorize a recovery release: the orchestrator
+      // publishes its in-memory snapshot before the corresponding store save.
       isRunActive: async (runId) => {
-        const run = orchestrator.get(runId) ?? await durableStores.runs.get(runId);
+        const run = await durableStores.runs.get(runId);
         if (run === undefined) throw new Error('originating run state is unavailable');
-        return run.status === 'queued' || run.status === 'running';
+        const status: unknown = run.status;
+        if (status === 'queued' || status === 'running') return true;
+        if (status === 'completed' || status === 'failed' || status === 'stopped' || status === 'interrupted') return false;
+        throw new Error('originating run state is unavailable');
       },
       // The holder decisions reuse the existing lifecycle ordering rather than
       // re-implementing Task context cleanup or lease release here.
