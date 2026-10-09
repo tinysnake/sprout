@@ -4,6 +4,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TaskProposalService } from './proposal-service.ts';
+import { buildTaskContext, renderTaskPrompt } from './context.ts';
+import type { Task } from './model.ts';
 import type { TaskProposalStore } from './proposal-store.ts';
 import { InMemoryTaskProposalStore } from './proposal-store.ts';
 import { SqliteStore } from '../store/db.ts';
@@ -47,6 +49,36 @@ test('Human and Agent proposals share validated attributable content without exe
   const saved = await service.propose('project', human, sensitive);
   assert.equal(saved.versions[0]?.goal, sanitized.goal);
   await assert.rejects(service.propose('project', human, { ...content, goal: privatePath }), { code: 'invalid-content' });
+});
+
+test('a Task content version preserves relative Project filenames and redacts hostnames in its composed prompt', async () => {
+  const { service } = fixture();
+  const contentInput = {
+    title: 'Review README.md',
+    goal: 'Read README.md and notes/today.txt; report any issue with worker.node1.tailnet.example',
+    constraints: ['Keep notes/today.txt unchanged.'],
+    validationCriteria: ['Confirm the instructions in README.md.'],
+  };
+  const proposal = await service.propose('project', human, contentInput);
+  const revised = await service.revise(proposal.id, human, {
+    ...contentInput, reason: 'Clarify the file checks', expectedRevision: proposal.revision,
+  });
+  const content = await service.contentVersion(revised.id, revised.currentContentVersion);
+  const task: Task = {
+    id: 'task-257', projectId: 'project', title: content.title, goal: content.goal,
+    constraints: content.constraints, status: 'todo', createdAt: 1, updatedAt: 1,
+    admission: {
+      proposalId: proposal.id, proposalRevision: proposal.revision, contentVersion: content.version,
+      validationCriteria: content.validationCriteria, lead: human, contextAgentId: 'author',
+      approvedBy: human, approvedAt: 1,
+    },
+  };
+  const prompt = renderTaskPrompt(buildTaskContext(task, []), 'Continue with the requested files.');
+
+  assert.ok(prompt.includes('README.md'), 'the dotted root filename reaches the composed prompt unchanged');
+  assert.ok(prompt.includes('notes/today.txt'), 'the dotted relative path reaches the composed prompt unchanged');
+  assert.ok(!prompt.includes('worker.node1.tailnet.example'), 'the hostname is redacted from the same prompt');
+  assert.ok(prompt.includes('<redacted-host>'), 'the prompt makes the hostname redaction visible');
 });
 
 test('Only proposer revises or withdraws; Human override and rejection require durable reasons', async () => {

@@ -1,4 +1,4 @@
-import { redactSensitiveText } from '../environment/privacy.ts';
+import { redactProjectText } from '../environment/privacy.ts';
 import type { Message, TaskGroupMessageKind, WakePlan } from './model.ts';
 import { parseMentionTargets, planWake, type WakeMember } from './wake.ts';
 
@@ -56,7 +56,7 @@ export async function resolveTaskGroupAmbiguity(message: Message, members: reado
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const selected = await Promise.race([
-        model.select({ message: { id: message.id, body: redactSensitiveText(message.body).slice(0, TASK_GROUP_MODEL_MAX_BODY_CHARS), kind: message.kind === 'escalation' ? 'escalation' : message.envelope?.kind ?? message.kind ?? 'status' }, candidates: candidates.slice(0, TASK_GROUP_MODEL_MAX_CANDIDATES), signal: abort.signal }),
+        model.select({ message: { id: message.id, body: redactProjectText(message.body).slice(0, TASK_GROUP_MODEL_MAX_BODY_CHARS), kind: message.kind === 'escalation' ? 'escalation' : message.envelope?.kind ?? message.kind ?? 'status' }, candidates: candidates.slice(0, TASK_GROUP_MODEL_MAX_CANDIDATES), signal: abort.signal }),
         new Promise<readonly string[]>((_, reject) => { timer = setTimeout(() => { abort.abort(); reject(new Error('timeout')); }, Math.max(1, Math.min(TASK_GROUP_MODEL_TIMEOUT_MS, timeoutMs))); }),
       ]);
       if (Array.isArray(selected) && selected.every(id => candidates.slice(0, TASK_GROUP_MODEL_MAX_CANDIDATES).includes(id))) {

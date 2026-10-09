@@ -3,7 +3,7 @@ import type { ProjectAgentAuthorityPort } from '../project/authority-service.ts'
 import type { ConversationProjectPort } from '../conversation/service.ts';
 import type { WorkingGroupScope } from '../conversation/model.ts';
 import type { Message } from '../collaboration/model.ts';
-import { sanitizeOperatorText } from '../environment/privacy.ts';
+import { sanitizeOperatorText, sanitizeProjectText } from '../environment/privacy.ts';
 import { TaskProposalError, type ProposalActor, type TaskProposal, type TaskProposalContent,
   type TaskContentVersion, type ProposalDecision, type ReviseTaskProposal, type TaskProposalInput,
   type TaskProposalOrigin } from './proposal-model.ts';
@@ -186,12 +186,18 @@ function text(value: unknown, field: string, max: number): string {
   if (!sanitized.trim()) throw new TaskProposalError('invalid-content', `invalid ${field}`);
   return sanitized;
 }
+function projectText(value: unknown, field: string, max: number): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > max) throw new TaskProposalError('invalid-content', `invalid ${field}`);
+  const sanitized = sanitizeProjectText(value, { maxLength: max, fallback: '' });
+  if (!sanitized.trim()) throw new TaskProposalError('invalid-content', `invalid ${field}`);
+  return sanitized;
+}
 function strings(value: unknown, field: string): readonly string[] {
   if (!Array.isArray(value) || value.length > 100) throw new TaskProposalError('invalid-content', `invalid ${field}`);
-  return value.map(v => text(v, field, 4000));
+  return value.map(v => projectText(v, field, 4000));
 }
 function validatedContent(input: TaskProposalContent): TaskProposalContent {
   if (!input || typeof input !== 'object') throw new TaskProposalError('invalid-content');
-  return { title: text(input.title, 'title', 200), goal: text(input.goal, 'goal', 16000),
+  return { title: projectText(input.title, 'title', 200), goal: projectText(input.goal, 'goal', 16000),
     constraints: strings(input.constraints, 'constraints'), validationCriteria: strings(input.validationCriteria, 'validationCriteria') };
 }

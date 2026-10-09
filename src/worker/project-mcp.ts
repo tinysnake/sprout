@@ -5,7 +5,7 @@ import type { RequestOptions } from 'node:http';
 import { lstat, open, realpath } from 'node:fs/promises';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { isAbsolute, join, sep } from 'node:path';
-import { redactSensitiveText, sanitizeIdentifier, sanitizeOperatorText } from '../environment/privacy.ts';
+import { redactProjectText, sanitizeIdentifier, sanitizeProjectText } from '../environment/privacy.ts';
 import { parseProjectMcpManifest, projectMcpServerSecrets, type ProjectMcpManifestServer } from './project-mcp-manifest.ts';
 import type {
   AttachWorkspaceBindingParams,
@@ -141,7 +141,7 @@ export class WorkerProjectMcp {
           const safeServer = sanitizeIdentifier(declaration.name, { fallback: '', kind: 'generic', maxLength: 64 });
           const id = randomUUID();
           const safeName = sanitizeIdentifier(`${safeServer}_${safeTool}`, { fallback: '', kind: 'generic', maxLength: 120 });
-          const description = redactMcpText(sanitizeOperatorText(tool.description, { fallback: 'No description was provided.', maxLength: 1_000 }), serverSecrets);
+          const description = redactMcpText(sanitizeProjectText(tool.description, { fallback: 'No description was provided.', maxLength: 1_000 }), serverSecrets);
           const schema = sanitizeInputSchema(tool.inputSchema, 0, serverSecrets);
           if (!safeTool || !safeServer || !safeName || !schema) { rejectedDeclaration = true; continue; }
           const descriptor: ProjectMcpToolDeclaration = { id, server: safeServer, name: safeTool, description, inputSchema: schema };
@@ -656,7 +656,7 @@ function sanitizeInputSchema(value: unknown, depth = 0, secretValues: readonly s
   const type = value.type;
   if (typeof type !== 'string' || !['object', 'array', 'string', 'number', 'integer', 'boolean', 'null'].includes(type)) return undefined;
   const result: JsonRecord = { type };
-  if (typeof value.description === 'string') result.description = redactMcpText(sanitizeOperatorText(value.description, { fallback: '', maxLength: 1_000 }), secretValues);
+  if (typeof value.description === 'string') result.description = redactMcpText(sanitizeProjectText(value.description, { fallback: '', maxLength: 1_000 }), secretValues);
   if (value.enum !== undefined) {
     if (!Array.isArray(value.enum) || value.enum.length > 64 || value.enum.some(item => item !== null && !['string', 'number', 'boolean'].includes(typeof item)) ||
         value.enum.some(item => typeof item === 'string' && secretValues.some(secret => secret.length > 0 && item.includes(secret)))) return undefined;
@@ -750,7 +750,7 @@ function redactMcpText(text: string, secretValues: readonly string[]): string {
   for (const secret of [...secretValues].filter(value => value.length > 0).sort((a, b) => b.length - a.length)) {
     result = result.split(secret).join('<redacted-project-mcp-secret>');
   }
-  return redactSensitiveText(result);
+  return redactProjectText(result);
 }
 function validLease(input: ProjectMcpLeaseIdentity): LeaseScope | undefined {
   if (!input.leaseId || input.leaseId.length > 128 || !input.runId || input.runId.length > 128 || !input.holderId || input.holderId.length > 128) return undefined;

@@ -17,6 +17,8 @@ import {
 } from './authority-model.ts';
 import { ProjectService } from './authority-service.ts';
 import { InMemoryProjectAuthorityStore } from './authority-store.ts';
+import { BridgedProjectRegistry } from './bridged-registry.ts';
+import { assembleProjectContract, renderProjectContract } from './contract.ts';
 import { GENERAL_COLLABORATION_TEMPLATE } from './template.ts';
 
 test('Project MCP configuration selection is versioned, explicit, and restricted to the supported format', async () => {
@@ -469,6 +471,27 @@ test('free text passes the privacy boundary and an empty goal never invalidates 
   assert.ok(!content.goal.includes('/home/secret'));
   const leaky = content.memberships.find((membership) => membership.memberId === 'agent-leaky');
   assert.ok(leaky !== undefined && !leaky.collaborationInstructions.includes('host.internal.corp'));
+});
+
+test('the Project contract preserves relative filenames and redacts hostnames in model-visible text', async () => {
+  const projects = service();
+  const authority = await projects.create({
+    id: 'project-files', displayName: 'File instructions',
+    goal: 'Review README.md and notes/today.txt; avoid worker.node1.tailnet.example',
+    rules: ['Keep notes/today.txt unchanged.'],
+    agentMemberships: [{
+      agentId: 'agent-scout', responsibilities: ['Read README.md'],
+      collaborationInstructions: 'Do not connect to docs.internal.example today.',
+    }],
+  });
+  const project = BridgedProjectRegistry.project(authority);
+  const contract = renderProjectContract(assembleProjectContract({ project, agentId: 'agent-scout' }));
+
+  assert.ok(contract.includes('README.md'), 'the Project filename reaches the assembled contract unchanged');
+  assert.ok(contract.includes('notes/today.txt'), 'the relative Project path reaches the assembled contract unchanged');
+  assert.ok(!contract.includes('worker.node1.tailnet.example'), 'the hostname is redacted from the same contract');
+  assert.ok(!contract.includes('docs.internal.example'), 'hostnames in Project membership text are redacted too');
+  assert.ok(contract.includes('<redacted-host>'), 'the contract makes hostname redaction visible');
 });
 
 test('a Project authority record survives an in-memory store round-trip and a restart-shaped reopen', async () => {

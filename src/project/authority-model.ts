@@ -31,7 +31,7 @@
  * shared privacy boundary before it becomes durable.
  */
 
-import { sanitizeIdentifier, sanitizeOperatorText, redactSensitiveText } from '../environment/privacy.ts';
+import { redactProjectText, sanitizeIdentifier, sanitizeOperatorText } from '../environment/privacy.ts';
 
 /** The one Project MCP manifest format currently selected by Human authority. */
 export const PROJECT_MCP_CONFIGURATION_FORMAT = 'claude-code-mcp-json-v1' as const;
@@ -222,7 +222,7 @@ export function sanitizeProjectDisplayName(value: string | undefined): string {
  * narrative must never become invalid identity).
  */
 export function sanitizeProjectGoal(value: string | undefined): string {
-  const text = redactSensitiveText((value ?? '').trim());
+  const text = redactProjectText((value ?? '').trim());
   return text.length <= MAX_TEXT ? text : `${text.slice(0, MAX_TEXT - 1).trimEnd()}\u2026`;
 }
 
@@ -234,7 +234,7 @@ export function sanitizeProjectRules(value: readonly string[] | undefined): read
   const rules: string[] = [];
   for (const entry of value ?? []) {
     if (typeof entry !== 'string') continue;
-    const text = redactSensitiveText(entry.trim());
+    const text = redactProjectText(entry.trim());
     if (text === '') continue;
     rules.push(text.length <= MAX_TEXT ? text : `${text.slice(0, MAX_TEXT - 1).trimEnd()}\u2026`);
   }

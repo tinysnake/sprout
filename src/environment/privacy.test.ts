@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   redactSensitiveText,
+  redactProjectText,
   sanitizeIdentifier,
   sanitizeOperatorText,
   sanitizeProtocolVersion,
@@ -160,6 +161,26 @@ test('an ordinary decisive sentence is not eaten by the credential rules', () =>
   ]) {
     assert.equal(sanitizeOperatorText(reason, { fallback: 'fallback' }), reason);
   }
+});
+
+test('Project prose preserves clear relative filenames while general hostnames stay redacted', () => {
+  const content = 'Read README.md and notes/today.txt; connect to worker.node1.tailnet.example';
+  const projectText = redactProjectText(content);
+
+  assert.equal(projectText, 'Read README.md and notes/today.txt; connect to <redacted-host>');
+  assert.equal(redactSensitiveText('Read README.md'), 'Read <redacted-host>', 'the general sanitizer keeps its existing rule');
+  assert.equal(redactProjectText('example.md'), '<redacted-host>', 'an unqualified domain-shaped token is still treated as a host');
+  assert.equal(redactProjectText('Read example.md'), 'Read example.md', 'file-reference context distinguishes a bare filename');
+
+  const sensitive = redactProjectText(
+    'Read README.md; host=worker-7 port=41001; path /srv/project/private.txt; URL https://internal.example/data; api_key={{API_KEY_TEST}}',
+  );
+  assert.ok(sensitive.includes('README.md'));
+  assert.ok(!/worker-7|41001|\/srv\/project|internal\.example|API_KEY_TEST/.test(sensitive));
+  assert.ok(sensitive.includes('<redacted-host>'));
+  assert.ok(sensitive.includes('<redacted-path>'));
+  assert.ok(sensitive.includes('<redacted-url>'));
+  assert.ok(sensitive.includes('<redacted-credential>'));
 });
 
 test('a model identifier is not mistaken for a hostname', () => {

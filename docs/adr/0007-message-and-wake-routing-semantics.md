@@ -254,6 +254,12 @@ model with the source exclusions and limited redaction guarantee above. It
 satisfies #179 AC4's reconciliation trigger by recording the accepted risk;
 shape-independent sanitization is not implemented or required by this decision.
 
+## Model-visible Project file references
+
+Project and Task prose can name files the Agent must inspect. Their shared contextual redactor preserves a relative Project file reference when it is a slash-separated path with simple components and a recognized file extension, or a bare filename in explicit file-reference position (for example, after a file operation or inside inline code). A dotted token without that file context remains host-shaped and is redacted. The general free-text redactor used for Environment, diagnostic, and AgentRun output stays context-free.
+
+This context changes only how the dotted-host rule classifies clear Project file references. Credential and token patterns, URLs, identities, network addresses, absolute paths, machine hostnames, and raw model output keep their existing redactions. Sprout-owned secrets still must not be placed in shared prose.
+
 ## Failure, suppression, admission, and retry
 
 A missing or unavailable model, timeout, exception, invalid identifier,

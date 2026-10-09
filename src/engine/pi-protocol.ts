@@ -1,6 +1,6 @@
 import type { AgentRunEvent, EngineTurnResult, TokenUsage, DetailedTokenDimensions } from './port.ts';
 import { extractPiCostEstimate } from '../usage/valuation.ts';
-import { sanitizeOperatorText } from '../environment/privacy.ts';
+import { sanitizeProjectText } from '../environment/privacy.ts';
 import { classifyEngineTurnFailure, isRetryableEngineTurnFailure, sanitizedTurnFailure, type EngineTurnFailureCause } from './turn-failure.ts';
 
 /**
@@ -226,7 +226,7 @@ function mapAssistantUpdate(message: Record<string, unknown>, state: PiTurnState
 }
 
 function sanitizeToolOutput(value: string): string {
-  return sanitizeOperatorText(value, { fallback: '', maxLength: 2_048 });
+  return sanitizeProjectText(value, { fallback: '', maxLength: 2_048 });
 }
 
 function getRecord(value: unknown): Record<string, unknown> | undefined {

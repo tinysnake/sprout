@@ -4,7 +4,7 @@ import type { RemoteWorkspaceOperationResult, RemoteWorkspaceTools, RemoteProjec
 import { RemoteProjectMcpStartupError } from '../engine/port.ts';
 import type { ProjectAccessService } from '../project/access-service.ts';
 import { accessIsConsistent, sanitizeWorkspaceSelection } from '../project/access.ts';
-import { sanitizeIdentifier, sanitizeOperatorText } from '../environment/privacy.ts';
+import { sanitizeIdentifier, sanitizeProjectText } from '../environment/privacy.ts';
 import type { ProjectService } from '../project/authority-service.ts';
 import { PROJECT_MCP_CONFIGURATION_FORMAT } from '../project/authority-model.ts';
 import type { ProjectEnvironmentAccess, WorkspaceBinding } from '../project/access.ts';
@@ -1137,7 +1137,7 @@ function safeMcpToolCatalog(result: StartProjectMcpResult): { readonly processId
       if (!name || names.has(name)) return undefined;
       names.add(name);
       tools.push({
-        public: { name, description: sanitizeOperatorText(tool.description, { fallback: 'Project MCP tool.', maxLength: 1_000 }), inputSchema },
+        public: { name, description: sanitizeProjectText(tool.description, { fallback: 'Project MCP tool.', maxLength: 1_000 }), inputSchema },
         workerId: tool.id,
       });
     }
@@ -1154,13 +1154,13 @@ function sanitizeMcpSchema(schema: Record<string, unknown>, depth: number): Read
   const result: Record<string, unknown> = { type: schema.type };
   if (schema.description !== undefined) {
     if (typeof schema.description !== 'string') return undefined;
-    result.description = sanitizeOperatorText(schema.description, { fallback: '', maxLength: 1_000 });
+    result.description = sanitizeProjectText(schema.description, { fallback: '', maxLength: 1_000 });
   }
   if (schema.enum !== undefined) {
     if (!Array.isArray(schema.enum) || schema.enum.length > 64 || schema.enum.some(item => item !== null && !['string', 'number', 'boolean'].includes(typeof item))) return undefined;
     const safeEnum = schema.enum.map(item => {
       if (typeof item !== 'string') return item;
-      const safe = sanitizeOperatorText(item, { fallback: '', maxLength: 1_000 });
+      const safe = sanitizeProjectText(item, { fallback: '', maxLength: 1_000 });
       return safe === item ? safe : undefined;
     });
     if (safeEnum.some(item => item === undefined)) return undefined;
@@ -1245,7 +1245,7 @@ function sanitizeMcpCallResult(
       (result.outcomeUnknown !== undefined && (result.outcomeUnknown !== true || result.status !== 'failed' || result.reason !== 'server-error')) ||
       (result.reason !== undefined && !['unknown-tool', 'invalid-arguments', 'server-error', 'invalid-result', 'unsupported-feature', 'timeout', 'worker-refused'].includes(result.reason)) ||
       (result.text !== undefined && typeof result.text !== 'string')) return { status: 'failed', reason: 'worker-refused' };
-  let safeText = result.text === undefined ? undefined : sanitizeOperatorText(result.text, { fallback: 'MCP tool returned no text.', maxLength: 32_000 });
+  let safeText = result.text === undefined ? undefined : sanitizeProjectText(result.text, { fallback: 'MCP tool returned no text.', maxLength: 32_000 });
   if (safeText !== undefined && Buffer.byteLength(safeText, 'utf8') > 32 * 1024) {
     let low = 0; let high = safeText.length;
     while (low < high) {
