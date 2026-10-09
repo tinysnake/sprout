@@ -41,7 +41,7 @@ import type { Task, TaskRunLink, TaskStatus, TaskWithRuns } from '../task/model.
 import type { ExecutionMode } from '../execution-mode.ts';
 import { executionModeMismatchReason, legacyEnvironmentPlacement, runExecutionModeMismatchReason } from '../execution-placement.ts';
 import { normalizeEnrollment, type EnvironmentEnrollment } from '../environment/enrollment.ts';
-import type { EnvironmentRecoveryRecord, ForceReleaseRecord } from '../environment/recovery.ts';
+import { remoteWorkHasUnresolvedFacts, type EnvironmentRecoveryRecord, type ForceReleaseRecord } from '../environment/recovery.ts';
 import {
   sanitizeIdentifier,
   sanitizeOperatorText,
@@ -1017,6 +1017,8 @@ export interface EnvironmentRecoveryView {
     readonly taskContextPrepared?: boolean;
   };
   readonly unresolvedFacts: readonly string[];
+  /** Sanitized decision gate derived from remote operation and process evidence. */
+  readonly remoteWorkEvidence?: { readonly unresolved: boolean };
   /** Whether the ordinary decision requires synchronized evidence first. */
   readonly evidenceSynchronized: boolean;
   readonly decisions: readonly {
@@ -1057,6 +1059,9 @@ export function toEnvironmentRecoveryView(record: EnvironmentRecoveryRecord): En
     unresolvedFacts: record.unresolvedFacts.map((fact) =>
       sanitizeOperatorText(fact, { fallback: DEFAULT_RECOVERY_REASON }),
     ),
+    ...(record.remoteWorkEvidence !== undefined
+      ? { remoteWorkEvidence: { unresolved: remoteWorkHasUnresolvedFacts(record.remoteWorkEvidence) } }
+      : {}),
     evidenceSynchronized: record.evidence !== undefined,
     decisions: record.decisions.map((decision) => ({
       kind: decision.kind,

@@ -20,6 +20,7 @@ import type { Task, TaskRunLink } from '../task/model.ts';
 import {
   summarizeRunHistory,
   toEnvironmentReadinessView,
+  toEnvironmentRecoveryView,
   toMessageView,
   toProjectView,
   toProbeResultView,
@@ -35,6 +36,7 @@ import {
   type RunView,
 } from './views.ts';
 import type { EnvironmentReadiness } from '../environment/readiness.ts';
+import type { EnvironmentRecoveryRecord, RemoteWorkRecoveryEvidence } from '../environment/recovery.ts';
 
 function run(overrides: Partial<AgentRun> = {}): AgentRun {
   return {
@@ -694,6 +696,59 @@ test('the scope read projection re-applies the privacy boundary before anything 
   assert.ok(!serialized.includes('sk-abcdefghijklmnopqrstuvwx'), 'no credential in a reason');
   assert.ok(!serialized.includes('worker.internal.corp'), 'no hostname in a rule');
   assert.ok(!serialized.includes('192.168.1.10'), 'no address in an end reason');
+});
+
+test('recovery wire projection exposes only the sanitized remote outcome gate', () => {
+  const project = (remoteWorkEvidence: RemoteWorkRecoveryEvidence) => toEnvironmentRecoveryView({
+    id: 'recovery-1',
+    environmentInstanceId: 'instance-1',
+    leaseId: 'lease-1',
+    holderKind: 'task',
+    holderId: 'task-1',
+    taskId: 'task-1',
+    cause: 'worker-channel-lost',
+    phase: 'recovery',
+    startedAt: 1,
+    updatedAt: 2,
+    evidence: {
+      retainedEventCount: 1,
+      turnSettlementObserved: true,
+      terminalStatus: 'interrupted',
+      engineSessionStopped: true,
+      taskContextRecycled: false,
+      taskContextPrepared: true,
+    },
+    remoteWorkEvidence,
+    unresolvedFacts: [],
+    decisions: [],
+  } satisfies EnvironmentRecoveryRecord);
+
+  const uncertain = project({
+    journalAvailable: true,
+    workspaceOperations: { running: 0, unknown: 0, cancelRequested: 0, recoveryRequired: 0 },
+    projectMcpOperations: { running: 0, uncertain: 0 },
+    projectMcpProcesses: { starting: 0, running: 0, stopping: 0, uncertain: 1 },
+    endpoint: 'ENDPOINT_TEST_SENTINEL',
+    headers: 'HEADER_TEST_SENTINEL',
+    credentials: 'CREDENTIAL_TEST_SENTINEL',
+    sessionIdentifier: 'SESSION_TEST_SENTINEL',
+    homePath: 'HOME_PATH_TEST_SENTINEL',
+  } as unknown as RemoteWorkRecoveryEvidence);
+  assert.deepEqual(uncertain.remoteWorkEvidence, { unresolved: true });
+  for (const sentinel of [
+    'ENDPOINT_TEST_SENTINEL', 'HEADER_TEST_SENTINEL', 'CREDENTIAL_TEST_SENTINEL',
+    'SESSION_TEST_SENTINEL', 'HOME_PATH_TEST_SENTINEL',
+  ]) {
+    assert.equal(JSON.stringify(uncertain).includes(sentinel), false, `${sentinel} is not projected`);
+  }
+
+  const confirmed = project({
+    journalAvailable: true,
+    workspaceOperations: { running: 0, unknown: 0, cancelRequested: 0, recoveryRequired: 0 },
+    projectMcpOperations: { running: 0, uncertain: 0 },
+    projectMcpProcesses: { starting: 0, running: 0, stopping: 0, uncertain: 0 },
+  });
+  assert.deepEqual(confirmed.remoteWorkEvidence, { unresolved: false });
 });
 
 test('scope state and context views keep the two governing halves separate and redacted', () => {

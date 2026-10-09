@@ -962,13 +962,13 @@ test('unresolved remote operations block ordinary recovery and preserve the Task
       taskContextPrepared: true, taskContextRecycled: false },
     remoteWorkEvidence: {
       journalAvailable: true,
-      workspaceOperations: { running: 0, unknown: 1, cancelRequested: 0, recoveryRequired: 0 },
+      workspaceOperations: { running: 0, unknown: 0, cancelRequested: 0, recoveryRequired: 0 },
       projectMcpOperations: { running: 0, uncertain: 0 },
-      projectMcpProcesses: { starting: 0, running: 0, stopping: 0, uncertain: 0 },
+      projectMcpProcesses: { starting: 0, running: 0, stopping: 0, uncertain: 1 },
     },
   });
   assert.equal(record.phase, 'recovery');
-  assert.ok(record.unresolvedFacts.some(fact => fact.includes('remote workspace operation')));
+  assert.ok(record.unresolvedFacts.some(fact => fact.includes('Project MCP process')));
   await assert.rejects(built.recovery.resume(leaseId), (error: unknown) =>
     error instanceof EnvironmentRecoveryError && error.code === 'evidence-not-synchronized');
   assert.equal(built.pool.getLease(leaseId)?.state, 'recovering');
