@@ -776,7 +776,7 @@ export class RunOrchestrator {
       stopAdmissionKeepalive?.();
       throw error;
     }
-    const execute = () => this.#executeHostRun(recorded, agent, host, option, request.taskBootstrapInstructions, mcpSelected, selectedWorkEnvironmentInstanceId);
+    const execute = () => this.#executeHostRun(recorded, agent, host, option, request.taskBootstrapInstructions, mcpSelected, selectedWorkEnvironmentInstanceId, stopAdmissionKeepalive);
     const settled = (recorded.taskId === undefined
       ? this.#bindingGenerations.withLock(bindingGenerationScope(recorded), execute)
       : execute()).then((run) => this.settleTaskRun(run)).finally(() => stopAdmissionKeepalive?.());
@@ -792,6 +792,7 @@ export class RunOrchestrator {
     taskBootstrapInstructions: string | undefined,
     useProjectMcp: boolean,
     requestedWorkEnvironmentInstanceId: string | undefined,
+    stopAdmissionKeepalive: (() => void) | undefined,
   ): Promise<AgentRun> {
     if (this.#stopRequests.has(initial.id)) {
       if (initial.leaseId !== undefined && initial.taskId === undefined) this.#pool.releaseLease(initial.leaseId);
@@ -850,6 +851,10 @@ export class RunOrchestrator {
           : initial.environmentInstanceId !== '' ? { environmentInstanceId: initial.environmentInstanceId } : {}),
         ...(bindingFence !== undefined ? { bindingFence } : {}),
       });
+      if (remoteWorkspace !== undefined) {
+        // Workspace attachment has started the same renewal policy; hand off without a gap.
+        stopAdmissionKeepalive?.();
+      }
       if ((requestedWorkEnvironmentInstanceId !== undefined || previousActivationWasBound) &&
           remoteWorkspace === undefined && remoteProjectMcp === undefined) {
         throw new Error(requestedWorkEnvironmentInstanceId !== undefined
