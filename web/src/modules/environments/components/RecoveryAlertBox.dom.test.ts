@@ -38,7 +38,7 @@ for (const [key, value] of Object.entries(replacements)) {
   Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
 }
 
-function factsWithRemoteProcess(uncertain: boolean): EnvironmentFactsView {
+function factsWithRemoteUncertainty(kind: 'process' | 'call' | 'none'): EnvironmentFactsView {
   const recovery = {
     id: 'recovery-1',
     environmentInstanceId: 'instance-1',
@@ -57,11 +57,11 @@ function factsWithRemoteProcess(uncertain: boolean): EnvironmentFactsView {
       taskContextRecycled: false,
       taskContextPrepared: true,
     },
-    unresolvedFacts: uncertain
+    unresolvedFacts: kind === 'process'
       ? ['1 Project MCP process(es) have not been confirmed stopped.']
-      : [],
+      : kind === 'call' ? ['1 Project MCP tool call(s) do not have a confirmed terminal outcome.'] : [],
     evidenceSynchronized: true,
-    remoteWorkEvidence: { unresolved: uncertain },
+    remoteWorkEvidence: { unresolved: kind !== 'none' },
     decisions: [],
   } as unknown as EnvironmentRecoveryView;
 
@@ -103,7 +103,7 @@ function serviceFor(facts: EnvironmentFactsView): ProductionEnvironmentService {
   return new ProductionEnvironmentService(adapter);
 }
 
-test('RecoveryAlertBox gates ordinary decisions on sanitized remote process-stop evidence', async () => {
+test('RecoveryAlertBox gates ordinary decisions on sanitized remote process-stop and call-outcome evidence', async () => {
   const vite = await (await import('vite')).createServer({
     root: new URL('../../../../', import.meta.url).pathname,
     appType: 'custom',
@@ -127,9 +127,11 @@ test('RecoveryAlertBox gates ordinary decisions on sanitized remote process-stop
     const component = (await vite.ssrLoadModule(
       '/src/modules/environments/components/RecoveryAlertBox.vue',
     )) as { default: unknown };
-    const uncertainEnv = await serviceFor(factsWithRemoteProcess(true)).getEnvironment('enrollment-1');
-    const confirmedEnv = await serviceFor(factsWithRemoteProcess(false)).getEnvironment('enrollment-1');
+    const uncertainEnv = await serviceFor(factsWithRemoteUncertainty('process')).getEnvironment('enrollment-1');
+    const callOnlyEnv = await serviceFor(factsWithRemoteUncertainty('call')).getEnvironment('enrollment-1');
+    const confirmedEnv = await serviceFor(factsWithRemoteUncertainty('none')).getEnvironment('enrollment-1');
     assert.ok(uncertainEnv);
+    assert.ok(callOnlyEnv);
     assert.ok(confirmedEnv);
     const env = ref(uncertainEnv as EnvironmentInstance);
     const container = initialDom.window.document.createElement('div');
@@ -139,6 +141,15 @@ test('RecoveryAlertBox gates ordinary decisions on sanitized remote process-stop
 
     const alert = container.querySelector('.recovery-alert-box');
     assert.ok(alert);
+    assert.match(alert.textContent ?? '', /Remote operation outcomes or Project MCP process stops remain unconfirmed/);
+    assert.match(alert.textContent ?? '', /Ordinary recovery remains blocked/);
+    assert.doesNotMatch(alert.textContent ?? '', /Ready for Human decision/);
+    assert.equal(container.querySelector('.btn-resume-recovery'), null);
+    assert.equal(container.querySelector('.btn-discard-recovery'), null);
+
+    env.value = callOnlyEnv;
+    await nextTick();
+    assert.match(alert.textContent ?? '', /1 Project MCP tool call\(s\) do not have a confirmed terminal outcome/);
     assert.match(alert.textContent ?? '', /Remote operation outcomes or Project MCP process stops remain unconfirmed/);
     assert.match(alert.textContent ?? '', /Ordinary recovery remains blocked/);
     assert.doesNotMatch(alert.textContent ?? '', /Ready for Human decision/);

@@ -742,6 +742,15 @@ test('recovery wire projection exposes only the sanitized remote outcome gate', 
     assert.equal(JSON.stringify(uncertain).includes(sentinel), false, `${sentinel} is not projected`);
   }
 
+  const callOnly = project({
+    journalAvailable: true,
+    workspaceOperations: { running: 0, unknown: 0, cancelRequested: 0, recoveryRequired: 0 },
+    projectMcpOperations: { running: 0, uncertain: 1 },
+    projectMcpProcesses: { starting: 0, running: 0, stopping: 0, uncertain: 0 },
+  });
+  assert.equal(callOnly.evidenceSynchronized, true, 'terminal Worker evidence is independently synchronized');
+  assert.deepEqual(callOnly.remoteWorkEvidence, { unresolved: true }, 'one uncertain call blocks even with no open processes');
+
   const confirmed = project({
     journalAvailable: true,
     workspaceOperations: { running: 0, unknown: 0, cancelRequested: 0, recoveryRequired: 0 },

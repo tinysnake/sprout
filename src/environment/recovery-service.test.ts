@@ -945,31 +945,51 @@ test('#171 identity rotation is attested, never inferred: unexplained mismatches
   assert.equal(unchanged?.evidence, undefined);
 });
 
-test('unresolved remote operations block ordinary recovery and preserve the Task lease', async () => {
-  const built = build({ now: 1_700_000_000_000 });
-  await built.store.create(task());
-  const begun = await built.lifecycle.begin('task-1');
-  const leaseId = begun.environmentLeaseId;
-  assert.ok(leaseId);
-  await built.recovery.open({ leaseId, cause: 'sprout-restart', hadActiveRun: false });
-  await built.recovery.observeReconnect(leaseId, {
-    enrollmentId: 'enroll-1', environmentInstanceId: 'mac-1', identityVerified: true,
-    protocolCompatible: true, permissionsAllowed: true, hadActiveRun: false,
+for (const scenario of [
+  { holder: 'task', uncertain: 'process' },
+  { holder: 'task', uncertain: 'call' },
+  { holder: 'run', uncertain: 'call' },
+] as const) {
+  test(`unresolved remote ${scenario.uncertain} blocks ordinary recovery and preserves the ${scenario.holder} lease`, async () => {
+    const built = build({ now: 1_700_000_000_000 });
+    let leaseId: string;
+    if (scenario.holder === 'task') {
+      ({ leaseId } = await interruptedTask(built));
+    } else {
+      const acquired = built.pool.acquireLease({
+        instanceId: 'mac-1', capability: 'agent-run', holderId: 'run-1', runId: 'run-1', ttlMs: 60_000,
+      });
+      assert.ok(acquired.ok);
+      leaseId = acquired.lease.id;
+      await built.recovery.open({ leaseId, cause: 'sprout-restart', hadActiveRun: true, runId: 'run-1' });
+    }
+    await built.recovery.observeReconnect(leaseId, {
+      enrollmentId: 'enroll-1', environmentInstanceId: 'mac-1', identityVerified: true,
+      protocolCompatible: true, permissionsAllowed: true, hadActiveRun: true,
+    });
+    const record = await built.recovery.synchronizeEvidence(leaseId, {
+      hadActiveRun: true,
+      evidence: { retainedEventCount: 1, turnSettlementObserved: true, engineSessionStopped: true,
+        terminalStatus: 'interrupted', taskContextPrepared: true, taskContextRecycled: false },
+      remoteWorkEvidence: {
+        journalAvailable: true,
+        workspaceOperations: { running: 0, unknown: 0, cancelRequested: 0, recoveryRequired: 0 },
+        projectMcpOperations: { running: 0, uncertain: scenario.uncertain === 'call' ? 1 : 0 },
+        projectMcpProcesses: { starting: 0, running: 0, stopping: 0, uncertain: scenario.uncertain === 'process' ? 1 : 0 },
+      },
+    });
+    assert.equal(record.phase, 'recovery');
+    assert.equal(record.holderKind, scenario.holder);
+    assert.ok(record.unresolvedFacts.some(fact => fact.includes(scenario.uncertain === 'call' ? 'Project MCP tool call' : 'Project MCP process')));
+    const leaseBefore = built.pool.getLease(leaseId);
+    const taskBefore = await built.store.get('task-1');
+    for (const action of scenario.holder === 'task' ? ['resume', 'discard'] as const : ['release'] as const) {
+      await assert.rejects(built.recovery[action](leaseId), (error: unknown) =>
+        error instanceof EnvironmentRecoveryError && error.code === 'evidence-not-synchronized');
+      assert.deepEqual(built.pool.getLease(leaseId), leaseBefore, `${action} preserves the same lease`);
+      assert.equal(built.pool.getLease(leaseId)?.state, 'recovering');
+      assert.equal((await built.recovery.forLease(leaseId))?.phase, 'recovery');
+      assert.deepEqual(await built.store.get('task-1'), taskBefore);
+    }
   });
-  const record = await built.recovery.synchronizeEvidence(leaseId, {
-    hadActiveRun: false,
-    evidence: { retainedEventCount: 0, turnSettlementObserved: true, engineSessionStopped: true,
-      taskContextPrepared: true, taskContextRecycled: false },
-    remoteWorkEvidence: {
-      journalAvailable: true,
-      workspaceOperations: { running: 0, unknown: 0, cancelRequested: 0, recoveryRequired: 0 },
-      projectMcpOperations: { running: 0, uncertain: 0 },
-      projectMcpProcesses: { starting: 0, running: 0, stopping: 0, uncertain: 1 },
-    },
-  });
-  assert.equal(record.phase, 'recovery');
-  assert.ok(record.unresolvedFacts.some(fact => fact.includes('Project MCP process')));
-  await assert.rejects(built.recovery.resume(leaseId), (error: unknown) =>
-    error instanceof EnvironmentRecoveryError && error.code === 'evidence-not-synchronized');
-  assert.equal(built.pool.getLease(leaseId)?.state, 'recovering');
-});
+}
