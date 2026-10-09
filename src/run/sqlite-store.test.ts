@@ -50,6 +50,32 @@ test('a run survives being written to disk and read back', async () => {
   assert.deepEqual(restored, sampleRun());
 });
 
+test('standalone Work Environment selection and binding state survive SQLite reopen and updates', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-sqlite-binding-switch-'));
+  const dbPath = join(dir, 'sprout.db');
+  const writer = new SqliteRunStore({ filename: dbPath });
+  const run = sampleRun({
+    executionMode: 'host-run', engineHostProfileId: 'profile-local-a', environmentInstanceId: 'environment-b',
+    requestedWorkEnvironmentInstanceId: 'environment-b',
+    workspaceBindingStatus: 'active',
+    workspaceBinding: {
+      environmentInstanceId: 'environment-b', bindingId: 'binding-b', generation: 2,
+      catalogGeneration: 4, workspaceId: 'a'.repeat(40), kind: 'relative', path: 'repos/project',
+      operations: ['read', 'search'], projectMcpTools: ['lookup'],
+    },
+  });
+  await writer.save(run);
+  await writer.save({ ...run, status: 'failed', workspaceBindingStatus: 'recovering' });
+  writer.close();
+
+  const reader = new SqliteRunStore({ filename: dbPath });
+  const restored = await reader.get('run-1');
+  reader.close();
+  assert.equal(restored?.requestedWorkEnvironmentInstanceId, 'environment-b');
+  assert.equal(restored?.workspaceBindingStatus, 'recovering');
+  assert.deepEqual(restored?.workspaceBinding, run.workspaceBinding);
+});
+
 test('Host-run placement and its Engine profile survive SQLite reopen', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sprout-sqlite-host-run-'));
   const dbPath = join(dir, 'sprout.db');

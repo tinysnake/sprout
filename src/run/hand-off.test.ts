@@ -98,6 +98,85 @@ test('previousRun picks the agent\'s most recent run, across projects', () => {
   assert.equal(previous?.id, 'other-project', 'newest run of this agent before the current one');
 });
 
+test('a standalone binding transition is a Sprout fact and prior results keep their source binding', () => {
+  const previous = run({
+    id: 'binding-a',
+    environmentInstanceId: 'environment-a',
+    workspaceBinding: {
+      environmentInstanceId: 'environment-a', bindingId: 'binding-a', generation: 4,
+      workspaceId: 'workspace-a', kind: 'relative', path: 'repos/a', operations: ['read'],
+    },
+    result: { status: 'completed', text: 'Changed the parser.' },
+  });
+  const currentBinding = {
+    environmentInstanceId: 'environment-b', bindingId: 'binding-b', generation: 2,
+    workspaceId: 'workspace-b', kind: 'relative' as const, path: 'repos/b', operations: ['read', 'edit'] as const,
+  };
+  const handOff = buildHandOffContext([previous], {
+    ...identity,
+    currentCreatedAt: 2_000,
+    projectId: 'project-sprout',
+    currentEnvironmentInstanceId: 'environment-b',
+    currentWorkspaceBinding: currentBinding,
+  });
+
+  assert.ok(handOff);
+  assert.equal(handOff.bindingChange,
+    'Sprout switched the current Work Environment from environment-a to environment-b.');
+  assert.match(handOff.text, /environment-a, relative workspace at binding generation 4: Changed the parser/);
+  assert.deepEqual(handOff.previousWorkspaceBinding, previous.workspaceBinding);
+  assert.equal(shouldAttachHandOff({
+    previousEnvironmentInstanceId: handOff.previousEnvironmentInstanceId,
+    currentEnvironmentInstanceId: 'environment-b',
+    previousWorkspaceBinding: handOff.previousWorkspaceBinding,
+    currentWorkspaceBinding: currentBinding,
+  }), true);
+  const prompt = renderHandOffPrompt(handOff, 'Continue the work.');
+  assert.match(prompt, /Sprout switched the current Work Environment from environment-a to environment-b/);
+  assert.match(prompt, /## Task\nContinue the work\./);
+});
+
+test('a changed tool catalog gets a Sprout-produced change fact even when the workspace grant is stable', () => {
+  const previous = run({
+    id: 'catalog-before', environmentInstanceId: 'environment-a',
+    workspaceBinding: {
+      environmentInstanceId: 'environment-a', bindingId: 'binding-a', generation: 3,
+      workspaceId: 'workspace-a', kind: 'default', operations: ['read', 'search'],
+      projectMcpTools: ['lookup'], catalogIdentity: 'a'.repeat(64),
+    },
+  });
+  const currentWorkspaceBinding = {
+    environmentInstanceId: 'environment-a', bindingId: 'binding-a', generation: 3,
+    workspaceId: 'workspace-a', kind: 'default' as const, operations: ['read'] as const,
+    projectMcpTools: ['lookup', 'inspect'] as const, catalogIdentity: 'b'.repeat(64),
+  };
+  const handOff = buildHandOffContext([previous], {
+    ...identity, currentCreatedAt: 2_000, projectId: 'project-sprout',
+    currentEnvironmentInstanceId: 'environment-a', currentWorkspaceBinding,
+  });
+  assert.equal(handOff?.bindingChange,
+    'Sprout refreshed the current tool catalog. Available operations: workspace operations read; Project MCP tools lookup, inspect.');
+  assert.equal(shouldAttachHandOff({
+    previousEnvironmentInstanceId: 'environment-a', currentEnvironmentInstanceId: 'environment-a',
+    previousWorkspaceBinding: previous.workspaceBinding, currentWorkspaceBinding,
+  }), true);
+});
+
+test('a project scoped hand-off ignores results from another Project', () => {
+  const history = [
+    run({ id: 'same-project', createdAt: 1_000, result: { status: 'completed', text: 'same project fact' } }),
+    run({ id: 'other-project', projectId: 'project-other', createdAt: 1_500,
+      result: { status: 'completed', text: 'cross project secret' } }),
+  ];
+  const handOff = buildHandOffContext(history, {
+    ...identity, currentCreatedAt: 2_000, projectId: 'project-sprout',
+    currentEnvironmentInstanceId: 'container-1',
+  });
+  assert.match(handOff?.text ?? '', /same project fact/);
+  assert.doesNotMatch(handOff?.text ?? '', /cross project secret/);
+  assert.deepEqual(handOff?.sourceRunIds, ['same-project']);
+});
+
 test('the summary states facts from results and never reads a run\'s events', () => {
   const history: readonly AgentRun[] = [
     run({
