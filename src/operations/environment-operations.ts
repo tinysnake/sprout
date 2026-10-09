@@ -11,6 +11,7 @@ import type { ProjectEnvironmentAccess, WorkspaceBinding } from '../project/acce
 import type { RuntimeEnvironment, WorkerGatewayView } from '../runtime.ts';
 import type { EnvironmentPool } from '../environment/pool.ts';
 import type { EnvironmentLease } from '../environment/pool.ts';
+import { EMPTY_REMOTE_WORK_RECOVERY_EVIDENCE, type RemoteWorkRecoveryEvidence } from '../environment/recovery.ts';
 import type { EnvironmentCatalog } from '../environment/catalog.ts';
 import type { EnvironmentEnrollmentService } from '../environment/enrollment-service.ts';
 import type { RemoteOperationIdentityStore, RemoteOperationIdentity, RemoteOperationState, RemoteMcpProcessIdentity, RemoteMcpOperationIdentity } from './remote-operation-store.ts';
@@ -90,6 +91,7 @@ export class EnvironmentOperations {
   readonly #enrollments: EnvironmentOperationsEnrollments;
   readonly #store: RemoteOperationIdentityStore;
   readonly #onUncertainMcp: ((scope: ProjectMcpLeaseScope) => Promise<void>) | undefined;
+  readonly #onUncertainOperation: ((leaseId: string) => Promise<void>) | undefined;
   readonly #clock: () => number;
   readonly #pool: Pick<EnvironmentPool, 'getLease' | 'requiresLeaseForBoundOperation' | 'acquireBoundOperationLeaseRevalidated' | 'extendLease' | 'keepLeaseUntilCleanup' | 'markRecovering' | 'releaseLease'> | undefined;
   readonly #leaseTtlMs: number;
@@ -104,6 +106,7 @@ export class EnvironmentOperations {
     readonly pool?: Pick<EnvironmentPool, 'getLease' | 'requiresLeaseForBoundOperation' | 'acquireBoundOperationLeaseRevalidated' | 'extendLease' | 'keepLeaseUntilCleanup' | 'markRecovering' | 'releaseLease'>;
     readonly store: RemoteOperationIdentityStore;
     readonly onUncertainMcp?: (scope: ProjectMcpLeaseScope) => Promise<void>;
+    readonly onUncertainOperation?: (leaseId: string) => Promise<void>;
     readonly leaseTtlMs?: number;
     readonly clock?: () => number;
   }) {
@@ -116,6 +119,7 @@ export class EnvironmentOperations {
     this.#pool = options.pool;
     this.#store = options.store;
     this.#onUncertainMcp = options.onUncertainMcp;
+    this.#onUncertainOperation = options.onUncertainOperation;
     this.#leaseTtlMs = options.leaseTtlMs ?? 900_000;
     this.#clock = options.clock ?? Date.now;
   }
@@ -189,9 +193,132 @@ export class EnvironmentOperations {
     }
   }
 
+  async remoteWorkEvidenceForLease(leaseId: string): Promise<RemoteWorkRecoveryEvidence> {
+    const lease = this.#pool?.getLease(leaseId);
+    if (lease === undefined) return EMPTY_REMOTE_WORK_RECOVERY_EVIDENCE;
+    const [workspace, mcpOperations, mcpProcesses] = await Promise.all([
+      this.#store.listOpenOperations(lease.instanceId),
+      this.#store.listOpenMcpOperations(lease.instanceId),
+      this.#store.listOpenMcpProcesses(lease.instanceId),
+    ]);
+    const rows = workspace.filter(row => row.leaseId === leaseId);
+    const mcpCalls = mcpOperations.filter(row => row.leaseId === leaseId);
+    const processes = mcpProcesses.filter(row => row.leaseId === leaseId);
+    return {
+      journalAvailable: true,
+      workspaceOperations: {
+        running: rows.filter(row => row.state === 'running').length,
+        unknown: rows.filter(row => row.state === 'unknown').length,
+        cancelRequested: rows.filter(row => row.state === 'cancel-requested').length,
+        recoveryRequired: rows.filter(row => row.state === 'recovery-required').length,
+      },
+      projectMcpOperations: {
+        running: mcpCalls.filter(row => row.state === 'running').length,
+        uncertain: mcpCalls.filter(row => row.state === 'uncertain').length,
+      },
+      projectMcpProcesses: {
+        starting: processes.filter(row => row.state === 'starting').length,
+        running: processes.filter(row => row.state === 'running').length,
+        stopping: processes.filter(row => row.state === 'stopping').length,
+        uncertain: processes.filter(row => row.state === 'uncertain').length,
+      },
+    };
+  }
+
+  async reconcileRemoteOperations(environmentInstanceId: string): Promise<void> {
+    await this.#reconcileProjectMcpProcesses(environmentInstanceId, false);
+    await this.#reconcileProjectMcpOperations(environmentInstanceId);
+    await this.#reconcileRemoteWorkspaceOperations(environmentInstanceId);
+  }
+
+  async #reconcileProjectMcpOperations(environmentInstanceId: string): Promise<void> {
+    const rows = await this.#store.listOpenMcpOperations(environmentInstanceId);
+    const live = this.#gateway.liveFor(environmentInstanceId);
+    const activeLeases = new Map<string, ProjectMcpLeaseScope>();
+    for (const row of rows) {
+      const scope: ProjectMcpLeaseScope = {
+        environmentInstanceId, leaseId: row.leaseId, holderKind: row.holderKind, holderId: row.holderId,
+        runId: row.runId, ...(row.taskId !== undefined ? { taskId: row.taskId } : {}),
+        leaseCapability: row.holderKind === 'task' ? 'agent-run' : 'project-mcp',
+      };
+      const lease = this.#pool?.getLease(row.leaseId);
+      if (sameMcpLease(lease, scope) && lease?.state === 'active' && row.state === 'running' && live !== undefined &&
+          row.connectionEpoch === live.epoch.epoch && row.enrollmentId === live.enrollment.id &&
+          row.workerIdentityDigest === live.enrollment.worker.identityDigest) continue;
+      if (!sameMcpLease(lease, scope) || (lease?.state !== 'active' && lease?.state !== 'recovering')) continue;
+      if (lease.state === 'active') {
+        this.#pool?.markRecovering(row.leaseId);
+        activeLeases.set(row.leaseId, scope);
+      }
+      if (row.state === 'running') await this.#store.saveMcpOperation({ ...row, state: 'uncertain', updatedAt: this.#clock() });
+    }
+    for (const scope of activeLeases.values()) await this.#noteUncertainMcp(scope);
+  }
+
+  async #reconcileRemoteWorkspaceOperations(environmentInstanceId: string): Promise<void> {
+    const rows = await this.#store.listOpenOperations(environmentInstanceId);
+    const live = this.#gateway.liveFor(environmentInstanceId);
+    const reconcilableRows = rows.filter(row => {
+      if (row.leaseId === undefined) return true;
+      const lease = this.#pool?.getLease(row.leaseId);
+      return !(live !== undefined && lease?.state === 'active' && sameOperationLease(lease, row) &&
+        row.connectionEpoch === live.epoch.epoch && row.enrollmentId === live.enrollment.id &&
+        row.workerIdentityDigest === live.enrollment.worker.identityDigest);
+    });
+    const affectedLeases = new Set<string>();
+    for (const row of reconcilableRows) {
+      if (row.leaseId === undefined || row.holderKind === undefined || row.holderId === undefined || row.runId === undefined) continue;
+      const lease = this.#pool?.getLease(row.leaseId);
+      if (!sameOperationLease(lease, row)) continue;
+      this.#pool?.markRecovering(row.leaseId);
+      affectedLeases.add(row.leaseId);
+    }
+    for (const leaseId of affectedLeases) {
+      try { await this.#onUncertainOperation?.(leaseId); } catch { /* The recovering pool row remains the admission fence. */ }
+    }
+    if (!live) return;
+    for (const row of reconcilableRows) {
+      if (row.leaseId === undefined || row.agentId === undefined || row.enrollmentId !== live.enrollment.id ||
+          row.workerIdentityDigest !== live.enrollment.worker.identityDigest || row.kind === undefined) continue;
+      const lease = this.#pool?.getLease(row.leaseId);
+      if (!sameOperationLease(lease, row)) continue;
+      const identity: AttachWorkspaceBindingParams = {
+        projectId: row.projectId, environmentInstanceId: row.environmentInstanceId,
+        bindingId: row.bindingId, generation: row.generation, connectionEpoch: live.epoch.epoch,
+        workspaceId: row.workspaceId, kind: row.kind, ...(row.path !== undefined ? { path: row.path } : {}),
+      };
+      const originalIdentity: AttachWorkspaceBindingParams = { ...identity, connectionEpoch: row.connectionEpoch };
+      try {
+        await this.#assertCurrent(row.projectId, row.agentId, environmentInstanceId, identity,
+          row.operation === 'read' || row.operation === 'search' ? 'read-only-investigation' : MUTATION_CAPABILITY);
+        await this.#environment.attachWorkspaceBinding?.(environmentInstanceId, identity);
+        if (!this.#environment.inspectWorkspaceFileOperation) continue;
+        const inspected = await this.#environment.inspectWorkspaceFileOperation(environmentInstanceId, { ...identity, operationId: row.operationId });
+        if (inspected.status === 'completed' || inspected.status === 'failed' || inspected.status === 'cancelled') {
+          const validResult = inspected.result !== undefined && inspected.result.status === inspected.status &&
+            isBoundedRemoteResult(inspected.result, originalIdentity, row.operationId, row.operation);
+          if (!validResult) {
+            await this.#store.save({ ...row, state: 'unknown', updatedAt: this.#clock() });
+            continue;
+          }
+          await this.#store.save({ ...row, state: inspected.status, updatedAt: this.#clock() });
+        } else if (row.state === 'running' || row.state === 'cancel-requested') {
+          await this.#store.save({ ...row, state: 'unknown', updatedAt: this.#clock() });
+        }
+      } catch {
+        // A lost Worker channel or stale authority is not evidence about the remote outcome.
+      }
+    }
+  }
+
   async reconcileProjectMcpProcesses(environmentInstanceId: string): Promise<void> {
+    await this.#reconcileProjectMcpProcesses(environmentInstanceId, true);
+  }
+
+  async #reconcileProjectMcpProcesses(environmentInstanceId: string, includeSameEpoch: boolean): Promise<void> {
     const rows = await this.#store.listOpenMcpProcesses(environmentInstanceId);
-    const liveEpoch = this.#gateway.liveFor(environmentInstanceId)?.epoch.epoch;
+    const live = this.#gateway.liveFor(environmentInstanceId);
+    const liveEpoch = live?.epoch.epoch;
     for (const row of rows) {
       const lease = this.#pool?.getLease(row.leaseId);
       const leaseCapability = row.holderKind === 'task' ? 'agent-run' : 'project-mcp';
@@ -199,16 +326,39 @@ export class EnvironmentOperations {
         environmentInstanceId, leaseId: row.leaseId, holderKind: row.holderKind, holderId: row.holderId,
         runId: row.runId, ...(row.taskId !== undefined ? { taskId: row.taskId } : {}), leaseCapability,
       };
-      if ((row.state === 'starting' || row.state === 'running') && lease?.state === 'active' && sameMcpLease(lease, scope) && liveEpoch === row.connectionEpoch) continue;
-      if (lease?.state === 'active' && sameMcpLease(lease, scope)) await this.#noteUncertainMcp(scope);
+      if (!sameMcpLease(lease, scope) || (lease?.state !== 'active' && lease?.state !== 'recovering') ||
+          row.enrollmentId === undefined || row.workerIdentityDigest === undefined ||
+          live?.enrollment.id !== row.enrollmentId || live.enrollment.worker.identityDigest !== row.workerIdentityDigest) {
+        await this.#store.saveMcpProcess({ ...row, state: 'uncertain', updatedAt: this.#clock() }).catch(() => undefined);
+        if (lease?.state === 'active' && sameMcpLease(lease, scope)) await this.#noteUncertainMcp(scope);
+        continue;
+      }
+      if (!includeSameEpoch && lease.state === 'recovering' && liveEpoch === row.connectionEpoch) continue;
+      if ((row.state === 'starting' || row.state === 'running') && lease.state === 'active' && liveEpoch === row.connectionEpoch) continue;
+      if (lease.state === 'active') await this.#noteUncertainMcp(scope);
       const identity: AttachWorkspaceBindingParams = {
         projectId: row.projectId, environmentInstanceId: row.environmentInstanceId, bindingId: row.bindingId,
-        generation: row.generation, connectionEpoch: row.connectionEpoch, workspaceId: row.workspaceId,
+        generation: row.generation, connectionEpoch: liveEpoch ?? row.connectionEpoch, workspaceId: row.workspaceId,
         kind: row.kind, ...(row.path !== undefined ? { path: row.path } : {}),
       };
       try {
+        let stopIdentity = identity;
+        if (liveEpoch !== row.connectionEpoch) {
+          const access = await this.#access.get(row.projectId, environmentInstanceId);
+          const binding = access?.current;
+          if (!access || access.status !== 'active' || !binding || !validProjectBinding(access, binding)) throw new Error('MCP process binding is no longer current');
+          const currentIdentity: AttachWorkspaceBindingParams = {
+            projectId: row.projectId, environmentInstanceId, bindingId: binding.bindingId!, generation: binding.generation!,
+            connectionEpoch: liveEpoch!, workspaceId: binding.workspaceId, kind: binding.kind,
+            ...(binding.path !== undefined ? { path: binding.path } : {}),
+          };
+          if (!sameMcpBindingExceptEpoch(currentIdentity, identity)) throw new Error('MCP process binding changed');
+          if (!this.#environment.attachWorkspaceBinding) throw new Error('MCP process binding cannot be attached');
+          await this.#environment.attachWorkspaceBinding(environmentInstanceId, currentIdentity);
+          stopIdentity = currentIdentity;
+        }
         const stopped = await this.#environment.stopProjectMcp?.(environmentInstanceId, {
-          ...identity, ...projectMcpLeaseIdentity(scope), processId: row.processId,
+          ...stopIdentity, ...projectMcpLeaseIdentity(scope), processId: row.processId,
         });
         if (stopped?.processId === row.processId && (stopped.status === 'stopped' || (stopped.status === 'not-found' && liveEpoch === row.connectionEpoch))) {
           await this.#store.saveMcpProcess({ ...row, state: 'stopped', updatedAt: this.#clock() });
@@ -216,7 +366,6 @@ export class EnvironmentOperations {
         }
       } catch { /* Persist uncertainty below and keep the lease protected. */ }
       await this.#store.saveMcpProcess({ ...row, state: 'uncertain', updatedAt: this.#clock() }).catch(() => undefined);
-      if (lease !== undefined && sameMcpLease(lease, scope)) await this.#noteUncertainMcp(scope);
     }
   }
 
@@ -231,8 +380,11 @@ export class EnvironmentOperations {
     const leaseIdentity = projectMcpLeaseIdentity(scope);
     const processId = randomUUID();
     const fingerprint = createHash('sha256').update(JSON.stringify([authority.identity, leaseIdentity, processId])).digest('hex');
+    const live = this.#gateway.liveFor(scope.environmentInstanceId);
     let processRow: RemoteMcpProcessIdentity = {
-      ...authority.identity, ...leaseIdentity, fingerprint, processId, state: 'starting', updatedAt: this.#clock(),
+      ...authority.identity, ...leaseIdentity, agentId, fingerprint, processId, state: 'starting',
+      ...(live !== undefined ? { enrollmentId: live.enrollment.id, workerIdentityDigest: live.enrollment.worker.identityDigest } : {}),
+      updatedAt: this.#clock(),
     };
     try { await this.#store.saveMcpProcess(processRow); }
     catch { throw new RemoteWorkspaceUnavailableError('worker-refused'); }
@@ -329,8 +481,10 @@ export class EnvironmentOperations {
           return { status: 'failed', reason: 'worker-refused' };
         }
         const operationId = randomUUID();
+        const live = this.#gateway.liveFor(scope.environmentInstanceId);
         const operationIdentity: RemoteMcpOperationIdentity = {
-          ...authority.identity, ...leaseIdentity, operationId, processId, toolId: origin.workerId,
+          ...authority.identity, ...leaseIdentity, agentId, operationId, processId, toolId: origin.workerId,
+          ...(live !== undefined ? { enrollmentId: live.enrollment.id, workerIdentityDigest: live.enrollment.worker.identityDigest } : {}),
           fingerprint: createHash('sha256').update(JSON.stringify([processRow.fingerprint, operationId, origin.workerId])).digest('hex'),
           state: 'running', updatedAt: this.#clock(),
         };
@@ -561,8 +715,12 @@ export class EnvironmentOperations {
       const operationId = stableOperationId(runId, requestedOperationId);
       const normalized = normalizeOperationInput(operation, input);
       const fingerprint = createHash('sha256').update(JSON.stringify([fixed, operation, runId ?? '', normalized])).digest('hex');
-      const row: RemoteOperationIdentity = { operationId, fingerprint, projectId, environmentInstanceId: access.environmentInstanceId,
+      let row: RemoteOperationIdentity = { operationId, fingerprint, projectId, environmentInstanceId: access.environmentInstanceId,
         bindingId: binding.bindingId, generation: binding.generation!, connectionEpoch: epoch, workspaceId: binding.workspaceId,
+        kind: binding.kind, ...(binding.path !== undefined ? { path: binding.path } : {}), agentId,
+        enrollmentId: live.enrollment.id, workerIdentityDigest: live.enrollment.worker.identityDigest,
+        ...(runId !== undefined ? { runId } : {}),
+        ...(mutationLease !== undefined ? operationLeaseIdentity(mutationLease) : {}),
         operation, state: normalized.failure ? 'failed' : 'running', updatedAt: this.#clock() };
       const claimIdentity = async (): Promise<RemoteWorkspaceOperationResult | undefined> => {
         const claim = await this.#store.claim(row);
@@ -605,6 +763,7 @@ export class EnvironmentOperations {
         if (!lease.acquired) {
           return operationResult(fixed, operationId, operation, 'failed', lease.conflict ? 'lease-conflict' : (lease.failure ?? 'lease-unavailable'), lease.conflict);
         }
+        row = { ...row, ...operationLeaseIdentity(lease.acquired) };
         try {
           await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed, MUTATION_CAPABILITY);
         } catch {
@@ -1123,11 +1282,34 @@ function sameMcpLease(lease: EnvironmentLease | undefined, scope: ProjectMcpLeas
   if (scope.holderKind === 'run') return scope.taskId === undefined && lease.taskId === undefined && lease.runId === scope.runId;
   return scope.taskId !== undefined && scope.holderId === scope.taskId && lease.taskId === scope.taskId;
 }
+function sameOperationLease(lease: EnvironmentLease | undefined, row: RemoteOperationIdentity): boolean {
+  if (!lease || row.leaseId !== lease.id || lease.instanceId !== row.environmentInstanceId ||
+      row.holderKind === undefined || row.holderId !== lease.holderId ||
+      (lease.holderKind ?? 'run') !== row.holderKind) return false;
+  if (row.holderKind === 'task') return row.taskId !== undefined && lease.taskId === row.taskId &&
+    (row.runId === undefined || lease.runId === row.runId);
+  return lease.taskId === undefined && row.runId !== undefined && lease.runId === row.runId;
+}
+
+function sameMcpBindingExceptEpoch(a: AttachWorkspaceBindingParams, b: AttachWorkspaceBindingParams): boolean {
+  return a.projectId === b.projectId && a.environmentInstanceId === b.environmentInstanceId && a.bindingId === b.bindingId &&
+    a.generation === b.generation && a.workspaceId === b.workspaceId && a.kind === b.kind && a.path === b.path;
+}
 function sameMcpBinding(a: AttachWorkspaceBindingParams, b: AttachWorkspaceBindingParams): boolean {
   return a.projectId === b.projectId && a.environmentInstanceId === b.environmentInstanceId && a.bindingId === b.bindingId &&
     a.generation === b.generation && a.connectionEpoch === b.connectionEpoch && a.workspaceId === b.workspaceId && a.kind === b.kind && a.path === b.path;
 }
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
+
+function operationLeaseIdentity(lease: EnvironmentLease): Pick<RemoteOperationIdentity, 'runId' | 'leaseId' | 'holderKind' | 'holderId' | 'taskId'> {
+  return {
+    ...(lease.runId !== undefined ? { runId: lease.runId } : {}),
+    leaseId: lease.id,
+    holderKind: lease.holderKind ?? 'run',
+    holderId: lease.holderId,
+    ...(lease.taskId !== undefined ? { taskId: lease.taskId } : {}),
+  };
+}
 
 function isTerminalOperationState(value: string): value is 'completed' | 'failed' | 'cancelled' {
   return value === 'completed' || value === 'failed' || value === 'cancelled';

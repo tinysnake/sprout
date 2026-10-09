@@ -82,6 +82,36 @@ export interface ReconciliationDecision {
   readonly reason: string;
 }
 
+export interface RemoteWorkRecoveryEvidence {
+  readonly journalAvailable: boolean;
+  readonly workspaceOperations: {
+    readonly running: number;
+    readonly unknown: number;
+    readonly cancelRequested: number;
+    readonly recoveryRequired: number;
+  };
+  readonly projectMcpOperations: { readonly running: number; readonly uncertain: number };
+  readonly projectMcpProcesses: {
+    readonly starting: number;
+    readonly running: number;
+    readonly stopping: number;
+    readonly uncertain: number;
+  };
+}
+
+export const EMPTY_REMOTE_WORK_RECOVERY_EVIDENCE: RemoteWorkRecoveryEvidence = {
+  journalAvailable: true,
+  workspaceOperations: { running: 0, unknown: 0, cancelRequested: 0, recoveryRequired: 0 },
+  projectMcpOperations: { running: 0, uncertain: 0 },
+  projectMcpProcesses: { starting: 0, running: 0, stopping: 0, uncertain: 0 },
+};
+
+export function remoteWorkHasUnresolvedFacts(evidence: RemoteWorkRecoveryEvidence): boolean {
+  return !evidence.journalAvailable || Object.values(evidence.workspaceOperations).some(count => count > 0) ||
+    Object.values(evidence.projectMcpOperations).some(count => count > 0) ||
+    Object.values(evidence.projectMcpProcesses).some(count => count > 0);
+}
+
 /** One durable recovery record protecting one lease. */
 export interface EnvironmentRecoveryRecord {
   readonly id: string;
@@ -105,6 +135,8 @@ export interface EnvironmentRecoveryRecord {
   readonly reconnectObservedAt?: number;
   /** The evidence the reconnecting Worker synchronized, once it has. */
   readonly evidence?: RetainedEvidence;
+  /** Core-reconciled remote outcomes, separate from Worker engine evidence. */
+  readonly remoteWorkEvidence?: RemoteWorkRecoveryEvidence;
   /** Every concrete fact still unproven, computed from the evidence. */
   readonly unresolvedFacts: readonly string[];
   readonly decisions: readonly ReconciliationDecision[];
@@ -230,19 +262,29 @@ export const UNRESOLVED_FACT_WORKER_OFFLINE =
 export function deriveUnresolvedFacts(input: {
   readonly holderKind: 'task' | 'run';
   readonly evidence?: RetainedEvidence;
+  readonly remoteWorkEvidence?: RemoteWorkRecoveryEvidence;
   /** True once the same Worker identity reconnected and synchronized evidence. */
   readonly evidenceSynchronized: boolean;
 }): readonly string[] {
-  if (!input.evidenceSynchronized || input.evidence === undefined) {
-    return [UNRESOLVED_FACT_WORKER_OFFLINE];
-  }
   const facts: string[] = [];
-  if (!input.evidence.engineSessionStopped) facts.push(UNRESOLVED_FACT_ENGINE_SESSION);
-  if (!input.evidence.turnSettlementObserved) {
-    facts.push(UNRESOLVED_FACT_SETTLEMENT);
+  if (!input.evidenceSynchronized || input.evidence === undefined) {
+    facts.push(UNRESOLVED_FACT_WORKER_OFFLINE);
+  } else {
+    if (!input.evidence.engineSessionStopped) facts.push(UNRESOLVED_FACT_ENGINE_SESSION);
+    if (!input.evidence.turnSettlementObserved) facts.push(UNRESOLVED_FACT_SETTLEMENT);
+    if (input.holderKind === 'task' && !input.evidence.taskContextRecycled && !input.evidence.taskContextPrepared) {
+      facts.push(UNRESOLVED_FACT_TASK_CONTEXT);
+    }
   }
-  if (input.holderKind === 'task' && !input.evidence.taskContextRecycled && !input.evidence.taskContextPrepared) {
-    facts.push(UNRESOLVED_FACT_TASK_CONTEXT);
+  const remote = input.remoteWorkEvidence;
+  if (remote !== undefined) {
+    if (!remote.journalAvailable) facts.push('The remote operation journal could not be checked; operation and process outcomes remain unverified.');
+    const workspaceCount = Object.values(remote.workspaceOperations).reduce((sum, count) => sum + count, 0);
+    if (workspaceCount > 0) facts.push(`${workspaceCount} remote workspace operation(s) do not have a confirmed terminal outcome.`);
+    const mcpOperationCount = Object.values(remote.projectMcpOperations).reduce((sum, count) => sum + count, 0);
+    if (mcpOperationCount > 0) facts.push(`${mcpOperationCount} Project MCP tool call(s) do not have a confirmed terminal outcome.`);
+    const mcpProcessCount = Object.values(remote.projectMcpProcesses).reduce((sum, count) => sum + count, 0);
+    if (mcpProcessCount > 0) facts.push(`${mcpProcessCount} Project MCP process(es) have not been confirmed stopped.`);
   }
   return facts;
 }
@@ -260,9 +302,11 @@ export function canAutoResolve(input: {
   readonly hadActiveRun: boolean;
   readonly holderKind: 'task' | 'run';
   readonly evidence: RetainedEvidence;
+  readonly remoteWorkEvidence?: RemoteWorkRecoveryEvidence;
 }): boolean {
   if (input.hadActiveRun) return false;
   if (input.holderKind !== 'task') return false;
+  if (input.remoteWorkEvidence !== undefined && remoteWorkHasUnresolvedFacts(input.remoteWorkEvidence)) return false;
   if (!input.evidence.engineSessionStopped) return false;
   if (!input.evidence.taskContextPrepared) return false;
   return true;
@@ -288,6 +332,7 @@ export function phaseAfterEvidence(input: {
   readonly hadActiveRun: boolean;
   readonly holderKind: 'task' | 'run';
   readonly evidence: RetainedEvidence;
+  readonly remoteWorkEvidence?: RemoteWorkRecoveryEvidence;
 }): EnvironmentRecoveryPhase {
   return canAutoResolve(input) ? 'resolved' : 'recovery';
 }

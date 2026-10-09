@@ -69,6 +69,8 @@ export interface LeaseRecovery {
   interruptedRunAgent?: string;
   /** True once evidence was synchronized; it gates the ordinary decisions. */
   evidenceSynchronized?: boolean;
+  /** Sanitized server signal for unresolved remote outcomes or process stops. */
+  remoteWorkEvidence?: { unresolved: boolean };
   unresolvedFacts: string[];
   reconciledEvidence?: ReconciledEvidence;
 }
