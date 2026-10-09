@@ -372,7 +372,9 @@ class HttpMcpClient implements ProjectMcpClient {
 
   async #send(message: JsonRecord): Promise<HttpMcpReply> {
     try {
-      const response = await exchangeHttp(this.#endpoint, this.#requestHeaders(), 'POST', JSON.stringify(message));
+      const body = JSON.stringify(message);
+      if (Buffer.byteLength(body, 'utf8') > MAX_HTTP_RESPONSE_BYTES) throw new McpUnsupportedFeatureError();
+      const response = await exchangeHttp(this.#endpoint, this.#requestHeaders(), 'POST', body);
       if (response.sessionId !== undefined) {
         if (this.#sessionId !== undefined && this.#sessionId !== response.sessionId) throw new McpUnsupportedFeatureError();
         this.#sessionId = response.sessionId;
@@ -461,13 +463,8 @@ function parseMcpEventStream(text: string, expectedId: number): JsonRecord {
     data = [];
     let message: unknown;
     try { message = JSON.parse(payload); } catch { throw new McpUnsupportedFeatureError(); }
-    if (!isRecord(message) || message.jsonrpc !== '2.0') throw new McpUnsupportedFeatureError();
-    if (message.id === expectedId) {
-      if (result !== undefined) throw new McpUnsupportedFeatureError();
-      result = message;
-    } else if (message.id !== undefined && message.method !== undefined) {
-      throw new McpUnsupportedFeatureError();
-    }
+    if (!isRecord(message) || message.jsonrpc !== '2.0' || message.id !== expectedId) throw new McpUnsupportedFeatureError();
+    result = message;
   };
   for (const line of text.split(/\r?\n/)) {
     if (line === '') consume();

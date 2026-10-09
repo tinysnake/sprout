@@ -41,6 +41,11 @@ test('Worker MCP inspection reads the bound root manifest and returns sanitized 
   assert.equal(JSON.stringify(inspectedHttp).includes('private-origin.example'), false);
   assert.equal(JSON.stringify(inspectedHttp).includes('private-origin-token'), false);
   assert.equal(JSON.stringify(inspectedHttp).includes('private-header-token'), false);
+  await writeFile(join(root, 'repo', '.mcp.json'), JSON.stringify({ mcpServers: {
+    invalid: { type: 'http', url: 'file:///private/path' },
+  } }));
+  const invalidHttp = await files.inspectMcpConfiguration({ ...binding, format: 'claude-code-mcp-json-v1' });
+  assert.deepEqual(invalidHttp, { status: 'unsupported', format: 'claude-code-mcp-json-v1', servers: [] });
 });
 
 test('Worker starts and calls a remote-origin HTTP MCP server directly with bounded typed tools and private authorization', async (t) => {
@@ -182,7 +187,7 @@ test('Worker reports denied HTTP MCP authorization as an unavailable remote serv
   assert.deepEqual(await connection.contexts.stopProjectMcp({ ...binding, ...lease, processId }), { processId, status: 'stopped' });
 });
 
-test('Worker reports a missing MCP server dependency without exposing command configuration', async (t) => {
+test('Worker launches a selected stdio MCP server in the bound workspace, validates calls, and fences by lease', async (t) => {
   const workerRoot = await mkdtemp(join(tmpdir(), 'sprout-mcp-worker-'));
   const hostRoot = await mkdtemp(join(tmpdir(), 'sprout-mcp-host-'));
   t.after(async () => {
@@ -266,6 +271,38 @@ test('Worker reports a missing MCP server dependency without exposing command co
   assert.deepEqual(wrongLease, { processId, operationId: wrongOperationId, status: 'failed', reason: 'worker-refused' });
   const stopped = await connection.contexts.stopProjectMcp({ ...binding, ...lease, processId });
   assert.deepEqual(stopped, { processId, status: 'stopped' });
+});
+
+test('Worker reports an HTTP MCP disconnect as unavailable and retains uncertain remote startup identity', async (t) => {
+  let requestCount = 0;
+  const server = createServer(request => {
+    requestCount += 1;
+    request.socket.destroy();
+  });
+  const port = await listenLocalServer(server);
+  t.after(() => closeLocalServer(server));
+  const root = await mkdtemp(join(tmpdir(), 'sprout-mcp-http-disconnect-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const connection = await worker(root);
+  t.after(() => connection.close());
+  const selected = await connection.contexts.validateWorkspace({ projectId: 'project-http-disconnect', environmentInstanceId: 'env-1', kind: 'relative', path: 'repo' });
+  const binding = {
+    projectId: 'project-http-disconnect', environmentInstanceId: 'env-1', bindingId: 'binding-http-disconnect',
+    generation: 1, connectionEpoch: 4, workspaceId: selected.workspaceId, kind: 'relative' as const, path: 'repo',
+  };
+  await connection.contexts.attachWorkspaceBinding(binding);
+  await writeFile(join(root, 'repo', '.mcp.json'), JSON.stringify({ mcpServers: {
+    disconnected: { type: 'http', url: `http://localhost:${port}/mcp` },
+  } }));
+  const processId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+  const lease = { leaseId: 'lease-http-disconnect', holderKind: 'run' as const, holderId: 'run-http-disconnect', runId: 'run-http-disconnect' };
+  const started = await connection.contexts.startProjectMcp({ ...binding, ...lease, processId, format: 'claude-code-mcp-json-v1' });
+  assert.deepEqual(started, {
+    processId, status: 'blocked', reason: 'unavailable',
+    servers: [{ name: 'disconnected', status: 'unavailable', tools: [] }],
+  });
+  assert.equal(requestCount, 1, 'the request was sent only to the configured endpoint');
+  assert.deepEqual(await connection.contexts.stopProjectMcp({ ...binding, ...lease, processId }), { processId, status: 'uncertain' });
 });
 
 test('Worker reports a missing MCP server dependency without exposing command configuration', async (t) => {
