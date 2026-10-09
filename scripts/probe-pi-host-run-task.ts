@@ -34,7 +34,7 @@ const remoteFailureCodes = new Set([
 ]);
 
 const taskCommandArgs = ['--version'];
-const taskFixturePath = 'README.md';
+const taskFixturePath = 'README';
 let runPromptNamesTarget = false;
 let runPromptContainsExactRead = false;
 
@@ -266,8 +266,7 @@ createInterface({ input: process.stdin }).on('line', line => {
         goal: 'Use the authorized Project workspace and Project MCP tools in one bounded activation.',
         constraints: [
           'Use only the provided tools and do not disclose file contents.',
-          `The only file to read and edit is ${taskFixturePath} at the root of the authorized Project workspace. Its initial content is before; replace it with after using remote_edit.`,
-          'Remote file paths are relative to the Project workspace root, not the Pi session or Task context directory. The remote command starts at the Project workspace root; omit cwd.',
+          `The only file to read and edit is ${taskFixturePath} (no extension) at the root of the authorized Project workspace. Its initial content is before; replace it with after using remote_edit.`,          'Remote file paths are relative to the Project workspace root, not the Pi session or Task context directory. The remote command starts at the Project workspace root; omit cwd.',
         ],
         validationCriteria: ['Remote read, edit, command, and Project MCP calls succeed under the Task lease, then the Project file persists after safe Task end.'],
       });
@@ -289,7 +288,7 @@ createInterface({ input: process.stdin }).on('line', line => {
         const advanced = await runtime.taskAdmissions.advanceForHuman(taskId, {
           targetAgentId: 'scout',
           reason: 'Run the bounded workspace and MCP check.',
-          prompt: `Use only these four tools once each in this order: remote_read, remote_edit, remote_command, then the available Project MCP echo tool. The exact single file is ${taskFixturePath} at the root of the authorized Project workspace, not the Pi session or Task context directory. First call remote_read with exactly {"path":"${taskFixturePath}"}. Next call remote_edit on that same file with exactly {"path":"${taskFixturePath}","oldText":"before","newText":"after"}. Then call remote_command with executable "node" and args ${JSON.stringify(taskCommandArgs)}; omit cwd because it runs from the Project workspace root. Finally call the advertised echo Project MCP tool once with {"text":"MCP_OK"}. Do not call remote_search or any other tool, repeat calls, or include tool arguments, file contents, or command output in your final response. Report the check result in one short sentence.`,
+          prompt: `Use only these four tools once each in this order: remote_read, remote_edit, remote_command, then the available Project MCP echo tool. The exact single file is ${taskFixturePath} with no extension at the root of the authorized Project workspace, not the Pi session or Task context directory. First call remote_read with exactly {"path":"${taskFixturePath}"}. Next call remote_edit on that same file with exactly {"path":"${taskFixturePath}","oldText":"before","newText":"after"}. Then call remote_command with executable "node" and args ${JSON.stringify(taskCommandArgs)}; omit cwd because it runs from the Project workspace root. Finally call the advertised echo Project MCP tool once with {"text":"MCP_OK"}. Do not call remote_search or any other tool, repeat calls, or include tool arguments, file contents, or command output in your final response. Report the check result in one short sentence.`,
         });
         const settledRun = await runtime.orchestrator.waitFor(advanced.runId);
         const afterRunTask = await runtime.tasks.get(taskId);
