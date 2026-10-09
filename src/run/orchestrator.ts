@@ -710,7 +710,7 @@ export class RunOrchestrator {
       if (mcpLeaseId !== undefined && !taskBound) this.#pool.releaseLease(mcpLeaseId);
       throw error;
     }
-    const settled = this.#executeHostRun(recorded, agent, host, option, request.taskBootstrapInstructions, mcpSelected).then((run) => this.settleTaskRun(run));
+    const settled = this.#executeHostRun(recorded, agent, host, option, mcpSelected).then((run) => this.settleTaskRun(run));
     this.#settled.set(recorded.id, settled);
     return { id: recorded.id };
   }
@@ -720,7 +720,6 @@ export class RunOrchestrator {
     agent: AgentDefinition,
     host: HostPiEngineAdapter,
     option: AgentWorkOption,
-    taskBootstrapInstructions: string | undefined,
     useProjectMcp: boolean,
   ): Promise<AgentRun> {
     if (this.#stopRequests.has(initial.id)) {
@@ -737,7 +736,10 @@ export class RunOrchestrator {
     let containingLeaseCanRelease = false;
     try {
       const assembled = await this.#assembleInput(initial, agent, running.id);
-      const instructions = appendBootstrap(assembled.instructions, taskBootstrapInstructions);
+      // Host-run Pi receives Task facts in assembled.prompt. The Worker bootstrap
+      // points at .sprout Task files, which the remote Project tools intentionally
+      // do not expose and the host-profile working directory cannot read.
+      const instructions = assembled.instructions;
       if (assembled.handOff !== undefined) prepared = await this.#advance(running, { handOff: assembled.handOff });
       const workingDirectory = `host-profile:${host.profileId}:agent:${agent.id}`;
       const placement = initial.executionPlacement;

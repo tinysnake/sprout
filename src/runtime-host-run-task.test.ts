@@ -19,6 +19,8 @@ test('Human-authorized Host-run Task uses Sprout Pi and keeps workspace and MCP 
   const model = 'provider/model-host';
   const engine = new ScriptedEngineAdapter({ turns: [scriptedTurn('Task step completed.')] });
   let runToolsUsed = false;
+  let hostInstructions = '';
+  let sessionPrompt = '';
   let runtime: Awaited<ReturnType<typeof createRuntime>>;
   const hostPi = {
     id: 'pi', profileId: 'host-task-profile', authorizedModel: model, capabilities: engine.capabilities,
@@ -27,10 +29,12 @@ test('Human-authorized Host-run Task uses Sprout Pi and keeps workspace and MCP 
         modelAvailability: 'available', adapterControls: 'ready', version: '1.0.4', observedAt: 1 };
     },
     async startSession(request: StartSessionRequest) {
+      hostInstructions = request.instructions ?? '';
       const session = await engine.startSession(request);
       return {
         ...session,
         run(prompt: string) {
+          sessionPrompt = prompt;
           const turn = session.run(prompt);
           return { events: turn.events, completion: (async () => {
             const leaseRows = runtime.pool.leases();
@@ -42,6 +46,9 @@ test('Human-authorized Host-run Task uses Sprout Pi and keeps workspace and MCP 
             assert.ok(workspaceTools?.edit);
             assert.ok(workspaceTools.command);
             assert.ok(mcpTools);
+            const read = await workspaceTools.read('proof.txt', 'host-task-read');
+            assert.equal(read.status, 'completed', read.failure ?? 'remote read failed');
+            assert.equal(read.content, 'before');
             assert.deepEqual(await mcpTools.call(mcpTools.tools[0]!.name, { text: 'task-held-mcp' }), {
               status: 'completed', text: 'task-held-mcp',
             });
@@ -106,7 +113,7 @@ test('Human-authorized Host-run Task uses Sprout Pi and keeps workspace and MCP 
     const actor = await runtime.taskProposals.humanAuthority('host-task-project');
     const proposal = await runtime.taskProposals.propose('host-task-project', actor, {
       title: 'Host-run workspace task', goal: 'Use the selected Environment workspace and Project MCP tools.',
-      constraints: [], validationCriteria: ['The bounded Project workspace check passes.'],
+      constraints: ['Task-specific context is delivered in the run prompt.'], validationCriteria: ['The bounded Project workspace check passes.'],
     });
     const begun = await runtime.taskAdmissions.beginForHuman(proposal.id, {
       expectedRevision: proposal.revision, environmentInstanceId: INSTANCE_ID,
@@ -127,6 +134,10 @@ test('Human-authorized Host-run Task uses Sprout Pi and keeps workspace and MCP 
     assert.equal(settled.executionPlacement?.mode, 'host-run');
     assert.equal(settled.leaseId, taskLeaseId);
     assert.equal(runToolsUsed, true);
+    assert.equal(hostInstructions.includes('Sprout Task bootstrap'), false);
+    assert.equal(hostInstructions.includes('.sprout/tasks'), false);
+    assert.ok(sessionPrompt.includes('Use the selected Environment workspace and Project MCP tools.'));
+    assert.ok(sessionPrompt.includes('Task-specific context is delivered in the run prompt.'));
     assert.equal((await runtime.tasks.get(taskId))?.environmentLifecycleState, 'idle');
     assert.equal(runtime.pool.getLease(taskLeaseId)?.state, 'active', 'a settled nested run retains the Task lease');
 
