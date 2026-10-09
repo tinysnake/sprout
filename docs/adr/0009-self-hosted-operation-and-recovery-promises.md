@@ -162,6 +162,23 @@ An inaccessible Environment may be archived without pretending that uncertain
 work was safely released. Its history and recovery state remain visible, and
 that Environment identity admits no new work.
 
+## Task lead authority override for a recovering Agent run
+
+A current Task lead may release another Agent's run-held lease after that Agent's
+work has ended or been interrupted and the recovering instance blocks further
+work. The lease must already be recovering; this authority cannot preempt an
+active run. Before release the Task lead acknowledges the risks and records the
+unresolved facts. The release is an authority decision, not settlement evidence:
+unknown workspace operations, MCP effects, engine state, or other facts remain
+unknown in the permanent recovery history after the lease is released. The record
+names the Task lead, authority Task, originating Agent and run, lease, instance,
+and action, separately from Force Release history.
+
+This authority applies only to another Agent's run-held lease. It does not give
+the Task lead authority to start or terminate another Agent's run, and it does not
+resume, discard, or end a Task. Investigation reports the current holder and the
+lease acquisition time without acquiring or extending a lease.
+
 ## Human-only emergency Force Release
 
 Early self-hosted software can contain recovery defects, so recovery cannot be

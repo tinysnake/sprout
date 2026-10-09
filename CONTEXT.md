@@ -221,8 +221,12 @@ One durable version of a Task's goal, constraints, and validation criteria. A Hu
 _Avoid_: Prompt, Agent memory
 
 **Task lead**:
-A Human or Agent Project member entrusted by a Human at Task begin to coordinate work within the Task's current content, Project permissions, and selected Environment instance. An Agent Task lead may initiate sequential agent runs, stop runs it initiated, report blockers, and make a Task completion claim, but cannot approve, pause, validate, end, or recover the Task. For an Agent-led Task, the authorized Human may submit a marked substitute claim if the lead has not filed one.
+A Human or Agent Project member entrusted by a Human at Task begin to coordinate work within the Task's current content, Project permissions, and selected Environment instance. An Agent Task lead may initiate sequential agent runs, stop runs it initiated, report blockers, and make a Task completion claim. A current Task lead may investigate the selected Environment's lease holder and acquisition time, and may authority-override release another Agent's recovering run lease after acknowledging risks and recording unresolved facts; the override does not establish the remote outcome or retry that work. A Task lead still cannot approve, pause, validate, or end the Task. For an Agent-led Task, the authorized Human may submit a marked substitute claim if the lead has not filed one.
 _Avoid_: Task owner, scheduler
+
+**Task lead authority-override release**:
+A current Task lead's explicit release of another Agent's recovering run lease on the Task's Environment after acknowledging risks and recording the unresolved facts. It releases the lease but leaves remote effects unknown until separately proved. It does not start or terminate Agent runs and is distinct from the Human-only emergency Force Release.
+_Avoid_: Force Release, ordinary Release, remote settlement
 
 **Task begin**:
 The Human-authorized act that selects one environment instance for a Task, acquires that instance's Task lease, and has the environment worker create the Task context directory.
@@ -325,11 +329,11 @@ A time-bounded right to use an environment instance's lease-requiring capabiliti
 _Avoid_: Agent environment, lock
 
 **Lease recovery**:
-The state an environment instance's lease enters after a timeout, holder loss, or interruption, during which the instance is not reassignable until recovery is explicitly resolved. An unfinished Task's lease stays reserved and only a Human may resume, discard, or Force Release it; one-round Agent run recovery retains its existing holder or Human controls.
+The state an environment instance's lease enters after a timeout, holder loss, or interruption, during which the instance is not reassignable until recovery is explicitly resolved. An unfinished Task's lease stays reserved. A Task lead may investigate a lease and authority-override release another Agent's recovering run lease after risk acknowledgement; this permanently records unresolved facts without proving remote work settled. Evidence-based Resume, Discard, ordinary Release, and Human-only Force Release keep their existing authorities.
 _Avoid_: Cleanup, lock timeout
 
 **Force Release**:
-The Human-only emergency recovery decision that makes an Environment instance reassignable despite unresolved proof or cleanup after ordinary recovery has been attempted. It permanently records the acknowledged risks and unresolved facts; for a Task-held lease it releases the lease and records active-intent status `stopped` while preserving work intent and the Project workspace.
+The Human-only emergency recovery decision that makes an Environment instance reassignable despite unresolved proof or cleanup after ordinary recovery has been attempted. It permanently records the acknowledged risks and unresolved facts; for a Task-held lease it releases the lease and records active-intent status `stopped` while preserving work intent and the Project workspace. A Task lead's authority-override release is a separate action for another Agent's recovering run lease and never uses or relabels Force Release.
 _Avoid_: Automatic expiry, normal release, lease steal
 
 **Operational event**:

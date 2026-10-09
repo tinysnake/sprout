@@ -251,9 +251,14 @@ test('a Chat interruption settles with its product reason and releases the lease
 
   assert.equal(interrupted.status, 'interrupted');
   assert.equal(interrupted.interruptionReason, 'human-stop');
-  assert.equal(pool.leases().find((lease) => lease.runId === first.id)?.state, 'released');
+  const firstLease = pool.leases().find((lease) => lease.runId === first.id);
+  assert.equal(firstLease?.state, 'released');
   const next = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'next message', projectId: 'project-sprout' });
   assert.equal((await orchestrator.waitFor(next.id)).status, 'completed');
+  const nextLease = pool.leases().find((lease) => lease.runId === next.id);
+  assert.ok(nextLease, 'the later run acquires its own admission lease');
+  assert.notEqual(nextLease?.id, firstLease?.id, 'the later run does not resume or extend the prior lease');
+  assert.equal(pool.leases().find(lease => lease.id === firstLease?.id)?.state, 'released');
 });
 
 

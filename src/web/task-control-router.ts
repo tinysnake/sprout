@@ -26,18 +26,49 @@ export function createTaskControlRouter(options: {
   return {
     name: 'task-controls',
     async handle(context) {
-      if (context.method !== 'POST' || context.segments.length !== 4
-        || context.segments[0] !== 'api' || context.segments[1] !== 'tasks') return false;
+      if (context.segments.length !== 4 || context.segments[0] !== 'api' || context.segments[1] !== 'tasks') return false;
+      const taskId = context.segments[2] ?? '';
       const action = context.segments[3] ?? '';
-      const supported = new Set(['content', 'pause', 'interrupt', 'resume', 'cancel-pause', 'subordinate-stop', 'blockers', 'clear-blocker', 'completion-claims', 'validation', 'end', 'discard', 'reopen', 'recovery']);
+      if (context.method === 'GET' && action === 'environment-lease') {
+        if (!context.operatorSessionId) return json(context, 401, { error: 'authentication required' });
+        try {
+          const lease = await controls.investigateEnvironmentLeaseForHumanLead(taskId);
+          return json(context, 200, { lease: lease ?? null });
+        } catch (error) {
+          if (error instanceof TaskControlError) {
+            const status = error.code === 'unknown-task' ? 404 : error.code === 'authority-required' ? 403
+              : error.code === 'invalid-command' ? 400 : 409;
+            return json(context, status, { code: error.code, error: error.message });
+          }
+          if (error instanceof TaskProposalError) {
+            const status = ['unknown-project', 'unknown-proposal'].includes(error.code) ? 404
+              : ['membership-required', 'authority-required', 'agent-read-only'].includes(error.code) ? 403 : 409;
+            return json(context, status, { code: error.code, error: error.message });
+          }
+          return json(context, 409, { code: 'lifecycle-conflict', error: 'the Task lease could not be investigated' });
+        }
+      }
+      if (context.method !== 'POST') return false;
+      const supported = new Set(['content', 'pause', 'interrupt', 'resume', 'cancel-pause', 'subordinate-stop', 'blockers', 'clear-blocker', 'completion-claims', 'validation', 'end', 'discard', 'reopen', 'recovery', 'authority-override-release']);
       if (!supported.has(action)) return false;
       if (!context.operatorSessionId) return json(context, 401, { error: 'authentication required' });
       try {
         const body = await context.readBody();
-        const taskId = context.segments[2] ?? '';
         if (!isRecord(body)) return json(context, 400, { code: 'invalid-command', error: 'a JSON command object is required' });
         let task: Task | undefined;
         switch (action) {
+          case 'authority-override-release': {
+            if (!onlyKeys(body, ['leaseId', 'acknowledgedRisks', 'reason']) || typeof body.leaseId !== 'string' ||
+                typeof body.acknowledgedRisks !== 'boolean' || typeof body.reason !== 'string') {
+              return json(context, 400, { code: 'invalid-command', error: 'leaseId, acknowledgedRisks, and reason are required; actor fields are not accepted' });
+            }
+            const release = await controls.authorityOverrideReleaseForHumanLead(taskId, {
+              leaseId: body.leaseId,
+              acknowledgedRisks: body.acknowledgedRisks,
+              reason: body.reason,
+            });
+            return json(context, 201, { release });
+          }
           case 'content':
             if (!onlyKeys(body, ['expectedContentVersion', 'content', 'reason'])
               || typeof body.expectedContentVersion !== 'number' || typeof body.reason !== 'string') {

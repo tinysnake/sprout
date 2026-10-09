@@ -11,6 +11,7 @@ import {
   type EnvironmentRecoveryCause,
   type EnvironmentRecoveryRecord,
   type ForceReleaseRecord,
+  type TaskLeadAuthorityOverrideReleaseRecord,
   type ForceReleaseRefusal,
   type RetainedEvidence,
   type RemoteWorkRecoveryEvidence,
@@ -39,8 +40,8 @@ import type { RecoveryStore } from './recovery-store.ts';
  *
  * - a reconnect only moves a record to `reconciling` and never resolves it;
  * - retained evidence is synchronized before any ordinary decision;
- * - an interrupted run always requires a Human decision, so it is never
- *   auto-released;
+ * - an interrupted run always requires an explicit authority decision and is
+ *   never auto-released; a Task lead may override only another settled run lease;
  * - Force Release is available only in `recovery`, requires a concrete
  *   unresolved fact, risk acknowledgement, the exact typed confirmation, and a
  *   reason, and leaves a permanent outcome record.
@@ -55,6 +56,17 @@ export interface RecoveryLeasePort {
   releaseLease(leaseId: string): EnvironmentLease | undefined;
   resumeTaskLease(leaseId: string): EnvironmentLease | undefined;
   releaseTaskLease(leaseId: string): EnvironmentLease | undefined;
+}
+
+export interface EnvironmentLeaseInvestigation {
+  readonly instanceId: string;
+  readonly leaseId: string;
+  readonly state: 'active' | 'recovering';
+  readonly holderKind: 'task' | 'run';
+  readonly holderId: string;
+  readonly runId?: string;
+  readonly taskId?: string;
+  readonly acquiredAt: number;
 }
 
 /**
@@ -120,6 +132,9 @@ export type RecoveryRefusalCode =
   | ForceReleaseRefusal
   | 'unknown-recovery'
   | 'unknown-lease'
+  | 'lease-not-recovering'
+  | 'run-state-unavailable'
+  | 'run-still-active'
   | 'not-reconciling'
   | 'evidence-not-synchronized'
   | 'identity-not-verified'
@@ -148,6 +163,8 @@ export interface EnvironmentRecoveryServiceOptions {
     readonly enrollmentId: string; readonly identityDigest: string;
   } | undefined>;
   readonly remoteWorkEvidenceForLease?: (lease: EnvironmentLease) => Promise<RemoteWorkRecoveryEvidence>;
+  /** Fail closed if a run-held lease still names a live Agent run. */
+  readonly isRunActive?: (runId: string) => Promise<boolean>;
   readonly activeRunForTask?: (taskId: string) => Promise<string | undefined>;
   readonly clock?: () => number;
   readonly idFactory?: () => string;
@@ -175,6 +192,8 @@ export interface OpenRecoveryInput {
 
 export interface RecoveryDecisionInput {
   readonly actor?: string;
+  readonly actorKind?: 'operator' | 'task-lead';
+  readonly authorityTaskId?: string;
   readonly reason?: string;
 }
 
@@ -185,6 +204,7 @@ export class EnvironmentRecoveryService {
   readonly #taskRuns: ((taskId: string) => Promise<readonly string[]>) | undefined;
   readonly #workerIdentityForInstance: EnvironmentRecoveryServiceOptions['workerIdentityForInstance'];
   readonly #remoteWorkEvidenceForLease: EnvironmentRecoveryServiceOptions['remoteWorkEvidenceForLease'];
+  readonly #isRunActive: EnvironmentRecoveryServiceOptions['isRunActive'];
   readonly #activeRunForTask: ((taskId: string) => Promise<string | undefined>) | undefined;
   readonly #clock: () => number;
   readonly #idFactory: () => string;
@@ -199,6 +219,7 @@ export class EnvironmentRecoveryService {
     this.#taskRuns = options.taskRuns;
     this.#workerIdentityForInstance = options.workerIdentityForInstance;
     this.#remoteWorkEvidenceForLease = options.remoteWorkEvidenceForLease;
+    this.#isRunActive = options.isRunActive;
     this.#activeRunForTask = options.activeRunForTask;
     this.#clock = options.clock ?? Date.now;
     this.#idFactory = options.idFactory ?? (() => `recovery-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
@@ -285,6 +306,38 @@ export class EnvironmentRecoveryService {
   async listForEnvironment(environmentInstanceId: string): Promise<readonly EnvironmentRecoveryRecord[]> {
     const records = (await this.#store.list()).filter(record => record.environmentInstanceId === environmentInstanceId);
     return Promise.all(records.map(record => this.#refreshRemoteWorkEvidence(record)));
+  }
+
+  /** Every permanent Task lead authority-override outcome for one Environment. */
+  async authorityOverrideReleaseHistory(environmentInstanceId: string): Promise<readonly TaskLeadAuthorityOverrideReleaseRecord[]> {
+    return this.#store.listAuthorityOverrideReleases(environmentInstanceId);
+  }
+
+  /** Permanent authority-override actions attributable to one released Agent. */
+  async authorityOverrideReleaseHistoryForAgent(agentId: string): Promise<readonly TaskLeadAuthorityOverrideReleaseRecord[]> {
+    return this.#store.listAuthorityOverrideReleasesForAgent(agentId);
+  }
+
+  /** Permanent recovery history attributable to one originating Agent. */
+  async listForAgent(agentId: string): Promise<readonly EnvironmentRecoveryRecord[]> {
+    const records = (await this.#store.list()).filter(record => record.holderId === agentId);
+    return Promise.all(records.map(record => this.#refreshRemoteWorkEvidence(record)));
+  }
+
+  /** The current or recovering lease, projected without extending or acquiring it. */
+  inspectInstanceLease(instanceId: string): EnvironmentLeaseInvestigation | undefined {
+    const lease = this.#leases.leases().find(candidate => candidate.instanceId === instanceId);
+    if (lease === undefined || (lease.state !== 'active' && lease.state !== 'recovering')) return undefined;
+    return {
+      instanceId: lease.instanceId,
+      leaseId: lease.id,
+      state: lease.state,
+      holderKind: lease.holderKind ?? 'run',
+      holderId: lease.holderId,
+      ...(lease.runId !== undefined ? { runId: lease.runId } : {}),
+      ...(lease.taskId !== undefined ? { taskId: lease.taskId } : {}),
+      acquiredAt: lease.acquiredAt,
+    };
   }
 
   /** Every permanent Force Release outcome for one Environment, newest first. */
@@ -529,6 +582,90 @@ export class EnvironmentRecoveryService {
   }
 
   /**
+   * Task lead authority override for a blocked run-held lease.
+   *
+   * This deliberately bypasses evidence-based release without changing any
+   * unknown remote outcome. The resolved recovery record and separate action
+   * row both retain the risk acknowledgement, unresolved facts, and actor.
+   */
+  async authorityOverrideRelease(leaseId: string, input: {
+    readonly authorityTaskId: string;
+    readonly environmentInstanceId: string;
+    readonly actorId: string;
+    readonly actorKind: 'human' | 'agent';
+    readonly acknowledgedRisks: boolean;
+    readonly reason: string;
+  }): Promise<TaskLeadAuthorityOverrideReleaseRecord> {
+    const lease = this.#leases.getLease(leaseId);
+    if (lease === undefined || lease.state === 'released') {
+      throw new EnvironmentRecoveryError('unknown-lease', `Unknown or released lease: ${leaseId}`);
+    }
+    if (lease.state !== 'recovering') {
+      throw new EnvironmentRecoveryError('lease-not-recovering', 'Task lead authority override is available only after the Agent run is no longer active.');
+    }
+    const record = await this.#requireRecord(leaseId);
+    const runId = record.runId ?? lease.runId;
+    if (record.holderKind !== 'run' || (lease.holderKind ?? 'run') !== 'run' || runId === undefined ||
+        record.holderId !== lease.holderId || record.environmentInstanceId !== input.environmentInstanceId ||
+        lease.instanceId !== input.environmentInstanceId || input.actorId === lease.holderId) {
+      throw new EnvironmentRecoveryError('holder-mismatch', 'The Task lead can release only another Agent run lease on the Task Environment.');
+    }
+    if (this.#isRunActive === undefined) {
+      throw new EnvironmentRecoveryError('run-state-unavailable', 'Task lead authority override requires proof that the originating Agent run is no longer active.');
+    }
+    let runIsActive: boolean;
+    try { runIsActive = await this.#isRunActive(runId); }
+    catch {
+      throw new EnvironmentRecoveryError('run-state-unavailable', 'Task lead authority override could not verify that the originating Agent run is no longer active.');
+    }
+    if (runIsActive) {
+      throw new EnvironmentRecoveryError('run-still-active', 'Task lead authority override cannot release a lease while the originating Agent run is active.');
+    }
+    if (!input.acknowledgedRisks) {
+      throw new EnvironmentRecoveryError('risks-not-acknowledged', 'Task lead authority override requires explicit risk acknowledgement.');
+    }
+    if (record.unresolvedFacts.length === 0) {
+      throw new EnvironmentRecoveryError('no-unresolved-facts', 'Task lead authority override requires recorded unresolved facts.');
+    }
+    if (input.reason.trim() === '') {
+      throw new EnvironmentRecoveryError('reason-required', 'Task lead authority override requires a written reason.');
+    }
+
+    const at = this.#clock();
+    const reason = sanitizeRecoveryReason(input.reason, 'The Task lead authority override reason was withheld as sensitive.');
+    const outcome: TaskLeadAuthorityOverrideReleaseRecord = {
+      id: this.#idFactory(),
+      action: 'task-lead-authority-override-release',
+      environmentInstanceId: lease.instanceId,
+      leaseId,
+      holderKind: 'run',
+      holderId: lease.holderId,
+      runId,
+      authorityTaskId: input.authorityTaskId,
+      actorId: input.actorId,
+      actorKind: input.actorKind,
+      at,
+      reason,
+      risksAcknowledged: true,
+      unresolvedFacts: [...record.unresolvedFacts],
+      remoteWorkEvidence: record.remoteWorkEvidence ?? EMPTY_REMOTE_WORK_RECOVERY_EVIDENCE,
+    };
+    await this.#resolve(record, 'authority-override-released', {
+      actor: input.actorId,
+      actorKind: 'task-lead',
+      authorityTaskId: input.authorityTaskId,
+      reason,
+    }, 'Task lead authority override released another Agent run lease.', false);
+    if (this.#leases.releaseLease(leaseId) === undefined) {
+      await this.#store.save(record);
+      throw new EnvironmentRecoveryError('unknown-lease', `Lease ${leaseId} could not be released.`);
+    }
+    await this.#store.appendAuthorityOverrideRelease(outcome);
+    this.#announce();
+    return outcome;
+  }
+
+  /**
    * Human-only emergency Force Release.
    *
    * Available only in `recovery`, requires a concrete unresolved fact, risk
@@ -733,7 +870,9 @@ export class EnvironmentRecoveryService {
         ...record.decisions,
         {
           kind,
-          actor: 'operator',
+          actor: decision.actorKind ?? 'operator',
+          ...(decision.actor !== undefined ? { actorId: decision.actor } : {}),
+          ...(decision.authorityTaskId !== undefined ? { authorityTaskId: decision.authorityTaskId } : {}),
           at,
           // A caller-supplied reason is sanitized; no reason falls back to the
           // product-owned text for the decision. The reason is never echoed

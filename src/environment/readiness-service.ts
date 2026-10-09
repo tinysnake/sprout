@@ -61,7 +61,7 @@ export interface AssembleReadinessInput {
    *
    * When supplied, these are authoritative over the lease registry, so a
    * `reconciling` state (evidence still synchronizing) is distinguishable from
-   * `recovery` (facts in, Human decision required) instead of both collapsing to
+   * `recovery` (facts in, authorized decision required) instead of both collapsing to
    * the lease's `recovering` state.
    */
   readonly recoveryRecords?: readonly {

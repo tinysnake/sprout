@@ -54,6 +54,14 @@ interface ColumnShape {
 
 /** The exact composed schema shape, including the M2 authority boundary. */
 const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
+  environment_authority_override_releases: [
+    { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
+    { name: 'environment_instance_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'lease_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'origin_agent_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'at', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
+  ],
   environment_model_authorization_evidence: [
     { name: 'evidence_id', type: 'TEXT', notnull: 0, pk: 1 },
     { name: 'environment_instance_id', type: 'TEXT', notnull: 1, pk: 0 },
@@ -678,9 +686,8 @@ test('a database written with the pre-rehome schema still opens and reads back',
     writeHistoricalDatabase(path);
 
     const handle = new SqliteStore({ filename: path });
-    // Opening runs the idempotent `CREATE TABLE IF NOT EXISTS` and the
-    // `#addColumnIfMissing` migrations; a historical file must be left with the
-    // same nine tables rather than failing or duplicating one.
+    // Opening runs idempotent table creation and column migrations; historical
+    // files must remain readable while gaining any newer domain tables.
     const tables = handle.db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
       .all() as unknown as readonly { readonly name: string }[];

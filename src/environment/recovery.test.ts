@@ -29,7 +29,7 @@ test('a reconnect alone is not proof and never resolves an Environment', () => {
   assert.notEqual(phaseAfterReconnect(), 'resolved');
 });
 
-test('an interrupted run always requires a Human decision, even with clean evidence', () => {
+test('an interrupted run always requires an authorized decision, even with clean evidence', () => {
   assert.equal(
     phaseAfterEvidence({ hadActiveRun: true, holderKind: 'task', evidence: cleanEvidence }),
     'recovery',

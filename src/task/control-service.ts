@@ -7,6 +7,8 @@ import { TaskTerminalMutationError, type TaskEnvironmentLifecycle, type TaskReco
 import type { TaskProposalService } from './proposal-service.ts';
 import { createExecutionStrategy, taskExecutionModeAdmissionRefusal, type ExecutionStrategy } from '../execution-mode.ts';
 import { executionModeMismatchReason, legacyEnvironmentPlacement } from '../execution-placement.ts';
+import type { EnvironmentLeaseInvestigation } from '../environment/recovery-service.ts';
+import type { TaskLeadAuthorityOverrideReleaseRecord } from '../environment/recovery.ts';
 
 export type TaskBlockerInput = Omit<TaskBlocker, 'createdBy' | 'createdAt'>;
 export type TaskCompletionClaimInput = Omit<TaskCompletionClaim, 'id' | 'actor' | 'at' | 'contentVersion'>;
@@ -34,6 +36,17 @@ export class TaskControlService {
   readonly #now: () => number;
   readonly #id: () => string;
   readonly #executionStrategy: ExecutionStrategy;
+  readonly #leaseRecovery: {
+    inspectInstanceLease(instanceId: string): EnvironmentLeaseInvestigation | undefined;
+    authorityOverrideRelease(leaseId: string, input: {
+      readonly authorityTaskId: string;
+      readonly environmentInstanceId: string;
+      readonly actorId: string;
+      readonly actorKind: 'human' | 'agent';
+      readonly acknowledgedRisks: boolean;
+      readonly reason: string;
+    }): Promise<TaskLeadAuthorityOverrideReleaseRecord>;
+  } | undefined;
 
   constructor(options: {
     readonly tasks: TaskService;
@@ -43,6 +56,17 @@ export class TaskControlService {
     readonly now?: () => number;
     readonly id?: () => string;
     readonly executionStrategy?: ExecutionStrategy;
+    readonly leaseRecovery?: {
+      inspectInstanceLease(instanceId: string): EnvironmentLeaseInvestigation | undefined;
+      authorityOverrideRelease(leaseId: string, input: {
+        readonly authorityTaskId: string;
+        readonly environmentInstanceId: string;
+        readonly actorId: string;
+        readonly actorKind: 'human' | 'agent';
+        readonly acknowledgedRisks: boolean;
+        readonly reason: string;
+      }): Promise<TaskLeadAuthorityOverrideReleaseRecord>;
+    };
   }) {
     this.#tasks = options.tasks;
     this.#lifecycle = options.lifecycle;
@@ -51,6 +75,7 @@ export class TaskControlService {
     this.#now = options.now ?? Date.now;
     this.#id = options.id ?? (() => `claim-${randomUUID()}`);
     this.#executionStrategy = options.executionStrategy ?? createExecutionStrategy('environment-hosted');
+    this.#leaseRecovery = options.leaseRecovery;
   }
 
   async reviseForHuman(taskId: string, input: {
@@ -241,6 +266,52 @@ export class TaskControlService {
     if (run.status !== 'stopped') throw new TaskControlError('lifecycle-conflict', 'the subordinate run did not settle as stopped');
     await this.#tasks.onRunSettled({ taskId, run });
     return this.#task(taskId);
+  }
+
+  async investigateEnvironmentLeaseForHumanLead(taskId: string): Promise<EnvironmentLeaseInvestigation | undefined> {
+    const actor = await this.#humanForTask(taskId);
+    return this.investigateEnvironmentLeaseForLead(taskId, actor);
+  }
+
+  async investigateEnvironmentLeaseForLead(taskId: string, actorInput: TaskActor): Promise<EnvironmentLeaseInvestigation | undefined> {
+    const task = await this.#task(taskId);
+    await this.#authorizeLead(task, actorInput);
+    if (task.environmentInstanceId === undefined || this.#leaseRecovery === undefined) {
+      throw new TaskControlError('lifecycle-conflict', 'Environment lease investigation is unavailable for this Task.');
+    }
+    return this.#leaseRecovery.inspectInstanceLease(task.environmentInstanceId);
+  }
+
+  async authorityOverrideReleaseForHumanLead(taskId: string, input: {
+    readonly leaseId: string;
+    readonly acknowledgedRisks: boolean;
+    readonly reason: string;
+  }): Promise<TaskLeadAuthorityOverrideReleaseRecord> {
+    const actor = await this.#humanForTask(taskId);
+    return this.authorityOverrideReleaseForLead(taskId, actor, input);
+  }
+
+  async authorityOverrideReleaseForLead(taskId: string, actorInput: TaskActor, input: {
+    readonly leaseId: string;
+    readonly acknowledgedRisks: boolean;
+    readonly reason: string;
+  }): Promise<TaskLeadAuthorityOverrideReleaseRecord> {
+    const task = await this.#task(taskId);
+    const actor = await this.#authorizeLead(task, actorInput);
+    if (task.environmentInstanceId === undefined || this.#leaseRecovery === undefined) {
+      throw new TaskControlError('lifecycle-conflict', 'Task lead authority-override release is unavailable for this Task.');
+    }
+    if (typeof input?.leaseId !== 'string' || !input.leaseId.trim()) {
+      throw new TaskControlError('invalid-command', 'leaseId is required');
+    }
+    return this.#leaseRecovery.authorityOverrideRelease(input.leaseId, {
+      authorityTaskId: task.id,
+      environmentInstanceId: task.environmentInstanceId,
+      actorId: actor.memberId,
+      actorKind: actor.memberKind,
+      acknowledgedRisks: input.acknowledgedRisks === true,
+      reason: commandReason(input.reason),
+    });
   }
 
   async #task(taskId: string): Promise<Task> {

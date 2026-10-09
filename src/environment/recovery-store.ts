@@ -1,4 +1,4 @@
-import type { EnvironmentRecoveryRecord, ForceReleaseRecord } from './recovery.ts';
+import type { EnvironmentRecoveryRecord, ForceReleaseRecord, TaskLeadAuthorityOverrideReleaseRecord } from './recovery.ts';
 import type { JournalTurn } from '../worker/recovery-journal.ts';
 import type { AgentRunEvent } from '../engine/port.ts';
 
@@ -50,11 +50,18 @@ export interface RecoveryStore {
   appendForceRelease(record: ForceReleaseRecord): Promise<void>;
   /** Every Force Release outcome for one Environment, newest first. */
   listForceReleases(environmentInstanceId: string): Promise<readonly ForceReleaseRecord[]>;
+  /** Append one permanent Task lead authority-override outcome. */
+  appendAuthorityOverrideRelease(record: TaskLeadAuthorityOverrideReleaseRecord): Promise<void>;
+  /** Every Task lead authority-override outcome for one Environment, newest first. */
+  listAuthorityOverrideReleases(environmentInstanceId: string): Promise<readonly TaskLeadAuthorityOverrideReleaseRecord[]>;
+  /** Task lead authority-override outcomes that released one Agent's lease, newest first. */
+  listAuthorityOverrideReleasesForAgent(agentId: string): Promise<readonly TaskLeadAuthorityOverrideReleaseRecord[]>;
 }
 
 export class InMemoryRecoveryStore implements RecoveryStore {
   readonly #records = new Map<string, EnvironmentRecoveryRecord>();
   readonly #forceReleases: ForceReleaseRecord[] = [];
+  readonly #authorityOverrideReleases: TaskLeadAuthorityOverrideReleaseRecord[] = [];
 
   async save(record: EnvironmentRecoveryRecord): Promise<void> {
     this.#records.set(record.id, record);
@@ -82,6 +89,22 @@ export class InMemoryRecoveryStore implements RecoveryStore {
   async listForceReleases(environmentInstanceId: string): Promise<readonly ForceReleaseRecord[]> {
     return this.#forceReleases
       .filter((record) => record.environmentInstanceId === environmentInstanceId)
+      .sort((a, b) => b.at - a.at);
+  }
+
+  async appendAuthorityOverrideRelease(record: TaskLeadAuthorityOverrideReleaseRecord): Promise<void> {
+    this.#authorityOverrideReleases.push(record);
+  }
+
+  async listAuthorityOverrideReleases(environmentInstanceId: string): Promise<readonly TaskLeadAuthorityOverrideReleaseRecord[]> {
+    return this.#authorityOverrideReleases
+      .filter(record => record.environmentInstanceId === environmentInstanceId)
+      .sort((a, b) => b.at - a.at);
+  }
+
+  async listAuthorityOverrideReleasesForAgent(agentId: string): Promise<readonly TaskLeadAuthorityOverrideReleaseRecord[]> {
+    return this.#authorityOverrideReleases
+      .filter(record => record.holderId === agentId)
       .sort((a, b) => b.at - a.at);
   }
 }

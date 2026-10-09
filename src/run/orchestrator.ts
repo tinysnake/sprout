@@ -149,7 +149,6 @@ export interface RunOrchestratorOptions {
   readonly executionPlacementForEnvironment?: (environmentInstanceId: string) => ExecutionPlacement;
   /** Core-owned Host-run workspace operation attachment; never a model target selector. */
   readonly remoteWorkspace?: (projectId: string, agentId: string, runId: string,
-    onLeaseAcquired: (leaseId: string) => Promise<void>,
     containingLease?: import('../operations/environment-operations.ts').WorkspaceContainingLease,
     options?: { readonly environmentInstanceId?: string; readonly bindingFence?: BindingGenerationFence }) => Promise<import('../engine/port.ts').RemoteWorkspaceTools | undefined>;
   /** Project authority determines whether the selected MCP configuration is active. */
@@ -809,7 +808,6 @@ export class RunOrchestrator {
     let mcpMayHaveStarted = false;
     let remoteWorkspace: import('../engine/port.ts').RemoteWorkspaceTools | undefined;
     let remoteSettlementUnknown = false;
-    let remoteEnvironmentInstanceId: string | undefined;
     let containingLeaseCanRelease = false;
     const bindingScope = bindingGenerationScope(initial);
     const bindingFence = initial.taskId === undefined ? this.#bindingGenerations.stage(bindingScope) : undefined;
@@ -829,11 +827,8 @@ export class RunOrchestrator {
         });
         mcpMayHaveStarted = true;
       }
-      remoteWorkspace = await this.#remoteWorkspace?.(initial.projectId ?? '', agent.id, initial.id, async leaseId => {
-        const environmentInstanceId = remoteEnvironmentInstanceId;
-        if (environmentInstanceId === undefined) throw new Error('remote Environment was not pinned before lease acquisition');
-        prepared = await this.#advance(prepared, { environmentInstanceId, leaseId });
-      }, initial.leaseId !== undefined && initial.environmentInstanceId ? (() => {
+      remoteWorkspace = await this.#remoteWorkspace?.(initial.projectId ?? '', agent.id, initial.id,
+        initial.leaseId !== undefined && initial.environmentInstanceId ? (() => {
         const lease = this.#pool.getLease(initial.leaseId);
         if (!lease) throw new Error('Containing lease is unavailable');
         return {
@@ -860,8 +855,6 @@ export class RunOrchestrator {
           ? 'the requested Work Environment could not be attached'
           : 'the current Work Environment binding could not be reattached');
       }
-      remoteEnvironmentInstanceId = remoteWorkspace?.binding.environmentInstanceId ??
-        (initial.environmentInstanceId !== '' ? initial.environmentInstanceId : undefined);
       const binding = currentRunWorkspaceBinding({
         ...(remoteWorkspace !== undefined ? { remoteWorkspace } : {}),
         ...(remoteProjectMcp !== undefined ? { remoteProjectMcp } : {}),

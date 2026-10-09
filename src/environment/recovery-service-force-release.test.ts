@@ -31,7 +31,7 @@ import { InMemoryRecoveryStore } from './recovery-store.ts';
 
 import { SqliteRecoveryStore } from './sqlite-recovery-store.ts';
 
-import { FORCE_RELEASE_CONFIRMATION } from './recovery.ts';
+import { FORCE_RELEASE_CONFIRMATION, EMPTY_REMOTE_WORK_RECOVERY_EVIDENCE } from './recovery.ts';
 
 
 /**
@@ -383,4 +383,82 @@ test('Force Release sanitizes a sensitive reason and keeps a product-owned recor
   assert.ok(!outcome.reason.includes('hunter2correcthorse'));
   assert.ok(!outcome.reason.includes('/Users/'));
   assert.ok(outcome.reason.length > 0);
+});
+
+test('Task lead authority override releases an interrupted Agent lease and preserves unknown remote work durably', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-authority-override-'));
+  const filename = join(directory, 'state.db');
+  let store: SqliteRecoveryStore | undefined;
+  try {
+    const pool = new EnvironmentPool({
+      definitions: [definition], instances: [instance], clock: { now: () => 10 }, idFactory: () => 'run-lease',
+    });
+    const acquired = pool.acquireLease({ instanceId: 'mac-1', capability: 'agent-run', holderId: 'agent-origin', runId: 'run-origin', ttlMs: 60_000 });
+    assert.equal(acquired.ok, true);
+    if (!acquired.ok) throw new Error('run lease was not admitted');
+    let nextId = 0;
+    let originatingRunActive = true;
+    store = new SqliteRecoveryStore({ filename });
+    const remoteWorkEvidence = {
+      ...EMPTY_REMOTE_WORK_RECOVERY_EVIDENCE,
+      workspaceOperations: { running: 0, unknown: 1, cancelRequested: 0, recoveryRequired: 0 },
+    };
+    const recovery = new EnvironmentRecoveryService({
+      store, leases: pool, clock: () => 20, idFactory: () => `record-${++nextId}`,
+      remoteWorkEvidenceForLease: async () => remoteWorkEvidence,
+      isRunActive: async () => originatingRunActive,
+    });
+    await recovery.open({ leaseId: acquired.lease.id, cause: 'worker-channel-lost', hadActiveRun: true, runId: 'run-origin' });
+    await assert.rejects(recovery.authorityOverrideRelease(acquired.lease.id, {
+      authorityTaskId: 'task-lead-authority', environmentInstanceId: 'mac-1', actorId: 'task-lead-agent',
+      actorKind: 'agent', acknowledgedRisks: true, reason: 'The run has not settled yet.',
+    }), (error: unknown) => error instanceof EnvironmentRecoveryError && error.code === 'run-still-active');
+    assert.equal(pool.getLease(acquired.lease.id)?.state, 'recovering', 'the Task lead cannot preempt active Agent work');
+    originatingRunActive = false;
+
+    const heldBeforeInspection = pool.leases();
+    const investigation = recovery.inspectInstanceLease('mac-1');
+    assert.equal(investigation?.holderId, 'agent-origin');
+    assert.equal(investigation?.runId, 'run-origin');
+    assert.equal(investigation?.acquiredAt, 10);
+    assert.deepEqual(pool.leases(), heldBeforeInspection, 'investigation does not acquire or extend a lease');
+
+    const outcome = await recovery.authorityOverrideRelease(acquired.lease.id, {
+      authorityTaskId: 'task-lead-authority',
+      environmentInstanceId: 'mac-1',
+      actorId: 'task-lead-agent',
+      actorKind: 'agent',
+      acknowledgedRisks: true,
+      reason: 'The originating work ended and a successor is blocked on this instance.',
+    });
+    assert.equal(pool.getLease(acquired.lease.id)?.state, 'released');
+    assert.equal(outcome.action, 'task-lead-authority-override-release');
+    assert.equal(outcome.actorId, 'task-lead-agent');
+    assert.equal(outcome.authorityTaskId, 'task-lead-authority');
+    assert.ok(outcome.unresolvedFacts.some(fact => fact.includes('remote workspace operation')));
+    assert.equal(outcome.remoteWorkEvidence.workspaceOperations.unknown, 1, 'unknown remote work remains unconfirmed after release');
+    assert.equal((await recovery.forceReleaseHistory('mac-1')).length, 0, 'Task lead release is distinct from Force Release');
+
+    const byInstance = await recovery.listForEnvironment('mac-1');
+    const byAgent = await recovery.listForAgent('agent-origin');
+    for (const queried of [byInstance[0], byAgent[0]]) {
+      assert.equal(queried?.phase, 'resolved');
+      assert.ok(queried?.unresolvedFacts.some(fact => fact.includes('remote workspace operation')));
+      assert.equal(queried?.remoteWorkEvidence?.workspaceOperations.unknown, 1);
+      assert.equal(queried?.decisions.at(-1)?.kind, 'authority-override-released');
+      assert.equal(queried?.decisions.at(-1)?.actorId, 'task-lead-agent');
+    }
+    assert.equal((await recovery.authorityOverrideReleaseHistory('mac-1'))[0]?.leaseId, acquired.lease.id);
+    assert.equal((await recovery.authorityOverrideReleaseHistoryForAgent('agent-origin'))[0]?.actorId, 'task-lead-agent');
+
+    store.close();
+    store = new SqliteRecoveryStore({ filename });
+    const reopened = new EnvironmentRecoveryService({ store, leases: pool, clock: () => 30 });
+    assert.ok((await reopened.listForEnvironment('mac-1'))[0]?.unresolvedFacts.some(fact => fact.includes('remote workspace operation')));
+    assert.ok((await reopened.listForAgent('agent-origin'))[0]?.unresolvedFacts.some(fact => fact.includes('remote workspace operation')));
+    assert.equal((await reopened.authorityOverrideReleaseHistory('mac-1'))[0]?.action, 'task-lead-authority-override-release');
+  } finally {
+    store?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

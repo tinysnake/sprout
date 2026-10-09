@@ -1176,9 +1176,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       // (ADR-0003), and so execution follows the leased instance (F1, #18).
       engines: (requestedInstanceId) => runtimeEnvironment.adapters(requestedInstanceId),
       executionStrategy,
-      remoteWorkspace: async (projectId, agentId, runId, onLeaseAcquired, containingLease, bindingOptions) => {
+      remoteWorkspace: async (projectId, agentId, runId, containingLease, bindingOptions) => {
         if (!environmentOperations) return undefined;
-        try { return await environmentOperations.attach(projectId, agentId, runId, onLeaseAcquired, containingLease, bindingOptions); }
+        try { return await environmentOperations.attach(projectId, agentId, runId, containingLease, bindingOptions); }
         catch { return undefined; }
       },
       projectMcpSelected: async (projectId) => {
@@ -1313,6 +1313,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     });
     const taskControls = new TaskControlService({
       tasks, lifecycle: taskLifecycle, proposals: taskProposals, runs: orchestrator, executionStrategy,
+      leaseRecovery: {
+        inspectInstanceLease: (instanceId) => recovery.inspectInstanceLease(instanceId),
+        authorityOverrideRelease: (leaseId, input) => recovery.authorityOverrideRelease(leaseId, input),
+      },
     });
 
     recovery = new EnvironmentRecoveryService({
@@ -1330,6 +1334,11 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         if (environmentOperations === undefined) return { ...EMPTY_REMOTE_WORK_RECOVERY_EVIDENCE, journalAvailable: false };
         try { return await environmentOperations.remoteWorkEvidenceForLease(lease.id); }
         catch { return { ...EMPTY_REMOTE_WORK_RECOVERY_EVIDENCE, journalAvailable: false }; }
+      },
+      isRunActive: async (runId) => {
+        const run = orchestrator.get(runId) ?? await durableStores.runs.get(runId);
+        if (run === undefined) throw new Error('originating run state is unavailable');
+        return run.status === 'queued' || run.status === 'running';
       },
       // The holder decisions reuse the existing lifecycle ordering rather than
       // re-implementing Task context cleanup or lease release here.

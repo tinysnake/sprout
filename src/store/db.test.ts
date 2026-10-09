@@ -46,6 +46,14 @@ interface ColumnShape {
 
 /** The exact composed schema shape, including the M2 authority boundary. */
 const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
+  environment_authority_override_releases: [
+    { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
+    { name: 'environment_instance_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'lease_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'origin_agent_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'at', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
+  ],
   environment_model_authorization_evidence: [
     { name: 'evidence_id', type: 'TEXT', notnull: 0, pk: 1 },
     { name: 'environment_instance_id', type: 'TEXT', notnull: 1, pk: 0 },
@@ -627,6 +635,8 @@ test('explicit indexes keep their names, tables, and column order', async () => 
         { name: 'environment_recovery_lease_idx', tbl: 'environment_recovery' },
         { name: 'environment_recovery_instance_idx', tbl: 'environment_recovery' },
         { name: 'environment_force_releases_instance_idx', tbl: 'environment_force_releases' },
+        { name: 'environment_authority_override_instance_idx', tbl: 'environment_authority_override_releases' },
+        { name: 'environment_authority_override_agent_idx', tbl: 'environment_authority_override_releases' },
         { name: 'task_proposals_project', tbl: 'task_proposals' },
         { name: 'task_run_links_by_task', tbl: 'task_run_links' },
         { name: 'usage_activities_kind_idx', tbl: 'usage_activities' },
@@ -710,6 +720,7 @@ test('uniqueness identities are still enforced by the database, not the caller',
         'collaboration_wake_requests',
         'collaboration_window_inputs',
         'conversation_scopes',
+        'environment_authority_override_releases',
         'environment_catalog',
         'environment_enrollments',
         'environment_force_releases',
