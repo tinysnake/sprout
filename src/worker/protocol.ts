@@ -313,7 +313,7 @@ export interface InspectProjectMcpConfigurationParams extends WorkspaceBindingId
 
 export interface ProjectMcpServerDescriptor {
   readonly name: string;
-  readonly transport: 'stdio';
+  readonly transport: 'stdio' | 'http';
 }
 
 export interface InspectProjectMcpConfigurationResult {
@@ -345,14 +345,14 @@ export interface ProjectMcpToolDeclaration {
 
 export interface ProjectMcpServerStatus {
   readonly name: string;
-  readonly status: 'ready' | 'missing-dependency' | 'invalid' | 'unsupported';
+  readonly status: 'ready' | 'missing-dependency' | 'invalid' | 'unsupported' | 'unavailable';
   readonly tools: readonly ProjectMcpToolDeclaration[];
 }
 
 export interface StartProjectMcpResult {
   readonly status: 'ready' | 'partial' | 'blocked';
   readonly processId: string;
-  readonly reason?: 'not-selected' | 'missing' | 'invalid' | 'unsupported' | 'worker-refused';
+  readonly reason?: 'not-selected' | 'missing' | 'invalid' | 'unsupported' | 'unavailable' | 'worker-refused';
   readonly servers: readonly ProjectMcpServerStatus[];
 }
 
@@ -368,7 +368,7 @@ export interface CallProjectMcpToolResult {
   readonly operationId: string;
   readonly status: 'completed' | 'failed' | 'unsupported';
   readonly text?: string;
-  readonly reason?: 'unknown-tool' | 'invalid-arguments' | 'server-error' | 'invalid-result' | 'timeout' | 'worker-refused';
+  readonly reason?: 'unknown-tool' | 'invalid-arguments' | 'server-error' | 'invalid-result' | 'unsupported-feature' | 'timeout' | 'worker-refused';
 }
 
 export interface StopProjectMcpParams extends WorkspaceBindingIdentity, ProjectMcpLeaseIdentity {

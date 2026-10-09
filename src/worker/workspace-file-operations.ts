@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { join, relative, resolve, sep } from 'node:path';
 import { sanitizeIdentifier } from '../environment/privacy.ts';
+import { parseProjectMcpManifest } from './project-mcp-manifest.ts';
 import type { WorkerWorkspace } from './workspace.ts';
 import type {
   CancelWorkspaceFileOperationParams,
@@ -123,16 +124,13 @@ export class WorkerWorkspaceFiles {
       } finally { await handle.close(); }
       if (text.includes(String.fromCharCode(0xfffd))) return { status: 'invalid', format: MCP_CONFIGURATION_FORMAT, servers: [] };
       const config: unknown = JSON.parse(text);
-      if (!isRecord(config) || Object.keys(config).some(key => key !== 'mcpServers') || !isRecord(config.mcpServers)) {
-        return { status: 'unsupported', format: MCP_CONFIGURATION_FORMAT, servers: [] };
-      }
-      const servers = Object.entries(config.mcpServers);
-      if (servers.length > 64) return { status: 'unsupported', format: MCP_CONFIGURATION_FORMAT, servers: [] };
-      const descriptors: { name: string; transport: 'stdio' }[] = [];
-      for (const [rawName, rawConfig] of servers) {
-        const name = sanitizeIdentifier(rawName, { fallback: '', kind: 'generic', maxLength: 64 });
-        if (!name || !validStdioDeclaration(rawConfig)) return { status: 'unsupported', format: MCP_CONFIGURATION_FORMAT, servers: [] };
-        descriptors.push({ name, transport: 'stdio' });
+      const parsed = parseProjectMcpManifest(config);
+      if (parsed.status !== 'valid') return { status: 'unsupported', format: MCP_CONFIGURATION_FORMAT, servers: [] };
+      const descriptors: { name: string; transport: 'stdio' | 'http' }[] = [];
+      for (const server of parsed.servers) {
+        const name = sanitizeIdentifier(server.name, { fallback: '', kind: 'generic', maxLength: 64 });
+        if (!name) return { status: 'unsupported', format: MCP_CONFIGURATION_FORMAT, servers: [] };
+        descriptors.push({ name, transport: server.transport });
       }
       return { status: 'valid', format: MCP_CONFIGURATION_FORMAT, servers: descriptors };
     } catch {
@@ -505,15 +503,6 @@ export class WorkerWorkspaceFiles {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function validStdioDeclaration(value: unknown): boolean {
-  if (!isRecord(value) || Object.keys(value).some(key => !['type', 'command', 'args', 'env'].includes(key))) return false;
-  if (value.type !== undefined && value.type !== 'stdio') return false;
-  if (typeof value.command !== 'string' || value.command.trim() === '' || value.command.length > 512) return false;
-  if (value.args !== undefined && (!Array.isArray(value.args) || value.args.length > 100 || value.args.some(arg => typeof arg !== 'string' || arg.length > 4_096))) return false;
-  if (value.env !== undefined && (!isRecord(value.env) || Object.keys(value.env).length > 64 || Object.entries(value.env).some(([key, entry]) => !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(key) || typeof entry !== 'string' || entry.length > 4_096))) return false;
-  return true;
 }
 
 async function stopProcessGroup(pid: number, control: WorkspaceCommandProcessControl): Promise<boolean> {

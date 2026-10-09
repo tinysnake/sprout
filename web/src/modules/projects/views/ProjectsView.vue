@@ -334,8 +334,13 @@ function mcpInspectionDetail(inspection: ProjectMcpInspectionView): string {
     case 'not-selected': return 'Select the supported Project MCP format before inspection.';
     case 'missing': return 'Add a .mcp.json file to the bound Project workspace.';
     case 'invalid': return 'Check the .mcp.json syntax and workspace file permissions, then inspect again.';
-    case 'unsupported': return 'Use mcpServers with stdio entries containing command and optional args or env fields.';
-    case 'valid': return `Configuration syntax is valid${inspection.servers.length ? `; ${inspection.servers.length} stdio server${inspection.servers.length === 1 ? '' : 's'} declared` : '; no servers declared'}. Server dependencies and tool availability are checked only during an authorized run; readiness has not been observed yet.`;
+    case 'unsupported': return 'Use mcpServers with stdio entries containing command and optional args or env fields, or HTTP entries containing a URL and optional headers.';
+    case 'valid': {
+      const stdioCount = inspection.servers.filter(server => server.transport === 'stdio').length;
+      const httpCount = inspection.servers.length - stdioCount;
+      const declared = [stdioCount ? `${stdioCount} stdio server${stdioCount === 1 ? '' : 's'}` : '', httpCount ? `${httpCount} HTTP server${httpCount === 1 ? '' : 's'}` : ''].filter(Boolean).join(' and ');
+      return `Configuration syntax is valid${declared ? `; ${declared} declared` : '; no servers declared'}. Server dependencies and tool availability are checked only during an authorized run; readiness has not been observed yet.`;
+    }
     case 'blocked':
       switch (inspection.reason) {
         case 'worker-offline': return 'Reconnect the approved Environment Worker, then inspect again.';
@@ -709,7 +714,7 @@ const addMemberExhausted = computed(() => dialog.value === 'add-member' && unass
         <label v-if="dialog === 'edit'" class="flex flex-col gap-1 font-semibold">Completion Guidance<textarea v-model="projectCompletionGuidance" rows="3" class="project-completion-guidance-input rounded border border-[var(--border-subtle)] bg-[var(--bg-surface-elevated)] p-3 text-[var(--text-primary)]" /></label>
         <label class="flex min-h-[44px] items-start gap-2 rounded border border-[var(--border-subtle)] p-3 font-semibold">
           <input v-model="mcpConfigurationEnabled" type="checkbox" class="mt-0.5 min-h-5 min-w-5" />
-          <span>Select Project stdio MCP configuration <span class="mt-1 block font-normal text-[var(--text-muted)]">Use the supported format from the bound workspace root’s .mcp.json. The Worker returns sanitized server names only; repository files alone grant no authority.</span></span>
+          <span>Select Project MCP configuration <span class="mt-1 block font-normal text-[var(--text-muted)]">Use the supported format from the bound workspace root’s .mcp.json. The Worker returns sanitized server names and transport only; endpoints, headers, commands, and credentials remain private. Repository files alone grant no authority.</span></span>
         </label>
         <fieldset v-if="dialog === 'create'" class="rounded border border-[var(--border-subtle)] p-3">
           <legend class="px-1 font-bold">Project Agents</legend>

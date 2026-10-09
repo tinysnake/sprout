@@ -4,12 +4,13 @@ import { test } from 'node:test';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createServer, type Server } from 'node:http';
 import { EndpointCarrier } from './carrier.ts';
 import { WorkerWorkspace } from './workspace.ts';
 import { WorkerWorkspaceFiles } from './workspace-file-operations.ts';
 import { WorkerProjectMcp, type ProjectMcpClientLauncher } from './project-mcp.ts';
 
-test('Worker MCP inspection reads only the bound root manifest and returns sanitized stdio descriptors', async (t) => {
+test('Worker MCP inspection reads the bound root manifest and returns sanitized stdio and HTTP descriptors', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'sprout-mcp-inspection-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const workspace = new WorkerWorkspace(root);
@@ -31,14 +32,157 @@ test('Worker MCP inspection reads only the bound root manifest and returns sanit
   assert.equal(JSON.stringify(inspection).includes('private-config-field'), false);
 
   await writeFile(join(root, 'repo', '.mcp.json'), JSON.stringify({ mcpServers: {
-    remote: { type: 'http', url: 'https://example.invalid/mcp' },
+    remote: { type: 'http', url: 'https://private-origin.example/mcp?token=private-origin-token', headers: { Authorization: 'Bearer private-header-token' } },
   } }));
-  const unsupported = await files.inspectMcpConfiguration({ ...binding, format: 'claude-code-mcp-json-v1' });
-  assert.equal(unsupported.status, 'unsupported');
-  assert.deepEqual(unsupported.servers, []);
+  const inspectedHttp = await files.inspectMcpConfiguration({ ...binding, format: 'claude-code-mcp-json-v1' });
+  assert.deepEqual(inspectedHttp, {
+    status: 'valid', format: 'claude-code-mcp-json-v1', servers: [{ name: 'remote', transport: 'http' }],
+  });
+  assert.equal(JSON.stringify(inspectedHttp).includes('private-origin.example'), false);
+  assert.equal(JSON.stringify(inspectedHttp).includes('private-origin-token'), false);
+  assert.equal(JSON.stringify(inspectedHttp).includes('private-header-token'), false);
 });
 
-test('Worker launches a selected stdio MCP server in the bound workspace, validates calls, and fences by lease', async (t) => {
+test('Worker starts and calls a remote-origin HTTP MCP server directly with bounded typed tools and private authorization', async (t) => {
+  const originRequests: { method: string; authorization?: string; session?: string; protocolVersion?: string }[] = [];
+  let toolCalls = 0;
+  let proxyHits = 0;
+  let originUrl = '';
+  const origin = createServer((request, response) => {
+    let body = '';
+    request.setEncoding('utf8');
+    request.on('data', chunk => { body += chunk; });
+    request.on('end', () => {
+      originRequests.push({
+        method: request.method ?? '',
+        ...(typeof request.headers.authorization === 'string' ? { authorization: request.headers.authorization } : {}),
+        ...(typeof request.headers['mcp-session-id'] === 'string' ? { session: request.headers['mcp-session-id'] } : {}),
+        ...(typeof request.headers['mcp-protocol-version'] === 'string' ? { protocolVersion: request.headers['mcp-protocol-version'] } : {}),
+      });
+      if (request.method === 'DELETE') {
+        response.writeHead(204).end();
+        return;
+      }
+      const message = JSON.parse(body) as { id?: number; method: string; params?: { name?: string } };
+      if (message.method === 'initialize') {
+        response.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': 'private-session-sentinel' }).end(JSON.stringify({
+          jsonrpc: '2.0', id: message.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'fixture', version: '1' } },
+        }));
+      } else if (message.method === 'notifications/initialized') {
+        response.writeHead(202).end();
+      } else if (message.method === 'tools/list') {
+        const result = {
+          jsonrpc: '2.0', id: message.id,
+          result: { tools: [{
+            name: 'remote_echo', description: `Endpoint ${originUrl} session private-session-sentinel`,
+            inputSchema: { type: 'object', properties: { text: { type: 'string', description: 'Authorization Bearer private-header-token' } }, required: ['text'], additionalProperties: false },
+          }] },
+        };
+        response.writeHead(200, { 'content-type': 'text/event-stream' }).end(`event: message\ndata: ${JSON.stringify(result)}\n\n`);
+      } else if (message.method === 'tools/call') {
+        toolCalls += 1;
+        const text = `origin=${originUrl}; authorization=${request.headers.authorization}; session=${request.headers['mcp-session-id']}`;
+        response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+          jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text }] },
+        }));
+      } else {
+        response.writeHead(404).end();
+      }
+    });
+  });
+  const proxy = createServer((_request, response) => { proxyHits += 1; response.writeHead(502).end(); });
+  const originPort = await listenLocalServer(origin);
+  const proxyPort = await listenLocalServer(proxy);
+  originUrl = `http://localhost:${originPort}/mcp?token=private-origin-token`;
+  const priorProxyEnvironment = saveProxyEnvironment();
+  process.env.HTTP_PROXY = `http://localhost:${proxyPort}`;
+  process.env.http_proxy = `http://localhost:${proxyPort}`;
+  process.env.HTTPS_PROXY = `http://localhost:${proxyPort}`;
+  process.env.https_proxy = `http://localhost:${proxyPort}`;
+  process.env.ALL_PROXY = `http://localhost:${proxyPort}`;
+  process.env.all_proxy = `http://localhost:${proxyPort}`;
+  t.after(async () => {
+    restoreProxyEnvironment(priorProxyEnvironment);
+    await closeLocalServer(origin);
+    await closeLocalServer(proxy);
+  });
+
+  const workerRoot = await mkdtemp(join(tmpdir(), 'sprout-mcp-http-worker-'));
+  t.after(() => rm(workerRoot, { recursive: true, force: true }));
+  const connection = await worker(workerRoot);
+  t.after(() => connection.close());
+  const selected = await connection.contexts.validateWorkspace({ projectId: 'project-http-mcp', environmentInstanceId: 'env-1', kind: 'relative', path: 'repo' });
+  const binding = {
+    projectId: 'project-http-mcp', environmentInstanceId: 'env-1', bindingId: 'binding-http-mcp',
+    generation: 1, connectionEpoch: 4, workspaceId: selected.workspaceId, kind: 'relative' as const, path: 'repo',
+  };
+  await connection.contexts.attachWorkspaceBinding(binding);
+  await writeFile(join(workerRoot, 'repo', '.mcp.json'), JSON.stringify({ mcpServers: {
+    remote: { type: 'http', url: originUrl, headers: { Authorization: 'Bearer private-header-token' } },
+  } }));
+  const lease = { leaseId: 'lease-http-mcp', holderKind: 'run' as const, holderId: 'run-http-mcp', runId: 'run-http-mcp' };
+  const processId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const started = await connection.contexts.startProjectMcp({ ...binding, ...lease, processId, format: 'claude-code-mcp-json-v1' });
+  assert.equal(started.status, 'ready');
+  assert.equal(started.servers[0]?.tools.length, 1);
+  const catalogText = JSON.stringify(started);
+  for (const secret of [originUrl, `localhost:${originPort}`, 'private-origin-token', 'private-header-token', 'private-session-sentinel']) {
+    assert.equal(catalogText.includes(secret), false, `the typed catalog must not expose ${secret}`);
+  }
+  const declaration = started.servers[0]?.tools[0];
+  assert.ok(declaration);
+  assert.equal(declaration.description.includes('private-session-sentinel'), false);
+  assert.equal(JSON.stringify(declaration.inputSchema).includes('private-header-token'), false);
+  const operationId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const callInput = { ...binding, ...lease, processId, operationId, toolId: declaration.id, arguments: { text: 'hello' } };
+  const called = await connection.contexts.callProjectMcpTool(callInput);
+  assert.equal(called.status, 'completed');
+  const resultText = called.text ?? '';
+  for (const secret of [originUrl, `localhost:${originPort}`, 'private-origin-token', 'private-header-token', 'private-session-sentinel']) {
+    assert.equal(resultText.includes(secret), false, `the model-visible result must not expose ${secret}`);
+  }
+  assert.deepEqual(await connection.contexts.callProjectMcpTool(callInput), called, 'a retry with the same durable operation id reuses its result');
+  assert.equal(toolCalls, 1);
+  assert.equal(proxyHits, 0, 'the configured host proxy fixture received no request');
+  assert.ok(originRequests.length >= 4, 'initialize, notification, discovery and invocation reached the configured origin');
+  assert.ok(originRequests.every(row => row.authorization === 'Bearer private-header-token'));
+  assert.ok(originRequests.every(row => row.protocolVersion === '2025-06-18'));
+  assert.ok(originRequests.filter(row => row.method !== 'POST' || row.session !== undefined).length >= 3);
+  const stopped = await connection.contexts.stopProjectMcp({ ...binding, ...lease, processId });
+  assert.deepEqual(stopped, { processId, status: 'stopped' });
+  assert.ok(originRequests.some(row => row.method === 'DELETE' && row.session === 'private-session-sentinel'));
+  assert.ok(originRequests.filter(row => row.session !== undefined).length >= 4);
+});
+
+test('Worker reports denied HTTP MCP authorization as an unavailable remote server without fallback', async (t) => {
+  const server = createServer((_request, response) => { response.writeHead(403).end(); });
+  const port = await listenLocalServer(server);
+  t.after(() => closeLocalServer(server));
+  const root = await mkdtemp(join(tmpdir(), 'sprout-mcp-http-denied-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const connection = await worker(root);
+  t.after(() => connection.close());
+  const selected = await connection.contexts.validateWorkspace({ projectId: 'project-http-denied', environmentInstanceId: 'env-1', kind: 'relative', path: 'repo' });
+  const binding = {
+    projectId: 'project-http-denied', environmentInstanceId: 'env-1', bindingId: 'binding-http-denied',
+    generation: 1, connectionEpoch: 4, workspaceId: selected.workspaceId, kind: 'relative' as const, path: 'repo',
+  };
+  await connection.contexts.attachWorkspaceBinding(binding);
+  await writeFile(join(root, 'repo', '.mcp.json'), JSON.stringify({ mcpServers: {
+    denied: { type: 'http', url: `http://localhost:${port}/mcp`, headers: { Authorization: 'Bearer private-denied-token' } },
+  } }));
+  const processId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const lease = { leaseId: 'lease-http-denied', holderKind: 'run' as const, holderId: 'run-http-denied', runId: 'run-http-denied' };
+  const started = await connection.contexts.startProjectMcp({ ...binding, ...lease, processId, format: 'claude-code-mcp-json-v1' });
+  assert.deepEqual(started, {
+    processId, status: 'blocked', reason: 'unavailable',
+    servers: [{ name: 'denied', status: 'unavailable', tools: [] }],
+  });
+  assert.equal(JSON.stringify(started).includes('private-denied-token'), false);
+  assert.deepEqual(await connection.contexts.stopProjectMcp({ ...binding, ...lease, processId }), { processId, status: 'stopped' });
+});
+
+test('Worker reports a missing MCP server dependency without exposing command configuration', async (t) => {
   const workerRoot = await mkdtemp(join(tmpdir(), 'sprout-mcp-worker-'));
   const hostRoot = await mkdtemp(join(tmpdir(), 'sprout-mcp-host-'));
   t.after(async () => {
@@ -472,6 +616,32 @@ test('Worker reports recovery-required when cancellation cannot prove descendant
   assert.equal(result.failure, 'descendant-process-unknown');
   assert.equal((await files.inspect({ ...binding, operationId: 'command-unknown-1' })).status, 'recovery-required');
 });
+
+async function listenLocalServer(server: Server): Promise<number> {
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, 'localhost', resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('local MCP fixture did not bind a TCP port');
+  return address.port;
+}
+
+function closeLocalServer(server: Server): Promise<void> {
+  return new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+}
+
+const PROXY_ENVIRONMENT_KEYS = ['HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy', 'ALL_PROXY', 'all_proxy'] as const;
+function saveProxyEnvironment(): Record<typeof PROXY_ENVIRONMENT_KEYS[number], string | undefined> {
+  return Object.fromEntries(PROXY_ENVIRONMENT_KEYS.map(key => [key, process.env[key]])) as Record<typeof PROXY_ENVIRONMENT_KEYS[number], string | undefined>;
+}
+function restoreProxyEnvironment(previous: Record<typeof PROXY_ENVIRONMENT_KEYS[number], string | undefined>): void {
+  for (const key of PROXY_ENVIRONMENT_KEYS) {
+    const value = previous[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+}
 
 async function worker(root: string) {
   const server = new URL('./server.ts', import.meta.url).pathname;

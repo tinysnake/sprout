@@ -105,7 +105,7 @@ The Human-selected format that permits an Environment Worker to inspect the Proj
 _Avoid_: Repository MCP permission, implicit plugin configuration
 
 **Project MCP tool**:
-A typed operation advertised by a configured stdio server and bound to its Environment Worker, Project workspace binding, and containing run or Task lease. The supported tool catalog does not imply support for MCP resources, prompts, notifications, cancellation, or server-to-client requests.
+A typed operation advertised by a configured stdio or HTTP server and bound to its Environment Worker, Project workspace binding, and containing run or Task lease. HTTP endpoints and headers stay inside the Worker. The supported tool catalog does not imply support for MCP resources, prompts, cancellation, or server-to-client requests.
 _Avoid_: Universal MCP capability, arbitrary server selector
 
 **Run context**:
