@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createProductionHostPiAdapter, type HostPiEngineAdapter } from '../src/engine/pi-host.ts';
-import type { RemoteProjectMcpTools, RemoteWorkspaceOperationResult, StartSessionRequest } from '../src/engine/port.ts';
+import type { EngineSession, RemoteProjectMcpTools, RemoteWorkspaceOperationResult, StartSessionRequest } from '../src/engine/port.ts';
 import { loadOrCreateWorkerIdentity, workerPublicKey } from '../src/worker/enrollment-connector.ts';
 import { sanitizedProbeErrorFields } from '../src/engine/pi-error-facts.ts';
 import { toTaskContextState } from '../src/web/views.ts';
@@ -34,6 +34,9 @@ const remoteFailureCodes = new Set([
 ]);
 
 const taskCommandArgs = ['--version'];
+const taskFixturePath = 'README.md';
+let runPromptNamesTarget = false;
+let runPromptContainsExactRead = false;
 
 type Binding = {
   readonly projectId: string;
@@ -69,7 +72,7 @@ function relativePathShape(value: string | undefined): string {
   if (segments.includes('..')) return 'parent-segment';
   if (segments.includes('.')) return 'dot-segment';
   if (segments.some(segment => segment.length === 0)) return 'empty-segment';
-  return segments.length === 1 ? (normalized === 'proof.txt' ? 'workspace-root-proof-file' : 'workspace-root-file') : 'nested-relative';
+  return segments.length === 1 ? (normalized === taskFixturePath ? 'workspace-root-target-file' : 'workspace-root-file') : 'nested-relative';
 }
 
 function commandCwdShape(value: string | undefined): string {
@@ -117,14 +120,14 @@ function observeTaskCapabilities(adapter: HostPiEngineAdapter): HostPiEngineAdap
       const observedWorkspace = {
         ...workspace,
         async read(path: string, operationId?: string) {
-          return observeWorkspace('read', path === 'proof.txt', [`path:${relativePathShape(path)}`], () => workspace.read(path, operationId));
+          return observeWorkspace('read', path === taskFixturePath, [`path:${relativePathShape(path)}`], () => workspace.read(path, operationId));
         },
         async search(query: string, path?: string, operationId?: string) {
           return observeWorkspace('search', false, [`path:${relativePathShape(path)}`, `query:${query.length > 0 ? 'nonempty' : 'empty'}`], () => workspace.search(query, path, operationId));
         },
         ...(workspace.edit ? { async edit(path: string, oldText: string, newText: string, operationId?: string) {
           const exactText = oldText === 'before' && newText === 'after';
-          return observeWorkspace('edit', path === 'proof.txt' && exactText, [`path:${relativePathShape(path)}`, `edit-text:${exactText ? 'expected' : 'different'}`], () => workspace.edit!(path, oldText, newText, operationId));
+          return observeWorkspace('edit', path === taskFixturePath && exactText, [`path:${relativePathShape(path)}`, `edit-text:${exactText ? 'expected' : 'different'}`], () => workspace.edit!(path, oldText, newText, operationId));
         } } : {}),
         ...(workspace.command ? { async command(executable: string, args: readonly string[], options: { readonly cwd?: string; readonly timeoutMs?: number }, operationId: string,
           onProgress?: (progress: import('../src/engine/port.ts').RemoteWorkspaceProgress) => void) {
@@ -135,7 +138,7 @@ function observeTaskCapabilities(adapter: HostPiEngineAdapter): HostPiEngineAdap
         } } : {}),
         ...(workspace.patch ? { async patch(path: string, hunks: readonly { readonly before: string; readonly after: string }[], operationId?: string) {
           const exactPatch = hunks.length === 1 && hunks[0]?.before === 'before' && hunks[0]?.after === 'after';
-          return observeWorkspace('patch', path === 'proof.txt' && exactPatch, [`path:${relativePathShape(path)}`, `patch:${exactPatch ? 'expected' : 'different'}`], () => workspace.patch!(path, hunks, operationId));
+          return observeWorkspace('patch', path === taskFixturePath && exactPatch, [`path:${relativePathShape(path)}`, `patch:${exactPatch ? 'expected' : 'different'}`], () => workspace.patch!(path, hunks, operationId));
         } } : {}),
       };
       const mcp = request.remoteProjectMcp;
@@ -159,7 +162,16 @@ function observeTaskCapabilities(adapter: HostPiEngineAdapter): HostPiEngineAdap
         ...request,
         remoteWorkspace: observedWorkspace,
         ...(observedMcp ? { remoteProjectMcp: observedMcp } : {}),
-      });
+      }).then((session: EngineSession) => ({
+        ...session,
+        run(prompt: string) {
+          runPromptNamesTarget = prompt.includes(taskFixturePath);
+          runPromptContainsExactRead = prompt.includes(`"path":"${taskFixturePath}"`);
+          return session.run(prompt);
+        },
+        interrupt: session.interrupt.bind(session),
+        close: session.close.bind(session),
+      }));
     },
   } as unknown as HostPiEngineAdapter;
 }
@@ -234,7 +246,7 @@ try {
         selection: { kind: 'relative', path: 'repos/task-proof' },
       });
       await mkdir(workspacePath, { recursive: true });
-      await writeFile(join(workspacePath, 'proof.txt'), 'before');
+      await writeFile(join(workspacePath, taskFixturePath), 'before');
       const mcpServer = `import { createInterface } from 'node:readline';
 const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
 createInterface({ input: process.stdin }).on('line', line => {
@@ -254,7 +266,7 @@ createInterface({ input: process.stdin }).on('line', line => {
         goal: 'Use the authorized Project workspace and Project MCP tools in one bounded activation.',
         constraints: [
           'Use only the provided tools and do not disclose file contents.',
-          'The only file to read and edit is proof.txt at the root of the authorized Project workspace. Its initial content is before; replace it with after using remote_edit.',
+          `The only file to read and edit is ${taskFixturePath} at the root of the authorized Project workspace. Its initial content is before; replace it with after using remote_edit.`,
           'Remote file paths are relative to the Project workspace root, not the Pi session or Task context directory. The remote command starts at the Project workspace root; omit cwd.',
         ],
         validationCriteria: ['Remote read, edit, command, and Project MCP calls succeed under the Task lease, then the Project file persists after safe Task end.'],
@@ -277,7 +289,7 @@ createInterface({ input: process.stdin }).on('line', line => {
         const advanced = await runtime.taskAdmissions.advanceForHuman(taskId, {
           targetAgentId: 'scout',
           reason: 'Run the bounded workspace and MCP check.',
-          prompt: `Use only the four tools named below, once each in this order. Remote file paths are relative to the root of the authorized Project workspace, not the Pi session or Task context directory. First call remote_read with exactly {"path":"proof.txt"}. Second call remote_edit with exactly {"path":"proof.txt","oldText":"before","newText":"after"}. Third call remote_command with executable "node" and args ${JSON.stringify(taskCommandArgs)}; omit cwd because this command runs from the Project workspace root. Fourth, call the available Project MCP tool described as echoing supplied text once with {"text":"MCP_OK"}. Do not call remote_search or any other tool, repeat calls, or include tool arguments, file contents, or command output in your final response. Report the check result in one short sentence.`,
+          prompt: `Use only these four tools once each in this order: remote_read, remote_edit, remote_command, then the available Project MCP echo tool. The exact single file is ${taskFixturePath} at the root of the authorized Project workspace, not the Pi session or Task context directory. First call remote_read with exactly {"path":"${taskFixturePath}"}. Next call remote_edit on that same file with exactly {"path":"${taskFixturePath}","oldText":"before","newText":"after"}. Then call remote_command with executable "node" and args ${JSON.stringify(taskCommandArgs)}; omit cwd because it runs from the Project workspace root. Finally call the advertised echo Project MCP tool once with {"text":"MCP_OK"}. Do not call remote_search or any other tool, repeat calls, or include tool arguments, file contents, or command output in your final response. Report the check result in one short sentence.`,
         });
         const settledRun = await runtime.orchestrator.waitFor(advanced.runId);
         const afterRunTask = await runtime.tasks.get(taskId);
@@ -289,7 +301,7 @@ createInterface({ input: process.stdin }).on('line', line => {
         const operationsWithinBound = observedOperations.length <= 10;
         const operationsComplete = requiredOperationsComplete && operationsWithinBound &&
           observedOperations.every(operation => operation.bindingMatched && operation.taskLeaseHeld);
-        const remoteFileEdited = await readFile(join(workspacePath, 'proof.txt'), 'utf8') === 'after';
+        const remoteFileEdited = await readFile(join(workspacePath, taskFixturePath), 'utf8') === 'after';
         const remoteCommandPassed = observedOperations.some(operation => operation.kind === 'command' && operation.status === 'completed');
         const runSettledSafely = settledRun.status === 'completed' && nestedRunUsedTaskLease && activeAfterRun &&
           afterRunTask?.environmentLifecycleState === 'idle';
@@ -311,7 +323,7 @@ createInterface({ input: process.stdin }).on('line', line => {
             });
             taskEndedSafely = ended.status === 'done' && toTaskContextState(ended) === 'recycled' &&
               runtime.pool.getLease(taskLeaseId)?.state === 'released';
-            workspacePersistsAfterTaskEnd = await readFile(join(workspacePath, 'proof.txt'), 'utf8') === 'after';
+            workspacePersistsAfterTaskEnd = await readFile(join(workspacePath, taskFixturePath), 'utf8') === 'after';
           }
         }
         const accepted = runSettledSafely && operationsComplete && remoteFileEdited && remoteCommandPassed &&
@@ -328,6 +340,8 @@ createInterface({ input: process.stdin }).on('line', line => {
           operationBindingsMatched: observedOperations.every(operation => operation.bindingMatched),
           taskLeaseHeldForEveryOperation: observedOperations.length > 0 && observedOperations.every(operation => operation.taskLeaseHeld),
           operationsWithinBound,
+          runPromptNamesTarget,
+          runPromptContainsExactRead,
           nestedRunUsedTaskLease,
           taskLeaseActiveAfterRun: activeAfterRun,
           taskIdleAfterRun: afterRunTask?.environmentLifecycleState === 'idle',
