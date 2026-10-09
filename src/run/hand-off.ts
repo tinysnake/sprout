@@ -1,4 +1,5 @@
 import type { AgentRun } from '../run/model.ts';
+import { sanitizeIdentifier } from '../environment/privacy.ts';
 
 /**
  * Hand-off context for a run that moved to a different environment instance.
@@ -42,8 +43,73 @@ export interface HandOffContext {
   readonly previousEngineHostProfileId?: string;
   /** The bounded, fact-form summary text. */
   readonly text: string;
+  /** Sprout-produced binding transition, when the prior activation used another grant. */
+  readonly bindingChange?: string;
+  /** Binding used by the prior run, for the current activation's transition check. */
+  readonly previousWorkspaceBinding?: AgentRun['workspaceBinding'];
   /** Which runs contributed a fact, so the hand-off is auditable. */
   readonly sourceRunIds: readonly string[];
+}
+
+function workspaceBindingChange(
+  previous: AgentRun,
+  current: {
+    readonly currentEnvironmentInstanceId?: string;
+    readonly currentWorkspaceBinding?: AgentRun['workspaceBinding'];
+  },
+): string | undefined {
+  if (current.currentEnvironmentInstanceId === undefined && current.currentWorkspaceBinding === undefined) return undefined;
+  const previousEnvironmentId = previous.workspaceBinding?.environmentInstanceId ?? previous.environmentInstanceId;
+  const currentEnvironmentId = current.currentWorkspaceBinding?.environmentInstanceId ??
+    current.currentEnvironmentInstanceId ?? '';
+  const previousEnvironment = previousEnvironmentId === ''
+    ? 'none'
+    : sanitizeIdentifier(previousEnvironmentId, { fallback: 'unknown-environment', kind: 'generic' });
+  const currentEnvironment = currentEnvironmentId === ''
+    ? 'none'
+    : sanitizeIdentifier(currentEnvironmentId, { fallback: 'unknown-environment', kind: 'generic' });
+  if (previousEnvironment !== currentEnvironment) {
+    return `Sprout switched the current Work Environment from ${previousEnvironment} to ${currentEnvironment}.`;
+  }
+  if (sameWorkspaceBinding(previous.workspaceBinding, current.currentWorkspaceBinding)) return undefined;
+  const prior = previous.workspaceBinding;
+  const next = current.currentWorkspaceBinding;
+  const describeCapabilities = (binding: NonNullable<AgentRun['workspaceBinding']>): string => {
+    const operations = binding.operations ?? [];
+    const mcpTools = binding.projectMcpTools ?? [];
+    return `workspace operations ${operations.length ? operations.join(', ') : 'none'}; Project MCP tools ${mcpTools.length ? mcpTools.join(', ') : 'none'}`;
+  };
+  if (prior !== undefined && next !== undefined &&
+      prior.environmentInstanceId === next.environmentInstanceId &&
+      prior.bindingId === next.bindingId && prior.generation === next.generation &&
+      prior.workspaceId === next.workspaceId && prior.kind === next.kind && prior.path === next.path) {
+    return `Sprout refreshed the current tool catalog. Available operations: ${describeCapabilities(next)}.`;
+  }
+  const describe = (binding: AgentRun['workspaceBinding'] | undefined): string => {
+    if (binding === undefined) return 'no workspace binding';
+    const generation = binding.generation === undefined ? '' : ` at generation ${binding.generation}`;
+    return `${binding.kind} workspace${generation}`;
+  };
+  return `Sprout switched the current workspace binding from ${describe(previous.workspaceBinding)} to ${describe(current.currentWorkspaceBinding)}.`;
+}
+
+function sameWorkspaceBinding(
+  left: AgentRun['workspaceBinding'] | undefined,
+  right: AgentRun['workspaceBinding'] | undefined,
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  return left.environmentInstanceId === right.environmentInstanceId &&
+    left.bindingId === right.bindingId && left.workspaceId === right.workspaceId &&
+    left.generation === right.generation && left.kind === right.kind && left.path === right.path &&
+    left.catalogIdentity === right.catalogIdentity &&
+    sameStrings(left.operations, right.operations) && sameStrings(left.projectMcpTools, right.projectMcpTools);
+}
+
+function sameStrings(left: readonly string[] | undefined, right: readonly string[] | undefined): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  const leftSorted = [...left].sort();
+  const rightSorted = [...right].sort();
+  return leftSorted.length === rightSorted.length && leftSorted.every((value, index) => value === rightSorted[index]);
 }
 
 /**
@@ -65,14 +131,17 @@ export function shouldAttachHandOff(request: {
   readonly currentExecutionMode?: import('../execution-mode.ts').ExecutionMode;
   readonly previousEngineHostProfileId?: string;
   readonly currentEngineHostProfileId?: string;
+  readonly currentWorkspaceBinding?: AgentRun['workspaceBinding'];
+  readonly previousWorkspaceBinding?: AgentRun['workspaceBinding'];
 }): boolean {
   const previous = request.previousEnvironmentInstanceId;
   if (previous === undefined) return false;
   const previousMode = request.previousExecutionMode ?? 'environment-hosted';
   const currentMode = request.currentExecutionMode ?? 'environment-hosted';
   if (previousMode !== currentMode) return true;
-  if (currentMode === 'host-run') return request.previousEngineHostProfileId !== request.currentEngineHostProfileId;
-  return previous !== request.currentEnvironmentInstanceId;
+  if (currentMode === 'host-run' && request.previousEngineHostProfileId !== request.currentEngineHostProfileId) return true;
+  if (previous !== request.currentEnvironmentInstanceId) return true;
+  return !sameWorkspaceBinding(request.previousWorkspaceBinding, request.currentWorkspaceBinding);
 }
 
 /**
@@ -90,10 +159,12 @@ function isPriorRun(
     readonly agentId: string;
     readonly currentRunId: string;
     readonly currentCreatedAt: number;
+    readonly projectId?: string;
   },
 ): boolean {
   return (
     run.agentId === request.agentId &&
+    (request.projectId === undefined || run.projectId === request.projectId) &&
     run.id !== request.currentRunId &&
     run.createdAt <= request.currentCreatedAt
   );
@@ -120,6 +191,7 @@ export function previousRun(
     readonly agentId: string;
     readonly currentRunId: string;
     readonly currentCreatedAt: number;
+    readonly projectId?: string;
   },
 ): AgentRun | undefined {
   const candidates = runs.filter((run) => isPriorRun(run, request));
@@ -134,6 +206,7 @@ function priorRuns(
     readonly agentId: string;
     readonly currentRunId: string;
     readonly currentCreatedAt: number;
+    readonly projectId?: string;
   },
 ): readonly AgentRun[] {
   const candidates = runs.filter((run) => isPriorRun(run, request));
@@ -167,6 +240,11 @@ export function buildHandOffContext(
     readonly agentId: string;
     readonly currentRunId: string;
     readonly currentCreatedAt: number;
+    readonly projectId?: string;
+    readonly currentEnvironmentInstanceId?: string;
+    readonly currentExecutionMode?: import('../execution-mode.ts').ExecutionMode;
+    readonly currentEngineHostProfileId?: string;
+    readonly currentWorkspaceBinding?: AgentRun['workspaceBinding'];
   },
   options: HandOffSummaryOptions = {},
 ): HandOffContext | undefined {
@@ -180,10 +258,17 @@ export function buildHandOffContext(
   const entries: string[] = [];
   const sourceRunIds: string[] = [];
   let total = 0;
+  const bindingChange = workspaceBindingChange(previous, request);
+  if (bindingChange !== undefined) {
+    const fact = bound(bindingChange, MAX_ENTRY_CHARACTERS);
+    if (fact.length <= maxCharacters) {
+      entries.push(fact);
+      total = fact.length;
+    }
+  }
   for (const run of history) {
     const fact = factFor(run);
     if (fact === undefined) continue;
-    // `+ 1` accounts for the newline that will join this entry to the previous.
     const cost = fact.length + (entries.length > 0 ? 1 : 0);
     if (total + cost > maxCharacters) break;
     entries.push(fact);
@@ -199,9 +284,10 @@ export function buildHandOffContext(
     return {
       previousEnvironmentInstanceId: previous.environmentInstanceId,
       previousExecutionMode: previous.executionMode ?? 'environment-hosted',
-      ...(previous.engineHostProfileId !== undefined ? { previousEngineHostProfileId: previous.engineHostProfileId } : {}),
-      text: bound(moveNotice(previous), maxCharacters),
-      sourceRunIds: [],
+      ...(previous.workspaceBinding !== undefined ? { previousWorkspaceBinding: previous.workspaceBinding } : {}),
+      ...(bindingChange !== undefined ? { bindingChange } : {}),
+      text: bound(entries.length > 0 ? entries.join('\n') : moveNotice(previous), maxCharacters),
+      sourceRunIds,
     };
   }
 
@@ -209,6 +295,8 @@ export function buildHandOffContext(
     previousEnvironmentInstanceId: previous.environmentInstanceId,
     previousExecutionMode: previous.executionMode ?? 'environment-hosted',
     ...(previous.engineHostProfileId !== undefined ? { previousEngineHostProfileId: previous.engineHostProfileId } : {}),
+    ...(previous.workspaceBinding !== undefined ? { previousWorkspaceBinding: previous.workspaceBinding } : {}),
+    ...(bindingChange !== undefined ? { bindingChange } : {}),
     text: entries.join('\n'),
     sourceRunIds,
   };
@@ -216,9 +304,12 @@ export function buildHandOffContext(
 
 /** One bounded fact line for a run, or `undefined` when it has no fact to state. */
 function factFor(run: AgentRun): string | undefined {
-  const where = run.executionMode === 'host-run'
-    ? `Engine host profile ${run.engineHostProfileId ?? 'unknown'}`
-    : run.environmentInstanceId;
+  const environment = run.workspaceBinding?.environmentInstanceId ?? run.environmentInstanceId;
+  const where = run.workspaceBinding !== undefined
+    ? `Environment ${environment}, ${run.workspaceBinding.kind} workspace${run.workspaceBinding.generation !== undefined ? ` at binding generation ${run.workspaceBinding.generation}` : ''}`
+    : run.executionMode === 'host-run'
+      ? `Engine host profile ${run.engineHostProfileId ?? 'unknown'}${environment ? `, Environment ${environment}` : ''}`
+      : environment;
   if (run.status === 'stopped') return `- Stopped in ${where}`;
   switch (run.result?.status) {
     case 'completed': {
@@ -263,9 +354,11 @@ function bound(text: string, limit: number): string {
 export function renderHandOffPrompt(handOff: HandOffContext, prompt: string): string {
   return [
     '## Hand-off context',
-    handOff.previousExecutionMode === 'host-run'
-      ? 'You are continuing prior work after moving to a different Engine host profile.'
-      : 'You are continuing prior work after moving to a different environment instance.',
+    handOff.bindingChange !== undefined
+      ? 'The current work binding changed as recorded below.'
+      : handOff.previousExecutionMode === 'host-run'
+        ? 'You are continuing prior work after moving to a different Engine host profile.'
+        : 'You are continuing prior work after moving to a different environment instance.',
     'The following is a factual summary of earlier results. It contains no',
     'transcript and no other agent\'s private reasoning.',
     '',

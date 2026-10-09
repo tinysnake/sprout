@@ -140,6 +140,8 @@ export interface RunView {
    * run or a run with no Project access, reported as unspecified.
    */
   readonly workspaceBinding?: RunWorkspaceBindingAttributionView;
+  /** Current Host-run attachment and recovery state, when applicable. */
+  readonly workspaceBindingStatus?: AgentRun['workspaceBindingStatus'];
   readonly failure?: string;
   readonly result?: unknown;
   readonly recoverySettlement?: AgentRun['recoverySettlement'];
@@ -214,6 +216,7 @@ export function toRunView(run: AgentRun, processExecutionMode?: ExecutionMode): 
     handOffAttached: run.handOff !== undefined,
     ...(toRunWorkOptionAttribution(run) !== undefined ? { workOption: toRunWorkOptionAttribution(run)! } : {}),
     ...(workspaceBinding !== undefined ? { workspaceBinding } : {}),
+    ...(run.workspaceBindingStatus !== undefined ? { workspaceBindingStatus: run.workspaceBindingStatus } : {}),
     ...(run.failure !== undefined ? { failure: run.failure } : {}),
     ...(run.result !== undefined ? { result: run.result } : {}),
     ...(run.recoverySettlement !== undefined ? { recoverySettlement: run.recoverySettlement } : {}),
@@ -1244,10 +1247,15 @@ export function toRunWorkOptionAttribution(run: AgentRun): RunWorkOptionAttribut
  * record's current binding, so history stays historical.
  */
 export interface RunWorkspaceBindingAttributionView {
+  readonly environmentInstanceId?: string;
   readonly bindingId?: string;
+  readonly generation?: number;
+  readonly catalogGeneration?: number;
   readonly workspaceId: string;
   readonly kind: string;
   readonly path?: string;
+  readonly operations?: readonly string[];
+  readonly projectMcpTools?: readonly string[];
 }
 
 function toRunWorkspaceBindingAttribution(run: AgentRun): RunWorkspaceBindingAttributionView | undefined {
@@ -1255,12 +1263,22 @@ function toRunWorkspaceBindingAttribution(run: AgentRun): RunWorkspaceBindingAtt
   if (binding === undefined) return undefined;
   const path = binding.path !== undefined ? sanitizeWorkspacePath(binding.path) : undefined;
   return {
+    ...(binding.environmentInstanceId !== undefined ? {
+      environmentInstanceId: sanitizeIdentifier(binding.environmentInstanceId, { fallback: 'unknown-environment', kind: 'generic' }),
+    } : {}),
     ...(binding.bindingId !== undefined
       ? { bindingId: sanitizeIdentifier(binding.bindingId, { fallback: 'unknown-binding', kind: 'generic' }) }
       : {}),
+    ...(Number.isSafeInteger(binding.generation) && binding.generation! > 0 ? { generation: binding.generation } : {}),
+    ...(Number.isSafeInteger(binding.catalogGeneration) && binding.catalogGeneration! > 0
+      ? { catalogGeneration: binding.catalogGeneration } : {}),
     workspaceId: sanitizeIdentifier(binding.workspaceId ?? '', { fallback: 'unknown-workspace', kind: 'digest' }),
     kind: binding.kind === 'relative' ? 'relative' : 'default',
     ...(path !== undefined ? { path } : {}),
+    ...(binding.operations !== undefined ? { operations: binding.operations.filter((value) =>
+      ['read', 'search', 'edit', 'patch', 'command'].includes(value)) } : {}),
+    ...(binding.projectMcpTools !== undefined ? { projectMcpTools: binding.projectMcpTools.filter((name) =>
+      /^[A-Za-z][A-Za-z0-9_-]{0,127}$/.test(name)).slice(0, 128) } : {}),
   };
 }
 

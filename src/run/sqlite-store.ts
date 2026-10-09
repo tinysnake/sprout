@@ -73,6 +73,8 @@ interface RunRow {
   readonly work_option: string | null;
   readonly configuration_version: number | null;
   readonly workspace_binding: string | null;
+  readonly workspace_binding_status: AgentRun['workspaceBindingStatus'] | null;
+  readonly requested_work_environment_instance_id: string | null;
   readonly recovery_settlement: string | null;
   readonly recovered_events: string | null;
   readonly retry_of_run_id: string | null;
@@ -126,6 +128,8 @@ export class SqliteRunStore implements RunStore {
         work_option TEXT,
         configuration_version INTEGER,
         workspace_binding TEXT,
+        workspace_binding_status TEXT,
+        requested_work_environment_instance_id TEXT,
         recovery_settlement TEXT,
         recovered_events TEXT,
         retry_of_run_id TEXT,
@@ -149,6 +153,8 @@ export class SqliteRunStore implements RunStore {
     // attribution), which the view layer presents as unspecified.
     this.#addColumnIfMissing('agent_runs', 'work_option', 'TEXT');
     this.#addColumnIfMissing('agent_runs', 'configuration_version', 'INTEGER');
+    this.#addColumnIfMissing('agent_runs', 'workspace_binding_status', 'TEXT');
+    this.#addColumnIfMissing('agent_runs', 'requested_work_environment_instance_id', 'TEXT');
     this.#addColumnIfMissing('agent_runs', 'recovery_settlement', 'TEXT');
     this.#addColumnIfMissing('agent_runs', 'recovered_events', 'TEXT');
     // The bounded reconnect retry link (#181). A database from before this
@@ -191,8 +197,8 @@ export class SqliteRunStore implements RunStore {
     this.#db
       .prepare(
         `INSERT INTO agent_runs
-           (id, agent_id, prompt, environment_instance_id, execution_mode, engine_host_profile_id, project_id, task_id, status, events, lease_id, failure, failure_class, result, created_at, completed_at, hand_off, token_usage, replay_sequence, work_option, configuration_version, workspace_binding, recovery_settlement, recovered_events, retry_of_run_id, execution_placement, session_key_scope)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (id, agent_id, prompt, environment_instance_id, execution_mode, engine_host_profile_id, project_id, task_id, status, events, lease_id, failure, failure_class, result, created_at, completed_at, hand_off, token_usage, replay_sequence, work_option, configuration_version, workspace_binding, workspace_binding_status, requested_work_environment_instance_id, recovery_settlement, recovered_events, retry_of_run_id, execution_placement, session_key_scope)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            status = excluded.status,
            events = excluded.events,
@@ -208,6 +214,8 @@ export class SqliteRunStore implements RunStore {
            work_option = excluded.work_option,
            configuration_version = excluded.configuration_version,
            workspace_binding = excluded.workspace_binding,
+           workspace_binding_status = excluded.workspace_binding_status,
+           requested_work_environment_instance_id = excluded.requested_work_environment_instance_id,
            recovery_settlement = excluded.recovery_settlement,
            recovered_events = excluded.recovered_events,
            retry_of_run_id = excluded.retry_of_run_id,
@@ -238,6 +246,8 @@ export class SqliteRunStore implements RunStore {
         run.workOption ? JSON.stringify(run.workOption) : null,
         run.configurationVersion ?? null,
         run.workspaceBinding ? JSON.stringify(run.workspaceBinding) : null,
+        run.workspaceBindingStatus ?? null,
+        run.requestedWorkEnvironmentInstanceId ?? null,
         run.recoverySettlement ? JSON.stringify(run.recoverySettlement) : null,
         run.recoveredEvents ? JSON.stringify(run.recoveredEvents) : null,
         run.retryOfRunId ?? null,
@@ -527,6 +537,11 @@ function toRun(row: RunRow): AgentRun {
     ...(tokenUsage !== undefined ? { tokenUsage } : {}),
     ...(workOption !== undefined ? { workOption } : {}),
     ...(workspaceBinding !== undefined ? { workspaceBinding } : {}),
+    ...(row.workspace_binding_status !== null && row.workspace_binding_status !== undefined &&
+        ['staging', 'active', 'detached', 'unavailable', 'recovering'].includes(row.workspace_binding_status)
+      ? { workspaceBindingStatus: row.workspace_binding_status } : {}),
+    ...(row.requested_work_environment_instance_id !== null && row.requested_work_environment_instance_id !== undefined
+      ? { requestedWorkEnvironmentInstanceId: row.requested_work_environment_instance_id } : {}),
     ...(recoverySettlement !== undefined ? { recoverySettlement } : {}),
     ...(recoveredEvents !== undefined ? { recoveredEvents } : {}),
     ...(row.retry_of_run_id !== null ? { retryOfRunId: row.retry_of_run_id } : {}),

@@ -1,5 +1,7 @@
+import { DatabaseSync } from 'node:sqlite';
+import { SqliteRemoteOperationIdentityStore } from './operations/remote-operation-store.ts';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,9 +11,13 @@ import type { StartSessionRequest, RemoteWorkspaceTools } from './engine/port.ts
 import { loadOrCreateWorkerIdentity, workerPublicKey } from './worker/enrollment-connector.ts';
 import { connectRuntimeWorker, createRuntime, hostConfiguration, INSTANCE_ID, project, scriptedTurn, waitFor } from './runtime-test-harness.ts';
 
-for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unknown', 'stop-unknown', 'mcp-only-past-ttl', 'first-mutation-past-ttl', 'renewal-loss-past-ttl'] as const) {
+for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unknown', 'stop-unknown', 'mcp-only-past-ttl', 'first-mutation-past-ttl', 'renewal-loss-past-ttl', 'discovery-past-ttl', 'discovery-stop-unknown'] as const) {
   test(`one Host Pi turn calls typed MCP and remotely edits under the same protected containing lease: ${outcome}`, async t => {
-    const timed = outcome.endsWith('past-ttl');
+    const discoveryHeld = outcome.startsWith('discovery-');
+    const timed = outcome.endsWith('past-ttl') || discoveryHeld;
+    let discoveryConflict: boolean | undefined;
+    let discoveryLeaseState: string | undefined;
+    let discoveryProcessId: string | undefined;
     const leaseTtlMs = 3_000;
     let workspaceSettled = false;
     let mcpStopped = false;
@@ -40,6 +46,7 @@ for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unk
           const turn = session.run(prompt);
           return { events: turn.events, completion: (async () => {
             turnCalled = true;
+            if (discoveryHeld) assert.equal(discoveryConflict, true, 'discovery beyond TTL must refuse a competing activation');
             tools = request.remoteWorkspace;
             const mcp = request.remoteProjectMcp;
             assert.ok(tools?.edit);
@@ -93,14 +100,36 @@ for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unk
       mkdirSync(workspace, { recursive: true });
       writeFileSync(join(workspace, 'target.txt'), 'before');
       const script = `import { createInterface } from 'node:readline';
+        import { writeFileSync, existsSync } from 'node:fs';
         const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
         createInterface({ input: process.stdin }).on('line', line => {
           const r = JSON.parse(line);
           if (r.method === 'initialize') send({ jsonrpc: '2.0', id: r.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'fixture', version: '1' } } });
-          if (r.method === 'tools/list') send({ jsonrpc: '2.0', id: r.id, result: { tools: [{ name: 'echo', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false } }] } });
+          if (r.method === 'tools/list') {
+            const respond = () => send({ jsonrpc: '2.0', id: r.id, result: { tools: [{ name: 'echo', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false } }] } });
+            ${discoveryHeld ? `writeFileSync('discovery-held', 'held');
+            const polling = setInterval(() => { if (existsSync('discovery-continue')) { clearInterval(polling); respond(); } }, 5);` : 'respond();'}
+          }
           if (r.method === 'tools/call') send({ jsonrpc: '2.0', id: r.id, result: { content: [{ type: 'text', text: r.params.arguments.text }] } });
         });`;
       writeFileSync(join(workspace, '.mcp.json'), JSON.stringify({ mcpServers: { fixture: { command: process.execPath, args: ['--input-type=module', '-e', script] } } }));
+      if (discoveryHeld) {
+        const start = runtime.enrollmentEnvironment.startProjectMcp.bind(runtime.enrollmentEnvironment);
+        runtime.enrollmentEnvironment.startProjectMcp = async (...args) => {
+          discoveryProcessId = args[1].processId;
+          const starting = start(...args);
+          try {
+            await waitFor(() => existsSync(join(workspace, 'discovery-held')), 'real stdio MCP discovery request');
+            leaseId = runtime.pool.leases()[0]!.id;
+            for (let elapsed = 0; elapsed < 2 * leaseTtlMs; elapsed += 1_000) t.mock.timers.tick(1_000);
+            const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'discovery-competitor', runId: 'discovery-competitor', ttlMs: leaseTtlMs });
+            discoveryConflict = !conflict.ok;
+            if (conflict.ok) runtime.pool.releaseLease(conflict.lease.id);
+            discoveryLeaseState = runtime.pool.getLease(leaseId)?.state;
+          } finally { writeFileSync(join(workspace, 'discovery-continue'), 'continue'); }
+          return starting;
+        };
+      }
       const settleWorkspace = runtime.environmentOperations.attach.bind(runtime.environmentOperations);
       runtime.environmentOperations.attach = async (...args) => {
         const surface = await settleWorkspace(...args);
@@ -157,7 +186,7 @@ for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unk
         }
         return recycle(...args);
       };
-      if (outcome === 'stop-unknown') {
+      if (outcome === 'stop-unknown' || outcome === 'discovery-stop-unknown') {
         const stop = runtime.enrollmentEnvironment.stopProjectMcp.bind(runtime.enrollmentEnvironment);
         runtime.enrollmentEnvironment.stopProjectMcp = async (...args) => { const result = await stop(...args); return { ...result, status: 'uncertain' }; };
         confirmMcpStop = async () => {
@@ -168,6 +197,10 @@ for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unk
       if (timed) t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: Date.now() });
       const run = await runtime.orchestrator.submit({ agentId: 'scout', projectId: 'combined-project', prompt: 'Call typed echo and edit target.' });
       const settled = await runtime.orchestrator.waitFor(run.id);
+      if (discoveryHeld) {
+        assert.equal(discoveryConflict, true, 'discovery beyond TTL must refuse a competing activation');
+        assert.equal(discoveryLeaseState, 'active', 'admission renewal protects the lease before workspace attachment');
+      }
       assert.equal(settled.status, outcome === 'turn-unknown' ? 'interrupted' : 'completed', settled.failure ?? 'Host turn failed');
       assert.equal(turnCalled, true);
       assert.equal(settled.leaseId, leaseId);
@@ -175,7 +208,7 @@ for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unk
         assert.equal(mcpStopped, true);
         assert.equal(workspaceSettled, true);
       }
-      if (outcome === 'confirmed' || outcome === 'no-mutation' || outcome === 'mcp-only-past-ttl' || outcome === 'first-mutation-past-ttl') assert.equal(runtime.pool.getLease(leaseId!)?.state, 'released');
+      if (outcome === 'confirmed' || outcome === 'no-mutation' || outcome === 'mcp-only-past-ttl' || outcome === 'first-mutation-past-ttl' || outcome === 'discovery-past-ttl') assert.equal(runtime.pool.getLease(leaseId!)?.state, 'released');
       else {
         assert.equal(runtime.pool.getLease(leaseId!)?.state, 'recovering');
         const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'another-run', runId: 'another-run', ttlMs: 60_000 });
@@ -186,7 +219,15 @@ for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unk
           await tools!.settle!('settled');
           await waitFor(() => runtime.pool.getLease(leaseId!)?.state === 'released', 'confirmed shared lease settlement');
           assert.equal(runtime.pool.getLease(leaseId!)?.state, 'released', 'confirmed mutation settlement and MCP stop release the containing lease');
-        } else if (outcome === 'stop-unknown') {
+        } else if (outcome === 'stop-unknown' || outcome === 'discovery-stop-unknown') {
+          const database = new DatabaseSync(join(directory, 'state.db'));
+          let processes;
+          try { processes = await new SqliteRemoteOperationIdentityStore(database).listOpenMcpProcesses(INSTANCE_ID); }
+          finally { database.close(); }
+          assert.equal(processes.length, 1);
+          assert.equal(processes[0]!.leaseId, leaseId);
+          assert.equal(processes[0]!.state, 'uncertain');
+          if (discoveryHeld) assert.equal(processes[0]!.processId, discoveryProcessId, 'recovery retains the process identity dispatched before discovery');
           await assert.rejects(runtime.recovery.release(leaseId!), 'unconfirmed settlement cannot release recovery');
           await confirmMcpStop!();
           const recovery = await runtime.recovery.forLease(leaseId!);

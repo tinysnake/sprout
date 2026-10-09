@@ -265,6 +265,12 @@ test('the runner pins the provider source hashes reviewed by the isolation proto
   for (const [, file, hash] of hashes) assert.ok(runner.includes(`'${file}': '${hash}'`), `${file} stays pinned to its reviewed hash`);
 });
 
+test('Host Pi runner keeps per-activation context in the compaction system prompt', () => {
+  const runner = readFileSync(new URL('./pi-host-runner.mjs', import.meta.url), 'utf8');
+  assert.match(runner, /getSystemPrompt: \(\) => config\.instructions \?\? ''/);
+  assert.match(runner, /SettingsManager\.inMemory\(\{ compaction: \{ enabled: true \}, retry: \{ enabled: false \} \}\)/);
+});
+
 test('Engine host profile identifiers are stable opaque local ids with private file permissions', () => {
   const root = mkdtempSync(join(tmpdir(), 'sprout-host-profile-test-'));
   try {

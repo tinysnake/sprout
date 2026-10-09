@@ -1174,9 +1174,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       // (ADR-0003), and so execution follows the leased instance (F1, #18).
       engines: (requestedInstanceId) => runtimeEnvironment.adapters(requestedInstanceId),
       executionStrategy,
-      remoteWorkspace: async (projectId, agentId, runId, onLeaseAcquired, containingLease) => {
+      remoteWorkspace: async (projectId, agentId, runId, onLeaseAcquired, containingLease, bindingOptions) => {
         if (!environmentOperations) return undefined;
-        try { return await environmentOperations.attach(projectId, agentId, runId, onLeaseAcquired, containingLease); }
+        try { return await environmentOperations.attach(projectId, agentId, runId, onLeaseAcquired, containingLease, bindingOptions); }
         catch { return undefined; }
       },
       projectMcpSelected: async (projectId) => {
@@ -1218,7 +1218,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           const path = sanitizeWorkspacePath(binding.path);
           if (path === undefined) return undefined;
           return {
+            environmentInstanceId: instanceId,
             ...(binding.bindingId !== undefined ? { bindingId: binding.bindingId } : {}),
+            ...(binding.generation !== undefined ? { generation: binding.generation } : {}),
             workspaceId: binding.workspaceId,
             kind: 'relative',
             path,
@@ -1226,7 +1228,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         }
         if (binding.kind !== 'default' || binding.path !== undefined) return undefined;
         return {
+          environmentInstanceId: instanceId,
           ...(binding.bindingId !== undefined ? { bindingId: binding.bindingId } : {}),
+          ...(binding.generation !== undefined ? { generation: binding.generation } : {}),
           workspaceId: binding.workspaceId,
           kind: 'default',
         };

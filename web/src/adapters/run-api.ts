@@ -10,7 +10,7 @@ export interface RunBrowserAdapter {
   listRuns(): Promise<{ readonly runs: readonly RunView[]; readonly totals: RunHistoryTotals }>;
   getRun(id: string): Promise<RunView>;
   getRunStatus(id: string): Promise<{ readonly id: string; readonly status: RunView['status']; readonly failureReason?: string }>;
-  submitRun(input: { readonly agentId: string; readonly prompt: string }): Promise<{ readonly id: string }>;
+  submitRun(input: { readonly agentId: string; readonly prompt: string; readonly projectId?: string; readonly workEnvironmentInstanceId?: string }): Promise<{ readonly id: string }>;
   stopRun(id: string): Promise<RunView>;
   listActiveChatRuns(scopeId: string): Promise<{ readonly runs: readonly { readonly id: string; readonly agentId: string; readonly status: 'queued' | 'running' }[] }>;
   stopChatRun(scopeId: string, id: string): Promise<{ readonly id: string; readonly status: RunView['status'] }>;

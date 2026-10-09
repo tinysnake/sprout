@@ -337,7 +337,8 @@ async function openSession(config, input) {
       customTools,
       resourceLoader: loader,
       sessionManager: manager,
-      settingsManager: loaded.sdk.SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),
+      // Sprout's activation snapshot lives in the system prompt and survives Pi compaction.
+      settingsManager: loaded.sdk.SettingsManager.inMemory({ compaction: { enabled: true }, retry: { enabled: false } }),
     }));
     const selected = session.model;
     if (selected?.provider !== config.provider || selected?.id !== config.model ||

@@ -364,6 +364,22 @@ export class EnvironmentPool {
     this.#cleanupProtectedLeases.add(leaseId);
   }
 
+  /** Renew a cleanup-protected owner using the same TTL-fraction policy at every attachment stage. */
+  keepLeaseUntilCleanup(leaseId: string, ttlMs: number, onRenewalLoss: () => void = () => undefined): () => void {
+    this.protectLeaseUntilCleanup(leaseId);
+    const interval = setInterval(() => {
+      if (this.extendLease(leaseId, ttlMs) !== undefined) return;
+      clearInterval(interval);
+      const lease = this.getLease(leaseId);
+      if (lease?.state === 'released') return;
+      this.markRecovering(leaseId);
+      onRenewalLoss();
+    }, Math.max(1, Math.floor(ttlMs / 3)));
+    interval.unref?.();
+    // Stopping renewal never removes cleanup protection. Only proven release does.
+    return () => clearInterval(interval);
+  }
+
   /** Extend an active lease. Returns undefined when it is no longer active. */
   extendLease(leaseId: string, ttlMs: number): EnvironmentLease | undefined {
     const lease = this.#byId(leaseId);

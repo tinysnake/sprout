@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import type { BindingGenerationFence } from '../environment/binding-generation-fence.ts';
 import type { RemoteWorkspaceOperationResult, RemoteWorkspaceTools, RemoteProjectMcpTools, RemoteWorkspaceProgress } from '../engine/port.ts';
 import { RemoteProjectMcpStartupError } from '../engine/port.ts';
 import type { ProjectAccessService } from '../project/access-service.ts';
@@ -20,9 +21,10 @@ const MAX_SUPPORTED_SEARCH_RESULTS = 100;
 const MAX_COMMAND_OUTPUT_BYTES = 32 * 1024;
 const MUTATION_CAPABILITY = 'agent-run';
 
-export type RemoteWorkspaceBlock = 'project-denied' | 'access-ended' | 'workspace-unbound' | 'worker-offline' | 'stale-epoch' | 'unsupported' | 'capability-denied' | 'lease-required' | 'worker-refused';
+export type RemoteWorkspaceBlock = 'project-denied' | 'access-ended' | 'workspace-unbound' | 'worker-offline' | 'stale-epoch' | 'stale-generation' | 'unsupported' | 'capability-denied' | 'lease-required' | 'worker-refused';
 export interface ProjectMcpLeaseScope extends ProjectMcpLeaseIdentity {
   readonly environmentInstanceId: string;
+  readonly bindingFence?: BindingGenerationFence;
   /** The containing run lease or existing Task lease; MCP never acquires a second Task lease. */
   readonly leaseCapability: 'project-mcp' | 'agent-run';
 }
@@ -89,7 +91,7 @@ export class EnvironmentOperations {
   readonly #store: RemoteOperationIdentityStore;
   readonly #onUncertainMcp: ((scope: ProjectMcpLeaseScope) => Promise<void>) | undefined;
   readonly #clock: () => number;
-  readonly #pool: Pick<EnvironmentPool, 'getLease' | 'requiresLeaseForBoundOperation' | 'acquireBoundOperationLeaseRevalidated' | 'extendLease' | 'protectLeaseUntilCleanup' | 'markRecovering' | 'releaseLease'> | undefined;
+  readonly #pool: Pick<EnvironmentPool, 'getLease' | 'requiresLeaseForBoundOperation' | 'acquireBoundOperationLeaseRevalidated' | 'extendLease' | 'keepLeaseUntilCleanup' | 'markRecovering' | 'releaseLease'> | undefined;
   readonly #leaseTtlMs: number;
 
   constructor(options: {
@@ -99,7 +101,7 @@ export class EnvironmentOperations {
     readonly gateway: EnvironmentOperationsGateway;
     readonly catalog: EnvironmentOperationsCatalog;
     readonly enrollments: EnvironmentOperationsEnrollments;
-    readonly pool?: Pick<EnvironmentPool, 'getLease' | 'requiresLeaseForBoundOperation' | 'acquireBoundOperationLeaseRevalidated' | 'extendLease' | 'protectLeaseUntilCleanup' | 'markRecovering' | 'releaseLease'>;
+    readonly pool?: Pick<EnvironmentPool, 'getLease' | 'requiresLeaseForBoundOperation' | 'acquireBoundOperationLeaseRevalidated' | 'extendLease' | 'keepLeaseUntilCleanup' | 'markRecovering' | 'releaseLease'>;
     readonly store: RemoteOperationIdentityStore;
     readonly onUncertainMcp?: (scope: ProjectMcpLeaseScope) => Promise<void>;
     readonly leaseTtlMs?: number;
@@ -300,15 +302,19 @@ export class EnvironmentOperations {
       closeInFlight = undefined;
       return outcome;
     };
+    const mcpGrantIsCurrent = (): boolean => scope.bindingFence === undefined || scope.bindingFence.isCurrent();
     return {
       binding: {
         projectId, environmentInstanceId: scope.environmentInstanceId,
         bindingId: authority.identity.bindingId, generation: authority.identity.generation,
         connectionEpoch: authority.identity.connectionEpoch, workspaceId: authority.identity.workspaceId,
+        kind: authority.identity.kind, ...(authority.identity.path !== undefined ? { path: authority.identity.path } : {}),
       },
+      ...(scope.bindingFence !== undefined ? { bindingFence: scope.bindingFence } : {}),
       tools: catalog.tools.map(row => row.public),
       call: async (name, arguments_) => {
         if (processClosed || !processId || !processRow) return { status: 'failed', reason: 'worker-refused' };
+        if (!mcpGrantIsCurrent()) return { status: 'failed', reason: 'worker-refused' };
         const origin = toolOrigins.get(name);
         if (!origin || !isRecord(arguments_)) return { status: 'failed', reason: 'unknown-tool' };
         if (!validMcpArguments(origin.schema, arguments_)) return { status: 'failed', reason: 'invalid-arguments' };
@@ -343,6 +349,7 @@ export class EnvironmentOperations {
         };
         let rawResult: CallProjectMcpToolResult;
         try {
+          if (!mcpGrantIsCurrent()) throw new Error('stale Project MCP tool generation');
           if (!this.#environment.callProjectMcpTool) throw new Error('unsupported');
           rawResult = await this.#environment.callProjectMcpTool(scope.environmentInstanceId, input);
         } catch {
@@ -386,10 +393,12 @@ export class EnvironmentOperations {
     };
   }
 
-  async attach(projectId: string, agentId: string, runId?: string, onLeaseAcquired?: (leaseId: string) => Promise<void>, containingLease?: WorkspaceContainingLease): Promise<RemoteWorkspaceTools> {
+  async attach(projectId: string, agentId: string, runId?: string, onLeaseAcquired?: (leaseId: string) => Promise<void>, containingLease?: WorkspaceContainingLease,
+    options: { readonly environmentInstanceId?: string; readonly bindingFence?: BindingGenerationFence } = {}): Promise<RemoteWorkspaceTools> {
     const project = await this.#projects.get(projectId);
     if (!project || project.status !== 'active' || !hasAgent(project, agentId)) throw new RemoteWorkspaceUnavailableError('project-denied');
     const accesses = (await this.#access.listForProject(projectId)).filter(a => a.status === 'active' && a.current &&
+      (options.environmentInstanceId === undefined || a.environmentInstanceId === options.environmentInstanceId) &&
       (containingLease === undefined || a.environmentInstanceId === containingLease.environmentInstanceId))
       .sort((a, b) => a.environmentInstanceId.localeCompare(b.environmentInstanceId));
     let selected: BindingCandidate | undefined;
@@ -426,6 +435,11 @@ export class EnvironmentOperations {
       throw new RemoteWorkspaceUnavailableError('worker-refused');
     }
     const fixed = { ...identity };
+    const assertBindingFence = (): void => {
+      if (options.bindingFence !== undefined && !options.bindingFence.isCurrent()) {
+        throw new RemoteWorkspaceUnavailableError('stale-generation');
+      }
+    };
     const runContext: RunContextParams | undefined = runId === undefined ? undefined : { ...fixed, runId };
     let runContextState: 'absent' | 'prepared' | 'unknown' = 'absent';
     let contextPreparationUncertain = false;
@@ -442,30 +456,18 @@ export class EnvironmentOperations {
     let settlementFinalizing = false;
     const activeOperationIds = new Set<string>();
     const uncertainOperationIds = new Set<string>();
-    let leaseKeepalive: ReturnType<typeof setInterval> | undefined;
+    let stopLeaseKeepalive: (() => void) | undefined;
 
     const keepMutationLeaseAlive = (): void => {
-      if (leaseKeepalive !== undefined) return;
-      const interval = Math.max(1, Math.floor(this.#leaseTtlMs / 3));
-      leaseKeepalive = setInterval(() => {
-        const active = mutationLease;
-        if (!active) return;
-        const extended = this.#pool?.extendLease(active.id, this.#leaseTtlMs);
-        if (!extended) {
-          uncertainOutcome = true;
-          leaseCompromised = true;
-          this.#pool?.markRecovering(active.id);
-          if (leaseKeepalive !== undefined) clearInterval(leaseKeepalive);
-          leaseKeepalive = undefined;
-        } else mutationLease = extended;
-      }, interval);
-      leaseKeepalive.unref?.();
+      if (stopLeaseKeepalive !== undefined || mutationLease === undefined) return;
+      stopLeaseKeepalive = this.#pool!.keepLeaseUntilCleanup(mutationLease.id, this.#leaseTtlMs, () => {
+        uncertainOutcome = true;
+        leaseCompromised = true;
+        stopLeaseKeepalive = undefined;
+      });
     };
 
-    if (containingLease !== undefined && mutationLease !== undefined) {
-      this.#pool!.protectLeaseUntilCleanup(mutationLease.id);
-      keepMutationLeaseAlive();
-    }
+    if (containingLease !== undefined && mutationLease !== undefined) keepMutationLeaseAlive();
 
     const acquireMutationLease = async (): Promise<{ readonly acquired?: EnvironmentLease; readonly conflict?: { readonly holderId: string; readonly state: 'active' | 'recovering' }; readonly failure?: string }> => {
       if (runId === undefined) return { failure: 'run-required' };
@@ -526,7 +528,7 @@ export class EnvironmentOperations {
       }
       if (leaseCompromised || uncertainOutcome || uncertainOperationIds.size > 0 || pendingOperations > 0 || runContextState === 'unknown') {
         this.#pool.markRecovering(mutationLease.id);
-        if (leaseKeepalive !== undefined) clearInterval(leaseKeepalive);
+        stopLeaseKeepalive?.();
         return;
       }
       settlementFinalizing = true;
@@ -537,12 +539,12 @@ export class EnvironmentOperations {
           runContextState = 'absent';
         }
         if (containingLease === undefined || containingLease.canRelease()) this.#pool.releaseLease(mutationLease.id);
-        if (leaseKeepalive !== undefined) clearInterval(leaseKeepalive);
+        stopLeaseKeepalive?.();
       } catch {
         runContextState = 'unknown';
         uncertainOutcome = true;
         this.#pool.markRecovering(mutationLease.id);
-        if (leaseKeepalive !== undefined) clearInterval(leaseKeepalive);
+        stopLeaseKeepalive?.();
       } finally {
         settlementFinalizing = false;
       }
@@ -553,6 +555,9 @@ export class EnvironmentOperations {
       readonly hunks?: readonly { readonly before: string; readonly after: string }[];
       readonly executable?: string; readonly args?: readonly string[]; readonly cwd?: string; readonly timeoutMs?: number;
     }, requestedOperationId?: string, onProgress?: (progress: RemoteWorkspaceProgress) => void): Promise<RemoteWorkspaceOperationResult> => {
+      try { assertBindingFence(); } catch {
+        return operationResult(fixed, stableOperationId(runId, requestedOperationId), operation, 'failed', 'remote-operation-blocked');
+      }
       const operationId = stableOperationId(runId, requestedOperationId);
       const normalized = normalizeOperationInput(operation, input);
       const fingerprint = createHash('sha256').update(JSON.stringify([fixed, operation, runId ?? '', normalized])).digest('hex');
@@ -729,6 +734,8 @@ export class EnvironmentOperations {
     };
 
     const cancelOperation = async (operationId: string): Promise<{ readonly accepted: boolean; readonly status: string }> => {
+      // Recovery controls remain pinned to this exact Environment and binding;
+      // the fence blocks new work but must not prevent settling an old call.
       await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed);
       const row = await this.#store.get(operationId);
       if (!row || row.projectId !== projectId || row.bindingId !== binding.bindingId || row.generation !== binding.generation || row.connectionEpoch !== epoch || !['running','cancel-requested'].includes(row.state)) {
@@ -752,7 +759,9 @@ export class EnvironmentOperations {
         operations?.workspaceOperations?.version === 3 && operations.workspaceOperations.operations.includes('command')) remoteOperations.push('command');
     return {
       binding: { projectId, environmentInstanceId: access.environmentInstanceId, bindingId: binding.bindingId,
-        generation: binding.generation!, connectionEpoch: epoch, workspaceId: binding.workspaceId },
+        generation: binding.generation!, connectionEpoch: epoch, workspaceId: binding.workspaceId, kind: binding.kind,
+        ...(binding.path !== undefined ? { path: binding.path } : {}) },
+      ...(options.bindingFence !== undefined ? { bindingFence: options.bindingFence } : {}),
       operations: remoteOperations,
       read: (path, operationId) => execute('read', { path }, operationId),
       search: (query, path, operationId) => execute('search', { query, ...(path !== undefined ? { path } : {}) }, operationId),
@@ -764,7 +773,7 @@ export class EnvironmentOperations {
       settle: async outcome => {
         settlementRequested = true;
         if (outcome === 'unknown' && mutationLease !== undefined) this.#pool?.markRecovering(mutationLease.id);
-        if (outcome === 'unknown' && leaseKeepalive !== undefined) clearInterval(leaseKeepalive);
+        if (outcome === 'unknown') stopLeaseKeepalive?.();
         if (outcome === 'unknown') {
           const operationIds = new Set([...activeOperationIds, ...uncertainOperationIds]);
           for (const operationId of operationIds) {

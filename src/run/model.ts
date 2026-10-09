@@ -15,11 +15,20 @@ export type { TokenUsage, DetailedTokenDimensions } from '../engine/port.ts';
  * has no binding identity) projects only its kind and relative location.
  */
 export interface RunWorkspaceBinding {
+  readonly environmentInstanceId?: string;
   readonly bindingId?: string;
+  /** Monotonic Project access generation for this Environment. */
+  readonly generation?: number;
+  /** Monotonic Host-run tool catalog publication generation. */
+  readonly catalogGeneration?: number;
+  /** One-way identity of the immutable Worker catalog, independent of publication generation. */
+  readonly catalogIdentity?: string;
   readonly workspaceId?: string;
   readonly kind: WorkspaceSelectionKind;
   /** Worker-root-relative location, when the workspace named one. */
   readonly path?: string;
+  readonly operations?: readonly ('read' | 'search' | 'edit' | 'patch' | 'command')[];
+  readonly projectMcpTools?: readonly string[];
 }
 
 /** The observable lifecycle of one agent run. */
@@ -69,6 +78,8 @@ export interface AgentRun {
   readonly taskId?: string;
   /** Authorized continuation scope for a standalone run, when one exists. */
   readonly sessionKeyScope?: SessionKeyScope;
+  /** Selected Work Environment carried across bounded standalone activations. */
+  readonly requestedWorkEnvironmentInstanceId?: string;
   /** The process mode and actual engine host/profile recorded at admission. */
   readonly executionPlacement?: ExecutionPlacement;
   readonly status: AgentRunStatus;
@@ -99,6 +110,8 @@ export interface AgentRun {
    * future runs; it cannot rewrite what this run used.
    */
   readonly workspaceBinding?: RunWorkspaceBinding;
+  /** Current remote-workspace availability for this Host-run activation. */
+  readonly workspaceBindingStatus?: 'staging' | 'active' | 'detached' | 'unavailable' | 'recovering';
   /**
    * The hand-off context attached to this run's input, when there was one.
    *
@@ -153,6 +166,8 @@ export interface RunHandOff {
   readonly previousEnvironmentInstanceId: string;
   /** The bounded, fact-form summary attached to this run's input. */
   readonly text: string;
+  /** Sprout-produced summary of the current binding or catalog transition. */
+  readonly bindingChange?: string;
   /** Which prior runs contributed a fact, so the hand-off is auditable. */
   readonly sourceRunIds: readonly string[];
 }
