@@ -9,8 +9,12 @@ import type { StartSessionRequest, RemoteWorkspaceTools } from './engine/port.ts
 import { loadOrCreateWorkerIdentity, workerPublicKey } from './worker/enrollment-connector.ts';
 import { connectRuntimeWorker, createRuntime, hostConfiguration, INSTANCE_ID, project, scriptedTurn, waitFor } from './runtime-test-harness.ts';
 
-for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unknown', 'stop-unknown'] as const) {
+for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unknown', 'stop-unknown', 'mcp-only-past-ttl', 'first-mutation-past-ttl', 'renewal-loss-past-ttl'] as const) {
   test(`one Host Pi turn calls typed MCP and remotely edits under the same protected containing lease: ${outcome}`, async t => {
+    const timed = outcome.endsWith('past-ttl');
+    const leaseTtlMs = 3_000;
+    let workspaceSettled = false;
+    let mcpStopped = false;
     const directory = mkdtempSync(join(tmpdir(), 'sprout-combined-host-'));
     t.after(() => rmSync(directory, { recursive: true, force: true }));
     const workerRoot = join(directory, 'worker');
@@ -46,7 +50,16 @@ for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unk
             assert.equal(lease.capability, 'project-mcp');
             assert.equal(lease.state, 'active');
             assert.deepEqual(await mcp.call(mcp.tools[0]!.name, { text: 'typed call' }), { status: 'completed', text: 'typed call' });
-            if (outcome !== 'no-mutation') {
+            if (timed) {
+              // Only the lease clock and renewal interval are virtual; Worker I/O stays real.
+              if (outcome === 'renewal-loss-past-ttl') t.mock.timers.setTime(Date.now() + 2 * leaseTtlMs);
+              else for (let elapsed = 0; elapsed < 2 * leaseTtlMs; elapsed += 1_000) t.mock.timers.tick(1_000);
+              const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'competitor', runId: 'competitor', ttlMs: leaseTtlMs });
+              assert.equal(conflict.ok, false, 'an open MCP turn must refuse a second holder beyond TTL');
+              assert.equal(runtime.pool.getLease(leaseId!)?.state, outcome === 'renewal-loss-past-ttl' ? 'recovering' : 'active');
+              assert.deepEqual(runtime.pool.leases().map(row => row.id), [leaseId]);
+            }
+            if (outcome !== 'no-mutation' && outcome !== 'mcp-only-past-ttl' && outcome !== 'renewal-loss-past-ttl') {
               const edit = await tools.edit('target.txt', 'before', 'after', 'combined-edit');
               operationId = edit.operationId;
               assert.equal(edit.status, outcome === 'mutation-unknown' ? 'failed' : 'completed', `remote edit: ${edit.failure}`);
@@ -61,7 +74,7 @@ for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unk
       },
     } as unknown as HostPiEngineAdapter;
     const runtime = await createRuntime({ configuration: hostConfiguration({
-      executionMode: 'host-run', environmentSource: 'enrollment', databasePath: join(directory, 'state.db'),
+      executionMode: 'host-run', environmentSource: 'enrollment', ...(timed ? { leaseTtlMs } : {}), databasePath: join(directory, 'state.db'),
       runtimeConfiguration: { agents: [{ id: 'scout', name: 'scout', engine: 'pi', capability: 'agent-run', model, effort: 'medium',
         workOptions: [{ id: 'host-pi', engine: 'pi', workModel: model, effort: 'medium' }] }],
         project: { ...project(), memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }] } },
@@ -88,6 +101,36 @@ for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unk
           if (r.method === 'tools/call') send({ jsonrpc: '2.0', id: r.id, result: { content: [{ type: 'text', text: r.params.arguments.text }] } });
         });`;
       writeFileSync(join(workspace, '.mcp.json'), JSON.stringify({ mcpServers: { fixture: { command: process.execPath, args: ['--input-type=module', '-e', script] } } }));
+      const settleWorkspace = runtime.environmentOperations.attach.bind(runtime.environmentOperations);
+      runtime.environmentOperations.attach = async (...args) => {
+        const surface = await settleWorkspace(...args);
+        const settle = surface.settle!.bind(surface);
+        return { ...surface, settle: async outcome => {
+          if (timed) {
+            assert.equal(mcpStopped, true, 'workspace settlement follows confirmed MCP stop');
+            assert.notEqual(runtime.pool.getLease(leaseId!)?.state, 'released');
+            for (let elapsed = 0; elapsed < 2 * leaseTtlMs; elapsed += 1_000) t.mock.timers.tick(1_000);
+            const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'cleanup-competitor', runId: 'cleanup-competitor', ttlMs: leaseTtlMs });
+            assert.equal(conflict.ok, false, 'workspace cleanup still owns the same lease');
+          }
+          await settle(outcome);
+          workspaceSettled = true;
+        } };
+      };
+      if (timed) {
+        const stop = runtime.enrollmentEnvironment.stopProjectMcp.bind(runtime.enrollmentEnvironment);
+        runtime.enrollmentEnvironment.stopProjectMcp = async (...args) => {
+          assert.equal(workspaceSettled, false);
+          assert.notEqual(runtime.pool.getLease(leaseId!)?.state, 'released');
+          for (let elapsed = 0; elapsed < 2 * leaseTtlMs; elapsed += 1_000) t.mock.timers.tick(1_000);
+          const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'stop-competitor', runId: 'stop-competitor', ttlMs: leaseTtlMs });
+          assert.equal(conflict.ok, false, 'MCP stop still owns the same lease');
+          const result = await stop(...args);
+          assert.equal(result.status, 'stopped');
+          mcpStopped = true;
+          return result;
+        };
+      }
       const execute = runtime.enrollmentEnvironment.executeWorkspaceFileOperation.bind(runtime.enrollmentEnvironment);
       runtime.enrollmentEnvironment.executeWorkspaceFileOperation = async (...args) => {
         assert.equal(runtime.pool.leases().length, 1);
@@ -104,6 +147,14 @@ for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unk
       const recycle = runtime.enrollmentEnvironment.recycleRunContext.bind(runtime.enrollmentEnvironment);
       runtime.enrollmentEnvironment.recycleRunContext = async (...args) => {
         assert.notEqual(runtime.pool.getLease(leaseId!)?.state, 'released', 'cleanup still owns the containing lease');
+        if (timed) {
+          assert.equal(mcpStopped, true);
+          await Promise.resolve();
+          for (let elapsed = 0; elapsed < 2 * leaseTtlMs; elapsed += 1_000) t.mock.timers.tick(1_000);
+          const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'recycle-competitor', runId: 'recycle-competitor', ttlMs: leaseTtlMs });
+          assert.equal(conflict.ok, false, 'asynchronous recycling retains the lease beyond TTL');
+          assert.equal(runtime.pool.getLease(leaseId!)?.state, 'active', 'renewal continues during asynchronous cleanup');
+        }
         return recycle(...args);
       };
       if (outcome === 'stop-unknown') {
@@ -114,12 +165,17 @@ for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unk
           await runtime.environmentOperations.reconcileProjectMcpProcesses(INSTANCE_ID);
         };
       }
+      if (timed) t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: Date.now() });
       const run = await runtime.orchestrator.submit({ agentId: 'scout', projectId: 'combined-project', prompt: 'Call typed echo and edit target.' });
       const settled = await runtime.orchestrator.waitFor(run.id);
       assert.equal(settled.status, outcome === 'turn-unknown' ? 'interrupted' : 'completed', settled.failure ?? 'Host turn failed');
       assert.equal(turnCalled, true);
       assert.equal(settled.leaseId, leaseId);
-      if (outcome === 'confirmed' || outcome === 'no-mutation') assert.equal(runtime.pool.getLease(leaseId!)?.state, 'released');
+      if (timed) {
+        assert.equal(mcpStopped, true);
+        assert.equal(workspaceSettled, true);
+      }
+      if (outcome === 'confirmed' || outcome === 'no-mutation' || outcome === 'mcp-only-past-ttl' || outcome === 'first-mutation-past-ttl') assert.equal(runtime.pool.getLease(leaseId!)?.state, 'released');
       else {
         assert.equal(runtime.pool.getLease(leaseId!)?.state, 'recovering');
         const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'another-run', runId: 'another-run', ttlMs: 60_000 });
@@ -147,6 +203,11 @@ for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unk
           await runtime.recovery.release(leaseId!);
           assert.equal(runtime.pool.getLease(leaseId!)?.state, 'released', 'confirmed recovery releases the same containing lease');
         }
+      }
+      if (outcome === 'mcp-only-past-ttl' || outcome === 'first-mutation-past-ttl') {
+        const next = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'after-cleanup', runId: 'after-cleanup', ttlMs: leaseTtlMs });
+        assert.equal(next.ok, true, 'another holder enters only after confirmed cleanup');
+        if (next.ok) runtime.pool.releaseLease(next.lease.id);
       }
     } finally { await runtime.close(); }
   });

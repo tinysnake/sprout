@@ -129,6 +129,7 @@ export class EnvironmentPool {
   readonly #definitions = new Map<string, EnvironmentDefinition>();
   readonly #instances = new Map<string, EnvironmentInstance>();
   readonly #leases = new Map<string, EnvironmentLease>();
+  readonly #cleanupProtectedLeases = new Set<string>();
   readonly #store: LeaseStore | undefined;
   readonly #clock: Clock;
   readonly #idFactory: () => string;
@@ -356,6 +357,13 @@ export class EnvironmentPool {
     return { ok: true, lease };
   }
 
+  /** Attached process/workspace owners require cleanup proof even if renewal stops. */
+  protectLeaseUntilCleanup(leaseId: string): void {
+    const lease = this.#leases.get(leaseId);
+    if (!lease || lease.state !== 'active') throw new Error('Active lease required for cleanup protection');
+    this.#cleanupProtectedLeases.add(leaseId);
+  }
+
   /** Extend an active lease. Returns undefined when it is no longer active. */
   extendLease(leaseId: string, ttlMs: number): EnvironmentLease | undefined {
     const lease = this.#byId(leaseId);
@@ -374,6 +382,7 @@ export class EnvironmentPool {
     const lease = this.#byId(leaseId);
     if (!lease || lease.holderKind === 'task') return undefined;
     const released: EnvironmentLease = { ...lease, state: 'released' };
+    this.#cleanupProtectedLeases.delete(leaseId);
     this.#leases.set(released.id, released);
     this.#store?.save(released);
     return released;
@@ -467,6 +476,10 @@ export class EnvironmentPool {
     if (lease.state === 'recovering') return lease;
     if (lease.state !== 'active') return undefined;
     if (lease.holderKind === 'task' || lease.expiresAt > this.#clock.now()) return lease;
+    if (this.#cleanupProtectedLeases.has(lease.id)) {
+      this.markRecovering(lease.id);
+      return undefined;
+    }
     const expired: EnvironmentLease = { ...lease, state: 'expired' };
     this.#leases.set(lease.id, expired);
     this.#store?.save(expired);
@@ -484,6 +497,7 @@ export class EnvironmentPool {
       if (lease.state === 'recovering') return lease;
       if (lease.state !== 'active') continue;
       if (lease.holderKind === 'task' || lease.expiresAt > this.#clock.now()) return lease;
+      if (this.#cleanupProtectedLeases.has(lease.id)) return this.markRecovering(lease.id);
       const expired: EnvironmentLease = { ...lease, state: 'expired' };
       this.#leases.set(lease.id, expired);
       this.#store?.save(expired);

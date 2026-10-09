@@ -89,7 +89,7 @@ export class EnvironmentOperations {
   readonly #store: RemoteOperationIdentityStore;
   readonly #onUncertainMcp: ((scope: ProjectMcpLeaseScope) => Promise<void>) | undefined;
   readonly #clock: () => number;
-  readonly #pool: Pick<EnvironmentPool, 'getLease' | 'requiresLeaseForBoundOperation' | 'acquireBoundOperationLeaseRevalidated' | 'extendLease' | 'markRecovering' | 'releaseLease'> | undefined;
+  readonly #pool: Pick<EnvironmentPool, 'getLease' | 'requiresLeaseForBoundOperation' | 'acquireBoundOperationLeaseRevalidated' | 'extendLease' | 'protectLeaseUntilCleanup' | 'markRecovering' | 'releaseLease'> | undefined;
   readonly #leaseTtlMs: number;
 
   constructor(options: {
@@ -99,7 +99,7 @@ export class EnvironmentOperations {
     readonly gateway: EnvironmentOperationsGateway;
     readonly catalog: EnvironmentOperationsCatalog;
     readonly enrollments: EnvironmentOperationsEnrollments;
-    readonly pool?: Pick<EnvironmentPool, 'getLease' | 'requiresLeaseForBoundOperation' | 'acquireBoundOperationLeaseRevalidated' | 'extendLease' | 'markRecovering' | 'releaseLease'>;
+    readonly pool?: Pick<EnvironmentPool, 'getLease' | 'requiresLeaseForBoundOperation' | 'acquireBoundOperationLeaseRevalidated' | 'extendLease' | 'protectLeaseUntilCleanup' | 'markRecovering' | 'releaseLease'>;
     readonly store: RemoteOperationIdentityStore;
     readonly onUncertainMcp?: (scope: ProjectMcpLeaseScope) => Promise<void>;
     readonly leaseTtlMs?: number;
@@ -446,7 +446,7 @@ export class EnvironmentOperations {
 
     const keepMutationLeaseAlive = (): void => {
       if (leaseKeepalive !== undefined) return;
-      const interval = Math.max(1_000, Math.floor(this.#leaseTtlMs / 3));
+      const interval = Math.max(1, Math.floor(this.#leaseTtlMs / 3));
       leaseKeepalive = setInterval(() => {
         const active = mutationLease;
         if (!active) return;
@@ -455,10 +455,17 @@ export class EnvironmentOperations {
           uncertainOutcome = true;
           leaseCompromised = true;
           this.#pool?.markRecovering(active.id);
+          if (leaseKeepalive !== undefined) clearInterval(leaseKeepalive);
+          leaseKeepalive = undefined;
         } else mutationLease = extended;
       }, interval);
       leaseKeepalive.unref?.();
     };
+
+    if (containingLease !== undefined && mutationLease !== undefined) {
+      this.#pool!.protectLeaseUntilCleanup(mutationLease.id);
+      keepMutationLeaseAlive();
+    }
 
     const acquireMutationLease = async (): Promise<{ readonly acquired?: EnvironmentLease; readonly conflict?: { readonly holderId: string; readonly state: 'active' | 'recovering' }; readonly failure?: string }> => {
       if (runId === undefined) return { failure: 'run-required' };
@@ -519,6 +526,7 @@ export class EnvironmentOperations {
       }
       if (leaseCompromised || uncertainOutcome || uncertainOperationIds.size > 0 || pendingOperations > 0 || runContextState === 'unknown') {
         this.#pool.markRecovering(mutationLease.id);
+        if (leaseKeepalive !== undefined) clearInterval(leaseKeepalive);
         return;
       }
       settlementFinalizing = true;
@@ -529,10 +537,12 @@ export class EnvironmentOperations {
           runContextState = 'absent';
         }
         if (containingLease === undefined || containingLease.canRelease()) this.#pool.releaseLease(mutationLease.id);
+        if (leaseKeepalive !== undefined) clearInterval(leaseKeepalive);
       } catch {
         runContextState = 'unknown';
         uncertainOutcome = true;
         this.#pool.markRecovering(mutationLease.id);
+        if (leaseKeepalive !== undefined) clearInterval(leaseKeepalive);
       } finally {
         settlementFinalizing = false;
       }
@@ -754,7 +764,7 @@ export class EnvironmentOperations {
       settle: async outcome => {
         settlementRequested = true;
         if (outcome === 'unknown' && mutationLease !== undefined) this.#pool?.markRecovering(mutationLease.id);
-        if (leaseKeepalive !== undefined) clearInterval(leaseKeepalive);
+        if (outcome === 'unknown' && leaseKeepalive !== undefined) clearInterval(leaseKeepalive);
         if (outcome === 'unknown') {
           const operationIds = new Set([...activeOperationIds, ...uncertainOperationIds]);
           for (const operationId of operationIds) {
