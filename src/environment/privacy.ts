@@ -117,13 +117,9 @@ const CREDENTIAL_VALUE_ASSIGNED = String.raw`(?:"[^"]*"|'[^']*'|[^\s,;]+)`;
 
 const DOTTED_HOST_PATTERN = /(?<![\w.-])(?:[A-Za-z][A-Za-z0-9-]*\.)+[A-Za-z]{2,}(?![\w.-])/g;
 
-/** Common Project file extensions; domain suffixes remain outside this list. */
-const PROJECT_FILE_EXTENSIONS =
-  String.raw`md|mdx|txt|text|rst|adoc|csv|tsv|json|jsonc|json5|yaml|yml|toml|ini|cfg|conf|properties|xml|html|htm|css|scss|sass|less|js|jsx|mjs|cjs|ts|tsx|mts|cts|vue|svelte|py|rb|go|rs|java|kt|kts|cs|c|h|cc|cpp|hpp|sh|bash|zsh|sql|graphql|gql|proto|lock|ipynb`;
-
-/** A simple, relative slash path or filename with a recognized Project file extension. */
+/** A dotted relative path or filename token; bare tokens need explicit file context. */
 const PROJECT_FILE_REFERENCE = new RegExp(
-  String.raw`(?<![A-Za-z0-9._~\\/:@-])(?:[A-Za-z0-9_~-]+\/)*[A-Za-z0-9_~-][A-Za-z0-9._~-]*\.(?:${PROJECT_FILE_EXTENSIONS})(?![A-Za-z0-9._~-])`,
+  String.raw`(?<![A-Za-z0-9._~\\/:@-])(?:[A-Za-z0-9_~-]+\/)*[A-Za-z0-9_~-][A-Za-z0-9._~-]*\.[A-Za-z0-9._~-]*(?![A-Za-z0-9._~-])`,
   'gi',
 );
 
@@ -286,11 +282,12 @@ export function redactSensitiveText(value: string): string {
 }
 
 /**
- * Redact model-facing Project and Task prose while retaining clear relative file
- * references. A path must use simple slash-separated components and a recognized
- * file extension. A bare filename is retained only in explicit file-reference
- * context, such as a file operation or inline code. Every other privacy rule,
- * including hostname detection, still runs unchanged.
+ * Redact model-facing Project and Task prose while retaining relative file
+ * references. Slash-separated paths with simple directory components are
+ * recognized structurally; a bare filename is retained only when explicit file
+ * context names it, such as a file operation, a file/filename/path label, or
+ * inline code. The filename's extension is not part of the decision. Every other
+ * privacy rule, including hostname detection, still runs unchanged.
  */
 export function redactProjectText(value: string): string {
   return redactText(value, true);

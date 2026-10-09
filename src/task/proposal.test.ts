@@ -55,7 +55,7 @@ test('a Task content version preserves relative Project filenames and redacts ho
   const { service } = fixture();
   const contentInput = {
     title: 'Review README.md',
-    goal: 'Read README.md and notes/today.txt; report any issue with worker.node1.tailnet.example',
+    goal: 'Read report.final.pdf; Read README.md; Read notes/today.txt; report any issue with worker.node1.tailnet.example',
     constraints: ['Keep notes/today.txt unchanged.'],
     validationCriteria: ['Confirm the instructions in README.md.'],
   };
@@ -75,6 +75,7 @@ test('a Task content version preserves relative Project filenames and redacts ho
   };
   const prompt = renderTaskPrompt(buildTaskContext(task, []), 'Continue with the requested files.');
 
+  assert.ok(prompt.includes('report.final.pdf'), 'the unsupported-extension filename reaches the composed Task prompt unchanged');
   assert.ok(prompt.includes('README.md'), 'the dotted root filename reaches the composed prompt unchanged');
   assert.ok(prompt.includes('notes/today.txt'), 'the dotted relative path reaches the composed prompt unchanged');
   assert.ok(!prompt.includes('worker.node1.tailnet.example'), 'the hostname is redacted from the same prompt');

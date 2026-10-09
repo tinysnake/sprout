@@ -166,15 +166,18 @@ test('Task advancement preserves file references and redacts a hostname in the a
   const begun = await context.admissions.beginProposal(
     proposal.id, { memberId: 'operator', memberKind: 'human' }, beginInput({ memberId: 'operator', memberKind: 'human' }),
   );
-  const rawPrompt = 'Read README.md and notes/today.txt; inspect worker.node1.tailnet.example';
+  const rawPrompt = 'Read report.final.pdf and worker.node1.tailnet.example; Also Read worker.example.md; Read README.md; Read notes/today.txt.';
   await context.admissions.advance(begun.task.id, { memberId: 'operator', memberKind: 'human' }, {
     targetAgentId: 'scout', reason: 'Continue the approved Task.', prompt: rawPrompt,
   });
   const prompt = context.prompts[0] ?? '';
 
+  assert.ok(prompt.includes('report.final.pdf'), 'the unsupported-extension filename reaches the actual composed prompt unchanged');
+  assert.ok(prompt.includes('Read report.final.pdf'), 'the explicit file instruction survives prompt composition');
   assert.ok(prompt.includes('README.md'));
   assert.ok(prompt.includes('notes/today.txt'));
-  assert.ok(!prompt.includes('worker.node1.tailnet.example'));
+  assert.ok(prompt.includes('Read worker.example.md'), 'explicit context preserves an ambiguous host-shaped filename');
+  assert.ok(!prompt.includes('worker.node1.tailnet.example'), `hostname leaked in prompt: ${prompt}`);
   assert.ok(prompt.includes('<redacted-host>'));
 });
 

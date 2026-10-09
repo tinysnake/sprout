@@ -256,9 +256,23 @@ shape-independent sanitization is not implemented or required by this decision.
 
 ## Model-visible Project file references
 
-Project and Task prose can name files the Agent must inspect. Their shared contextual redactor preserves a relative Project file reference when it is a slash-separated path with simple components and a recognized file extension, or a bare filename in explicit file-reference position (for example, after a file operation or inside inline code). A dotted token without that file context remains host-shaped and is redacted. The general free-text redactor used for Environment, diagnostic, and AgentRun output stays context-free.
+Project and Task prose can name files the Agent must inspect. The shared contextual
+redactor preserves a relative reference when it is a slash-separated path with
+simple directory components, or when explicit file context directly names one
+dotted filename token (for example, after a file operation, a `file`, `filename`,
+or `path` label, or inside inline code). This decision does not depend on a
+recognized extension: `report.final.pdf`, `spec.v2.xlsx`, and `README.` follow
+the same rule. A dotted token without that file context remains host-shaped and
+is redacted. The general free-text redactor used for Environment, diagnostic,
+and AgentRun output stays context-free.
 
-This context changes only how the dotted-host rule classifies clear Project file references. Credential and token patterns, URLs, identities, network addresses, absolute paths, machine hostnames, and raw model output keep their existing redactions. Sprout-owned secrets still must not be placed in shared prose.
+When explicit file context directly names a host-shaped token, that one token is
+treated as a Project filename by design; other host-shaped tokens in the same
+text remain redacted. This is the contextual boundary, including the case
+`Read worker.example.md`. Credential and token patterns, URLs, identities,
+network addresses, absolute paths, machine hostnames outside that file reference,
+and raw model output keep their existing redactions. Sprout-owned secrets still
+must not be placed in shared prose.
 
 ## Failure, suppression, admission, and retry
 

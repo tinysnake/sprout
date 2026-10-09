@@ -150,6 +150,13 @@ test('named credential assignments are removed whatever the secret characters ar
   }
 });
 
+test('credential material embedded in a JSON-like model payload is redacted', () => {
+  const payload = '{"model":"gpt-6","messages":[{"role":"user","content":"api_key={{API_KEY_TEST}}"}]}';
+  const redacted = redactSensitiveText(payload);
+  assert.ok(!redacted.includes('API_KEY_TEST'), 'credential material from the payload reached sanitized text');
+  assert.match(redacted, /<redacted-credential>/);
+});
+
 test('an ordinary decisive sentence is not eaten by the credential rules', () => {
   for (const reason of [
     'host retired after water damage',
@@ -171,6 +178,8 @@ test('Project prose preserves clear relative filenames while general hostnames s
   assert.equal(redactSensitiveText('Read README.md'), 'Read <redacted-host>', 'the general sanitizer keeps its existing rule');
   assert.equal(redactProjectText('example.md'), '<redacted-host>', 'an unqualified domain-shaped token is still treated as a host');
   assert.equal(redactProjectText('Read example.md'), 'Read example.md', 'file-reference context distinguishes a bare filename');
+  assert.equal(redactProjectText('Read worker.example.md'), 'Read worker.example.md', 'explicit file context takes precedence for host-shaped names');
+  assert.equal(redactProjectText('worker.example.md'), '<redacted-host>', 'the same host-shaped token without file context is redacted');
 
   const sensitive = redactProjectText(
     'Read README.md; host=worker-7 port=41001; path /srv/project/private.txt; URL https://internal.example/data; api_key={{API_KEY_TEST}}',
