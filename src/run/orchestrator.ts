@@ -7,7 +7,9 @@ import {
   type AdmissibleOptionDecision,
 } from '../agent/admission.ts';
 import type { ReadinessRequirementScope } from '../environment/readiness.ts';
+import { sanitizeIdentifier } from '../environment/privacy.ts';
 import type { EnvironmentPool } from '../environment/pool.ts';
+import type { BindingGenerationFence } from '../environment/binding-generation-fence.ts';
 import type { AgentRunEvent, EngineAdapter, EngineSession, EngineTurnResult } from '../engine/port.ts';
 import { EngineResumeRefusedError, RemoteProjectMcpStartupError } from '../engine/port.ts';
 import { HostPiEngineAdapter, isHostPiEffortSupported } from '../engine/pi-host.ts';
@@ -17,7 +19,9 @@ import type { ProjectRegistry } from '../project/registry.ts';
 import type { EnvironmentPreference } from '../environment/model.ts';
 import { resolveEnvironmentInstance, workspaceFor } from '../project/resolve.ts';
 import { sanitizeWorkspacePath } from '../project/access.ts';
-import { buildHandOffContext, renderHandOffPrompt, shouldAttachHandOff } from './hand-off.ts';
+import { buildHandOffContext, previousRun, renderHandOffPrompt, shouldAttachHandOff } from './hand-off.ts';
+import { BindingGenerationRegistry } from './binding-generation.ts';
+import { currentRunWorkspaceBinding, renderCurrentWorkspaceSnapshot } from './binding-context.ts';
 import type { AgentRun, AgentRunStatus, RunFailureClass, RunObserver, RunWorkspaceBinding } from './model.ts';
 import type { RunReplaySnapshot, RunStore } from './store.ts';
 import type { SessionKeyIdentity, SessionKeyStore } from './session-key-store.ts';
@@ -146,14 +150,15 @@ export interface RunOrchestratorOptions {
   /** Core-owned Host-run workspace operation attachment; never a model target selector. */
   readonly remoteWorkspace?: (projectId: string, agentId: string, runId: string,
     onLeaseAcquired: (leaseId: string) => Promise<void>,
-    containingLease?: import('../operations/environment-operations.ts').WorkspaceContainingLease) => Promise<import('../engine/port.ts').RemoteWorkspaceTools | undefined>;
+    containingLease?: import('../operations/environment-operations.ts').WorkspaceContainingLease,
+    options?: { readonly environmentInstanceId?: string; readonly bindingFence?: BindingGenerationFence }) => Promise<import('../engine/port.ts').RemoteWorkspaceTools | undefined>;
   /** Project authority determines whether the selected MCP configuration is active. */
   readonly projectMcpSelected?: (projectId: string) => Promise<boolean>;
   /** Attaches MCP tools after the orchestrator has acquired their containing run lease. */
   readonly remoteProjectMcp?: (projectId: string, agentId: string, scope: {
     readonly environmentInstanceId: string; readonly leaseId: string; readonly runId: string;
     readonly holderKind: 'run' | 'task'; readonly holderId: string; readonly taskId?: string;
-    readonly leaseCapability: 'project-mcp' | 'agent-run';
+    readonly leaseCapability: 'project-mcp' | 'agent-run'; readonly bindingFence?: BindingGenerationFence;
   }) => Promise<import('../engine/port.ts').RemoteProjectMcpTools>;
   /**
    * The durable Project workspace binding for one (Project, Environment), when
@@ -199,6 +204,8 @@ export interface SubmitRunRequest {
    * supplied by the advancement service; a direct caller may pass one too.
    */
   readonly environmentPreference?: EnvironmentPreference;
+  /** Explicit Work Environment for this standalone activation, independent of Engine host placement. */
+  readonly workEnvironmentInstanceId?: string;
   /** Fixed Task binding, supplied only by TaskEnvironmentLifecycle. */
   readonly environmentInstanceId?: string;
   readonly environmentLeaseId?: string;
@@ -282,6 +289,7 @@ export class RunOrchestrator {
   readonly #remoteWorkspace: RunOrchestratorOptions['remoteWorkspace'];
   readonly #projectMcpSelected: RunOrchestratorOptions['projectMcpSelected'];
   readonly #remoteProjectMcp: RunOrchestratorOptions['remoteProjectMcp'];
+  readonly #bindingGenerations = new BindingGenerationRegistry();
 
   readonly #runs = new Map<string, AgentRun>();
   readonly #sessions = new Map<string, EngineSession>();
@@ -351,6 +359,11 @@ export class RunOrchestrator {
       events: [],
       ...(request.taskId !== undefined ? { taskId: request.taskId } : {}),
       ...(request.sessionKeyScope !== undefined ? { sessionKeyScope: request.sessionKeyScope } : {}),
+      ...(request.workEnvironmentInstanceId !== undefined ? {
+        requestedWorkEnvironmentInstanceId: sanitizeIdentifier(request.workEnvironmentInstanceId, {
+          fallback: 'unknown-environment', kind: 'generic',
+        }),
+      } : {}),
       executionPlacement: { mode: this.#executionStrategy.mode },
       // The caller's Project scope is recorded from the first line of the
       // run's life, so a pre-admission failure (`no available environment`)
@@ -385,6 +398,19 @@ export class RunOrchestrator {
       await this.settleTaskRun(await this.#finish(run, 'failed', {
         status: 'failed',
         message: refusal,
+      }, 'admission'));
+      return { id: run.id };
+    }
+
+    if (request.taskId !== undefined && request.workEnvironmentInstanceId !== undefined) {
+      await this.settleTaskRun(await this.#finish(run, 'failed', {
+        status: 'failed', message: 'Task-bound activations cannot change their Work Environment binding',
+      }, 'admission'));
+      return { id: run.id };
+    }
+    if (request.workEnvironmentInstanceId !== undefined && request.environmentPreference !== undefined) {
+      await this.settleTaskRun(await this.#finish(run, 'failed', {
+        status: 'failed', message: 'choose one Work Environment selection for this activation',
       }, 'admission'));
       return { id: run.id };
     }
@@ -480,9 +506,11 @@ export class RunOrchestrator {
       {
         projects: scopedProjects,
         capability: agent.capability,
-        ...(request.environmentPreference !== undefined
-          ? { environmentPreference: request.environmentPreference }
-          : {}),
+        ...(request.workEnvironmentInstanceId !== undefined
+          ? { environmentPreference: { kind: 'instance' as const, id: request.workEnvironmentInstanceId } }
+          : request.environmentPreference !== undefined
+            ? { environmentPreference: request.environmentPreference }
+            : {}),
       },
       this.#pool,
     );
@@ -493,6 +521,12 @@ export class RunOrchestrator {
           message: this.#resolutionFailure(agent, resolution.reason),
         }, 'environment'),
       );
+      return { id: taskRun.id };
+    }
+    if (request.workEnvironmentInstanceId !== undefined && resolution.instanceId !== request.workEnvironmentInstanceId) {
+      await this.settleTaskRun(await this.#finish(taskRun, 'failed', {
+        status: 'failed', message: 'the requested Work Environment is not authorized for this Project capability',
+      }, 'admission'));
       return { id: taskRun.id };
     }
 
@@ -612,11 +646,13 @@ export class RunOrchestrator {
     request: SubmitRunRequest,
   ): Promise<{ id: string }> {
     const refuse = async (message: string): Promise<{ id: string }> => {
-      await this.settleTaskRun(await this.#finish(initial, 'failed', { status: 'failed', message }, 'admission'));
+      const unavailable = await this.#advance(initial, { workspaceBindingStatus: 'unavailable' });
+      await this.settleTaskRun(await this.#finish(unavailable, 'failed', { status: 'failed', message }, 'admission'));
       return { id: initial.id };
     };
     const taskBound = request.taskId !== undefined;
     if (taskBound) {
+      if (request.workEnvironmentInstanceId !== undefined) return refuse('Task-bound activations cannot switch Work Environments');
       if (request.environmentInstanceId === undefined || request.environmentLeaseId === undefined || request.projectId === undefined) {
         return refuse(`task run ${request.taskId} requires lifecycle lease, Environment, and Project bindings`);
       }
@@ -656,6 +692,19 @@ export class RunOrchestrator {
               : 'readiness is unknown';
       return refuse(`Host-run Pi admission failed for this Engine profile: ${reason}`);
     }
+    const previousActivations = (await this.#runHistory())
+      .filter((prior) => prior.agentId === agent.id && prior.projectId === selectedProject.id &&
+        prior.taskId === undefined && sameActivationScope(prior.sessionKeyScope, initial.sessionKeyScope))
+      .sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id));
+    const retainedWorkEnvironmentInstanceId = previousActivations.find((prior) =>
+      prior.workspaceBinding?.environmentInstanceId !== undefined,
+    )?.workspaceBinding?.environmentInstanceId;
+    const selectedWorkEnvironmentInstanceId = taskBound
+      ? undefined
+      : request.workEnvironmentInstanceId ?? retainedWorkEnvironmentInstanceId;
+    const retainedBinding = selectedWorkEnvironmentInstanceId !== undefined && selectedProject.id !== undefined
+      ? await this.#workspaceBinding?.(selectedProject.id, selectedWorkEnvironmentInstanceId)
+      : undefined;
     let mcpEnvironmentInstanceId: string | undefined = taskBound ? request.environmentInstanceId : undefined;
     let mcpLeaseId: string | undefined = taskBound ? request.environmentLeaseId : undefined;
     if (taskBound) {
@@ -672,8 +721,15 @@ export class RunOrchestrator {
         const resolution = resolveEnvironmentInstance({ projects: [selectedProject], capability: 'project-mcp', environmentPreference: { kind: 'instance', id: mcpEnvironmentInstanceId! } }, this.#pool);
         if (!resolution.ok || resolution.instanceId !== mcpEnvironmentInstanceId) return refuse('Project MCP is not authorized for the Task Environment');
       } else {
-        const resolution = resolveEnvironmentInstance({ projects: [selectedProject], capability: 'project-mcp' }, this.#pool);
-        if (!resolution.ok) return refuse('Project MCP is selected but no authorized leased Environment is available');
+        const resolution = resolveEnvironmentInstance({ projects: [selectedProject], capability: 'project-mcp',
+          ...(selectedWorkEnvironmentInstanceId !== undefined
+            ? { environmentPreference: { kind: 'instance', id: selectedWorkEnvironmentInstanceId } }
+            : {}) }, this.#pool);
+        if (!resolution.ok || (selectedWorkEnvironmentInstanceId !== undefined && resolution.instanceId !== selectedWorkEnvironmentInstanceId)) {
+          return refuse(selectedWorkEnvironmentInstanceId !== undefined
+            ? 'the selected Work Environment is not authorized for Project MCP'
+            : 'Project MCP is selected but no authorized leased Environment is available');
+        }
         const acquired = await this.#pool.acquireLeaseRevalidated({
           instanceId: resolution.instanceId, capability: 'project-mcp', holderId: initial.id, runId: initial.id, ttlMs: this.#leaseTtlMs,
         });
@@ -686,6 +742,12 @@ export class RunOrchestrator {
       ...initial,
       projectId: selectedProject.id,
       ...(mcpEnvironmentInstanceId !== undefined ? { environmentInstanceId: mcpEnvironmentInstanceId } : {}),
+      ...(selectedWorkEnvironmentInstanceId !== undefined ? {
+        requestedWorkEnvironmentInstanceId: sanitizeIdentifier(selectedWorkEnvironmentInstanceId, {
+          fallback: 'unknown-environment', kind: 'generic',
+        }),
+      } : {}),
+      ...(retainedBinding !== undefined ? { workspaceBinding: retainedBinding } : {}),
       ...(mcpLeaseId !== undefined ? { leaseId: mcpLeaseId } : {}),
       executionMode: 'host-run',
       engineHostProfileId: host.profileId,
@@ -710,7 +772,10 @@ export class RunOrchestrator {
       if (mcpLeaseId !== undefined && !taskBound) this.#pool.releaseLease(mcpLeaseId);
       throw error;
     }
-    const settled = this.#executeHostRun(recorded, agent, host, option, request.taskBootstrapInstructions, mcpSelected).then((run) => this.settleTaskRun(run));
+    const execute = () => this.#executeHostRun(recorded, agent, host, option, request.taskBootstrapInstructions, mcpSelected, selectedWorkEnvironmentInstanceId);
+    const settled = (recorded.taskId === undefined
+      ? this.#bindingGenerations.withLock(bindingGenerationScope(recorded), execute)
+      : execute()).then((run) => this.settleTaskRun(run));
     this.#settled.set(recorded.id, settled);
     return { id: recorded.id };
   }
@@ -722,40 +787,31 @@ export class RunOrchestrator {
     option: AgentWorkOption,
     taskBootstrapInstructions: string | undefined,
     useProjectMcp: boolean,
+    requestedWorkEnvironmentInstanceId: string | undefined,
   ): Promise<AgentRun> {
     if (this.#stopRequests.has(initial.id)) {
       if (initial.leaseId !== undefined && initial.taskId === undefined) this.#pool.releaseLease(initial.leaseId);
       return this.#finish(initial, 'interrupted', { status: 'interrupted' });
     }
-    const running = await this.#advance(initial, { status: 'running' });
-    let prepared = running;
+    const previous = previousRun(await this.#runHistory(), {
+      agentId: initial.agentId,
+      currentRunId: initial.id,
+      currentCreatedAt: initial.createdAt,
+      ...(initial.projectId !== undefined ? { projectId: initial.projectId } : {}),
+    });
+    const previousActivationWasBound = previous?.workspaceBinding !== undefined;
+    let prepared = await this.#advance(initial, { status: 'running', workspaceBindingStatus: 'staging' });
     let remoteProjectMcp: import('../engine/port.ts').RemoteProjectMcpTools | undefined;
     let mcpMayHaveStarted = false;
     let remoteWorkspace: import('../engine/port.ts').RemoteWorkspaceTools | undefined;
     let remoteSettlementUnknown = false;
     let remoteEnvironmentInstanceId: string | undefined;
     let containingLeaseCanRelease = false;
+    const bindingScope = bindingGenerationScope(initial);
+    const bindingFence = initial.taskId === undefined ? this.#bindingGenerations.stage(bindingScope) : undefined;
+    let catalogPublished = false;
+    let outcome = prepared;
     try {
-      const assembled = await this.#assembleInput(initial, agent, running.id);
-      const instructions = appendBootstrap(assembled.instructions, taskBootstrapInstructions);
-      if (assembled.handOff !== undefined) prepared = await this.#advance(running, { handOff: assembled.handOff });
-      const workingDirectory = `host-profile:${host.profileId}:agent:${agent.id}`;
-      const placement = initial.executionPlacement;
-      const scope = initial.sessionKeyScope;
-      const identity: SessionKeyIdentity | undefined = placement !== undefined &&
-        isEngineHostedPlacement(placement) && scope !== undefined
-        ? {
-            agentId: agent.id,
-            engine: 'pi',
-            environmentInstanceId: '',
-            executionPlacement: placement,
-            scope,
-            workingDirectory,
-          }
-        : undefined;
-      const stored = this.#sessionKeys && identity !== undefined
-        ? await this.#sessionKeys.get(identity)
-        : undefined;
       if (useProjectMcp && initial.leaseId !== undefined && initial.environmentInstanceId) {
         if (!this.#remoteProjectMcp) throw new Error('Project MCP Worker bridge is unavailable');
         const lease = this.#pool.getLease(initial.leaseId);
@@ -765,14 +821,15 @@ export class RunOrchestrator {
           holderKind: lease.holderKind ?? 'run', holderId: lease.holderId,
           ...(lease.taskId !== undefined ? { taskId: lease.taskId } : {}),
           leaseCapability: lease.capability === 'agent-run' ? 'agent-run' : 'project-mcp',
+          ...(bindingFence !== undefined ? { bindingFence } : {}),
         });
         mcpMayHaveStarted = true;
       }
-      remoteWorkspace = await this.#remoteWorkspace?.(initial.projectId ?? '', agent.id, running.id, async leaseId => {
+      remoteWorkspace = await this.#remoteWorkspace?.(initial.projectId ?? '', agent.id, initial.id, async leaseId => {
         const environmentInstanceId = remoteEnvironmentInstanceId;
         if (environmentInstanceId === undefined) throw new Error('remote Environment was not pinned before lease acquisition');
         prepared = await this.#advance(prepared, { environmentInstanceId, leaseId });
-      }, initial.leaseId !== undefined && initial.environmentInstanceId !== undefined ? (() => {
+      }, initial.leaseId !== undefined && initial.environmentInstanceId ? (() => {
         const lease = this.#pool.getLease(initial.leaseId);
         if (!lease) throw new Error('Containing lease is unavailable');
         return {
@@ -780,41 +837,121 @@ export class RunOrchestrator {
           holderKind: lease.holderKind ?? 'run', holderId: lease.holderId,
           ...(lease.taskId !== undefined ? { taskId: lease.taskId } : {}),
           leaseCapability: lease.capability === 'agent-run' ? 'agent-run' as const : 'project-mcp' as const,
+          ...(bindingFence !== undefined ? { bindingFence } : {}),
           canRelease: () => containingLeaseCanRelease,
         };
-      })() : undefined);
-      remoteEnvironmentInstanceId = remoteWorkspace?.binding.environmentInstanceId;
+      })() : undefined, {
+        ...(requestedWorkEnvironmentInstanceId !== undefined
+          ? { environmentInstanceId: requestedWorkEnvironmentInstanceId }
+          : initial.environmentInstanceId !== '' ? { environmentInstanceId: initial.environmentInstanceId } : {}),
+        ...(bindingFence !== undefined ? { bindingFence } : {}),
+      });
+      if ((requestedWorkEnvironmentInstanceId !== undefined || previousActivationWasBound) &&
+          remoteWorkspace === undefined && remoteProjectMcp === undefined) {
+        throw new Error(requestedWorkEnvironmentInstanceId !== undefined
+          ? 'the requested Work Environment could not be attached'
+          : 'the current Work Environment binding could not be reattached');
+      }
+      remoteEnvironmentInstanceId = remoteWorkspace?.binding.environmentInstanceId ??
+        (initial.environmentInstanceId !== '' ? initial.environmentInstanceId : undefined);
+      const binding = currentRunWorkspaceBinding({
+        ...(remoteWorkspace !== undefined ? { remoteWorkspace } : {}),
+        ...(remoteProjectMcp !== undefined ? { remoteProjectMcp } : {}),
+        ...(bindingFence !== undefined ? { catalogGeneration: bindingFence.generation } : {}),
+      });
+      const hasBinding = binding !== undefined;
+      const operations = binding?.operations ?? [];
+      const mcpNames = binding?.projectMcpTools ?? [];
+      const notice = hasBinding
+        ? `Remote workspace catalog staged for Environment ${binding.environmentInstanceId} (binding generation ${binding.generation ?? 'unknown'}). Operations: ${operations.length ? operations.join(', ') : 'none'}; Project MCP tools: ${mcpNames.length ? mcpNames.join(', ') : 'none'}.`
+        : 'No remote Project workspace is attached to this activation; host-local work tools are disabled.';
+      prepared = await this.#advance(prepared, {
+        ...(binding?.environmentInstanceId !== undefined ? { environmentInstanceId: binding.environmentInstanceId } : {}),
+        ...(binding !== undefined ? { workspaceBinding: binding } : {}),
+        workspaceBindingStatus: 'staging',
+        events: [...prepared.events, { type: 'notice', text: notice }],
+      });
+      const assembled = await this.#assembleInput(prepared, agent, prepared.id);
+      const currentSnapshot = renderCurrentWorkspaceSnapshot(
+        binding, hasBinding ? 'active' : 'detached', assembled.handOff?.bindingChange,
+      );
+      const instructions = appendBootstrap(
+        appendBootstrap(assembled.instructions, taskBootstrapInstructions), currentSnapshot,
+      );
+      if (assembled.handOff !== undefined) prepared = await this.#advance(prepared, { handOff: assembled.handOff });
+      const prompt = assembled.prompt;
+      const workingDirectory = `host-profile:${host.profileId}:agent:${agent.id}`;
+      const placement = initial.executionPlacement;
+      const scope = initial.sessionKeyScope;
+      const sessionWorkingDirectory = sessionWorkingDirectoryForBinding(
+        initial.projectId, workingDirectory, binding,
+      );
+      const identity: SessionKeyIdentity | undefined = placement !== undefined &&
+        isEngineHostedPlacement(placement) && scope !== undefined
+        ? {
+            agentId: agent.id,
+            engine: 'pi',
+            environmentInstanceId: '',
+            executionPlacement: placement,
+            scope,
+            workingDirectory: sessionWorkingDirectory,
+          }
+        : undefined;
+      const stored = this.#sessionKeys && identity !== undefined
+        ? await this.#sessionKeys.get(identity)
+        : undefined;
+      const publishCatalog = async (): Promise<void> => {
+        if (catalogPublished) return;
+        bindingFence?.publish();
+        catalogPublished = true;
+        prepared = await this.#advance(prepared, { workspaceBindingStatus: hasBinding ? 'active' : 'detached' });
+      };
       let attempt = await this.#runSession(
-        host, agent, option, assembled.prompt, prepared, stored?.key, instructions,
-        workingDirectory, undefined, undefined, undefined, remoteWorkspace, remoteProjectMcp,
+        host, agent, option, prompt, prepared, stored?.key, instructions,
+        workingDirectory, undefined, undefined, undefined, remoteWorkspace, remoteProjectMcp, publishCatalog,
       );
       if (stored !== undefined && !attempt.ok && attempt.resumeRefused) {
         if (this.#sessionKeys && identity !== undefined) await this.#sessionKeys.delete(identity);
         attempt = await this.#runSession(
-          host, agent, option, assembled.prompt, prepared, undefined, instructions,
-          workingDirectory, undefined, undefined, undefined, remoteWorkspace, remoteProjectMcp,
+          host, agent, option, prompt, prepared, undefined, instructions,
+          workingDirectory, undefined, undefined, undefined, remoteWorkspace, remoteProjectMcp, publishCatalog,
         );
       }
       if (!attempt.ok) {
         remoteSettlementUnknown = true;
-        return this.#finish(attempt.run, 'failed', attempt.result ?? {
+        prepared = await this.#advance(attempt.run, {
+          workspaceBindingStatus: catalogPublished ? 'recovering' : 'unavailable',
+        });
+        outcome = await this.#finish(prepared, 'failed', attempt.result ?? {
           status: 'failed', message: attempt.message,
         });
+      } else {
+        if (this.#sessionKeys && identity !== undefined && attempt.result.status === 'completed' && attempt.engineSessionKey) {
+          await this.#sessionKeys.save({ ...identity, key: attempt.engineSessionKey, updatedAt: this.#clock.now() });
+        }
+        if (attempt.result.status === 'interrupted') {
+          remoteSettlementUnknown = true;
+          prepared = await this.#advance(attempt.run, { workspaceBindingStatus: 'recovering' });
+        } else {
+          prepared = await this.#advance(attempt.run, {
+            workspaceBindingStatus: catalogPublished ? (hasBinding ? 'active' : 'detached') : 'unavailable',
+          });
+        }
+        outcome = await this.#settleWithResult(prepared, attempt.result);
       }
-      if (this.#sessionKeys && identity !== undefined && attempt.result.status === 'completed' && attempt.engineSessionKey) {
-        await this.#sessionKeys.save({ ...identity, key: attempt.engineSessionKey, updatedAt: this.#clock.now() });
-      }
-      if (attempt.result.status === 'interrupted') remoteSettlementUnknown = true;
-      return await this.#settleWithResult(attempt.run, attempt.result);
     } catch (error) {
       remoteSettlementUnknown = true;
       const message = error instanceof RemoteProjectMcpStartupError
         ? this.#projectMcpStartupFailureMessage(error.reason)
         : 'Host-run Pi execution failed';
-      return this.#finish(prepared, 'failed', {
-        status: 'failed', message,
+      const recoveryLeaseId = prepared.leaseId ?? initial.leaseId;
+      const recovering = recoveryLeaseId !== undefined && this.#pool.getLease(recoveryLeaseId)?.state === 'recovering';
+      prepared = await this.#advance(prepared, {
+        workspaceBindingStatus: recovering ? 'recovering' : 'unavailable',
       });
+      outcome = await this.#finish(prepared, 'failed', { status: 'failed', message });
     } finally {
+      bindingFence?.revoke();
       if (initial.leaseId !== undefined) {
         if (remoteSettlementUnknown) this.#pool.markRecovering(initial.leaseId);
         let stopCertain = !mcpMayHaveStarted;
@@ -826,16 +963,19 @@ export class RunOrchestrator {
         containingLeaseCanRelease = stopCertain && initial.taskId === undefined && this.#pool.getLease(initial.leaseId)?.state === 'active';
       }
       try { await remoteWorkspace?.settle?.(remoteSettlementUnknown ? 'unknown' : 'settled'); } catch {
-        // Settlement uncertainty protects the Environment; it never converts an
-        // already settled run into a second result or releases a lease.
         remoteSettlementUnknown = true;
         if (initial.leaseId !== undefined) this.#pool.markRecovering(initial.leaseId);
       }
-      // A containing lease may have had no workspace mutations. Never release
-      // before workspace settlement, or after either surface reports uncertainty.
       if (remoteWorkspace === undefined && initial.leaseId !== undefined && containingLeaseCanRelease &&
           this.#pool.getLease(initial.leaseId)?.state === 'active') this.#pool.releaseLease(initial.leaseId);
+      const recoveryLeaseId = prepared.leaseId ?? initial.leaseId;
+      const recoveryRequired = recoveryLeaseId !== undefined &&
+        this.#pool.getLease(recoveryLeaseId)?.state === 'recovering';
+      if (recoveryRequired && outcome.workspaceBindingStatus !== 'recovering') {
+        outcome = await this.#advance(outcome, { workspaceBindingStatus: 'recovering' });
+      }
     }
+    return this.#runs.get(initial.id) ?? outcome;
   }
 
   /**
@@ -1258,7 +1398,6 @@ export class RunOrchestrator {
       const stored = this.#sessionKeys && identity !== undefined
         ? await this.#sessionKeys.get(identity)
         : undefined;
-
       let attempt = await this.#runSession(
         adapter,
         agent,
@@ -1397,6 +1536,7 @@ export class RunOrchestrator {
     projectWorkspacePath: string | undefined,
     remoteWorkspace?: import('../engine/port.ts').RemoteWorkspaceTools,
     remoteProjectMcp?: import('../engine/port.ts').RemoteProjectMcpTools,
+    beforePrompt?: () => void | Promise<void>,
   ): Promise<SessionAttempt> {
     let session: EngineSession;
     try {
@@ -1441,6 +1581,8 @@ export class RunOrchestrator {
     this.#sessions.set(running.id, session);
     let current = running;
     try {
+      await beforePrompt?.();
+      current = this.#runs.get(running.id) ?? current;
       const turn = session.run(prompt);
       if (this.#stopRequests.has(running.id)) await this.#interruptRequestedSession(running.id, session);
       // The events iterator throws when a turn fails, so the *authoritative*
@@ -1537,6 +1679,11 @@ export class RunOrchestrator {
       agentId: agent.id,
       currentRunId,
       currentCreatedAt: run.createdAt,
+      ...(run.projectId !== undefined ? { projectId: run.projectId } : {}),
+      currentEnvironmentInstanceId: run.workspaceBinding?.environmentInstanceId ?? run.environmentInstanceId,
+      currentExecutionMode: run.executionMode ?? 'environment-hosted',
+      ...(run.engineHostProfileId !== undefined ? { currentEngineHostProfileId: run.engineHostProfileId } : {}),
+      ...(run.workspaceBinding !== undefined ? { currentWorkspaceBinding: run.workspaceBinding } : {}),
     });
     // ADR-0004: a session key is scoped to one (agent, engine, instance,
     // directory), so a stored key only exists for the same environment instance.
@@ -1551,6 +1698,8 @@ export class RunOrchestrator {
         currentExecutionMode: run.executionMode ?? 'environment-hosted',
         ...(handOff.previousEngineHostProfileId !== undefined ? { previousEngineHostProfileId: handOff.previousEngineHostProfileId } : {}),
         ...(run.engineHostProfileId !== undefined ? { currentEngineHostProfileId: run.engineHostProfileId } : {}),
+        ...(handOff.previousWorkspaceBinding !== undefined ? { previousWorkspaceBinding: handOff.previousWorkspaceBinding } : {}),
+        ...(run.workspaceBinding !== undefined ? { currentWorkspaceBinding: run.workspaceBinding } : {}),
       });
 
     return {
@@ -1620,6 +1769,40 @@ export class RunOrchestrator {
   }
 }
 
+function sameActivationScope(
+  left: SessionKeyScope | undefined,
+  right: SessionKeyScope | undefined,
+): boolean {
+  return left === undefined || right === undefined
+    ? left === right
+    : left.kind === right.kind && left.id === right.id;
+}
+
+function bindingGenerationScope(run: AgentRun): string {
+  return JSON.stringify([
+    run.agentId,
+    run.projectId ?? '',
+    run.sessionKeyScope?.kind ?? 'standalone',
+    run.sessionKeyScope?.id ?? '',
+  ]);
+}
+
+/** Session keys are partitioned by Project and the exact workspace grant. */
+function sessionWorkingDirectoryForBinding(
+  projectId: string | undefined,
+  workingDirectory: string,
+  binding: RunWorkspaceBinding | undefined,
+): string {
+  return JSON.stringify([
+    projectId ?? '',
+    workingDirectory,
+    binding?.environmentInstanceId ?? '',
+    binding?.bindingId ?? '',
+    binding?.generation ?? 0,
+    binding?.catalogIdentity ?? '',
+  ]);
+}
+
 /**
  * The directory a run executes in, inside the instance it actually uses.
  *
@@ -1659,22 +1842,32 @@ function sanitizeRunWorkspaceBinding(
   binding: RunWorkspaceBinding | undefined,
 ): RunWorkspaceBinding | undefined {
   if (binding === undefined) return undefined;
+  const operations = (binding.operations ?? []).filter((operation) =>
+    ['read', 'search', 'edit', 'patch', 'command'].includes(operation));
+  const projectMcpTools = (binding.projectMcpTools ?? []).filter((name) =>
+    /^[A-Za-z][A-Za-z0-9_-]{0,127}$/.test(name));
+  const common = {
+    ...(binding.environmentInstanceId !== undefined
+      ? { environmentInstanceId: sanitizeIdentifier(binding.environmentInstanceId, { fallback: 'unknown-environment', kind: 'generic' }) }
+      : {}),
+    ...(binding.bindingId !== undefined
+      ? { bindingId: sanitizeIdentifier(binding.bindingId, { fallback: 'unknown-binding', kind: 'generic' }) }
+      : {}),
+    ...(Number.isSafeInteger(binding.generation) && binding.generation! > 0 ? { generation: binding.generation } : {}),
+    ...(Number.isSafeInteger(binding.catalogGeneration) && binding.catalogGeneration! > 0 ? { catalogGeneration: binding.catalogGeneration } : {}),
+    ...(typeof binding.catalogIdentity === 'string' && /^[A-Fa-f0-9]{64}$/.test(binding.catalogIdentity)
+      ? { catalogIdentity: binding.catalogIdentity.toLowerCase() } : {}),
+    ...(binding.workspaceId !== undefined
+      ? { workspaceId: sanitizeIdentifier(binding.workspaceId, { fallback: 'unknown-workspace', kind: 'digest' }) }
+      : {}),
+    ...(operations.length > 0 ? { operations: [...new Set(operations)] } : {}),
+    ...(projectMcpTools.length > 0 ? { projectMcpTools: [...new Set(projectMcpTools)] } : {}),
+  };
   if (binding.kind === 'relative') {
     const path = sanitizeWorkspacePath(binding.path);
     if (path === undefined) return undefined;
-    return {
-      ...(binding.bindingId !== undefined ? { bindingId: binding.bindingId } : {}),
-      ...(binding.workspaceId !== undefined ? { workspaceId: binding.workspaceId } : {}),
-      kind: 'relative',
-      path,
-    };
+    return { ...common, kind: 'relative', path };
   }
-  if (binding.kind === 'default' && binding.path === undefined) {
-    return {
-      ...(binding.bindingId !== undefined ? { bindingId: binding.bindingId } : {}),
-      ...(binding.workspaceId !== undefined ? { workspaceId: binding.workspaceId } : {}),
-      kind: 'default',
-    };
-  }
+  if (binding.kind === 'default' && binding.path === undefined) return { ...common, kind: 'default' };
   return undefined;
 }

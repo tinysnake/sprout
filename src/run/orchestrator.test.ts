@@ -102,6 +102,20 @@ const successEvents: readonly AgentRunEvent[] = [
 const completed = { status: 'completed', text: 'done' } as const;
 
 
+test('Task-bound activations cannot select a standalone Work Environment', async () => {
+  const { orchestrator, pool } = build({ taskContext: true });
+  const { id } = await orchestrator.submit({
+    agentId: 'agent-scout', taskId: 'task-fixed-environment', projectId: 'project-sprout',
+    workEnvironmentInstanceId: 'different-environment', prompt: 'attempt to switch a Task Environment',
+  });
+  const run = await orchestrator.waitFor(id);
+  assert.equal(run.status, 'failed');
+  assert.equal(run.failureClass, 'admission');
+  assert.match(run.result?.status === 'failed' ? run.result.message ?? '' : '',
+    /Task-bound activations cannot change their Work Environment binding/);
+  assert.deepEqual(pool.leases(), [], 'the refused selector never acquires an Environment lease');
+});
+
 test('a submitted run acquires its lease, streams progress, and completes', async () => {
   const { orchestrator, pool } = build({
     turns: [{ events: successEvents, result: completed }],

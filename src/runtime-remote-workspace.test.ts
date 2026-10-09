@@ -40,8 +40,25 @@ test('Host-run reads an authorized Project file through an enrolled Worker witho
     },
     async startSession(request: StartSessionRequest) {
       assert.ok(request.remoteWorkspace, 'Runtime supplies only its authorized remote workspace tools');
-      observed.push(await request.remoteWorkspace.read('sentinel.txt'));
-      return localEngine.startSession(request);
+      const session = await localEngine.startSession(request);
+      const tools = request.remoteWorkspace;
+      return {
+        sessionId: session.sessionId,
+        engineSessionKey: session.engineSessionKey,
+        run(prompt: string) {
+          const turn = session.run(prompt);
+          const read = tools!.read('sentinel.txt');
+          return {
+            events: turn.events,
+            completion: Promise.all([turn.completion, read]).then(([result, operation]) => {
+              observed.push(operation);
+              return result;
+            }),
+          };
+        },
+        interrupt: () => session.interrupt(),
+        close: () => session.close(),
+      };
     },
   } as unknown as HostPiEngineAdapter;
   const runtime = await createRuntime({
@@ -115,6 +132,170 @@ test('Host-run reads an authorized Project file through an enrolled Worker witho
     assert.equal(observed[0]?.workspaceId, access.current?.workspaceId);
     assert.equal(observed[0]?.connectionEpoch, runtime.workerGateway.currentConnectionEpoch(enrollment.enrollment.id));
     assert.deepEqual(runtime.pool.leases(), [], 'the authorized read is explicitly lease-free');
+  } finally {
+    await runtime.close();
+  }
+});
+
+test('standalone Host-run switches from Environment A to B with fresh tools and origin-preserving context', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-binding-switch-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const model = 'provider/model-binding-switch';
+  const environmentA = INSTANCE_ID;
+  const environmentB = 'z-binding-switch-instance-b';
+  const workers = [
+    [environmentA, join(directory, 'worker-a')],
+    [environmentB, join(directory, 'worker-b')],
+  ] as const;
+  for (const [environment, root] of workers) {
+    mkdirSync(join(root, 'repos', 'switch-work'), { recursive: true });
+    writeFileSync(join(root, 'repos', 'switch-work', 'origin.txt'), environment);
+  }
+  const runtimeProject = { ...project(), memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }] };
+  const localEngine = new ScriptedEngineAdapter({ turns: [
+    scriptedTurn('Completed work in Environment A.'),
+    scriptedTurn('Continued work in Environment B.'),
+    scriptedTurn('Continued with the current Environment B session.'),
+  ] });
+  const starts: StartSessionRequest[] = [];
+  const reads: RemoteWorkspaceOperationResult[] = [];
+  const hostPi = {
+    id: 'pi', profileId: 'profile-binding-switch', authorizedModel: model,
+    capabilities: localEngine.capabilities,
+    async readiness() {
+      return { profileId: 'profile-binding-switch', engine: 'pi', status: 'ready', installation: 'ready',
+        authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready', version: '1.0.4', observedAt: 1 };
+    },
+    async startSession(request: StartSessionRequest) {
+      starts.push(request);
+      const session = await localEngine.startSession(request);
+      return {
+        sessionId: session.sessionId,
+        get engineSessionKey() { return session.engineSessionKey; },
+        run(prompt: string) {
+          const turn = session.run(prompt);
+          const shouldRead = starts.length <= 3;
+          const operation = shouldRead ? request.remoteWorkspace?.read('origin.txt') : undefined;
+          if (shouldRead && operation === undefined) throw new Error('the selected Environment did not publish workspace tools');
+          return {
+            events: turn.events,
+            completion: operation === undefined
+              ? turn.completion
+              : Promise.all([turn.completion, operation]).then(([result, read]) => {
+                reads.push(read);
+                return result;
+              }),
+          };
+        },
+        interrupt: () => session.interrupt(),
+        close: () => session.close(),
+      };
+    },
+  } as unknown as HostPiEngineAdapter;
+  const runtime = await createRuntime({
+    configuration: hostConfiguration({
+      executionMode: 'host-run', environmentSource: 'enrollment',
+      runtimeConfiguration: {
+        agents: [{ id: 'scout', name: 'scout', engine: 'pi', capability: 'agent-run', model, effort: 'medium',
+          workOptions: [{ id: 'host-pi', engine: 'pi', workModel: model, effort: 'medium' }] }],
+        project: runtimeProject,
+      },
+      databasePath: join(directory, 'state.db'),
+    }),
+    projectRoot: '/synthetic/project-root', hostPi,
+  });
+
+  try {
+    for (const [index, [environment, root]] of workers.entries()) {
+      const keyPath = join(directory, `worker-${index}.pem`);
+      const identity = loadOrCreateWorkerIdentity(keyPath);
+      const enrollment = await runtime.enrollments.requestEnrollment({
+        environmentInstanceId: environment, displayName: `Binding switch Worker ${index}`,
+        publicKey: workerPublicKey(identity.privateKey), platform: 'macos', protocolVersion: '3.0',
+        capabilityRequests: ['read-only-investigation'], engineFacts: [],
+      });
+      await runtime.enrollments.approve(enrollment.enrollment.id, {
+        capabilityPermissions: { 'read-only-investigation': true },
+      });
+      await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, root);
+    }
+    await runtime.projectService.create({ id: 'binding-switch-project', displayName: 'Binding switch Project' });
+    await runtime.projectService.addMembership('binding-switch-project', {
+      agentId: 'scout', responsibilities: [], collaborationInstructions: '',
+    });
+    for (const environment of [environmentA, environmentB]) {
+      await runtime.projectAccess.grant({
+        projectId: 'binding-switch-project', environmentInstanceId: environment,
+        selection: { kind: 'relative', path: 'repos/switch-work' },
+      });
+    }
+
+    const submit = async (
+      workEnvironmentInstanceId: string | undefined,
+      prompt: string,
+      scope = 'binding-switch-conversation',
+    ) => {
+      const { id } = await runtime.orchestrator.submit({
+        agentId: 'scout', projectId: 'binding-switch-project',
+        ...(workEnvironmentInstanceId !== undefined ? { workEnvironmentInstanceId } : {}),
+        sessionKeyScope: { kind: 'conversation', id: scope }, prompt,
+      });
+      return runtime.orchestrator.waitFor(id);
+    };
+    const runA = await submit(environmentA, 'Read the current Environment origin.');
+    const runB = await submit(environmentB, 'Continue the work in the selected Environment.');
+    const runBResume = await submit(undefined, 'Continue with the current grant.');
+    const isolatedScope = await submit(undefined, 'Start an independent conversation.', 'other-conversation');
+    await runtime.projectAccess.end({ projectId: 'binding-switch-project', environmentInstanceId: environmentB });
+    const unavailable = await submit('binding-switch-unauthorized', 'Use only the requested Environment.');
+    const retainedBindingUnavailable = await submit(undefined, 'Keep the last selected Environment; fail closed.');
+
+    assert.equal(runA.status, 'completed');
+    assert.equal(runB.status, 'completed');
+    assert.equal(runBResume.status, 'completed');
+    assert.equal(isolatedScope.status, 'completed');
+    assert.equal(isolatedScope.requestedWorkEnvironmentInstanceId, undefined);
+    assert.equal(isolatedScope.workspaceBinding?.environmentInstanceId, environmentA,
+      'a new conversation does not inherit B from another conversation and follows only the Project default');
+    assert.equal(unavailable.status, 'failed');
+    assert.equal(unavailable.workspaceBindingStatus, 'unavailable');
+    assert.equal(retainedBindingUnavailable.status, 'failed', 'a revoked retained binding cannot fall back to Environment A');
+    assert.equal(retainedBindingUnavailable.workspaceBindingStatus, 'unavailable');
+    assert.equal(starts.length, 4, 'an unavailable requested or retained Environment does not start a local fallback session');
+    assert.equal(runA.workspaceBindingStatus, 'active');
+    assert.equal(runB.workspaceBindingStatus, 'active');
+    assert.equal(runA.workspaceBinding?.environmentInstanceId, environmentA);
+    assert.equal(runB.workspaceBinding?.environmentInstanceId, environmentB);
+    assert.equal(runA.workspaceBinding?.generation, 1);
+    assert.equal(runB.workspaceBinding?.generation, 1);
+    assert.equal(runBResume.requestedWorkEnvironmentInstanceId, environmentB,
+      'the latest authorized binding stays selected when the next activation omits a selector');
+    assert.equal(retainedBindingUnavailable.requestedWorkEnvironmentInstanceId, environmentB,
+      'an unavailable retained binding stays the attempted binding instead of selecting another grant');
+    assert.equal(reads[0]?.content, environmentA);
+    assert.equal(reads[1]?.content, environmentB);
+    assert.equal(reads[2]?.content, environmentB);
+    assert.equal(starts[0]?.resumeSessionKey, undefined);
+    assert.equal(starts[1]?.resumeSessionKey, undefined, 'Environment B cannot resume Environment A native history');
+    assert.equal(starts[2]?.resumeSessionKey, 'scripted-key-2', 'same current grant resumes its native session');
+    const promptB = localEngine.sessions[1]?.prompts[0] ?? '';
+    assert.match(promptB, /Sprout switched the current Work Environment from composition-instance to z-binding-switch-instance-b/);
+    assert.match(starts[1]?.instructions ?? '', /Sprout current workspace and capability snapshot/);
+    assert.match(starts[1]?.instructions ?? '', /Environment: z-binding-switch-instance-b/);
+    assert.match(starts[1]?.instructions ?? '', /Remote workspace operations: read, search/);
+    assert.match(starts[1]?.instructions ?? '', /Binding change: Sprout switched the current Work Environment from composition-instance to z-binding-switch-instance-b/);
+    assert.match(promptB, /Environment composition-instance, relative workspace at binding generation 1: Completed work in Environment A\./);
+    assert.match(starts[2]?.instructions ?? '', /Sprout current workspace and capability snapshot/,
+      'native resume reconstructs the current state in the session system prompt');
+    assert.match(starts[2]?.instructions ?? '', /Environment: z-binding-switch-instance-b/);
+    assert.match(starts[3]?.instructions ?? '', /Status: active/);
+    assert.match(starts[3]?.instructions ?? '', /Environment: composition-instance/);
+    assert.equal(starts[3]?.remoteWorkspace?.binding.environmentInstanceId, environmentA,
+      'a separate conversation resolves the Project default instead of inheriting Environment B');
+    const staleRead = await starts[0]?.remoteWorkspace?.read('origin.txt');
+    assert.equal(staleRead?.status, 'failed', 'a prior generation cannot call after the new binding is published');
+    assert.equal(reads.length, 3, 'the stale call never executes against either Worker');
+    assert.equal(runtime.pool.leases().length, 0);
   } finally {
     await runtime.close();
   }
@@ -486,7 +667,8 @@ test('Host-run edits and patches only through the enrolled Worker with one run-h
       const endTool = (toolName: string, result: RemoteWorkspaceOperationResult | { readonly status: string; readonly operation?: RemoteWorkspaceOperationResult }, toolCallId: string): void => {
         emitPiEvent({ type: 'tool_execution_end', toolName, toolCallId, result: { content: [], details: result }, isError: result.status !== 'completed' });
       };
-      const editArgs = { path: 'src/target.txt', oldText: pathSentinel, newText: credentialSentinel };
+      const executeRemoteTools = async (): Promise<void> => {
+        const editArgs = { path: 'src/target.txt', oldText: pathSentinel, newText: credentialSentinel };
       startTool('remote_edit', editArgs, 'call-edit-1');
       observed.push(await tools.edit!('src/target.txt', pathSentinel, credentialSentinel, 'sdk-edit-1'));
       endTool('remote_edit', observed[0]!, 'call-edit-1');
@@ -515,18 +697,21 @@ test('Host-run edits and patches only through the enrolled Worker with one run-h
       }));
       endTool('remote_command', observed[2]!, 'sdk-command-1');
       leasesDuringRun = runtime!.pool.leases();
+      };
       const session = await localEngine.startSession(request);
       return {
         sessionId: session.sessionId,
         engineSessionKey: session.engineSessionKey,
         run(prompt: string) {
           const turn = session.run(prompt);
+          const operations = executeRemoteTools();
           return {
             events: (async function* () {
+              await operations;
               yield* runEvents;
               for await (const event of turn.events) yield event;
             })(),
-            completion: turn.completion,
+            completion: Promise.all([turn.completion, operations]).then(([result]) => result),
           };
         },
         interrupt: session.interrupt.bind(session),
