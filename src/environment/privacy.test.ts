@@ -204,6 +204,7 @@ test('file context preserves known extensions and unfamiliar non-host suffixes, 
     ['Read a.b.c; Read README.', 'Read a.b.c; Read README.'],
     ['Read some.unknown.qqq', 'Read some.unknown.qqq'],
     ['Read worker.node1.tailnet.com', 'Read worker.node1.tailnet.com'],
+    ['Read parser.pl; Read config.in', 'Read parser.pl; Read config.in'],
     ['Read worker.node1.tailnet.fail', 'Read <redacted-host>'],
     ['Read worker.node1.tailnet.example', 'Read <redacted-host>'],
     ['worker.node1.tailnet.example', '<redacted-host>'],
@@ -215,6 +216,8 @@ test('file context preserves known extensions and unfamiliar non-host suffixes, 
   }
 
   assert.equal(IANA_HOST_SUFFIXES.has('md'), true, '.md is in the IANA root-zone list');
+  assert.equal(IANA_HOST_SUFFIXES.has('pl'), true, '.pl is in the IANA root-zone list');
+  assert.equal(IANA_HOST_SUFFIXES.has('in'), true, '.in is in the IANA root-zone list');
   assert.equal(IANA_HOST_SUFFIXES.has('example'), true, '.example is included through IANA special-use names');
   assert.equal(IANA_HOST_SUFFIXES.has('qqq'), false, '.qqq is not an authoritative host suffix');
   assert.equal(
