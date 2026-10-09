@@ -72,8 +72,9 @@ function fixture(options: {
       return { ok: options.compatible?.(agentId, environmentInstanceId) ?? true };
     },
   };
+  const executionStrategy = options.executionStrategy ?? createExecutionStrategy('environment-hosted');
   const lifecycle = new TaskEnvironmentLifecycle({
-    store: taskStore, pool, agents, projects, runs: runner, worker,
+    store: taskStore, pool, agents, projects, runs: runner, worker, executionStrategy,
     ids: { task: () => 'unused-task', lease: () => 'unused-lease', run: (() => { let n = 0; return () => `run-${++n};` })(), message: () => 'unused-message', projectEvent: () => 'unused-event' },
     clock: { now: () => 100 },
     taskGroups: {
@@ -100,7 +101,7 @@ function fixture(options: {
   const admissions = new TaskAdmissionService({
     proposals, proposalStore, tasks, lifecycle, projects,
     agentAuthority: { agentIsActive: async id => memberIds.includes(id) },
-    ...(options.executionStrategy !== undefined ? { executionStrategy: options.executionStrategy } : {}),
+    ...(options.executionStrategy !== undefined ? { executionStrategy } : {}),
     ids: { task: () => 'task-1', lease: () => 'unused-lease', run: () => 'unused-run', message: () => 'unused-message', projectEvent: () => 'unused-event' },
     now: () => 100,
   });
@@ -206,6 +207,24 @@ test('failure before lease acquisition leaves the proposal open and creates no T
   assert.deepEqual(await conflicted.taskStore.list(), []);
   assert.equal(conflicted.pool.activeLease('env-a')?.holderId, 'other-work');
   assert.deepEqual(conflicted.materializations, []);
+});
+
+test('Host-run Task admission pins Host-run placement and holds one Task lease across runs', async () => {
+  const context = fixture({ executionStrategy: createExecutionStrategy('host-run', true) });
+  const proposal = await propose(context);
+  const result = await context.admissions.beginProposal(proposal.id, { memberId: 'operator', memberKind: 'human' }, beginInput({ memberId: 'operator', memberKind: 'human' }));
+  assert.equal(result.task.executionPlacement?.mode, 'host-run');
+  assert.equal(result.task.environmentInstanceId, 'env-a');
+  assert.equal(context.pool.leases().length, 1);
+  assert.equal(context.pool.getLease(result.task.environmentLeaseId!)?.holderKind, 'task');
+  assert.equal(context.submissions.length, 0, 'a Human Task lead does not start a run on approval');
+  const advanced = await context.admissions.advance(result.task.id, { memberId: 'operator', memberKind: 'human' }, {
+    targetAgentId: 'scout', reason: 'Start the authorized Host-run work.',
+  });
+  assert.equal(advanced.runId, 'run-1;');
+  assert.equal(context.submissions.length, 1);
+  assert.equal(context.pool.leases().length, 1, 'nested admission reuses the Task lease');
+  assert.equal(context.pool.getLease(result.task.environmentLeaseId!)?.holderKind, 'task');
 });
 
 test('begin reports a typed conflict when a Task-held lease is recovering', async () => {

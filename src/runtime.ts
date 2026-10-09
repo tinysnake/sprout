@@ -2132,6 +2132,8 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
               const projection = projectHostPiCompatibility(currentOptions(agent), hostPi, readiness);
               return {
                 agentId: agent.id,
+                ...(requestedInstanceId !== undefined ? { environmentInstanceId: requestedInstanceId } : {}),
+                executionMode: executionStrategy.mode,
                 available: projection.available,
                 ...(projection.firstAvailable !== undefined ? { firstAvailable: projection.firstAvailable } : {}),
                 ...(projection.unavailableReason !== undefined ? { unavailableReason: projection.unavailableReason } : {}),
@@ -2159,6 +2161,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
               ...(projection.unavailableReason !== undefined ? { unavailableReason: projection.unavailableReason } : {}),
               options: projection.options,
               explanation: projection.explanation,
+              executionMode: executionStrategy.mode,
             };
           },
           runAttribution: async (runId: string) => {

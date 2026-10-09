@@ -3,7 +3,7 @@ import { test } from 'node:test';
 
 import { ScriptedEngineAdapter } from './engine/scripted.ts';
 import type { HostPiEngineAdapter, HostPiReadiness } from './engine/pi-host.ts';
-import { build, scriptedTurn, agent, project, PROJECT_ID } from './runtime-test-harness.ts';
+import { build, scriptedTurn, agent, project, PROJECT_ID, INSTANCE_ID } from './runtime-test-harness.ts';
 import { projectHostPiCompatibility } from './runtime.ts';
 
 test('Host-run compatibility marks unsupported isolation controls unavailable', () => {
@@ -25,6 +25,11 @@ test('configured Host-run Pi executes a Message without Environment readiness or
   const engine = new ScriptedEngineAdapter({ turns: [scriptedTurn('Host Pi reply')] });
   let environmentLookups = 0;
   let environmentContexts = 0;
+  let piReadiness: HostPiReadiness = {
+    profileId: 'profile-runtime-test', engine: 'pi', status: 'ready', installation: 'ready',
+    authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready',
+    version: '1.0.4', observedAt: 1_000,
+  };
   const environment = {
     async adapters() { environmentLookups += 1; return new Map([[engine.id, engine]]); },
     async contexts() { environmentContexts += 1; return { async prepare() { return { bootstrapInstructions: '' }; }, async recycle() {} }; },
@@ -36,11 +41,7 @@ test('configured Host-run Pi executes a Message without Environment readiness or
     authorizedModel: model,
     capabilities: engine.capabilities,
     async readiness() {
-      return {
-        profileId: 'profile-runtime-test', engine: 'pi', status: 'ready', installation: 'ready',
-        authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready',
-        version: '1.0.4', observedAt: 1_000,
-      } satisfies HostPiReadiness;
+      return piReadiness;
     },
     startSession: engine.startSession.bind(engine),
   } as unknown as HostPiEngineAdapter;
@@ -59,6 +60,7 @@ test('configured Host-run Pi executes a Message without Environment readiness or
     assert.equal(runtime.executionStrategy.admission.available, true);
     assert.equal(runtime.executionStrategy.taskAdmission.available, true);
     assert.deepEqual(await runtime.hostPiReadiness(), await hostPi.readiness());
+    assert.equal((await runtime.orchestrator.evaluateOptionAdmission('scout', INSTANCE_ID)).ok, true);
 
     const { id } = await runtime.orchestrator.submit({ agentId: 'scout', projectId: PROJECT_ID, prompt: 'Say hello.' });
     const run = await runtime.orchestrator.waitFor(id);
@@ -69,6 +71,9 @@ test('configured Host-run Pi executes a Message without Environment readiness or
     assert.equal(environmentLookups, 0);
     assert.equal(environmentContexts, 0);
     assert.deepEqual(runtime.pool.leases(), []);
+    piReadiness = { ...piReadiness, installation: 'unknown' };
+    const notReady = await runtime.orchestrator.evaluateOptionAdmission('scout', INSTANCE_ID);
+    assert.equal(notReady.ok, false, 'a top-level ready flag cannot override incomplete Host Pi readiness facts');
   } finally {
     await runtime.close();
   }

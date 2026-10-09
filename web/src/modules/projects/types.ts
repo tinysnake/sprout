@@ -20,6 +20,7 @@ export interface ProjectAgentEnvironmentCompatibility {
   readonly agentId: string;
   readonly environmentInstanceId: string;
   readonly available?: boolean;
+  readonly executionMode?: 'environment-hosted' | 'host-run';
   readonly unavailableReason?: string;
 }
 
