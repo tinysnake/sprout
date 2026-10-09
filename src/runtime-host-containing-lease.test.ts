@@ -23,6 +23,7 @@ for (const outcome of ['confirmed', 'mutation-unknown', 'stop-unknown'] as const
     let operationId: string | undefined;
     let allowInspection = outcome !== 'mutation-unknown';
     let turnCalled = false;
+    let confirmMcpStop: (() => Promise<void>) | undefined;
     const hostPi = {
       id: 'pi', profileId: 'combined-host', authorizedModel: model, capabilities: engine.capabilities,
       async readiness() {
@@ -97,9 +98,18 @@ for (const outcome of ['confirmed', 'mutation-unknown', 'stop-unknown'] as const
         if (!allowInspection) throw new Error('Inspection unavailable');
         return inspect(...args);
       };
+      const recycle = runtime.enrollmentEnvironment.recycleRunContext.bind(runtime.enrollmentEnvironment);
+      runtime.enrollmentEnvironment.recycleRunContext = async (...args) => {
+        assert.notEqual(runtime.pool.getLease(leaseId!)?.state, 'released', 'cleanup still owns the containing lease');
+        return recycle(...args);
+      };
       if (outcome === 'stop-unknown') {
         const stop = runtime.enrollmentEnvironment.stopProjectMcp.bind(runtime.enrollmentEnvironment);
         runtime.enrollmentEnvironment.stopProjectMcp = async (...args) => { const result = await stop(...args); return { ...result, status: 'uncertain' }; };
+        confirmMcpStop = async () => {
+          runtime.enrollmentEnvironment.stopProjectMcp = stop;
+          await runtime.environmentOperations.reconcileProjectMcpProcesses(INSTANCE_ID);
+        };
       }
       const run = await runtime.orchestrator.submit({ agentId: 'scout', projectId: 'combined-project', prompt: 'Call typed echo and edit target.' });
       const settled = await runtime.orchestrator.waitFor(run.id);
@@ -117,6 +127,22 @@ for (const outcome of ['confirmed', 'mutation-unknown', 'stop-unknown'] as const
           await tools!.settle!('settled');
           await waitFor(() => runtime.pool.getLease(leaseId!)?.state === 'released', 'confirmed shared lease settlement');
           assert.equal(runtime.pool.getLease(leaseId!)?.state, 'released', 'confirmed mutation settlement and MCP stop release the containing lease');
+        } else {
+          await assert.rejects(runtime.recovery.release(leaseId!), 'unconfirmed settlement cannot release recovery');
+          await confirmMcpStop!();
+          const recovery = await runtime.recovery.forLease(leaseId!);
+          assert.ok(recovery);
+          await runtime.recovery.observeReconnect(leaseId!, {
+            enrollmentId: enrollment.enrollment.id, environmentInstanceId: INSTANCE_ID,
+            ...(recovery.workerIdentityDigest !== undefined ? { workerIdentityDigest: recovery.workerIdentityDigest } : {}),
+            identityVerified: true, protocolCompatible: true, permissionsAllowed: true, hadActiveRun: true,
+          });
+          await runtime.recovery.synchronizeEvidence(leaseId!, { hadActiveRun: true, evidence: {
+            retainedEventCount: settled.events.length, turnSettlementObserved: true, engineSessionStopped: true,
+            terminalStatus: 'completed', taskContextRecycled: true,
+          } });
+          await runtime.recovery.release(leaseId!);
+          assert.equal(runtime.pool.getLease(leaseId!)?.state, 'released', 'confirmed recovery releases the same containing lease');
         }
       }
     } finally { await runtime.close(); }
