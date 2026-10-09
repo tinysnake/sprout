@@ -1,7 +1,7 @@
 import { createIdFactory, type IdFactory } from '../ids.ts';
 import type { ProjectAgentAuthorityPort } from '../project/authority-service.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
-import { sanitizeOperatorText } from '../environment/privacy.ts';
+import { sanitizeOperatorText, sanitizeProjectText } from '../environment/privacy.ts';
 import type { TaskActor, Task, TaskRunLink } from './model.ts';
 import type { TaskService } from './service.ts';
 import { TaskEnvironmentLeaseRefusal, type TaskEnvironmentLifecycle } from './environment-lifecycle.ts';
@@ -267,7 +267,7 @@ function actorSnapshot(actor: TaskActor): TaskActor {
 
 function safePrompt(value: unknown): string {
   if (typeof value !== 'string' || value.length > 16_000) throw new TaskAdmissionError('invalid-command', 'prompt must be at most 16000 characters');
-  const sanitized = sanitizeOperatorText(value, { maxLength: 16_000, fallback: '' });
+  const sanitized = sanitizeProjectText(value, { maxLength: 16_000, fallback: '' });
   if (!sanitized.trim()) throw new TaskAdmissionError('invalid-command', 'prompt must contain usable text');
   return sanitized;
 }

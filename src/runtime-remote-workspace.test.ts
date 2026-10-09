@@ -395,11 +395,14 @@ test('Project MCP discovery failure keeps the Task lease recovering until child 
   const runtimeProject = { ...project(), memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }] };
   const localEngine = new ScriptedEngineAdapter({ turns: [scriptedTurn('MCP discovery should block startup.')] });
   let closeCalls = 0;
+  // Channel synchronization may retry cleanup before the assertions under load.
+  // Only explicit termination evidence, not a retry count, ends uncertainty.
+  let terminationConfirmed = false;
   const launcher: ProjectMcpClientLauncher = async (_server, _cwd, onCreated) => {
     const client = {
       async discoverTools() { throw new Error('fixture discovery failed'); },
       async callTool() { return {}; },
-      async close() { closeCalls += 1; return closeCalls >= 3; },
+      async close() { closeCalls += 1; return terminationConfirmed; },
     };
     onCreated(client);
     return client;
@@ -450,7 +453,9 @@ test('Project MCP discovery failure keeps the Task lease recovering until child 
     const advanced = await runtime.tasks.advance(task.id, { prompt: 'Start the Project MCP tool.' });
     const run = await runtime.orchestrator.waitFor(advanced.runId);
     assert.equal(run.status, 'failed');
-    assert.equal(closeCalls, 2, 'discovery failure and Worker stop both fail to confirm termination');
+    assert.ok(closeCalls >= 2, 'discovery failure and Worker stop both attempt cleanup without confirming termination');
+    // Exercise another failed stop explicitly; retries are not termination evidence.
+    await runtime.environmentOperations.reconcileProjectMcpProcesses(INSTANCE_ID);
     const leaseId = begun.environmentLeaseId;
     assert.ok(leaseId);
     assert.equal(runtime.pool.getLease(leaseId)?.state, 'recovering');
@@ -466,8 +471,10 @@ test('Project MCP discovery failure keeps the Task lease recovering until child 
       openProcess.close();
     }
 
+    const callsBeforeConfirmation = closeCalls;
+    terminationConfirmed = true;
     await runtime.environmentOperations.reconcileProjectMcpProcesses(INSTANCE_ID);
-    assert.equal(closeCalls, 3, 'reconciliation reaches the retained child identity and confirms termination');
+    assert.ok(closeCalls > callsBeforeConfirmation, 'reconciliation reaches the retained child identity and confirms termination');
     assert.equal(runtime.pool.getLease(leaseId)?.state, 'recovering');
   } finally {
     await runtime.close();

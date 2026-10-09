@@ -33,7 +33,7 @@
 
 import type { TaskStatus } from '../task/model.ts';
 import { createHash } from 'node:crypto';
-import { redactSensitiveText, sanitizeOperatorText } from '../environment/privacy.ts';
+import { redactProjectText, sanitizeOperatorText, sanitizeProjectText } from '../environment/privacy.ts';
 
 /** Which conversation scope a durable record describes. */
 export type ConversationScopeKind = 'project' | 'direct' | 'working-group' | 'task-group';
@@ -311,7 +311,7 @@ export function canonicalDirectParticipants(
 
 /** The sanitized display name of a Working group, refusing an empty one. */
 export function sanitizeWorkingGroupDisplayName(value: string | undefined): string {
-  const name = sanitizeOperatorText(value, { fallback: '', maxLength: MAX_DISPLAY_NAME });
+  const name = sanitizeProjectText(value, { fallback: '', maxLength: MAX_DISPLAY_NAME });
   if (name === '') {
     throw new ConversationScopeError(
       'invalid-display-name',
@@ -329,7 +329,7 @@ export function sanitizeWorkingGroupDisplayName(value: string | undefined): stri
  * narrative must never become invalid identity).
  */
 export function sanitizeWorkingGroupGoal(value: string | undefined): string {
-  const text = redactSensitiveText((value ?? '').trim());
+  const text = redactProjectText((value ?? '').trim());
   return text.length <= MAX_TEXT ? text : `${text.slice(0, MAX_TEXT - 1).trimEnd()}\u2026`;
 }
 
@@ -340,7 +340,7 @@ export function sanitizeWorkingGroupRules(
   const rules: string[] = [];
   for (const entry of value ?? []) {
     if (typeof entry !== 'string') continue;
-    const text = redactSensitiveText(entry.trim());
+    const text = redactProjectText(entry.trim());
     if (text === '') continue;
     rules.push(text.length <= MAX_TEXT ? text : `${text.slice(0, MAX_TEXT - 1).trimEnd()}\u2026`);
   }

@@ -62,9 +62,11 @@ function fixture(options: {
     async recycle() {},
   };
   const submissions: { runId?: string; agentId: string; taskId?: string; environmentInstanceId?: string }[] = [];
+  const prompts: string[] = [];
   const runner = {
     async submit(request: { runId?: string; agentId: string; taskId?: string; environmentInstanceId?: string; prompt: string; projectId: string }) {
       submissions.push({ agentId: request.agentId, ...(request.runId !== undefined ? { runId: request.runId } : {}), ...(request.taskId !== undefined ? { taskId: request.taskId } : {}), ...(request.environmentInstanceId !== undefined ? { environmentInstanceId: request.environmentInstanceId } : {}) });
+      prompts.push(request.prompt);
       if (options.submitFailure) throw new Error('run submission failed');
       return { id: request.runId ?? `unlinked-${submissions.length}` };
     },
@@ -105,7 +107,7 @@ function fixture(options: {
     ids: { task: () => 'task-1', lease: () => 'unused-lease', run: () => 'unused-run', message: () => 'unused-message', projectEvent: () => 'unused-event' },
     now: () => 100,
   });
-  return { taskStore, proposalStore, pool, worker, materializations, taskGroupSnapshots, submissions, tasks, proposals, admissions };
+  return { taskStore, proposalStore, pool, worker, materializations, taskGroupSnapshots, submissions, prompts, tasks, proposals, admissions };
 }
 
 async function propose(context: ReturnType<typeof fixture>) {
@@ -156,6 +158,27 @@ test('a Human lead begins one frozen proposal snapshot without waking an Agent',
   assert.equal((await context.tasks.get(result.task.id))?.goal, content.goal);
   assert.equal((await context.proposals.get(proposal.id)).status, 'begun');
   assert.equal(context.pool.activeLease('env-a')?.taskId, result.task.id);
+});
+
+test('Task advancement preserves file references and redacts a hostname in the actual composed prompt', async () => {
+  const context = fixture();
+  const proposal = await propose(context);
+  const begun = await context.admissions.beginProposal(
+    proposal.id, { memberId: 'operator', memberKind: 'human' }, beginInput({ memberId: 'operator', memberKind: 'human' }),
+  );
+  const rawPrompt = 'Read report.final.pdf and worker.node1.tailnet.example; Also Read worker.example.md; Read README.md; Read notes/today.txt.';
+  await context.admissions.advance(begun.task.id, { memberId: 'operator', memberKind: 'human' }, {
+    targetAgentId: 'scout', reason: 'Continue the approved Task.', prompt: rawPrompt,
+  });
+  const prompt = context.prompts[0] ?? '';
+
+  assert.ok(prompt.includes('report.final.pdf'), 'the unsupported-extension filename reaches the actual composed prompt unchanged');
+  assert.ok(prompt.includes('Read report.final.pdf'), 'the explicit file instruction survives prompt composition');
+  assert.ok(prompt.includes('README.md'));
+  assert.ok(prompt.includes('notes/today.txt'));
+  assert.ok(prompt.includes('Read worker.example.md'), 'explicit context preserves an ambiguous host-shaped filename');
+  assert.ok(!prompt.includes('worker.node1.tailnet.example'), `hostname leaked in prompt: ${prompt}`);
+  assert.ok(prompt.includes('<redacted-host>'));
 });
 
 test('approve-and-begin accepts an omitted reason and records no substitute', async () => {

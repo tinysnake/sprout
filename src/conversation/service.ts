@@ -74,7 +74,7 @@ import {
 } from './model.ts';
 import { TASK_STATUSES, TASK_STATUS_DATA, isEndedTaskStatus, type TaskStatus } from '../task/model.ts';
 import type { ConversationScopeStore } from './store.ts';
-import { redactSensitiveText, sanitizeOperatorText } from '../environment/privacy.ts';
+import { redactProjectText, sanitizeProjectText } from '../environment/privacy.ts';
 import {
   sanitizeRoutingIntervalMs,
   sanitizeWakePolicy,
@@ -553,7 +553,7 @@ export class ConversationScopeService {
       throw new ConversationScopeError('task-group-content-conflict', 'Task group requires a valid Task binding and content version');
     }
     const id = taskGroupScopeId(input.taskId);
-    const taskTitle = sanitizeOperatorText(input.title, { fallback: 'Task group', maxLength: 120 });
+    const taskTitle = sanitizeProjectText(input.title, { fallback: 'Task group', maxLength: 120 });
     const goal = sanitizeWorkingGroupGoal(input.goal);
     const rules = sanitizeWorkingGroupRules(input.constraints);
     const frozenTaskStatus = TASK_STATUS_DATA[taskStatus].freezeTaskGroup ? taskStatus : undefined;
@@ -1080,8 +1080,8 @@ export class ConversationScopeService {
     const facts = await this.#facts(scope.projectId);
     const project: ScopeContext['project'] = {
       contentVersion: facts.contentVersion,
-      goal: redactSensitiveText(facts.goal),
-      rules: facts.rules.map((rule) => redactSensitiveText(rule)),
+      goal: redactProjectText(facts.goal),
+      rules: facts.rules.map((rule) => redactProjectText(rule)),
     };
     if (scope.kind === 'task-group') {
       const content = currentTaskGroupContent(scope);
@@ -1095,8 +1095,8 @@ export class ConversationScopeService {
           taskTitle: content.taskTitle,
           contentVersion: scope.content.currentVersion,
           taskContentVersion: content.taskContentVersion,
-          goal: redactSensitiveText(content.goal),
-          rules: content.rules.map((rule) => redactSensitiveText(rule)),
+          goal: redactProjectText(content.goal),
+          rules: content.rules.map((rule) => redactProjectText(rule)),
         },
       };
     }
@@ -1112,8 +1112,8 @@ export class ConversationScopeService {
       workingGroup: {
         displayName: content.displayName,
         contentVersion: scope.content.currentVersion,
-        goal: redactSensitiveText(content.goal),
-        rules: content.rules.map((rule) => redactSensitiveText(rule)),
+        goal: redactProjectText(content.goal),
+        rules: content.rules.map((rule) => redactProjectText(rule)),
       },
     };
   }

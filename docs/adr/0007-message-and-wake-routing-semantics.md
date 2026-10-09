@@ -254,6 +254,47 @@ model with the source exclusions and limited redaction guarantee above. It
 satisfies #179 AC4's reconciliation trigger by recording the accepted risk;
 shape-independent sanitization is not implemented or required by this decision.
 
+## Model-visible Project file references
+
+Project and Task prose can name files the Agent must inspect. The shared contextual
+redactor preserves a relative reference when it is a slash-separated path with
+simple directory components, or when explicit file context directly names one
+dotted filename token (for example, after a file operation, a `file`, `filename`,
+or `path` label, or inside inline code). A bare filename in that context is
+preserved if it does not match the dotted-host shape. After that shape check,
+a bare **two-label** token ending in a common host TLD (`.com`, `.net`, `.org`,
+`.io`) is preserved. A host:port token is not bare and does not gain this exception.
+For all other matching tokens, labels in the IANA root-zone TLD snapshot and
+IANA's special-use single-label names have host precedence unless classified in
+the curated `FILE_LIKELY_SUFFIXES` set. Common host TLDs are excluded from that
+set: tokens with **three or more labels**, including `Read api.github.com`,
+`Read installer.v2.com`, and `Read worker.node1.tailnet.com`, still redact.
+
+The two-label exemption exists because `Read installer.com` and `Read github.com`
+are lexically identical: same position, label count, and suffix. No local text
+signal separates the filename from the hostname. The Human chose file preference
+for this class ([#257 decision](https://github.com/tinysnake/sprout/issues/257#issuecomment-6085092145)).
+Therefore a bare two-label common-TLD hostname in explicit file context is **not
+redacted**. This accepted cost concerns Human-authored Project/Task prose, not
+permission to expose host-environment names or addresses. Outside file context,
+ordinary dotted-host redaction is unchanged: `Connect to github.com` redacts.
+
+`report.final.pdf` and `some.unknown.qqq` survive because their suffixes are not
+IANA host suffixes; `README.md`, `parser.pl`, and `config.in` survive because
+these suffixes are classified as file-likely despite their TLD overlap.
+`worker.node1.tailnet.example` and `worker.node1.tailnet.fail` are redacted.
+Numeric-label filenames such as `notes.2024.10.md` do not match the dotted-host
+shape. This is a prose classification, not proof of a token's real identity:
+`Read installer.com` is preserved by the two-label decision, while
+`Read files/installer.com` is preserved as a structural relative path. A host using a
+file-likely suffix can survive explicit file context; the same dotted-host
+shape outside file context is redacted. Unknown non-IANA suffixes in explicit
+file context remain preserved without requiring a filename-extension registry.
+All earlier sensitive-category rules still run, including private host suffixes,
+named host/port assignments, credentials, URLs, identities, and absolute paths.
+The general free-text redactor used for Environment, diagnostic, and AgentRun
+output stays context-free.
+
 ## Failure, suppression, admission, and retry
 
 A missing or unavailable model, timeout, exception, invalid identifier,

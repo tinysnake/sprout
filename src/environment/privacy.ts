@@ -1,3 +1,5 @@
+import { IANA_HOST_SUFFIXES } from './iana-tlds.ts';
+
 /**
  * Structured privacy boundary for free-form Environment text (#87, ADR-0009).
  *
@@ -11,13 +13,14 @@
  * Redaction is pattern-based defence in depth: it removes recognized sensitive
  * categories and keeps the decisive operator-facing remainder, so a reason stays useful ("host
  * retired", "worker protocol 3.0 is newer than the maximum v2") while a leaked
- * path or credential is replaced by a bounded category placeholder. Coverage is
- * general rather than a list of known host roots: any absolute POSIX path, any
- * dotted or machine-style hostname, and any `credential=value` assignment is
- * removed, because the boundary exists precisely for the text nobody
- * anticipated. For routing-context free text, the owner accepted best-effort
- * value-level detection at this stage (#97 acceptance amendment). Unlabelled
- * opaque values can survive; #179 revisits this before a real production wake
+ * path or credential is replaced by a bounded category placeholder. The general
+ * boundary is broad rather than a list of known host roots: it removes any
+ * absolute POSIX path, dotted or machine-style hostname, and supported
+ * `credential=value` assignment. Model-facing Project and Task prose uses a
+ * contextual redactor that preserves relative paths and applies authoritative
+ * suffix checks to context-named filenames. Routing-context free text uses the
+ * owner-accepted best-effort value-level detection at this stage (#97 acceptance
+ * amendment). Unlabelled opaque values can survive; #179 revisits this before a real production wake
  * model is configured or full M2 acceptance. Sprout-owned keys must never be
  * put in prose for this scanner to discover. This Module is deliberately free
  * of `node:*` so the browser wire contract can import it.
@@ -113,6 +116,41 @@ const CREDENTIAL_VALUE =
  * value even when the token is a short lowercase word.
  */
 const CREDENTIAL_VALUE_ASSIGNED = String.raw`(?:"[^"]*"|'[^']*'|[^\s,;]+)`;
+
+const DOTTED_HOST_SOURCE = String.raw`(?:[A-Za-z][A-Za-z0-9-]*\.)+[A-Za-z]{2,}`;
+const DOTTED_HOST_PATTERN = new RegExp(String.raw`(?<![\w.-])${DOTTED_HOST_SOURCE}(?![\w.-])`, 'g');
+const DOTTED_HOST_TOKEN_PATTERN = new RegExp(`^${DOTTED_HOST_SOURCE}$`);
+
+/** Human-chosen file preference applies only to two-label tokens in file context. */
+const COMMON_HOST_SUFFIXES = new Set(['com', 'net', 'org', 'io']);
+
+/**
+ * File-likely suffixes in Project prose. This classification deliberately
+ * excludes common host suffixes such as com, net, org, and io, even when they
+ * can name files. Unknown non-IANA suffixes do not need membership here.
+ */
+const FILE_LIKELY_SUFFIXES = new Set(
+  String.raw`
+    adoc ai app as avi avif aac bash bib bmp bz2 c cc cfg cjs conf cpp cts css csv
+    dll doc docx epub err exe flac gif gql graphql gz h hpp heic htm html in ipynb ini
+    java jpeg jpg js json json5 jsonc jsx kt kts less lock log m4a md mdx me mov
+    mp3 mpeg mpg mts mjs mkv mobi ogg odt ods odp pdf png ppt pptx properties
+    pl pro proto py rb rar rst rs rtf sass scss sh so sql svg svelte tar tex tgz tif
+    tiff toml ts tsv tsx txt text vue wav webm webp xls xlsx xml xz yaml yml zip
+    7z 3gp
+  `.split(/\s+/),
+);
+
+/** A dotted relative path or filename token; bare tokens need explicit file context. */
+const PROJECT_FILE_REFERENCE = new RegExp(
+  String.raw`(?<![A-Za-z0-9._~\\/:@-])(?:[A-Za-z0-9_~-]+\/)*[A-Za-z0-9_~-][A-Za-z0-9._~-]*\.[A-Za-z0-9._~-]*(?![A-Za-z0-9._~-])`,
+  'gi',
+);
+
+const PROJECT_FILE_INTENT_PREFIX =
+  /(?:\b(?:read|open|edit|modify|update|create|write|review|inspect|check|find|search|list|remove|delete|rename|move|copy|patch|touch|diff|build|compile|format|test|verify|include|exclude|mention|preserve|keep|use|see)\s+(?:(?:the|this|that|a)\s+)?|\b(?:file|filename|path)\s*(?:(?:is)\s+|[:=]\s*)?|`)\s*$/i;
+
+const PROJECT_FILE_INTENT_SUFFIX = /^\s+(?:file|filename|path)\b/i;
 
 /** Categories this boundary removes before text can be persisted or returned. */
 const REDACTIONS: readonly { readonly pattern: RegExp; readonly replacement: string }[] = [
@@ -210,7 +248,7 @@ const REDACTIONS: readonly { readonly pattern: RegExp; readonly replacement: str
   // free-text reason has no legitimate FQDN, and a decisive reason does not need
   // one to stay decisive. The boundaries stop a model identifier like
   // `gpt-5.6-terra` (whose internal `6.terra` is not a host) from matching.
-  { pattern: /(?<![\w.-])(?:[A-Za-z][A-Za-z0-9-]*\.)+[A-Za-z]{2,}(?![\w.-])/g, replacement: '<redacted-host>' },
+  { pattern: DOTTED_HOST_PATTERN, replacement: '<redacted-host>' },
   // A machine-style bare hostname: a hyphenated word with a numeric suffix
   // (`buildbox-7`, `node-01`) or a machine word directly followed by digits
   // (`host9`, `node12`). The rule covers a one-digit suffix too, because a host
@@ -241,18 +279,78 @@ const REDACTIONS: readonly { readonly pattern: RegExp; readonly replacement: str
 ];
 
 /**
- * Remove recognized sensitive patterns from one text value. This is not proof
- * that arbitrary free text is secret-free (see #97 amendment and #179).
- *
- * Exported so a caller that must test the boundary can assert the categories
- * directly rather than reconstructing them through a record.
+ * Apply one redaction context over the shared category rules. The general
+ * context treats every dotted token as a host; Project/Task prose uses the
+ * contextual file-reference and authoritative-suffix rule below.
  */
-export function redactSensitiveText(value: string): string {
+function redactText(value: string, projectText: boolean): string {
   let text = value;
   for (const { pattern, replacement } of REDACTIONS) {
-    text = text.replace(pattern, replacement);
+    if (projectText && pattern === DOTTED_HOST_PATTERN) {
+      text = redactDottedHostsExceptProjectFiles(text, replacement);
+    } else {
+      text = text.replace(pattern, replacement);
+    }
   }
   return text.replace(/[ \t]{2,}/g, ' ').trim();
+}
+
+/**
+ * Remove recognized sensitive patterns from one general text value.
+ *
+ * This is not proof that arbitrary free text is secret-free (see #97 amendment
+ * and #179). Its hostname and filename behavior remains context-free.
+ */
+export function redactSensitiveText(value: string): string {
+  return redactText(value, false);
+}
+
+/**
+ * Redact model-facing Project and Task prose while retaining relative file
+ * references. Slash-separated paths with simple directory components are
+ * recognized structurally. A bare dotted filename needs explicit file context;
+ * it is still redacted when it matches the host shape and its final label is an
+ * IANA root-zone or special-use name, unless classified as file-likely above.
+ * In file context, two-label common-host tokens (com, net, org, io) are preserved:
+ * Read installer.com and Read github.com are lexically indistinguishable. Three
+ * or more labels retain host precedence; slash paths remain structural files.
+ * Unknown non-IANA suffixes in file context remain filenames.
+ */
+export function redactProjectText(value: string): string {
+  return redactText(value, true);
+}
+
+function redactDottedHostsExceptProjectFiles(value: string, replacement: string): string {
+  const protectedFiles = [...value.matchAll(PROJECT_FILE_REFERENCE)].filter((match) => {
+    const filename = match[0];
+    const offset = match.index ?? 0;
+    if (filename.includes('/')) return true;
+    const prefix = value.slice(Math.max(0, offset - 64), offset);
+    const suffix = value.slice(offset + filename.length);
+    const inFileContext = PROJECT_FILE_INTENT_PREFIX.test(prefix) || PROJECT_FILE_INTENT_SUFFIX.test(suffix);
+    if (!inFileContext) return false;
+
+    if (!DOTTED_HOST_TOKEN_PATTERN.test(filename)) return true;
+    const labels = filename.split('.');
+    const finalLabel = labels[labels.length - 1]!.toLowerCase();
+    if (labels.length === 2 && COMMON_HOST_SUFFIXES.has(finalLabel) && !/^:\d+\b/.test(suffix)) return true;
+    const isKnownHost =
+      IANA_HOST_SUFFIXES.has(finalLabel) &&
+      !FILE_LIKELY_SUFFIXES.has(finalLabel);
+    return !isKnownHost;
+  });
+  if (protectedFiles.length === 0) return value.replace(DOTTED_HOST_PATTERN, replacement);
+
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const match of protectedFiles) {
+    const start = match.index ?? 0;
+    parts.push(value.slice(cursor, start).replace(DOTTED_HOST_PATTERN, replacement));
+    parts.push(match[0]);
+    cursor = start + match[0].length;
+  }
+  parts.push(value.slice(cursor).replace(DOTTED_HOST_PATTERN, replacement));
+  return parts.join('');
 }
 
 export interface SanitizeTextOptions {
@@ -272,8 +370,21 @@ const DEFAULT_MAX_LENGTH = 320;
  * sensitive material.
  */
 export function sanitizeOperatorText(value: string | undefined, options: SanitizeTextOptions): string {
+  return sanitizeText(value, options, redactSensitiveText);
+}
+
+/** Sanitize bounded Project/Task prose with the contextual suffix classifier. */
+export function sanitizeProjectText(value: string | undefined, options: SanitizeTextOptions): string {
+  return sanitizeText(value, options, redactProjectText);
+}
+
+function sanitizeText(
+  value: string | undefined,
+  options: SanitizeTextOptions,
+  redact: (text: string) => string,
+): string {
   const maxLength = options.maxLength ?? DEFAULT_MAX_LENGTH;
-  const redacted = redactSensitiveText((value ?? '').trim());
+  const redacted = redact((value ?? '').trim());
   // A value that reduced to nothing but placeholders, punctuation, digits, and a
   // port is not a decisive reason; fall back to the product-owned text.
   const remainder = redacted.replace(/<redacted-[a-z-]+>/gi, '').replace(/[\s:.,;/0-9-]/g, '');
