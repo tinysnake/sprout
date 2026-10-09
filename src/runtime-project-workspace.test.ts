@@ -125,10 +125,11 @@ test('the composed Project access capability grants a validated workspace and ga
   await runtime.close();
 });
 
-test('a composed run records the durable workspace binding it was admitted under (#93)', async () => {
+test('a composed run records the durable workspace binding it was admitted under (#93)', async (t) => {
   const { runtime } = await build({
     turns: [scriptedTurn('composition reply')],
   });
+  t.after(() => runtime.close());
   await runtime.projectService.create({ id: 'project-bound', displayName: 'Bound' });
   const requested = await runtime.enrollments.requestEnrollment({
     environmentInstanceId: INSTANCE_ID,
@@ -161,7 +162,9 @@ test('a composed run records the durable workspace binding it was admitted under
   assert.deepEqual(
     run.workspaceBinding,
     {
+      environmentInstanceId: INSTANCE_ID,
       bindingId: durable?.current?.bindingId,
+      generation: durable?.current?.generation,
       workspaceId: durable?.current?.workspaceId,
       kind: 'relative',
       path: 'repos/sprout',
@@ -209,6 +212,4 @@ test('a composed run records the durable workspace binding it was admitted under
     false,
     'the raw durable corruption is neither run history nor a Worker-bound fact',
   );
-
-  await runtime.close();
 });
