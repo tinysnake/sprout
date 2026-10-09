@@ -265,7 +265,7 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
 
   async inspectProjectMcpConfiguration(environmentInstanceId: string, input: InspectProjectMcpConfigurationParams): Promise<InspectProjectMcpConfigurationResult> {
     const connection = await this.#connection(environmentInstanceId);
-    if (!connection || connection.info.workspaceOperations?.version !== 1 ||
+    if (!connection || !connection.info.workspaceOperations || ![1, 2, 3].includes(connection.info.workspaceOperations.version) ||
       !connection.info.workspaceOperations.operations.includes('inspect-mcp-configuration') ||
       this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
     const result = await connection.contexts.inspectProjectMcpConfiguration(input);
@@ -275,7 +275,7 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
 
   async startProjectMcp(environmentInstanceId: string, input: StartProjectMcpParams): Promise<StartProjectMcpResult> {
     const connection = await this.#connection(environmentInstanceId);
-    if (!connection || connection.info.workspaceOperations?.version !== 1 || !connection.info.workspaceOperations.operations.includes('start-project-mcp') || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    if (!connection || !connection.info.workspaceOperations || ![1, 2, 3].includes(connection.info.workspaceOperations.version) || !connection.info.workspaceOperations.operations.includes('start-project-mcp') || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
     const result = await connection.contexts.startProjectMcp(input);
     if (this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error('stale Worker epoch');
     return result;
@@ -283,7 +283,7 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
 
   async callProjectMcpTool(environmentInstanceId: string, input: CallProjectMcpToolParams): Promise<CallProjectMcpToolResult> {
     const connection = await this.#connection(environmentInstanceId);
-    if (!connection || connection.info.workspaceOperations?.version !== 1 || !connection.info.workspaceOperations.operations.includes('call-project-mcp-tool') || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    if (!connection || !connection.info.workspaceOperations || ![1, 2, 3].includes(connection.info.workspaceOperations.version) || !connection.info.workspaceOperations.operations.includes('call-project-mcp-tool') || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
     const result = await connection.contexts.callProjectMcpTool(input);
     if (this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error('stale Worker epoch');
     return result;
@@ -291,7 +291,7 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
 
   async stopProjectMcp(environmentInstanceId: string, input: StopProjectMcpParams): Promise<StopProjectMcpResult> {
     const connection = await this.#connection(environmentInstanceId);
-    if (!connection || connection.info.workspaceOperations?.version !== 1 || !connection.info.workspaceOperations.operations.includes('stop-project-mcp') || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    if (!connection || !connection.info.workspaceOperations || ![1, 2, 3].includes(connection.info.workspaceOperations.version) || !connection.info.workspaceOperations.operations.includes('stop-project-mcp') || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
     const result = await connection.contexts.stopProjectMcp(input);
     if (this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error('stale Worker epoch');
     return result;

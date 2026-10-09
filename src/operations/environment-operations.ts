@@ -381,7 +381,6 @@ export class EnvironmentOperations {
     };
   }
 
-  async attach(projectId: string, agentId: string): Promise<RemoteWorkspaceTools> {
   async attach(projectId: string, agentId: string, runId?: string, onLeaseAcquired?: (leaseId: string) => Promise<void>): Promise<RemoteWorkspaceTools> {
     const project = await this.#projects.get(projectId);
     if (!project || project.status !== 'active' || !hasAgent(project, agentId)) throw new RemoteWorkspaceUnavailableError('project-denied');

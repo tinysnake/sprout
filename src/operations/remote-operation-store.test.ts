@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
 import { MemoryRemoteOperationIdentityStore, SqliteRemoteOperationIdentityStore } from './remote-operation-store.ts';
-import type { RemoteMcpOperationIdentity, RemoteMcpProcessIdentity } from './remote-operation-store.ts';
+import type { RemoteOperationIdentity, RemoteMcpOperationIdentity, RemoteMcpProcessIdentity } from './remote-operation-store.ts';
 
 const processIdentity: RemoteMcpProcessIdentity = {
   projectId: 'project-1', environmentInstanceId: 'environment-1', bindingId: 'binding-1', generation: 2,
