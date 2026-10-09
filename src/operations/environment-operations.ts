@@ -429,7 +429,11 @@ export class EnvironmentOperations {
     const runContext: RunContextParams | undefined = runId === undefined ? undefined : { ...fixed, runId };
     let runContextState: 'absent' | 'prepared' | 'unknown' = 'absent';
     let contextPreparationUncertain = false;
-    let mutationLease: EnvironmentLease | undefined;
+    let mutationLease: EnvironmentLease | undefined = containingLease === undefined ? undefined : this.#pool?.getLease(containingLease.leaseId);
+    if (containingLease !== undefined && (containingLease.runId !== runId ||
+        !sameMcpLease(mutationLease, containingLease) || mutationLease?.state !== 'active')) {
+      throw new RemoteWorkspaceUnavailableError('lease-required');
+    }
     let leaseAcquisition: Promise<{ readonly acquired?: EnvironmentLease; readonly conflict?: { readonly holderId: string; readonly state: 'active' | 'recovering' }; readonly failure?: string }> | undefined;
     let pendingOperations = 0;
     let uncertainOutcome = false;

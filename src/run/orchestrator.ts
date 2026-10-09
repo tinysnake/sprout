@@ -816,6 +816,7 @@ export class RunOrchestrator {
       });
     } finally {
       if (initial.leaseId !== undefined) {
+        if (remoteSettlementUnknown) this.#pool.markRecovering(initial.leaseId);
         let stopCertain = !mcpMayHaveStarted;
         if (remoteProjectMcp !== undefined) {
           try { stopCertain = (await remoteProjectMcp.close()) === 'stopped'; }
@@ -832,7 +833,7 @@ export class RunOrchestrator {
       }
       // A containing lease may have had no workspace mutations. Never release
       // before workspace settlement, or after either surface reports uncertainty.
-      if (initial.leaseId !== undefined && containingLeaseCanRelease &&
+      if (remoteWorkspace === undefined && initial.leaseId !== undefined && containingLeaseCanRelease &&
           this.#pool.getLease(initial.leaseId)?.state === 'active') this.#pool.releaseLease(initial.leaseId);
     }
   }

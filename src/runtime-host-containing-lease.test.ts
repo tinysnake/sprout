@@ -9,7 +9,7 @@ import type { StartSessionRequest, RemoteWorkspaceTools } from './engine/port.ts
 import { loadOrCreateWorkerIdentity, workerPublicKey } from './worker/enrollment-connector.ts';
 import { connectRuntimeWorker, createRuntime, hostConfiguration, INSTANCE_ID, project, scriptedTurn, waitFor } from './runtime-test-harness.ts';
 
-for (const outcome of ['confirmed', 'mutation-unknown', 'stop-unknown'] as const) {
+for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unknown', 'stop-unknown'] as const) {
   test(`one Host Pi turn calls typed MCP and remotely edits under the same protected containing lease: ${outcome}`, async t => {
     const directory = mkdtempSync(join(tmpdir(), 'sprout-combined-host-'));
     t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -46,13 +46,16 @@ for (const outcome of ['confirmed', 'mutation-unknown', 'stop-unknown'] as const
             assert.equal(lease.capability, 'project-mcp');
             assert.equal(lease.state, 'active');
             assert.deepEqual(await mcp.call(mcp.tools[0]!.name, { text: 'typed call' }), { status: 'completed', text: 'typed call' });
-            const edit = await tools.edit('target.txt', 'before', 'after', 'combined-edit');
-            operationId = edit.operationId;
-            assert.equal(edit.status, outcome === 'mutation-unknown' ? 'failed' : 'completed', `remote edit: ${edit.failure}`);
-            if (outcome === 'mutation-unknown') assert.equal(edit.failure, 'outcome-unknown-inspect-required');
-            assert.equal(readFileSync(join(workspace, 'target.txt'), 'utf8'), 'after');
-            assert.deepEqual(runtime.pool.leases().map(row => row.id), [leaseId]);
-            return turn.completion;
+            if (outcome !== 'no-mutation') {
+              const edit = await tools.edit('target.txt', 'before', 'after', 'combined-edit');
+              operationId = edit.operationId;
+              assert.equal(edit.status, outcome === 'mutation-unknown' ? 'failed' : 'completed', `remote edit: ${edit.failure}`);
+              if (outcome === 'mutation-unknown') assert.equal(edit.failure, 'outcome-unknown-inspect-required');
+              assert.equal(readFileSync(join(workspace, 'target.txt'), 'utf8'), 'after');
+              assert.deepEqual(runtime.pool.leases().map(row => row.id), [leaseId]);
+            }
+            const result = await turn.completion;
+            return outcome === 'turn-unknown' ? { ...result, status: 'interrupted' as const } : result;
           })() };
         }, interrupt: session.interrupt.bind(session), close: session.close.bind(session) };
       },
@@ -113,10 +116,10 @@ for (const outcome of ['confirmed', 'mutation-unknown', 'stop-unknown'] as const
       }
       const run = await runtime.orchestrator.submit({ agentId: 'scout', projectId: 'combined-project', prompt: 'Call typed echo and edit target.' });
       const settled = await runtime.orchestrator.waitFor(run.id);
-      assert.equal(settled.status, 'completed', settled.failure ?? 'Host turn failed');
+      assert.equal(settled.status, outcome === 'turn-unknown' ? 'interrupted' : 'completed', settled.failure ?? 'Host turn failed');
       assert.equal(turnCalled, true);
       assert.equal(settled.leaseId, leaseId);
-      if (outcome === 'confirmed') assert.equal(runtime.pool.getLease(leaseId!)?.state, 'released');
+      if (outcome === 'confirmed' || outcome === 'no-mutation') assert.equal(runtime.pool.getLease(leaseId!)?.state, 'released');
       else {
         assert.equal(runtime.pool.getLease(leaseId!)?.state, 'recovering');
         const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'another-run', runId: 'another-run', ttlMs: 60_000 });
@@ -127,7 +130,7 @@ for (const outcome of ['confirmed', 'mutation-unknown', 'stop-unknown'] as const
           await tools!.settle!('settled');
           await waitFor(() => runtime.pool.getLease(leaseId!)?.state === 'released', 'confirmed shared lease settlement');
           assert.equal(runtime.pool.getLease(leaseId!)?.state, 'released', 'confirmed mutation settlement and MCP stop release the containing lease');
-        } else {
+        } else if (outcome === 'stop-unknown') {
           await assert.rejects(runtime.recovery.release(leaseId!), 'unconfirmed settlement cannot release recovery');
           await confirmMcpStop!();
           const recovery = await runtime.recovery.forLease(leaseId!);
