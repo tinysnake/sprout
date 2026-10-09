@@ -17,6 +17,7 @@ for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unk
     const timed = outcome.endsWith('past-ttl') || discoveryHeld;
     let discoveryConflict: boolean | undefined;
     let discoveryLeaseState: string | undefined;
+    let discoveryProcessId: string | undefined;
     const leaseTtlMs = 3_000;
     let workspaceSettled = false;
     let mcpStopped = false;
@@ -115,6 +116,7 @@ for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unk
       if (discoveryHeld) {
         const start = runtime.enrollmentEnvironment.startProjectMcp.bind(runtime.enrollmentEnvironment);
         runtime.enrollmentEnvironment.startProjectMcp = async (...args) => {
+          discoveryProcessId = args[1].processId;
           const starting = start(...args);
           try {
             await waitFor(() => existsSync(join(workspace, 'discovery-held')), 'real stdio MCP discovery request');
@@ -225,6 +227,7 @@ for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unk
           assert.equal(processes.length, 1);
           assert.equal(processes[0]!.leaseId, leaseId);
           assert.equal(processes[0]!.state, 'uncertain');
+          if (discoveryHeld) assert.equal(processes[0]!.processId, discoveryProcessId, 'recovery retains the process identity dispatched before discovery');
           await assert.rejects(runtime.recovery.release(leaseId!), 'unconfirmed settlement cannot release recovery');
           await confirmMcpStop!();
           const recovery = await runtime.recovery.forLease(leaseId!);
