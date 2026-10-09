@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { IANA_HOST_SUFFIXES } from './iana-tlds.ts';
 
 import {
   redactSensitiveText,
@@ -190,6 +191,53 @@ test('Project prose preserves clear relative filenames while general hostnames s
   assert.ok(sensitive.includes('<redacted-path>'));
   assert.ok(sensitive.includes('<redacted-url>'));
   assert.ok(sensitive.includes('<redacted-credential>'));
+});
+
+test('file context preserves known extensions and unfamiliar non-host suffixes, but redacts authoritative host suffixes', () => {
+  const cases = [
+    ['Read report.final.pdf', 'Read report.final.pdf'],
+    ['Read README.md', 'Read README.md'],
+    ['Read notes/today.txt; Read logs/app.log', 'Read notes/today.txt; Read logs/app.log'],
+    ['Read notes.2024.10.md', 'Read notes.2024.10.md'],
+    ['Read spec.v2.xlsx', 'Read spec.v2.xlsx'],
+    ['Read data.tar.gz', 'Read data.tar.gz'],
+    ['Read a.b.c; Read README.', 'Read a.b.c; Read README.'],
+    ['Read some.unknown.qqq', 'Read some.unknown.qqq'],
+    ['Read worker.node1.tailnet.com', 'Read <redacted-host>'],
+    ['Read worker.node1.tailnet.example', 'Read <redacted-host>'],
+    ['worker.node1.tailnet.example', '<redacted-host>'],
+    ['Connect to worker.node1.tailnet.example', 'Connect to <redacted-host>'],
+    ['Open the file at worker.node1.tailnet.example', 'Open the file at <redacted-host>'],
+  ] as const;
+  for (const [input, expected] of cases) {
+    assert.equal(redactProjectText(input), expected, input);
+  }
+
+  assert.equal(IANA_HOST_SUFFIXES.has('md'), true, '.md is in the IANA root-zone list');
+  assert.equal(IANA_HOST_SUFFIXES.has('example'), true, '.example is included through IANA special-use names');
+  assert.equal(IANA_HOST_SUFFIXES.has('qqq'), false, '.qqq is not an authoritative host suffix');
+  assert.equal(
+    redactProjectText('Connect to gateway.internal:41020'),
+    'Connect to <redacted-host>:41020',
+  );
+  assert.equal(redactProjectText('host=worker-7; port=41020'), '<redacted-host>; <redacted-host>');
+
+  const sensitive = redactProjectText(
+    'gateway.internal:41020; host=worker-7; port=41020; path=/Users/example/private; ' +
+      'api_key={{API_KEY_TEST}}; URL https://user:pass@internal.example/data; ' +
+      'email ops@example.com; payload {"model":"gpt-6","messages":[{"content":"api_key={{API_KEY_TEST}}"}]}',
+  );
+  assert.ok(sensitive.includes('<redacted-host>:41020'));
+  assert.ok(sensitive.includes('<redacted-path>'));
+  assert.ok(sensitive.includes('<redacted-credential>'));
+  assert.ok(sensitive.includes('<redacted-url>'));
+  assert.ok(sensitive.includes('<redacted-identity>'));
+  for (const privateValue of [
+    'gateway.internal', 'host=worker-7', 'port=41020', '/Users/example/private',
+    'API_KEY_TEST', 'https://user:pass@', 'ops@example.com',
+  ]) {
+    assert.equal(sensitive.includes(privateValue), false, `${privateValue} survived Project sanitization`);
+  }
 });
 
 test('a model identifier is not mistaken for a hostname', () => {

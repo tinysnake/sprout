@@ -53,9 +53,10 @@ test('Human and Agent proposals share validated attributable content without exe
 
 test('a Task content version preserves relative Project filenames and redacts hostnames in its composed prompt', async () => {
   const { service } = fixture();
+  const hostname = 'worker.node1.tailnet.example';
   const contentInput = {
     title: 'Review README.md',
-    goal: 'Read report.final.pdf; Read README.md; Read notes/today.txt; report any issue with worker.node1.tailnet.example',
+    goal: `Read report.final.pdf; Read ${hostname}; Read README.md; Read notes/today.txt; report any issue with ${hostname}`,
     constraints: ['Keep notes/today.txt unchanged.'],
     validationCriteria: ['Confirm the instructions in README.md.'],
   };
@@ -75,10 +76,14 @@ test('a Task content version preserves relative Project filenames and redacts ho
   };
   const prompt = renderTaskPrompt(buildTaskContext(task, []), 'Continue with the requested files.');
 
-  assert.ok(prompt.includes('report.final.pdf'), 'the unsupported-extension filename reaches the composed Task prompt unchanged');
+  assert.ok(
+    prompt.includes('Read report.final.pdf; Read <redacted-host>; Read README.md'),
+    'the filename survives while the immediately following hostname is redacted in the composed prompt',
+  );
+  assert.ok(prompt.includes('report.final.pdf'), 'the filename reaches the composed Task prompt unchanged');
   assert.ok(prompt.includes('README.md'), 'the dotted root filename reaches the composed prompt unchanged');
   assert.ok(prompt.includes('notes/today.txt'), 'the dotted relative path reaches the composed prompt unchanged');
-  assert.ok(!prompt.includes('worker.node1.tailnet.example'), 'the hostname is redacted from the same prompt');
+  assert.ok(!prompt.includes(hostname), `the hostname is redacted from the same prompt; composed prompt was: ${prompt}`);
   assert.ok(prompt.includes('<redacted-host>'), 'the prompt makes the hostname redaction visible');
 });
 

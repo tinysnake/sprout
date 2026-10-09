@@ -1,3 +1,5 @@
+import { IANA_HOST_SUFFIXES } from './iana-tlds.ts';
+
 /**
  * Structured privacy boundary for free-form Environment text (#87, ADR-0009).
  *
@@ -14,11 +16,11 @@
  * path or credential is replaced by a bounded category placeholder. The general
  * boundary is broad rather than a list of known host roots: it removes any
  * absolute POSIX path, dotted or machine-style hostname, and supported
- * `credential=value` assignment. Model-facing Project and Task prose uses the
- * separate contextual redactor below, which exempts only clear relative file
- * references from the dotted-host rule. For routing-context free text, the owner accepted best-effort
- * value-level detection at this stage (#97 acceptance amendment). Unlabelled
- * opaque values can survive; #179 revisits this before a real production wake
+ * `credential=value` assignment. Model-facing Project and Task prose uses a
+ * contextual redactor that preserves relative paths and applies authoritative
+ * suffix checks to context-named filenames. Routing-context free text uses the
+ * owner-accepted best-effort value-level detection at this stage (#97 acceptance
+ * amendment). Unlabelled opaque values can survive; #179 revisits this before a real production wake
  * model is configured or full M2 acceptance. Sprout-owned keys must never be
  * put in prose for this scanner to discover. This Module is deliberately free
  * of `node:*` so the browser wire contract can import it.
@@ -115,7 +117,26 @@ const CREDENTIAL_VALUE =
  */
 const CREDENTIAL_VALUE_ASSIGNED = String.raw`(?:"[^"]*"|'[^']*'|[^\s,;]+)`;
 
-const DOTTED_HOST_PATTERN = /(?<![\w.-])(?:[A-Za-z][A-Za-z0-9-]*\.)+[A-Za-z]{2,}(?![\w.-])/g;
+const DOTTED_HOST_SOURCE = String.raw`(?:[A-Za-z][A-Za-z0-9-]*\.)+[A-Za-z]{2,}`;
+const DOTTED_HOST_PATTERN = new RegExp(String.raw`(?<![\w.-])${DOTTED_HOST_SOURCE}(?![\w.-])`, 'g');
+const DOTTED_HOST_TOKEN_PATTERN = new RegExp(`^${DOTTED_HOST_SOURCE}$`);
+
+/**
+ * File suffixes known to name Project files. A matching suffix only exempts a
+ * contextually named token from host redaction; an unfamiliar suffix is still
+ * preserved when it is not an authoritative host suffix.
+ */
+const KNOWN_PROJECT_FILE_EXTENSIONS = new Set(
+  String.raw`
+    adoc ai app avi avif aac bash bib bmp bz2 c cc cfg cjs conf cpp cts css csv
+    doc docx epub err flac gif gql graphql gz h hpp heic htm html ipynb ini io
+    java jpeg jpg js json json5 jsonc jsx kt kts less lock log m4a md mdx me mov
+    mp3 mpeg mpg mts mjs mkv mobi ogg odt ods odp pdf png ppt pptx properties
+    pro proto py rb rar rst rs rtf sass scss sh so sql svg svelte tar tex tgz tif
+    tiff toml ts tsv tsx txt text vue wav webm webp xls xlsx xml xz yaml yml zip
+    7z 3gp
+  `.split(/\s+/),
+);
 
 /** A dotted relative path or filename token; bare tokens need explicit file context. */
 const PROJECT_FILE_REFERENCE = new RegExp(
@@ -256,8 +277,8 @@ const REDACTIONS: readonly { readonly pattern: RegExp; readonly replacement: str
 
 /**
  * Apply one redaction context over the shared category rules. The general
- * context treats every dotted token as a host; Project/Task prose opts into the
- * narrow relative-filename exception below.
+ * context treats every dotted token as a host; Project/Task prose uses the
+ * contextual file-reference and authoritative-suffix rule below.
  */
 function redactText(value: string, projectText: boolean): string {
   let text = value;
@@ -284,10 +305,10 @@ export function redactSensitiveText(value: string): string {
 /**
  * Redact model-facing Project and Task prose while retaining relative file
  * references. Slash-separated paths with simple directory components are
- * recognized structurally; a bare filename is retained only when explicit file
- * context names it, such as a file operation, a file/filename/path label, or
- * inline code. The filename's extension is not part of the decision. Every other
- * privacy rule, including hostname detection, still runs unchanged.
+ * recognized structurally. A bare dotted filename needs explicit file context;
+ * it is still redacted when it matches the host shape and its final label is an
+ * IANA root-zone or special-use name, unless that label is a known file extension.
+ * Unrecognized suffixes that are not authoritative host names remain filenames.
  */
 export function redactProjectText(value: string): string {
   return redactText(value, true);
@@ -300,7 +321,15 @@ function redactDottedHostsExceptProjectFiles(value: string, replacement: string)
     if (filename.includes('/')) return true;
     const prefix = value.slice(Math.max(0, offset - 64), offset);
     const suffix = value.slice(offset + filename.length);
-    return PROJECT_FILE_INTENT_PREFIX.test(prefix) || PROJECT_FILE_INTENT_SUFFIX.test(suffix);
+    const inFileContext = PROJECT_FILE_INTENT_PREFIX.test(prefix) || PROJECT_FILE_INTENT_SUFFIX.test(suffix);
+    if (!inFileContext) return false;
+
+    const finalLabel = filename.slice(filename.lastIndexOf('.') + 1).toLowerCase();
+    const isKnownHost =
+      DOTTED_HOST_TOKEN_PATTERN.test(filename) &&
+      IANA_HOST_SUFFIXES.has(finalLabel) &&
+      !KNOWN_PROJECT_FILE_EXTENSIONS.has(finalLabel);
+    return !isKnownHost;
   });
   if (protectedFiles.length === 0) return value.replace(DOTTED_HOST_PATTERN, replacement);
 
@@ -336,7 +365,7 @@ export function sanitizeOperatorText(value: string | undefined, options: Sanitiz
   return sanitizeText(value, options, redactSensitiveText);
 }
 
-/** Sanitize bounded Project/Task prose with the relative-filename context rule. */
+/** Sanitize bounded Project/Task prose with the contextual suffix classifier. */
 export function sanitizeProjectText(value: string | undefined, options: SanitizeTextOptions): string {
   return sanitizeText(value, options, redactProjectText);
 }
