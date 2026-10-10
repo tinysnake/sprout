@@ -99,18 +99,19 @@ try {
   const repoRoot = join(workerRoot, 'repos');
   mkdirSync(workspace, { recursive: true });
   writeFileSync(join(workspace, 'origin.txt'), marker);
-  writeFileSync(join(workspace, taskCommandMode ? 'remote-proof.txt' : 'proof.txt'), 'READY');
   if (taskCommandMode) {
-    writeFileSync(join(workspace, 'proof.txt'), [
+    writeFileSync(join(workspace, 'proof.test.cjs'), [
       "const assert = require('node:assert/strict');",
       "const { readFileSync } = require('node:fs');",
       "const test = require('node:test');",
-      "test('authorized remote workspace files contain the expected marker', () => {",
-      `  assert.equal(readFileSync('origin.txt', 'utf8'), ${JSON.stringify(marker)});`,
-      `  assert.equal(readFileSync('remote-proof.txt', 'utf8'), ${JSON.stringify(marker)});`,
+      "const marker = 'READY';",
+      "test('authorized remote origin marker matches the edited fixture', () => {",
+      "  assert.equal(readFileSync('origin.txt', 'utf8'), marker);",
       '});',
       '',
     ].join('\n'));
+  } else {
+    writeFileSync(join(workspace, 'proof.txt'), 'READY');
   }
   writeFileSync(join(repoRoot, 'host-sentinel.txt'), 'WORKER_SENTINEL_UNCHANGED');
 
@@ -161,7 +162,7 @@ try {
       commandMethodAvailable: typeof tools.command === 'function',
     });
     const classify = path => path === 'origin.txt' ? 'origin'
-      : path === (taskCommandMode ? 'remote-proof.txt' : 'proof.txt') ? 'proof'
+      : path === (taskCommandMode ? 'proof.test.cjs' : 'proof.txt') ? 'proof'
         : path === '../host-sentinel.txt' ? 'outside-workspace' : 'other';
     return {
       ...tools,
@@ -185,7 +186,7 @@ try {
           observations.workspace.push({
             operation: 'command', pathClass: 'command-test', status: result.status,
             executableMatched: executable === 'node', args: [...args],
-            argsMatched: args.length === 2 && args[0] === '--test' && args[1] === 'proof.txt',
+            argsMatched: args.length === 2 && args[0] === '--test' && args[1] === 'proof.test.cjs',
             cwd: options.cwd ?? '.', timeoutMs: options.timeoutMs ?? 30_000,
             exitCode: result.exitCode ?? null,
             testOutputMatched: output.includes('# tests 1') && output.includes('# pass 1') && output.includes('# fail 0'),
@@ -259,9 +260,9 @@ try {
         : 'Exercise HTTP Project MCP and complete one bounded Host-run Task.',
       constraints: taskCommandMode ? [
         'Use only the authorized remote Workspace and listed Project MCP tools.',
-        'Read origin.txt and copy its exact marker into remote-proof.txt by replacing READY.',
+        'Read origin.txt and copy its exact marker into proof.test.cjs by replacing the exact line const marker = \'READY\'; with const marker = \'REMOTE_ORIGIN_CLAUDE_HOST_PROBE\';.',
         'Call the stdio marker recorder with the marker.',
-        'Run workspace_command exactly once with executable node, args [--test, proof.txt], cwd ., and timeoutMs 30000. The test entry point is proof.txt; remote-proof.txt is plain marker data.',
+        'Run workspace_command exactly once with executable node, args [--test, proof.test.cjs], cwd ., and timeoutMs 30000. proof.test.cjs is both the edited proof and the test entry point.',
       ] : [
         'Use only the authorized remote Workspace and listed Project MCP tools.',
         'Read origin.txt and copy its exact marker into proof.txt by replacing READY.',
@@ -289,7 +290,7 @@ try {
       process.exitCode = 1;
     } else {
       const taskPrompt = taskCommandMode
-        ? 'Use only the listed remote Workspace and Project MCP tools. Read origin.txt and copy its exact marker. Edit remote-proof.txt by replacing READY with that exact marker. Call the stdio Project MCP tool described as "Record the marker read from the authorized remote workspace." with that marker. Then call workspace_command exactly once with {"executable":"node","args":["--test","proof.txt"],"cwd":".","timeoutMs":30000}. The test entry point is proof.txt; remote-proof.txt is plain marker data. Confirm the one-test command passes. Use exactly these four operations; do not call any other tool or use any other path. Return one short outcome.'
+        ? 'Use only the listed remote Workspace and Project MCP tools. Read origin.txt. In proof.test.cjs, replace the exact line const marker = \'READY\'; with const marker = \'REMOTE_ORIGIN_CLAUDE_HOST_PROBE\';. Call the stdio Project MCP tool described as "Record the marker read from the authorized remote workspace." with that marker. Then call workspace_command exactly once with {"executable":"node","args":["--test","proof.test.cjs"],"cwd":".","timeoutMs":30000}. proof.test.cjs is both the edited proof and the test entry point. Confirm the one-test command passes. Use exactly these four operations; do not call any other tool or use any other path. Return one short outcome.'
         : `Use only the listed remote Workspace and Project MCP tools. First read origin.txt and copy its exact marker. Call the stdio Project MCP tool described as "Record the marker read from the authorized remote workspace." with that marker. Edit proof.txt by replacing READY with the exact marker. Call the HTTP Project MCP tool described as "${httpToolDescription}" with exactly {"text":"HTTP_OK"}. Use each of these four tools exactly once; do not call any other tool or attempt any other path. Return one short outcome.`;
       const advanced = await runtime.taskAdmissions.advanceForHuman(taskId, {
         targetAgentId: agentId,
@@ -332,8 +333,12 @@ try {
     } else {
       const run = settled.run;
       const readFixture = path => { try { return readFileSync(path, 'utf8'); } catch { return undefined; } };
+      const proofFileMatches = () => {
+        const content = readFixture(join(workspace, taskCommandMode ? 'proof.test.cjs' : 'proof.txt'));
+        return taskCommandMode ? content?.includes(`const marker = '${marker}';`) === true : content === marker;
+      };
       const finalFiles = {
-        proofMatches: readFixture(join(workspace, taskCommandMode ? 'remote-proof.txt' : 'proof.txt')) === marker,
+        proofMatches: proofFileMatches(),
         projectMcpMatches: readFixture(join(workspace, 'mcp-proof.txt')) === marker,
         ...(!taskHttpMode ? { workerSentinelUnchanged: readFixture(join(repoRoot, 'host-sentinel.txt')) === 'WORKER_SENTINEL_UNCHANGED' } : {}),
       };
@@ -393,7 +398,7 @@ try {
             });
             taskEndedSafely = ended.status === 'done' && toTaskContextState(ended) === 'recycled' &&
               runtime.pool.getLease(taskLeaseId)?.state === 'released';
-            workspacePersistsAfterTaskEnd = readFixture(join(workspace, taskCommandMode ? 'remote-proof.txt' : 'proof.txt')) === marker;
+            workspacePersistsAfterTaskEnd = proofFileMatches();
           }
         }
       }
