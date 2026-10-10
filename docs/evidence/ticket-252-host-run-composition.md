@@ -26,6 +26,14 @@ The Pi results are blockers, not passes. They establish neither model-issued hos
 
 The model emitted 73 message events and 3 notices, then completed without using the accepted dynamic tools. The run recorded 12,600 prompt tokens and 49 completion tokens; billing basis was `unknown` and provider cost estimate was `unavailable`. This is not a pass and does not establish denied host reads/writes or no fallback. The attempt was not retried. The separate #248 host-authority prerequisite remains unresolved.
 
+### Claude Code
+
+| Scenario | Actual result | Evidence |
+| --- | --- | --- |
+| Origin-sensitive model-issued remote operation | **Passed for this bounded fixture.** Claude Code `2.1.294` completed a model-issued run on macOS. It read the selected remote marker, called the approved stdio Project MCP tool with that marker, edited the remote proof file, then attempted one parent traversal. The Worker refused the traversal as `invalid-path`; both remote proof files matched; the sentinel adjacent to the selected Worker workspace remained unchanged; the run lease was released. | Command: `node scripts/claude-host-conformance.mjs`; evidence tier `model-issued`; elapsed `14,428 ms`. |
+
+The run reported 1,962 prompt tokens and 283 completion tokens. It did **not** exercise HTTP MCP, a local Sprout-host sentinel, denied host writes, no-fallback behavior, stale binding, context restoration, interruption/recovery, Task lifecycle, or a mode-changing restart. Those outcomes are not inferred from this pass.
+
 ## Acceptance matrix
 
 The seven original criteria are tracked in the final work record on #252. This evidence file records each bounded engine scenario before proceeding to another one.
@@ -34,7 +42,7 @@ The seven original criteria are tracked in the final work record on #252. This e
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Pi | Blocked before model turn | Not run | Not run | Not run | Not run | Not run | Not run | Not evidenced in this attempt |
 | Codex | Not run | No operations issued | Catalog accepted; no tool called | Not run | Not run | Not run | Not run | Not evidenced; no sentinel read attempt |
-| Claude Code | Pending | Pending | Pending | Pending | Pending | Pending | Pending | Pending |
+| Claude Code | Not run | Model-issued remote read/edit; no command test | stdio Project MCP passed; HTTP/editor not run | Not run | Not run | Not run | Not run | No local host read/write attempt; no fallback proof |
 
 ## Prior scope evidence and known limits
 
