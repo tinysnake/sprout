@@ -21,7 +21,7 @@ const DISALLOWED_BUILTINS = 'Bash,Read,Write,Edit,Glob,Grep,Agent,Task,Skill,Too
 
 export interface HostClaudeProbeFailure {
   readonly step: 'resolve CLI' | 'read user configuration' | 'verify authentication configuration' | 'verify authorized model' | 'verify effort' | 'build isolation profile' | 'launch CLI';
-  readonly reason: 'not found' | 'permission denied' | 'invalid configuration' | 'unsupported version' | 'unsupported platform' | 'model mismatch' | 'effort mismatch' | 'authentication configuration missing' | 'isolation controls unavailable' | 'probe error';
+  readonly reason: 'not found' | 'permission denied' | 'invalid configuration' | 'unsupported version' | 'unsupported platform' | 'model mismatch' | 'effort mismatch' | 'authentication configuration missing' | 'configuration changed' | 'isolation controls unavailable' | 'probe error';
 }
 
 export interface HostClaudeReadiness extends HostEngineReadiness {
@@ -60,6 +60,7 @@ interface ClaudeUserSettings {
   readonly effortLevel: string;
   readonly baseUrl: string;
   readonly hasAuthToken: boolean;
+  readonly authorizationFingerprint: string;
 }
 
 export class HostClaudeEngineAdapter implements HostRunEngineAdapter {
@@ -70,6 +71,8 @@ export class HostClaudeEngineAdapter implements HostRunEngineAdapter {
   readonly #options: HostClaudeAdapterOptions;
   readonly #probe: HostClaudeProbeInput;
   readonly #clock: () => number;
+  #authorizationFingerprint: string | undefined;
+  #authorizedBinaryPath: string | undefined;
   #efforts = new Set<string>();
   #cachedReadiness: HostClaudeReadiness | undefined;
   #readinessAt = 0;
@@ -91,11 +94,47 @@ export class HostClaudeEngineAdapter implements HostRunEngineAdapter {
   supportsEffort(effort: string): boolean { return this.#efforts.has(effort); }
 
   async readiness(force = false): Promise<HostClaudeReadiness> {
+    let settings: ClaudeUserSettings;
+    try { settings = readClaudeUserSettings(this.#probe.settingsPath); }
+    catch (error) { return this.#cacheFailure(failedReadiness(this.profileId, this.#clock(), failureFor(error))); }
+    if (settings.model !== this.authorizedModel) return this.#cacheFailure(failedReadiness(this.profileId, this.#clock(), { step: 'verify authorized model', reason: 'model mismatch' }));
+    if (settings.effortLevel !== AUTHORIZED_EFFORT) return this.#cacheFailure(failedReadiness(this.profileId, this.#clock(), { step: 'verify effort', reason: 'effort mismatch' }, undefined, settings.model));
+    if (!settings.hasAuthToken || settings.baseUrl === '') return this.#cacheFailure(failedReadiness(this.profileId, this.#clock(), { step: 'verify authentication configuration', reason: 'authentication configuration missing' }));
+    if (this.#authorizationFingerprint !== undefined && settings.authorizationFingerprint !== this.#authorizationFingerprint) {
+      return this.#cacheFailure(failedReadiness(this.profileId, this.#clock(), { step: 'verify authentication configuration', reason: 'configuration changed' }));
+    }
     if (!force && this.#cachedReadiness !== undefined && this.#clock() - this.#readinessAt < 30_000) return this.#cachedReadiness;
+    let binaryPath: string;
+    try { binaryPath = resolveExecutable(this.#probe.binaryPath); }
+    catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
+      return this.#cacheFailure(unavailable(this.profileId, this.#clock(), code === 'EACCES' || code === 'EPERM' ? 'permission denied' : 'not found'));
+    }
+    const probe = { ...this.#probe, binaryPath };
     let result: HostClaudeReadiness;
-    try { result = await (this.#options.probeProcess ?? probeHostClaude)(this.#probe); }
+    try { result = await (this.#options.probeProcess ?? probeHostClaude)(probe); }
     catch (error) { result = failedReadiness(this.profileId, this.#clock(), failureFor(error)); }
+    if (result.status === 'ready') {
+      try {
+        const confirmed = readClaudeUserSettings(this.#probe.settingsPath);
+        if (confirmed.authorizationFingerprint !== settings.authorizationFingerprint) {
+          result = failedReadiness(this.profileId, this.#clock(), { step: 'verify authentication configuration', reason: 'configuration changed' });
+        } else {
+          this.#authorizationFingerprint = settings.authorizationFingerprint;
+          this.#authorizedBinaryPath = binaryPath;
+        }
+      } catch (error) { result = failedReadiness(this.profileId, this.#clock(), failureFor(error)); }
+    }
+    if (result.status !== 'ready') this.#authorizedBinaryPath = undefined;
     this.#efforts = result.status === 'ready' ? new Set(result.supportedEfforts ?? []) : new Set();
+    this.#cachedReadiness = result;
+    this.#readinessAt = this.#clock();
+    return result;
+  }
+
+  #cacheFailure(result: HostClaudeReadiness): HostClaudeReadiness {
+    this.#efforts.clear();
+    this.#authorizedBinaryPath = undefined;
     this.#cachedReadiness = result;
     this.#readinessAt = this.#clock();
     return result;
@@ -111,17 +150,20 @@ export class HostClaudeEngineAdapter implements HostRunEngineAdapter {
     let settings: ClaudeUserSettings;
     try { settings = readClaudeUserSettings(this.#probe.settingsPath); }
     catch { throw new EngineStartError('Host Claude user configuration is unavailable'); }
-    if (settings.model !== this.authorizedModel || settings.effortLevel !== effort || !settings.hasAuthToken || settings.baseUrl === '') {
+    if (settings.model !== this.authorizedModel || settings.effortLevel !== effort || !settings.hasAuthToken || settings.baseUrl === '' ||
+        settings.authorizationFingerprint !== this.#authorizationFingerprint) {
       throw new EngineStartError('Host Claude user configuration no longer matches the authorized profile');
     }
     const agentDigest = createHash('sha256').update(request.agentId).digest('hex').slice(0, 24);
     const agentRoot = join(this.#probe.runnerRoot, this.profileId, agentDigest);
     const controlRoot = join(tmpdir(), `sc-${createHash('sha256').update(`${this.profileId}:${request.agentId}:${randomUUID()}`).digest('hex').slice(0, 14)}`);
+    const binaryPath = this.#authorizedBinaryPath;
+    if (binaryPath === undefined) throw new EngineStartError('Host Claude CLI is unavailable');
     try {
       mkdirSync(agentRoot, { recursive: true, mode: 0o700 });
       mkdirSync(join(agentRoot, 'claude-config'), { recursive: true, mode: 0o700 });
       mkdirSync(controlRoot, { recursive: true, mode: 0o700 });
-      const input: HostClaudeLaunchInput = { ...this.#probe, agentId: request.agentId, agentRoot, controlRoot, settings };
+      const input: HostClaudeLaunchInput = { ...this.#probe, binaryPath, agentId: request.agentId, agentRoot, controlRoot, settings };
       return await HostClaudeSession.create(input, request, this.#options.spawnProcess ?? spawnHostClaude);
     } catch (error) {
       if (error instanceof EngineStartError) throw error;
@@ -206,10 +248,14 @@ function readClaudeUserSettings(path: string): ClaudeUserSettings {
   const model = typeof value.model === 'string' ? value.model : '';
   const effortLevel = typeof value.effortLevel === 'string' ? value.effortLevel : '';
   const baseUrl = typeof value.env.ANTHROPIC_BASE_URL === 'string' ? value.env.ANTHROPIC_BASE_URL : '';
-  const hasAuthToken = (typeof value.env.ANTHROPIC_AUTH_TOKEN === 'string' && value.env.ANTHROPIC_AUTH_TOKEN.length > 0) ||
-    (typeof value.env.ANTHROPIC_API_KEY === 'string' && value.env.ANTHROPIC_API_KEY.length > 0);
+  const authToken = typeof value.env.ANTHROPIC_AUTH_TOKEN === 'string' && value.env.ANTHROPIC_AUTH_TOKEN.length > 0
+    ? value.env.ANTHROPIC_AUTH_TOKEN
+    : typeof value.env.ANTHROPIC_API_KEY === 'string' && value.env.ANTHROPIC_API_KEY.length > 0
+      ? value.env.ANTHROPIC_API_KEY : '';
+  const hasAuthToken = authToken !== '';
+  const authorizationFingerprint = createHash('sha256').update(JSON.stringify({ model, effortLevel, baseUrl, authToken })).digest('hex');
   if (model === '' || effortLevel === '') throw new ClaudeProbeError({ step: 'read user configuration', reason: 'invalid configuration' });
-  return { model, effortLevel, baseUrl, hasAuthToken };
+  return { model, effortLevel, baseUrl, hasAuthToken, authorizationFingerprint };
 }
 
 function failureFor(error: unknown, step: HostClaudeProbeFailure['step'] = 'read user configuration'): HostClaudeProbeFailure {
@@ -224,7 +270,7 @@ class ClaudeProbeError extends Error {
 }
 
 function unavailable(profileId: string, observedAt: number, reason: HostClaudeProbeFailure['reason']): HostClaudeReadiness {
-  const step: HostClaudeProbeFailure['step'] = reason === 'unsupported platform' || reason === 'not found' || reason === 'unsupported version'
+  const step: HostClaudeProbeFailure['step'] = reason === 'unsupported platform' || reason === 'not found' || reason === 'unsupported version' || reason === 'permission denied'
     ? 'resolve CLI' : 'build isolation profile';
   return {
     profileId, engine: 'claude', status: 'unavailable',
@@ -435,6 +481,10 @@ class HostClaudeSession implements EngineSession {
     const child = this.#child;
     if (child?.pid !== undefined && child.exitCode === null && child.signalCode === null) {
       try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); }
+      if (!await waitForChildClose(child, 1_000)) {
+        try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+        await waitForChildClose(child, 1_000);
+      }
     }
     this.#server.close();
     try { const { unlinkSync } = await import('node:fs'); unlinkSync(this.#socketPath); } catch { /* Socket may already be removed. */ }
@@ -449,7 +499,6 @@ class HostClaudeSession implements EngineSession {
       '--setting-sources', '', '--settings', this.#settingsFile(), '--strict-mcp-config', '--mcp-config', this.#mcpConfigPath,
       '--permission-mode', 'dontAsk', '--permission-prompts', 'none',
       ...(allowedTools.length > 0 ? ['--allowedTools', allowedTools.join(',')] : []),
-      '--model', this.#input.settings.model, '--effort', this.#input.settings.effortLevel,
       ...(this.#request.instructions !== undefined ? ['--append-system-prompt', this.#request.instructions] : []),
       ...(this.#nativeSessionId !== undefined ? ['--resume', this.#nativeSessionId] : []),
     ];
@@ -458,9 +507,16 @@ class HostClaudeSession implements EngineSession {
 
   #settingsFile(): string {
     const helper = fileURLToPath(new URL('./claude-auth-helper.mjs', import.meta.url));
-    const command = [realpathSync(process.execPath), helper, this.#input.settingsPath].map(shellQuote).join(' ');
+    const pinPath = join(this.#input.controlRoot, 'auth-pin.json');
+    writeFileSync(pinPath, JSON.stringify({
+      model: this.#input.settings.model,
+      effortLevel: this.#input.settings.effortLevel,
+      baseUrl: this.#input.settings.baseUrl,
+      authorizationFingerprint: this.#input.settings.authorizationFingerprint,
+    }), { mode: 0o600 });
+    const command = [realpathSync(process.execPath), helper, this.#input.settingsPath, pinPath].map(shellQuote).join(' ');
     const path = join(this.#input.controlRoot, 'settings.json');
-    writeFileSync(path, JSON.stringify({ apiKeyHelper: command, effortLevel: this.#input.settings.effortLevel }), { mode: 0o600 });
+    writeFileSync(path, JSON.stringify({ model: this.#input.settings.model, apiKeyHelper: command, effortLevel: this.#input.settings.effortLevel }), { mode: 0o600 });
     return path;
   }
 
@@ -583,12 +639,16 @@ async function handleMcpLine(socket: Socket, line: string, tools: readonly Claud
   try { request = JSON.parse(line); } catch { return; }
   if (!isRecord(request) || request.id === undefined || typeof request.method !== 'string') return;
   let result: unknown;
-  if (request.method === 'initialize') result = { protocolVersion: '2025-03-26', capabilities: { tools: { listChanged: false } }, serverInfo: { name: 'sprout', version: CLAUDE_CODE_HOST_VERSION } };
+  if (request.method === 'initialize') result = { protocolVersion: isRecord(request.params) && typeof request.params.protocolVersion === 'string' ? request.params.protocolVersion : '2025-03-26', capabilities: { tools: { listChanged: false } }, serverInfo: { name: 'sprout', version: CLAUDE_CODE_HOST_VERSION } };
   else if (request.method === 'tools/list') result = { tools: tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) };
   else if (request.method === 'tools/call' && isRecord(request.params) && typeof request.params.name === 'string' && isRecord(request.params.arguments)) {
     const tool = tools.find(candidate => candidate.name === request.params!.name);
-    const text = tool === undefined ? 'The selected remote capability is no longer available.' : await tool.call(request.params.arguments);
-    result = { content: [{ type: 'text', text }], ...(tool === undefined ? { isError: true } : {}) };
+    try {
+      const text = tool === undefined ? 'The selected remote capability is no longer available.' : await tool.call(request.params.arguments);
+      result = { content: [{ type: 'text', text }], ...(tool === undefined ? { isError: true } : {}) };
+    } catch {
+      result = { content: [{ type: 'text', text: 'The selected remote capability failed or is no longer available.' }], isError: true };
+    }
   } else {
     socket.write(`${JSON.stringify({ jsonrpc: '2.0', id: request.id, error: { code: -32601, message: 'unsupported' } })}\n`); return;
   }
@@ -603,6 +663,22 @@ function workspaceMethodAvailable(workspace: RemoteWorkspaceTools, operation: 'r
     case 'patch': return typeof workspace.patch === 'function';
     case 'command': return typeof workspace.command === 'function';
   }
+}
+
+function waitForChildClose(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = (closed: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(closed);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    timer.unref();
+    child.once('close', () => finish(true));
+  });
 }
 
 function shellQuote(value: string): string { return `'${value.replaceAll("'", "'\\''")}'`; }

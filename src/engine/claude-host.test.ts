@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
 
 import {
@@ -114,11 +115,40 @@ test('Host Claude reads and refuses the exact user-configured model without infe
   assert.equal(spawned, 0);
 });
 
+test('Claude auth helper only returns the credential whose pinned settings still match', t => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-claude-auth-helper-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const settingsPath = join(directory, 'settings.json');
+  const pinPath = join(directory, 'auth-pin.json');
+  const configured = {
+    model: CLAUDE_CODE_AUTHORIZED_MODEL, effortLevel: 'high',
+    env: { ANTHROPIC_BASE_URL: 'https://example.invalid', ANTHROPIC_AUTH_TOKEN: 'synthetic-auth-material' },
+  };
+  const fingerprint = createHash('sha256').update(JSON.stringify({
+    model: configured.model, effortLevel: configured.effortLevel,
+    baseUrl: configured.env.ANTHROPIC_BASE_URL, authToken: configured.env.ANTHROPIC_AUTH_TOKEN,
+  })).digest('hex');
+  writeFileSync(settingsPath, JSON.stringify(configured));
+  writeFileSync(pinPath, JSON.stringify({ model: configured.model, effortLevel: configured.effortLevel,
+    baseUrl: configured.env.ANTHROPIC_BASE_URL, authorizationFingerprint: fingerprint }));
+  const helper = new URL('./claude-auth-helper.mjs', import.meta.url);
+  const accepted = spawnSync(process.execPath, [helper.pathname, settingsPath, pinPath], { encoding: 'utf8', timeout: 5_000 });
+  assert.equal(accepted.status, 0);
+  assert.equal(accepted.stdout, configured.env.ANTHROPIC_AUTH_TOKEN);
+  configured.env.ANTHROPIC_AUTH_TOKEN = 'changed-synthetic-auth-material';
+  writeFileSync(settingsPath, JSON.stringify(configured));
+  const refused = spawnSync(process.execPath, [helper.pathname, settingsPath, pinPath], { encoding: 'utf8', timeout: 5_000 });
+  assert.equal(refused.status, 2);
+  assert.equal(refused.stdout, '');
+});
+
 test('Host Claude maps probe exceptions to bounded readiness facts without retaining raw text', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-claude-readiness-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const settingsPath = join(directory, 'settings.json');
+  settings(settingsPath);
   const adapter = new HostClaudeEngineAdapter({
-    runnerRoot: join(directory, 'runner'),
+    binaryPath: '/usr/bin/true', settingsPath, runnerRoot: join(directory, 'runner'),
     probeProcess: async () => { throw new Error('synthetic token endpoint private path'); },
   });
   const readiness = await adapter.readiness(true);
@@ -127,12 +157,39 @@ test('Host Claude maps probe exceptions to bounded readiness facts without retai
   assert.doesNotMatch(JSON.stringify(readiness), /synthetic|token|endpoint|private path/);
 });
 
+test('Host Claude refuses a changed account configuration after readiness has been accepted', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-claude-config-pin-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const settingsPath = join(directory, 'settings.json');
+  settings(settingsPath);
+  const adapter = new HostClaudeEngineAdapter({
+    binaryPath: '/usr/bin/true', settingsPath, runnerRoot: join(directory, 'runner'),
+    probeProcess: async input => ({ profileId: input.profileId, engine: 'claude', status: 'ready', installation: 'ready',
+      authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready', version: '2.1.294',
+      resolvedModel: CLAUDE_CODE_AUTHORIZED_MODEL, supportedEfforts: ['high'], observedAt: 1 }),
+  });
+  assert.equal((await adapter.readiness(true)).status, 'ready');
+  settings(settingsPath, { token: 'different-synthetic-auth-material' });
+  const changed = await adapter.readiness(true);
+  assert.equal(changed.status, 'unavailable');
+  assert.deepEqual(changed.probeFailure, { step: 'verify authentication configuration', reason: 'configuration changed' });
+  assert.doesNotMatch(JSON.stringify(changed), /synthetic-auth-material|different-synthetic/);
+});
+
 test('Host Claude bridges only typed Environment tools and translates native stream events and usage', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-claude-session-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const settingsPath = join(directory, 'settings.json');
   settings(settingsPath);
+  const binaryDirectory = join(directory, 'bin');
+  mkdirSync(binaryDirectory);
+  const binaryPath = join(binaryDirectory, 'claude');
+  writeFileSync(binaryPath, 'synthetic CLI executable\n', { mode: 0o700 });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${binaryDirectory}${delimiter}${previousPath ?? ''}`;
+  t.after(() => { if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath; });
   let remoteReads = 0;
+  const resumeKeys: (string | undefined)[] = [];
   const requested = request();
   const workspace = requested.remoteWorkspace!;
   const guardedWorkspace: RemoteWorkspaceTools = { ...workspace, async read(path, operationId) {
@@ -140,19 +197,24 @@ test('Host Claude bridges only typed Environment tools and translates native str
     return workspace.read(path, operationId);
   } };
   const adapter = new HostClaudeEngineAdapter({
-    binaryPath: '/usr/bin/true', settingsPath, runnerRoot: join(directory, 'runner'),
+    binaryPath: 'claude', settingsPath, runnerRoot: join(directory, 'runner'),
     probeProcess: async input => ({ profileId: input.profileId, engine: 'claude', status: 'ready', installation: 'ready',
       authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready', version: '2.1.294',
       resolvedModel: CLAUDE_CODE_AUTHORIZED_MODEL, supportedEfforts: ['high'], observedAt: 1 }),
-    spawnProcess: (_input, args) => {
+    spawnProcess: (input, args) => {
+      resumeKeys.push(args.includes('--resume') ? args[args.indexOf('--resume') + 1] : undefined);
+      assert.equal(input.binaryPath, realpathSync(binaryPath), 'a bare CLI name resolves before launch');
       assert.ok(args.includes('--bare'));
       assert.ok(args.includes('--strict-mcp-config'));
       assert.ok(args.includes('--tools'));
       assert.ok(args.includes(''));
-      assert.equal(args[args.indexOf('--model') + 1], CLAUDE_CODE_AUTHORIZED_MODEL);
-      assert.equal(args[args.indexOf('--effort') + 1], 'high');
+      const invocationSettings = JSON.parse(readFileSync(args[args.indexOf('--settings') + 1]!, 'utf8')) as { readonly model: string; readonly effortLevel: string };
+      assert.equal(invocationSettings.model, CLAUDE_CODE_AUTHORIZED_MODEL, 'the CLI receives the model projected from its own user settings');
+      assert.equal(invocationSettings.effortLevel, 'high');
+      assert.equal(args.includes('--model'), false, 'the adapter does not override Claude Code model selection');
+      assert.equal(args.includes('--effort'), false, 'the adapter does not override Claude Code effort selection');
       assert.ok(!args.some(arg => ['Bash', 'Read', 'Write', 'Edit'].includes(arg)));
-      return spawn(process.execPath, ['-e', fakeCliScript(), '--', ...args], { stdio: ['pipe', 'pipe', 'pipe'] });
+      return spawn(process.execPath, ['-e', fakeCliScript(), '--', ...args], { stdio: ['pipe', 'pipe', 'pipe'], detached: true });
     },
   });
   const session = await adapter.startSession({ ...requested, remoteWorkspace: guardedWorkspace });
@@ -167,10 +229,42 @@ test('Host Claude bridges only typed Environment tools and translates native str
     assert.equal(result.text, 'Remote read complete.');
     assert.deepEqual(result.tokenUsage, { promptTokens: 7, completionTokens: 3, totalTokens: 10 });
     assert.equal(session.engineSessionKey, 'native-claude-session');
-    assert.equal(remoteReads, 1, 'the native MCP call crossed the typed Environment capability once');
+    const resumed = session.run('Continue the same authorized remote session.');
+    const resumedResult = await resumed.completion;
+    assert.equal(resumedResult.status, 'completed');
+    assert.deepEqual(resumeKeys, [undefined, 'native-claude-session']);
+    assert.equal(remoteReads, 2, 'both turns use the typed Environment capability');
     assert.ok(observed.includes('tool-call'));
     assert.ok(observed.includes('tool-output'));
     assert.ok(observed.includes('message'));
+  } finally { await session.close(); }
+});
+
+test('Host Claude reports an explicit stale native session refusal for the shared fresh-session fallback', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-claude-resume-refused-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const settingsPath = join(directory, 'settings.json');
+  settings(settingsPath);
+  const adapter = new HostClaudeEngineAdapter({
+    binaryPath: '/usr/bin/true', settingsPath, runnerRoot: join(directory, 'runner'),
+    probeProcess: async input => ({ profileId: input.profileId, engine: 'claude', status: 'ready', installation: 'ready',
+      authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready', version: '2.1.294',
+      resolvedModel: CLAUDE_CODE_AUTHORIZED_MODEL, supportedEfforts: ['high'], observedAt: 1 }),
+    spawnProcess: (_input, args) => {
+      assert.equal(args[args.indexOf('--resume') + 1], 'stale-native-session');
+      return spawn(process.execPath, ['-e', "process.stderr.write('No conversation found for session.'); process.exit(1);"], {
+        stdio: ['pipe', 'pipe', 'pipe'], detached: true,
+      });
+    },
+  });
+  const session = await adapter.startSession({ ...request(), resumeSessionKey: 'stale-native-session' });
+  try {
+    const result = await session.run('Continue the prior session.').completion;
+    assert.equal(result.status, 'failed');
+    if (result.status === 'failed') {
+      assert.equal(result.resumeRefused, true);
+      assert.equal(result.message, 'Claude Code refused the requested native session');
+    }
   } finally { await session.close(); }
 });
 
@@ -208,7 +302,7 @@ test('Host Claude Seatbelt profile blocks host sentinel reads and writes while a
   const input: HostClaudeLaunchInput = {
     profileId: 'test-profile', binaryPath: '/usr/bin/true', settingsPath, runnerRoot: directory,
     clock: Date.now, agentId: 'test-agent', agentRoot, controlRoot,
-    settings: { model: CLAUDE_CODE_AUTHORIZED_MODEL, effortLevel: 'high', baseUrl: 'https://example.invalid', hasAuthToken: true },
+    settings: { model: CLAUDE_CODE_AUTHORIZED_MODEL, effortLevel: 'high', baseUrl: 'https://example.invalid', hasAuthToken: true, authorizationFingerprint: 'test-only' },
   };
   const profile = hostClaudeIsolationProfileForTest(input);
   const script = `const fs=require('node:fs');const p=require('node:path');let hr=false,hw=false,aw=false;try{fs.readFileSync(process.argv[1])}catch(e){hr=['EPERM','EACCES'].includes(e.code)}try{fs.writeFileSync(process.argv[1],'CHANGED')}catch(e){hw=['EPERM','EACCES'].includes(e.code)}try{fs.writeFileSync(process.argv[2],'CHANGED')}catch(e){aw=['EPERM','EACCES'].includes(e.code)}fs.writeFileSync(p.join(process.argv[3],'runner-check.txt'),'OK');process.stdout.write(JSON.stringify({hr,hw,aw,runner:true}))`;

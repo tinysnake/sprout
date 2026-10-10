@@ -1145,7 +1145,7 @@ export class RunOrchestrator {
       for (const option of options) {
         const host = this.#hostEngines.get(option.engine);
         if (host === undefined || option.workModel !== host.authorizedModel) continue;
-        const readiness = await host.readiness();
+        const readiness = await host.readiness(true);
         if (readiness.status !== 'ready' || readiness.installation !== 'ready'
           || readiness.authentication !== 'ready' || readiness.modelAvailability !== 'available'
           || readiness.adapterControls !== 'ready') {
