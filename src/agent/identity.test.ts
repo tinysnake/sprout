@@ -89,6 +89,24 @@ test('a work option refuses an empty or host-shaped identifier', () => {
   assert.equal(option.id, 'primary');
 });
 
+test('a bounded model context suffix survives without admitting arbitrary bracketed text', () => {
+  const authorizedModel = 'group/auto-mimo-v2-6-flash[1m]';
+  assert.equal(sanitizeWorkOption({ engine: 'claude', workModel: authorizedModel, effort: 'high' }).workModel, authorizedModel);
+  for (const workModel of [
+    'group/model[api_key=synthetic-secret]',
+    'group/model[arbitrary text]',
+    'https://gateway.invalid/model',
+    '/Users/worker/private-model',
+    'buildbox-7',
+  ]) {
+    assert.throws(
+      () => sanitizeWorkOption({ engine: 'claude', workModel, effort: 'high' }),
+      AgentIdentityError,
+      `hostile model identifier should be refused: ${workModel}`,
+    );
+  }
+});
+
 test('standing instructions are optional and pass the privacy boundary', () => {
   assert.equal(sanitizeInstructions(undefined), undefined);
   assert.equal(sanitizeInstructions('  '), undefined);

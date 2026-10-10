@@ -27,6 +27,7 @@ import {
   type HostCodexReadiness,
 } from './engine/codex-host.ts';
 import { hostRunEffortSupported } from './engine/host-profile.ts';
+import { createProductionHostClaudeAdapter, type HostClaudeEngineAdapter, type HostClaudeReadiness } from './engine/claude-host.ts';
 import type { HostEngineReadiness, HostRunEngineAdapter } from './engine/host-profile.ts';
 import type { EnvironmentDefinition, EnvironmentInstance } from './environment/model.ts';
 import {
@@ -384,9 +385,12 @@ export interface SproutRuntime {
   readonly hostPi: HostPiEngineAdapter | undefined;
   /** The optional Sprout-host Codex profile used by Host-run conversations. */
   readonly hostCodex: HostCodexEngineAdapter | undefined;
+  /** The optional Sprout-host Claude Code profile used by Host-run conversations. */
+  readonly hostClaude: HostClaudeEngineAdapter | undefined;
   /** Non-inference readiness observations independent of Environment Workers. */
   hostPiReadiness(): Promise<HostPiReadiness | undefined>;
   hostCodexReadiness(): Promise<HostCodexReadiness | undefined>;
+  hostClaudeReadiness(): Promise<HostClaudeReadiness | undefined>;
   /**
    * The enrollment-backed outbound Worker gateway and its connection epochs
    * (#115). Present so Web-created pending enrollments have a machine channel.
@@ -446,6 +450,8 @@ export interface SproutRuntimeOptions {
   readonly hostPi?: HostPiEngineAdapter;
   /** Injected local Codex Engine profile for Host-run composition and tests. */
   readonly hostCodex?: HostCodexEngineAdapter;
+  /** Injected local Claude Code Engine profile for Host-run composition and tests. */
+  readonly hostClaude?: HostClaudeEngineAdapter;
   /**
    * Overrides the production SQLite stores.
    *
@@ -656,6 +662,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
   const hostCodex = options.hostCodex ?? (options.environment === undefined
     ? createProductionHostCodexAdapter(process.env)
     : undefined);
+  const hostClaude = options.hostClaude ?? (options.environment === undefined
+    ? createProductionHostClaudeAdapter()
+    : undefined);
   const hostCodexProductionBlockReason = options.environment === undefined && hostCodex === undefined &&
     !HOST_CODEX_PRODUCTION_ADOPTION_ENABLED
     ? HOST_CODEX_PRODUCTION_BLOCK_REASON
@@ -663,6 +672,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
   const hostProfiles: HostRunEngineAdapter[] = [];
   if (hostPi !== undefined) hostProfiles.push(hostPi);
   if (hostCodex !== undefined) hostProfiles.push(hostCodex);
+  if (hostClaude !== undefined) hostProfiles.push(hostClaude);
   const executionStrategy = createExecutionStrategy(configuration.executionMode, hostProfiles.length > 0);
 
   /**
@@ -1270,6 +1280,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       },
       ...(hostPi !== undefined ? { hostPi } : {}),
       ...(hostCodex !== undefined ? { hostCodex } : {}),
+      ...(hostClaude !== undefined ? { hostClaude } : {}),
       executionPlacementForEnvironment,
       agents,
       resolveAgent,
@@ -2038,6 +2049,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       executionStrategy,
       hostPiReadiness: () => hostPi === undefined ? Promise.resolve(undefined) : hostPi.readiness(),
       hostCodexReadiness: () => hostCodex === undefined ? Promise.resolve(undefined) : hostCodex.readiness(),
+      hostClaudeReadiness: () => hostClaude === undefined ? Promise.resolve(undefined) : hostClaude.readiness(),
       ...(hostCodexProductionBlockReason !== undefined ? { hostCodexProductionBlockReason } : {}),
       connected: (instanceId) => workerGateway.liveFor(instanceId) !== undefined,
       run: async (id) => {
@@ -2366,6 +2378,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       executionStrategy,
       hostPi,
       hostCodex,
+      hostClaude,
       engines,
       refreshEnvironmentCatalog,
 
@@ -2374,6 +2387,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       },
       async hostCodexReadiness(): Promise<HostCodexReadiness | undefined> {
         return hostCodex === undefined ? undefined : hostCodex.readiness(true);
+      },
+      async hostClaudeReadiness(): Promise<HostClaudeReadiness | undefined> {
+        return hostClaude === undefined ? undefined : hostClaude.readiness(true);
       },
 
       /** Reconcile runs, then Task lifecycle, then recovery records, then

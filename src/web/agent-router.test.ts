@@ -180,6 +180,39 @@ test('an Agent is created over HTTP with its identity, options, and version', as
   }
 });
 
+test('the authorized Claude model round-trips through create, reconfigure, storage, and API reads', async () => {
+  const runtime = await agentApi();
+  const workModel = 'group/auto-mimo-v2-6-flash[1m]';
+  const workOptions = [{ id: 'claude-host', engine: 'claude', workModel, effort: 'high' }];
+  try {
+    const created = await command(runtime.base, '/api/agents', runtime, {
+      id: 'claude-scout', displayName: 'Claude Scout', workOptions,
+    });
+    assert.equal(created.status, 201);
+    const createdBody = await created.json() as { readonly agent: AgentWireView & { readonly workOptions: readonly { readonly workModel: string }[] } };
+    assert.equal(createdBody.agent.configuration.versions[0]!.options[0]!.workModel, workModel);
+    assert.equal(createdBody.agent.workOptions[0]!.workModel, workModel);
+    assert.equal((await runtime.agents.get('claude-scout'))?.configuration.versions[0]!.options[0]!.workModel, workModel);
+
+    const reconfigured = await command(runtime.base, '/api/agents/claude-scout/configuration', runtime, { workOptions });
+    assert.equal(reconfigured.status, 200);
+    const reconfiguredBody = await reconfigured.json() as { readonly agent: AgentWireView & { readonly workOptions: readonly { readonly workModel: string }[] } };
+    assert.equal(reconfiguredBody.agent.configuration.currentVersion, 2);
+    assert.equal(reconfiguredBody.agent.configuration.versions[1]!.options[0]!.workModel, workModel);
+    assert.equal(reconfiguredBody.agent.workOptions[0]!.workModel, workModel);
+    assert.equal((await runtime.agents.get('claude-scout'))?.configuration.versions[1]!.options[0]!.workModel, workModel);
+
+    const detail = await read(runtime.base, '/api/agents/claude-scout', runtime);
+    const detailBody = await detail.json() as { readonly agent: AgentWireView & { readonly workOptions: readonly { readonly workModel: string }[] } };
+    assert.equal(detailBody.agent.workOptions[0]!.workModel, workModel);
+    const list = await read(runtime.base, '/api/agents', runtime);
+    const listBody = await list.json() as { readonly agents: readonly (AgentWireView & { readonly workOptions: readonly { readonly workModel: string }[] })[] };
+    assert.equal(listBody.agents.find(agent => agent.id === 'claude-scout')?.workOptions[0]?.workModel, workModel);
+  } finally {
+    await runtime.api.close();
+  }
+});
+
 test('creation validates the display name and the minimum-one-option invariant', async () => {
   const runtime = await agentApi();
   try {

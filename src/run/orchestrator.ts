@@ -14,6 +14,7 @@ import type { AgentRunEvent, EngineAdapter, EngineSession, EngineTurnResult } fr
 import { EngineResumeRefusedError, RemoteProjectMcpStartupError } from '../engine/port.ts';
 import { HostPiEngineAdapter } from '../engine/pi-host.ts';
 import { HostCodexEngineAdapter } from '../engine/codex-host.ts';
+import type { HostClaudeEngineAdapter } from '../engine/claude-host.ts';
 import { hostRunEffortSupported } from '../engine/host-profile.ts';
 import type { HostRunEngineAdapter } from '../engine/host-profile.ts';
 import { createIdFactory, type IdFactory } from '../ids.ts';
@@ -77,6 +78,7 @@ export interface RunOrchestratorOptions {
   /** Separate local Engine profiles for runs that do not acquire an Environment lease. */
   readonly hostPi?: HostPiEngineAdapter;
   readonly hostCodex?: HostCodexEngineAdapter;
+  readonly hostClaude?: HostClaudeEngineAdapter;
   readonly agents: AgentRegistry;
   /** Current Agent configuration authority; when supplied it also owns lifecycle refusal. */
   readonly resolveAgent?: (agentId: string) => Promise<AgentDefinition | undefined>;
@@ -309,6 +311,7 @@ export class RunOrchestrator {
     const hostEngines: [string, HostRunEngineAdapter][] = [];
     if (options.hostPi !== undefined) hostEngines.push(['pi', options.hostPi]);
     if (options.hostCodex !== undefined) hostEngines.push(['codex', options.hostCodex]);
+    if (options.hostClaude !== undefined) hostEngines.push(['claude', options.hostClaude]);
     this.#hostEngines = new Map(hostEngines);
     this.#agents = options.agents;
     this.#resolveAgent = options.resolveAgent ?? (async (id) => this.#agents.get(id));
@@ -1142,7 +1145,7 @@ export class RunOrchestrator {
       for (const option of options) {
         const host = this.#hostEngines.get(option.engine);
         if (host === undefined || option.workModel !== host.authorizedModel) continue;
-        const readiness = await host.readiness();
+        const readiness = await host.readiness(true);
         if (readiness.status !== 'ready' || readiness.installation !== 'ready'
           || readiness.authentication !== 'ready' || readiness.modelAvailability !== 'available'
           || readiness.adapterControls !== 'ready') {

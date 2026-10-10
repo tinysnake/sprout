@@ -10,6 +10,7 @@ import type { AgentRun } from '../run/model.ts';
 import type { Task } from '../task/model.ts';
 import type { HostPiReadiness } from '../engine/pi-host.ts';
 import type { HostCodexReadiness } from '../engine/codex-host.ts';
+import type { HostClaudeReadiness } from '../engine/claude-host.ts';
 import { type ExecutionStrategy } from '../execution-mode.ts';
 import { fact, projectEngines, projectDiagnosticCorrelation, diagnosticIdentity, isDiagnosticTarget, type DiagnosticEvent, type DiagnosticCorrelation, type EventKind, type EventState, type OperatorSettings, type WebDiagnostic } from './contract.ts';
 
@@ -28,6 +29,7 @@ export class OperatorDiagnostics {
     readonly executionStrategy: ExecutionStrategy;
     readonly hostPiReadiness?: () => Promise<HostPiReadiness | undefined>;
     readonly hostCodexReadiness?: () => Promise<HostCodexReadiness | undefined>;
+    readonly hostClaudeReadiness?: () => Promise<HostClaudeReadiness | undefined>;
     readonly hostCodexProductionBlockReason?: string;
     readonly connected?: (instanceId: string) => boolean;
     readonly run?: (id: string) => Promise<Pick<AgentRun, 'id' | 'projectId' | 'agentId'> | undefined>;
@@ -49,6 +51,7 @@ export class OperatorDiagnostics {
     if (!sessions.some(s => s.current)) throw new Error('authenticated session required');
     const hostPi = await this.options.hostPiReadiness?.();
     const hostCodex = await this.options.hostCodexReadiness?.();
+    const hostClaude = await this.options.hostClaudeReadiness?.();
     return { versions: PRODUCT_VERSIONS, executionMode: this.options.executionStrategy.mode,
       ...(hostPi === undefined ? { hostPi: { status: 'not-configured' as const } } : { hostPi: {
         status: hostPi.status,
@@ -69,6 +72,17 @@ export class OperatorDiagnostics {
           ...(hostCodex.version !== undefined ? { version: hostCodex.version } : {}),
           ...(hostCodex.probeFailure !== undefined ? { probeFailure: hostCodex.probeFailure } : {}),
         } }),
+      ...(hostClaude === undefined ? { hostClaude: { status: 'not-configured' as const } } : { hostClaude: {
+        status: hostClaude.status,
+        installation: hostClaude.installation,
+        authentication: hostClaude.authentication,
+        modelAvailability: hostClaude.modelAvailability,
+        adapterControls: hostClaude.adapterControls,
+        ...(hostClaude.version !== undefined ? { version: hostClaude.version } : {}),
+        ...(hostClaude.resolvedModel !== undefined ? { resolvedModel: hostClaude.resolvedModel } : {}),
+        ...(hostClaude.supportedEfforts !== undefined ? { supportedEfforts: hostClaude.supportedEfforts } : {}),
+        ...(hostClaude.probeFailure !== undefined ? { probeFailure: hostClaude.probeFailure } : {}),
+      } }),
       session: { authenticated: true, activeCount: sessions.length },
       access: { boundary: 'private-network-and-authentication', publicInternetSupported: false },
       responsibilities: { web: ['sessions', 'enrollment', 'recovery', 'diagnostics'], hostLocal: ['credentials', 'engine-login', 'service', 'network', 'backup', 'upgrade'] } };

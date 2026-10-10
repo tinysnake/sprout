@@ -695,6 +695,38 @@ function handleStatusKey(e: KeyboardEvent, tab: SettingsCategoryTab) {
               </div>
             </div>
           </section>
+          <section class="card settings-card p-4 sm:p-5 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-4 shadow-xs lg:col-span-2" data-settings-section="host-claude-readiness" :data-host-claude-readiness="settingsData?.hostClaude?.status ?? 'unknown'">
+            <div class="flex items-center justify-between gap-2 flex-wrap">
+              <h3 class="text-xs uppercase tracking-wider font-bold text-[var(--text-muted)] flex items-center gap-1.5">
+                <Icon name="server" :size="14" />
+                <span>Sprout-host Claude Code readiness</span>
+              </h3>
+              <Badge :variant="settingsData?.hostClaude?.status === 'ready' ? 'success' : 'warning'">{{ settingsData?.hostClaude?.status ?? 'Unknown' }}</Badge>
+            </div>
+            <p class="text-xs text-[var(--text-secondary)]">This non-inference probe checks Claude Code CLI 2.1.294, the read-only configured model and effort, configured authentication material, and the host isolation controls. It does not validate the gateway credential or send a model request. The resolved model is recorded as configured; it is not represented as a Claude-native model.</p>
+            <p v-if="settingsData?.hostClaude?.probeFailure" class="text-xs text-[var(--text-secondary)]" data-settings-claude-probe-failure>
+              Readiness probe failed at {{ settingsData.hostClaude.probeFailure.step }}: {{ settingsData.hostClaude.probeFailure.reason }}.
+            </p>
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+              <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
+                <span class="text-[10px] uppercase font-bold text-[var(--text-muted)] block">Installation</span>
+                <strong>{{ settingsData?.hostClaude?.installation ?? 'Not configured' }}</strong>
+                <span v-if="settingsData?.hostClaude?.version" class="block text-[10px] text-[var(--text-muted)]">Claude Code {{ settingsData.hostClaude.version }}</span>
+              </div>
+              <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
+                <span class="text-[10px] uppercase font-bold text-[var(--text-muted)] block">Authentication configuration</span>
+                <strong>{{ settingsData?.hostClaude?.authentication ?? 'Unknown' }}</strong>
+              </div>
+              <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
+                <span class="text-[10px] uppercase font-bold text-[var(--text-muted)] block">Resolved model</span>
+                <strong class="break-all">{{ settingsData?.hostClaude?.resolvedModel ?? settingsData?.hostClaude?.modelAvailability ?? 'Unknown' }}</strong>
+              </div>
+              <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
+                <span class="text-[10px] uppercase font-bold text-[var(--text-muted)] block">Configured effort</span>
+                <strong>{{ settingsData?.hostClaude?.supportedEfforts?.join(', ') ?? 'Unknown' }}</strong>
+              </div>
+            </div>
+          </section>
 
           <!-- Card 1: Sprout instance and compatibility -->
             <section class="card settings-card p-4 sm:p-5 rounded-[var(--radius-md)] border border-[var(--border-subtle)] bg-[var(--bg-surface)] flex flex-col gap-4 shadow-xs" data-settings-section="compatibility">

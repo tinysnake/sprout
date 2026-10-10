@@ -21,7 +21,7 @@ The single authentication boundary through which the Local Operator MVP's one Hu
 _Avoid_: Admin account, Team owner
 
 **Project**:
-A durable collaboration and management boundary with its own members, optional goal and rules, Environment access, Project workspaces, channels, and history. A Project remains complete when it has no Agent or Environment; a project Message may still receive a Host-run Pi reply when its Agent and Sprout-host Engine profile are authorized.
+A durable collaboration and management boundary with its own members, optional goal and rules, Environment access, Project workspaces, channels, and history. A Project remains complete when it has no Agent or Environment; a project Message may still receive a Host-run reply when its Agent and Sprout-host Engine profile are authorized.
 _Avoid_: Project group, group chat
 
 **Project channel**:
@@ -125,11 +125,11 @@ A persistent worker identity with its own capabilities, model configuration, and
 _Avoid_: Process, bot instance, environment agent
 
 **Agent work option**:
-One entry in an Agent's ordered execution preferences, naming an engine, work model, and effort. Environment-hosted admission checks the selected Environment's observed facts; Host-run admission checks the local Pi profile's exact authorized model and supported effort before accepting the Message run. Sprout never switches options after an engine accepts a run.
+One entry in an Agent's ordered execution preferences, naming an engine, work model, and effort. Environment-hosted admission checks the selected Environment's observed facts; Host-run admission checks the selected local Engine profile's exact authorized model and supported effort before accepting the Message run. Sprout never switches options after an engine accepts a run.
 _Avoid_: Environment binding, model fallback retry
 
 **Execution mode**:
-The immutable, process-wide choice made when a Sprout instance starts: `environment-hosted` places engine execution in the selected Environment worker, while `host-run` places supported one-round Message conversations and authorized Tasks on the Sprout host through its exact authorized Pi profile. A standalone run may independently select a Project-authorized Work Environment for workspace access; without that selection, Host-run Message admission needs no work Environment lookup or lease and grants no Project workspace or MCP access. A Host-run Task requires Human approval and an active Task-held lease on the selected authorized Environment; Sprout-host Pi performs nested activations while that Worker supplies Task context, Project workspace operations, and selected Project MCP tools under the same lease. Omission selects `environment-hosted` on every startup. Settings reports the effective mode and Host Pi readiness; changing mode requires restarting Sprout with a different startup argument. Restrictions on non-Project resources reachable through remote MCP remain deferred and are not claimed here.
+The immutable, process-wide choice made when a Sprout instance starts: `environment-hosted` places engine execution in the selected Environment worker, while `host-run` places supported one-round Message conversations and authorized Tasks on the Sprout host through a configured Host Engine profile. A standalone run may independently select a Project-authorized Work Environment for workspace access; without that selection, Host-run Message admission needs no work Environment lookup or lease and grants no Project workspace or MCP access. A Host-run Task requires Human approval and an active Task-held lease on the selected authorized Environment; the Host Engine performs nested activations while that Worker supplies Task context, Project workspace operations, and selected Project MCP tools under the same lease. Omission selects `environment-hosted` on every startup. Settings reports the effective mode and configured Host Engine readiness; changing mode requires restarting Sprout with a different startup argument. Restrictions on non-Project resources reachable through remote MCP remain deferred and are not claimed here.
 _Avoid_: Browser preference, runtime switch
 
 **Execution placement**:
@@ -137,11 +137,15 @@ The durable facts describing where a run or begun Task executes: its immutable E
 _Avoid_: Work Environment selection, Agent work option
 
 **Engine host**:
-The host that runs an engine process, owns its engine session storage, and holds its engine login. It is the Environment host in `environment-hosted` mode and the Sprout host in `host-run` mode. A Host-run Pi profile has one explicit provider/model authority and a host-local session namespace, independent of any Work Environment.
+The host that runs an engine process, owns its engine session storage, and holds its engine login. It is the Environment host in `environment-hosted` mode and the Sprout host in `host-run` mode. A Host-run Engine profile has one explicit model authority and a host-local session namespace, independent of any Work Environment.
 _Avoid_: Work Environment, Project workspace
 
 **Host Pi readiness**:
 A Sprout-host-local, non-inference observation that the pinned Pi runtime, configured authentication, exact authorized model, and required isolated adapter controls are available for one Host-run profile. It does not contact an Environment Worker or perform a model turn.
+_Avoid_: Environment readiness, smoke run, hidden model call
+
+**Host Claude Code readiness**:
+A Sprout-host-local, non-inference observation that Claude Code CLI `2.1.294`, its read-only user-configured model and effort, configured authentication material, and required isolation controls match the Host profile. The accepted model value is `group/auto-mimo-v2-6-flash[1m]`; it is a configured gateway alias and is not claimed to name a Claude-native model. Readiness does not validate the gateway credential or model reachability, contact an Environment Worker, or perform a model turn.
 _Avoid_: Environment readiness, smoke run, hidden model call
 
 **Agent run**:
@@ -153,7 +157,7 @@ An intentional request by a Human or Task lead to settle one active Task-linked 
 _Avoid_: Chat run interruption, Task pause, Task end
 
 **Chat run interruption**:
-A Human-authorized request from Chat to settle an active run outside a Task. Its outcome is interrupted with a Human-stop reason. An Environment-hosted run releases its run-held Environment lease before the conversation is reused; a Host-run Pi child is interrupted and closed, and any unresolved remote operation remains under its Environment recovery ownership.
+A Human-authorized request from Chat to settle an active run outside a Task. Its outcome is interrupted with a Human-stop reason. An Environment-hosted run releases its run-held Environment lease before the conversation is reused; a Host-run engine process is interrupted and closed, and any unresolved remote operation remains under its Environment recovery ownership.
 _Avoid_: Agent run stop, Task interruption, Task end
 
 **Usage activity**:
