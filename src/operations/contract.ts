@@ -1,5 +1,6 @@
 import { isFeedDeepLink, type FeedTarget } from '../web/feed.ts';
 import type { HostCodexProbeFailure } from '../engine/codex-host.ts';
+import type { HostClaudeProbeFailure } from '../engine/claude-host.ts';
 import type { ExecutionMode } from '../execution-mode.ts';
 
 /** Diagnostics select finite facts and validated routing identities; never content. */
@@ -91,6 +92,17 @@ export interface OperatorSettings {
     readonly adapterControls?: 'ready' | 'unavailable' | 'unknown';
     readonly version?: string;
     readonly probeFailure?: HostCodexProbeFailure;
+  };
+  readonly hostClaude?: {
+    readonly status: 'not-configured' | 'ready' | 'unavailable' | 'unknown';
+    readonly installation?: 'ready' | 'missing' | 'unsupported' | 'unknown';
+    readonly authentication?: 'ready' | 'not-ready' | 'unknown';
+    readonly modelAvailability?: 'available' | 'unavailable' | 'unknown';
+    readonly adapterControls?: 'ready' | 'unavailable' | 'unknown';
+    readonly version?: string;
+    readonly resolvedModel?: string;
+    readonly supportedEfforts?: readonly string[];
+    readonly probeFailure?: HostClaudeProbeFailure;
   };
   readonly session: { readonly authenticated: true; readonly activeCount: number };
   readonly access: { readonly boundary: 'private-network-and-authentication'; readonly publicInternetSupported: false };
