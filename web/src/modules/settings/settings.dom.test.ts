@@ -303,14 +303,15 @@ test('Settings F4: protocol range and migration guidance never imply verified co
   });
 });
 
-test('Settings execution mode is read-only, marked stale offline, and refreshed after reconnect', async () => {
+test('Settings execution mode is read-only, marked stale offline, and refreshed after reconnect in both directions', async () => {
   let settingsReads = 0;
+  let processMode: 'environment-hosted' | 'host-run' = 'environment-hosted';
   await withSettings(async ({ doc, service }) => {
     (doc.querySelector('.settings-tab-system') as HTMLButtonElement).click();
     await settle();
     let mode = doc.querySelector<HTMLElement>('[data-settings-section="execution-mode"]');
     assert.ok(mode);
-    assert.equal(mode.getAttribute('data-execution-mode'), 'host-run');
+    assert.equal(mode.getAttribute('data-execution-mode'), 'environment-hosted');
     assert.equal(mode.getAttribute('data-execution-mode-stale'), 'false');
     assert.match(mode.textContent ?? '', /Effective mode/);
     assert.match(mode.textContent ?? '', /Restart Sprout/);
@@ -324,6 +325,7 @@ test('Settings execution mode is read-only, marked stale offline, and refreshed 
     assert.match(mode?.textContent ?? '', /Last confirmed · stale/);
     assert.match(doc.body.textContent ?? '', /Connection is stale/);
 
+    processMode = 'host-run';
     service.setState({ status: 'online', connection: 'online', loading: false });
     await settle(180);
     mode = doc.querySelector<HTMLElement>('[data-settings-section="execution-mode"]');
@@ -331,11 +333,24 @@ test('Settings execution mode is read-only, marked stale offline, and refreshed 
     assert.equal(mode?.getAttribute('data-execution-mode'), 'host-run');
     assert.equal(mode?.getAttribute('data-execution-mode-stale'), 'false');
     assert.match(mode?.textContent ?? '', /Effective mode/);
+    assert.equal(mode?.querySelectorAll('button, input, select').length, 0);
+
+    service.setState({ status: 'offline', connection: 'offline', loading: false });
+    await settle();
+    assert.equal(mode?.getAttribute('data-execution-mode-stale'), 'true');
+    processMode = 'environment-hosted';
+    service.setState({ status: 'online', connection: 'online', loading: false });
+    await settle(180);
+    mode = doc.querySelector<HTMLElement>('[data-settings-section="execution-mode"]');
+    assert.equal(settingsReads, 3, 'the reverse mode change also triggers one fresh settings read');
+    assert.equal(mode?.getAttribute('data-execution-mode'), 'environment-hosted');
+    assert.equal(mode?.getAttribute('data-execution-mode-stale'), 'false');
+    assert.equal(mode?.querySelectorAll('button, input, select').length, 0);
   }, service => {
     const loadSettings = service.loadSettings.bind(service);
     service.loadSettings = async () => {
       settingsReads += 1;
-      return { ...await loadSettings(), executionMode: 'host-run' };
+      return { ...await loadSettings(), executionMode: processMode };
     };
   });
 });

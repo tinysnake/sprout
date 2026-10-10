@@ -6,6 +6,13 @@
 
 **Work-session constraint:** do not launch any other agent from this job.
 
+## Service startup and Settings reconnect
+
+- Started the actual service with `npm start -- --execution-mode environment-hosted`, restarted the same service with `npm start -- --execution-mode host-run`, and restarted with `npm start` omitting the argument. The observed process modes were `environment-hosted -> host-run -> environment-hosted`.
+- All three starts reopened the same temporary SQLite database. One authenticated Settings session was kept across restarts; an authenticated `GET /api/operator/settings` after each restart reported the new effective mode. The omission after Host-run returned to Environment-hosted.
+- The temporary service database contained its schema and the operator session, not a seeded Task or Agent Run. Placement and lease retention across mode changes are covered by the existing SQLite lifecycle scenarios in `src/task/environment-lifecycle.test.ts`; this startup run does not claim live Task placement retention.
+- Strengthened the Settings DOM reconnect scenario to change the reported mode in both directions. The displayed mode moved from Environment-hosted to Host-run and back after reconnect, became stale offline, and exposed no browser mutation control. Targeted `npm test -- 'web/src/modules/settings/settings.dom.test.ts'`: 18 tests passed, 0 failed.
+
 ## Live scenario results
 
 ### Pi
