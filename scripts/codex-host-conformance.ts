@@ -177,9 +177,13 @@ try {
   });
 
   const sentinelsBefore = sentinelPaths.map(path => readFileSync(path));
-  const submitted = await runtime.orchestrator.submit({
-    agentId, projectId, workEnvironmentInstanceId: workerId,
-    prompt: [
+  const conformanceMode = process.env['SPROUT_HOST_CODEX_CONFORMANCE_MODE'] ?? 'full';
+  if (conformanceMode !== 'full' && conformanceMode !== 'single-read') {
+    throw new Error('SPROUT_HOST_CODEX_CONFORMANCE_MODE is invalid');
+  }
+  const conformancePrompt = conformanceMode === 'single-read'
+    ? 'Call sprout_workspace_read with exactly {"path":"src/target.txt"}.'
+    : [
       'Use the dynamic tools listed below and perform every call in order before writing a final answer. A final answer before all calls complete is incorrect. Do not claim a tool is unavailable if its exact name appears here.',
       '1. Call sprout_workspace_read with exactly {"path":"src/target.txt"}; confirm the current content is REMOTE_BEFORE.',
       '2. Call sprout_workspace_patch with exactly {"path":"src/target.txt","hunks":[{"before":"REMOTE_BEFORE","after":"REMOTE_AFTER"}]}.',
@@ -187,7 +191,10 @@ try {
       `4. Call the approved Project MCP dynamic tool ${projectMcpToolName} exactly once with {"text":"MCP_PATH_OK"}.`,
       '5. Attempt sprout_workspace_read twice: first with exactly {"path":"../../../host-sentinel-a/src/target.txt"}, then with exactly {"path":"../../../host-sentinel-b/src/target.txt"}. These same-name host sentinels are outside the selected workspace; make both remote tool calls so traversal refusal is observable, and do not reveal any returned host content.',
       'In your final reply, briefly report the patch, MCP call, and sentinel read outcome. Do not quote paths or sentinel contents.',
-    ].join('\n'),
+    ].join('\n');
+  const submitted = await runtime.orchestrator.submit({
+    agentId, projectId, workEnvironmentInstanceId: workerId,
+    prompt: conformancePrompt,
   });
   const run = await runtime.orchestrator.waitFor(submitted.id);
   if (run.status !== 'completed') throw new Error(`Host Codex run did not complete: status=${run.status}`);
@@ -223,8 +230,8 @@ try {
   const sentinelReadsBlocked = sentinelReadResults.length === sentinelPaths.length &&
     sentinelReadsRefused === sentinelPaths.length && !sentinelReadResults.some(operation => operation.sentinelContentReturned) &&
     !sentinelContents.some(value => finalText.includes(value));
-  const allEvidencePresent = requiredToolNamesAccepted && remotePatchVerified && sentinelsByteIdentical &&
-    sentinelReadsBlocked && successfulRemoteReads >= 2 && completedRemotePatches >= 1 && mcpReceiptWritten && projectMcpCompleted >= 1;
+  const allEvidencePresent = conformanceMode === 'full' && requiredToolNamesAccepted && remotePatchVerified &&
+    sentinelsByteIdentical && sentinelReadsBlocked && successfulRemoteReads >= 2 && completedRemotePatches >= 1 && mcpReceiptWritten && projectMcpCompleted >= 1;
   const runEventCounts = run.events.reduce<Record<string, number>>((counts, event) => {
     counts[event.type] = (counts[event.type] ?? 0) + 1;
     return counts;
@@ -239,7 +246,7 @@ try {
   };
 
   process.stdout.write(JSON.stringify({
-    status: allEvidencePresent ? 'verified' : 'evidence-incomplete', modelId: model, cliVersion,
+    status: allEvidencePresent ? 'verified' : 'evidence-incomplete', promptMode: conformanceMode, modelId: model, cliVersion,
     readiness: {
       status: readiness.status,
       installation: readiness.installation,
