@@ -121,6 +121,29 @@ test('Host Pi and Codex Settings project local readiness facts without exposing 
   assert.equal(JSON.stringify(settings).includes(secretCodexProfileId), false);
 });
 
+test('Settings projects a bounded Host Codex readiness failure', async () => {
+  const auth = new OperatorSessionService({ store: new InMemoryOperatorSessionStore() });
+  await auth.initializeOrRecover('synthetic-credential');
+  const login = (await auth.signIn('synthetic-credential'))!;
+  const session = await auth.authenticate(login.bearerToken);
+  assert.ok(session.authenticated);
+  const operations = new OperatorDiagnostics({
+    store: new MemoryOperationalStore(), schema: 22, auth,
+    executionStrategy: createExecutionStrategy('host-run', true),
+    hostCodexReadiness: async () => ({
+      profileId: 'private-profile', engine: 'codex', status: 'unknown', installation: 'ready',
+      authentication: 'unknown', modelAvailability: 'unknown', adapterControls: 'unknown', observedAt: 1_000,
+      probeFailure: { step: 'model/list', reason: 'transport closed' },
+    }),
+    enrollments: { list: async () => [] } as never,
+    recovery: { list: async () => [] } as never,
+  });
+  assert.deepEqual((await operations.settings(session.session.id)).hostCodex, {
+    status: 'unknown', installation: 'ready', authentication: 'unknown', modelAvailability: 'unknown',
+    adapterControls: 'unknown', probeFailure: { step: 'model/list', reason: 'transport closed' },
+  });
+});
+
 test('Settings reports the unresolved production Host Codex prerequisite as blocked', async () => {
   const auth = new OperatorSessionService({ store: new InMemoryOperatorSessionStore() });
   await auth.initializeOrRecover('synthetic-credential');

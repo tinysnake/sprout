@@ -1,4 +1,5 @@
 import { isFeedDeepLink, type FeedTarget } from '../web/feed.ts';
+import type { HostCodexProbeFailure } from '../engine/codex-host.ts';
 import type { ExecutionMode } from '../execution-mode.ts';
 
 /** Diagnostics select finite facts and validated routing identities; never content. */
@@ -89,6 +90,7 @@ export interface OperatorSettings {
     readonly modelAvailability?: 'available' | 'unavailable' | 'unknown';
     readonly adapterControls?: 'ready' | 'unavailable' | 'unknown';
     readonly version?: string;
+    readonly probeFailure?: HostCodexProbeFailure;
   };
   readonly session: { readonly authenticated: true; readonly activeCount: number };
   readonly access: { readonly boundary: 'private-network-and-authentication'; readonly publicInternetSupported: false };

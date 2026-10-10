@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import type { CodexProcess } from './codex.ts';
+import { JsonRpcError } from './jsonrpc.ts';
 import {
   CODEX_HOST_VERSION,
   HostCodexEngineAdapter,
@@ -96,6 +97,21 @@ test('Host Codex readiness refuses a profile when any local tool control remains
   assert.equal(hostCodexControlsDisabledForTest({ data: features.filter(feature => feature.name !== 'browser_use') }), false);
 });
 
+test('Host Codex readiness reports a failing probe method and safe error category', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'sprout-host-codex-probe-failure-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const context = fixture(root, {
+    probeProcess: async () => {
+      throw new JsonRpcError('model/list', -32_000, 'token=SECRET path=/Users/private/.codex gateway.private:4321');
+    },
+  });
+  const readiness = await context.adapter.readiness(true);
+  assert.equal(readiness.status, 'unknown');
+  assert.deepEqual(readiness.probeFailure, { step: 'model/list', reason: 'JSON-RPC error' });
+  const serialized = JSON.stringify(readiness);
+  assert.doesNotMatch(serialized, /private|SECRET|gateway|4321|Users/);
+});
+
 test('Host Codex requires the exact configured model and supported effort before starting its pinned app-server', async t => {
   const root = mkdtempSync(join(tmpdir(), 'sprout-host-codex-profile-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -176,6 +192,7 @@ test('Host Codex isolation allows only its private runner and Codex home to writ
   assert.match(profile, /\(deny file-read\*\)/);
   assert.match(profile, /\(deny file-write\*\)/);
   assert.ok(profile.includes(`(allow file-write* (subpath "${realpathSync(agentRoot)}"))`));
+  assert.ok(profile.includes(`(allow file-read* (subpath "${realpathSync(context.codexHome)}"))`));
   assert.ok(profile.includes(`(allow file-write* (subpath "${realpathSync(context.codexHome)}"))`));
   assert.doesNotMatch(profile, /\(deny network\*\)/, 'provider requests need network access');
 });

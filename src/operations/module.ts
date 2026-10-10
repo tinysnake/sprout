@@ -67,6 +67,7 @@ export class OperatorDiagnostics {
           modelAvailability: hostCodex.modelAvailability,
           adapterControls: hostCodex.adapterControls,
           ...(hostCodex.version !== undefined ? { version: hostCodex.version } : {}),
+          ...(hostCodex.probeFailure !== undefined ? { probeFailure: hostCodex.probeFailure } : {}),
         } }),
       session: { authenticated: true, activeCount: sessions.length },
       access: { boundary: 'private-network-and-authentication', publicInternetSupported: false },

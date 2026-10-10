@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { delimiter, dirname, basename, join } from 'node:path';
 
 import { CodexEngineAdapter, type CodexProcess } from './codex.ts';
-import { LineJsonRpcTransport } from './jsonrpc.ts';
+import { JsonRpcError, JsonRpcTransportError, LineJsonRpcTransport } from './jsonrpc.ts';
 import type { CodexDynamicToolSpec } from './codex-tools.ts';
 import type { EngineSession, StartSessionRequest } from './port.ts';
 import type { HostEngineReadiness, HostRunEngineAdapter } from './host-profile.ts';
@@ -43,6 +43,56 @@ const CODEX_DISABLED_FEATURES = [
 export interface HostCodexReadiness extends HostEngineReadiness {
   readonly engine: 'codex';
   readonly supportedEfforts?: readonly string[];
+  readonly probeFailure?: HostCodexProbeFailure;
+}
+
+export interface HostCodexProbeFailure {
+  readonly step: 'prepare readiness directory' | 'build isolation profile' | 'launch app-server' | 'initialize' | 'account/read' | 'model/list' | 'experimentalFeature/list' | 'thread/start' | 'probe';
+  readonly reason: 'timed out' | 'transport closed' | 'permission denied' | 'not found' | 'JSON-RPC error' | 'probe error';
+}
+
+const HOST_CODEX_PROBE_STEPS: readonly HostCodexProbeFailure['step'][] = [
+  'prepare readiness directory', 'build isolation profile', 'launch app-server', 'initialize',
+  'account/read', 'model/list', 'experimentalFeature/list', 'thread/start', 'probe',
+];
+
+class HostCodexProbeError extends Error {
+  readonly failure: HostCodexProbeFailure;
+  constructor(failure: HostCodexProbeFailure) {
+    super(failure.reason);
+    this.failure = failure;
+  }
+}
+
+function hostCodexProbeFailure(error: unknown, fallbackStep: HostCodexProbeFailure['step'] = 'probe'): HostCodexProbeFailure {
+  if (error instanceof HostCodexProbeError) return error.failure;
+  const candidateStep = typeof error === 'object' && error !== null && 'method' in error && typeof error.method === 'string'
+    ? error.method : fallbackStep;
+  const step = HOST_CODEX_PROBE_STEPS.includes(candidateStep as HostCodexProbeFailure['step'])
+    ? candidateStep as HostCodexProbeFailure['step'] : fallbackStep;
+  const message = error instanceof Error ? error.message : '';
+  const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
+  const reason: HostCodexProbeFailure['reason'] = message === 'Codex profile probe timed out' || message.startsWith('Codex profile probe timed out:')
+    ? 'timed out'
+    : error instanceof JsonRpcTransportError || message === 'transport closed'
+      ? 'transport closed'
+      : error instanceof JsonRpcError
+        ? 'JSON-RPC error'
+        : code === 'EACCES' || code === 'EPERM'
+          ? 'permission denied'
+          : code === 'ENOENT'
+            ? 'not found'
+            : 'probe error';
+  return { step, reason };
+}
+
+function withProbeStep<T>(step: HostCodexProbeFailure['step'], operation: () => T): T {
+  try { return operation(); } catch (error) { throw new HostCodexProbeError(hostCodexProbeFailure(error, step)); }
+}
+
+async function probeRequest<T>(transport: LineJsonRpcTransport, method: HostCodexProbeFailure['step'], params: unknown): Promise<T> {
+  try { return await withTimeout(transport.request<T>(method, params), 15_000); }
+  catch (error) { throw new HostCodexProbeError(hostCodexProbeFailure(error, method)); }
 }
 
 export interface HostCodexAdapterOptions {
@@ -111,8 +161,8 @@ export class HostCodexEngineAdapter implements HostRunEngineAdapter {
     let result: HostCodexReadiness;
     try {
       result = await (this.#options.probeProcess ?? probeHostCodex)(this.#probe);
-    } catch {
-      result = unknownReadiness(this.profileId, this.#clock());
+    } catch (error) {
+      result = unknownReadiness(this.profileId, this.#clock(), hostCodexProbeFailure(error));
     }
     if (result.status === 'ready') {
       this.#efforts = new Set(result.supportedEfforts ?? []);
@@ -196,50 +246,59 @@ async function probeHostCodex(input: HostCodexProbeInput): Promise<HostCodexRead
   if (!existsSync(input.codexHome)) {
     return { ...unavailableReadiness(input.profileId, at, 'unknown'), authentication: 'not-ready', version: CODEX_HOST_VERSION };
   }
+  let step: HostCodexProbeFailure['step'] = 'prepare readiness directory';
+  let processHandle: CodexProcess | undefined;
+  let transport: LineJsonRpcTransport | undefined;
   try {
     const agentRoot = join(input.runnerRoot, input.profileId, 'readiness');
-    mkdirSync(agentRoot, { recursive: true, mode: 0o700 });
+    withProbeStep(step, () => mkdirSync(agentRoot, { recursive: true, mode: 0o700 }));
     const launchInput: HostCodexLaunchInput = { ...input, agentId: 'host-readiness', agentRoot };
-    const profile = codexIsolationProfile({ ...launchInput, network: true });
-    const process = spawnHostCodex(launchInput, ['app-server', '--listen', 'stdio://', ...CODEX_SERVER_ARGS], undefined, agentRoot, profile);
-    const transport = new LineJsonRpcTransport({ input: process.stdout, output: process.stdin });
-    try {
-      const initialize = await withTimeout(transport.request<Record<string, unknown>>('initialize', {
-        clientInfo: { name: 'sprout-host-profile-probe', version: '0' }, capabilities: { experimentalApi: true },
-      }), 15_000);
-      transport.notify('initialized', {});
-      const [account, models, features] = await Promise.all([
-        withTimeout(transport.request<unknown>('account/read', {}), 15_000),
-        withTimeout(transport.request<unknown>('model/list', { limit: MODEL_PAGE_SIZE, includeHidden: false }), 15_000),
-        withTimeout(transport.request<unknown>('experimentalFeature/list', { limit: MODEL_PAGE_SIZE }), 15_000),
-      ]);
-      const model = exactModel(models, input.model);
-      let controlsReady = model !== undefined && hasAccount(account) && initialize.userAgent !== undefined && hostCodexControlsDisabled(features);
-      if (controlsReady) {
-        try {
-          await withTimeout(transport.request('thread/start', {
-            ephemeral: true, cwd: agentRoot, model: input.model, approvalPolicy: 'never', sandbox: 'read-only',
-            dynamicTools: [DYNAMIC_TOOL_PROBE],
-          }), 15_000);
-        } catch { controlsReady = false; }
+    step = 'build isolation profile';
+    const profile = withProbeStep(step, () => codexIsolationProfile({ ...launchInput, network: true }));
+    step = 'launch app-server';
+    processHandle = withProbeStep(step, () => spawnHostCodex(launchInput, ['app-server', '--listen', 'stdio://', ...CODEX_SERVER_ARGS], undefined, agentRoot, profile));
+    transport = new LineJsonRpcTransport({ input: processHandle.stdout, output: processHandle.stdin });
+    step = 'initialize';
+    const initialize = await probeRequest<Record<string, unknown>>(transport, 'initialize', {
+      clientInfo: { name: 'sprout-host-profile-probe', version: '0' }, capabilities: { experimentalApi: true },
+    });
+    transport.notify('initialized', {});
+    const [account, models, features] = await Promise.all([
+      probeRequest<unknown>(transport, 'account/read', {}),
+      probeRequest<unknown>(transport, 'model/list', { limit: MODEL_PAGE_SIZE, includeHidden: false }),
+      probeRequest<unknown>(transport, 'experimentalFeature/list', { limit: MODEL_PAGE_SIZE }),
+    ]);
+    const model = exactModel(models, input.model);
+    let controlsReady = model !== undefined && hasAccount(account) && initialize.userAgent !== undefined && hostCodexControlsDisabled(features);
+    let probeFailure: HostCodexProbeFailure | undefined;
+    if (controlsReady) {
+      try {
+        await probeRequest(transport, 'thread/start', {
+          ephemeral: true, cwd: agentRoot, model: input.model, approvalPolicy: 'never', sandbox: 'read-only',
+          dynamicTools: [DYNAMIC_TOOL_PROBE],
+        });
+      } catch (error) {
+        controlsReady = false;
+        probeFailure = hostCodexProbeFailure(error, 'thread/start');
       }
-      const authenticated = hasAccount(account);
-      const modelAvailable = model !== undefined;
-      const adapterControls = controlsReady;
-      const ready = authenticated && modelAvailable && adapterControls;
-      return {
-        profileId: input.profileId, engine: 'codex', status: ready ? 'ready' : 'unavailable',
-        installation: 'ready', authentication: authenticated ? 'ready' : 'not-ready',
-        modelAvailability: modelAvailable ? 'available' : 'unavailable',
-        adapterControls: adapterControls ? 'ready' : 'unavailable', version: CODEX_HOST_VERSION, observedAt: at,
-        ...(model !== undefined ? { supportedEfforts: model.efforts } : {}),
-      };
-    } finally {
-      transport.close();
-      process.kill('SIGTERM');
     }
-  } catch {
-    return { ...unavailableReadiness(input.profileId, at, 'unknown'), version: CODEX_HOST_VERSION };
+    const authenticated = hasAccount(account);
+    const modelAvailable = model !== undefined;
+    const adapterControls = controlsReady;
+    const ready = authenticated && modelAvailable && adapterControls;
+    return {
+      profileId: input.profileId, engine: 'codex', status: ready ? 'ready' : 'unavailable',
+      installation: 'ready', authentication: authenticated ? 'ready' : 'not-ready',
+      modelAvailability: modelAvailable ? 'available' : 'unavailable',
+      adapterControls: adapterControls ? 'ready' : 'unavailable', version: CODEX_HOST_VERSION, observedAt: at,
+      ...(model !== undefined ? { supportedEfforts: model.efforts } : {}),
+      ...(probeFailure !== undefined ? { probeFailure } : {}),
+    };
+  } catch (error) {
+    return { ...unavailableReadiness(input.profileId, at, 'unknown'), version: CODEX_HOST_VERSION, probeFailure: hostCodexProbeFailure(error, step) };
+  } finally {
+    transport?.close();
+    processHandle?.kill('SIGTERM');
   }
 }
 
@@ -296,6 +355,7 @@ function codexIsolationProfile(input: HostCodexLaunchInput & { readonly network:
     ...macOsTimezoneFiles().map(path => `(allow file-read-data (literal ${JSON.stringify(path)}))`),
     `(allow file-read* (subpath ${quote(agentRoot)}))`,
     `(allow file-write* (subpath ${quote(agentRoot)}))`,
+    `(allow file-read* (subpath ${quote(codexHome)}))`,
     ...files.map(path => `(allow file-read* (literal ${quote(path)}))`),
     `(allow file-write* (subpath ${quote(codexHome)}))`,
     ...protectedFiles.map(path => `(deny file-write* (literal ${JSON.stringify(path)}))`),
@@ -376,9 +436,11 @@ function unavailableReadiness(profileId: string, observedAt: number, cause: 'mis
   };
 }
 
-function unknownReadiness(profileId: string, observedAt: number): HostCodexReadiness {
+function unknownReadiness(profileId: string, observedAt: number, probeFailure?: HostCodexProbeFailure): HostCodexReadiness {
   return { profileId, engine: 'codex', status: 'unknown', installation: 'unknown', authentication: 'unknown',
-    modelAvailability: 'unknown', adapterControls: 'unknown', observedAt };
+    modelAvailability: 'unknown', adapterControls: 'unknown', observedAt,
+    ...(probeFailure !== undefined ? { probeFailure } : {}),
+  };
 }
 
 function isUuid(value: string): boolean {

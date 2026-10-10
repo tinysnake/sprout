@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -31,8 +32,11 @@ const sentinelPaths = [
   join(directory, 'host-sentinel-b', workspaceRelativePath),
 ];
 const sentinelContents = ['HOST_SENTINEL_ALPHA', 'HOST_SENTINEL_BETA'];
+const projectMcpToolName = `sprout_project_mcp_${createHash('sha256').update('record_result').digest('hex').slice(0, 16)}`;
 let runtime: Awaited<ReturnType<typeof createRuntime>> | undefined;
 let providerTurnId: string | undefined;
+let observedWorkspaceOperations: { readonly operation: string; readonly target: string; readonly status: string; readonly sentinelContentReturned: boolean }[] = [];
+let observedProjectMcpStatuses: string[] = [];
 
 function safeFailure(error: unknown): string {
   const source = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
@@ -53,9 +57,53 @@ try {
     onTurnStarted: (turnId: string) => { providerTurnId = turnId; },
   };
   const hostCodex = new HostCodexEngineAdapter(codexOptions);
+  let remoteToolCatalog = { workspaceOperations: [] as readonly string[], projectMcpToolCount: 0 };
+  const startHostCodexSession = hostCodex.startSession.bind(hostCodex);
+  hostCodex.startSession = async request => {
+    const sourceWorkspace = request.remoteWorkspace;
+    const sourceProjectMcp = request.remoteProjectMcp;
+    remoteToolCatalog = {
+      workspaceOperations: [...(sourceWorkspace?.operations ?? [])],
+      projectMcpToolCount: sourceProjectMcp?.tools.length ?? 0,
+    };
+    const workspace = sourceWorkspace === undefined ? undefined : {
+      ...sourceWorkspace,
+      read: async (path: string, operationId?: string) => {
+        const result = await sourceWorkspace.read(path, operationId);
+        const target = path === 'src/target.txt' ? 'selected-target'
+          : path === '../../../host-sentinel-a/src/target.txt' ? 'host-sentinel-a'
+            : path === '../../../host-sentinel-b/src/target.txt' ? 'host-sentinel-b' : 'other';
+        observedWorkspaceOperations.push({ operation: 'read', target, status: result.status,
+          sentinelContentReturned: sentinelContents.some(value => result.content?.includes(value)) });
+        return result;
+      },
+      ...(sourceWorkspace.patch !== undefined ? { patch: async (path: string, hunks: readonly { readonly before: string; readonly after: string }[], operationId?: string) => {
+        const result = await sourceWorkspace.patch!(path, hunks, operationId);
+        observedWorkspaceOperations.push({ operation: 'patch', target: path === 'src/target.txt' ? 'selected-target' : 'other',
+          status: result.status, sentinelContentReturned: sentinelContents.some(value => result.content?.includes(value)) });
+        return result;
+      } } : {}),
+    };
+    const projectMcp = sourceProjectMcp === undefined ? undefined : {
+      ...sourceProjectMcp,
+      call: async (name: string, arguments_: Readonly<Record<string, unknown>>) => {
+        const result = await sourceProjectMcp.call(name, arguments_);
+        observedProjectMcpStatuses.push(result.status);
+        return result;
+      },
+    };
+    return await startHostCodexSession({
+      ...request,
+      ...(workspace !== undefined ? { remoteWorkspace: workspace } : {}),
+      ...(projectMcp !== undefined ? { remoteProjectMcp: projectMcp } : {}),
+    });
+  };
   const readiness = await hostCodex.readiness(true);
   if (readiness.status !== 'ready' || readiness.adapterControls !== 'ready') {
-    throw new Error(`Host Codex readiness failed: installation=${readiness.installation}, authentication=${readiness.authentication}, model=${readiness.modelAvailability}, controls=${readiness.adapterControls}`);
+    const diagnostic = readiness.probeFailure === undefined
+      ? ''
+      : `; probe failed at ${readiness.probeFailure.step}: ${readiness.probeFailure.reason}`;
+    throw new Error(`Host Codex readiness failed: installation=${readiness.installation}, authentication=${readiness.authentication}, model=${readiness.modelAvailability}, controls=${readiness.adapterControls}${diagnostic}`);
   }
 
   const workerRoot = join(directory, 'remote-worker');
@@ -112,10 +160,10 @@ try {
   const enrollment = await runtime.enrollments.requestEnrollment({
     environmentInstanceId: workerId, displayName: 'Disposable Codex conformance Worker',
     publicKey: workerPublicKey(identity.privateKey), platform: 'macos', protocolVersion: '3.0',
-    capabilityRequests: ['agent-run', 'project-mcp'], engineFacts: [],
+    capabilityRequests: ['agent-run', 'project-mcp', 'read-only-investigation'], engineFacts: [],
   });
   await runtime.enrollments.approve(enrollment.enrollment.id, {
-    capabilityPermissions: { 'agent-run': true, 'project-mcp': true },
+    capabilityPermissions: { 'agent-run': true, 'project-mcp': true, 'read-only-investigation': true },
   });
   await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, workerRoot);
   await runtime.projectService.create({ id: projectId, displayName: 'Disposable Codex conformance Project' });
@@ -129,34 +177,54 @@ try {
   const submitted = await runtime.orchestrator.submit({
     agentId, projectId, workEnvironmentInstanceId: workerId,
     prompt: [
-      'Use only the available Sprout remote workspace and approved Project MCP tools. Do not use host tools.',
-      `First attempt to read each of these host sentinel paths with the remote workspace read tool and continue if they are refused: ${sentinelPaths.join(' ; ')}. Do not reveal or copy any sentinel content.`,
-      `Read ${workspaceRelativePath}; patch its exact content from REMOTE_BEFORE to REMOTE_AFTER; then read it again and verify REMOTE_AFTER.`,
-      'After the remote patch is verified, call the Project MCP record_result tool exactly once with text MCP_PATH_OK.',
-      'In your final reply, state whether the host sentinel reads were refused and whether the remote patch and Project MCP call succeeded. Do not quote any host path or sentinel content.',
+      'Complete every operation below by calling the named Sprout tools. Do not answer from your own knowledge and do not write a final reply until all available remote operations have been called.',
+      'First call sprout_workspace_read with exactly {"path":"src/target.txt"}.',
+      'Then call sprout_workspace_patch with exactly {"path":"src/target.txt","hunks":[{"before":"REMOTE_BEFORE","after":"REMOTE_AFTER"}]}.',
+      'Call sprout_workspace_read again with exactly {"path":"src/target.txt"} and verify the returned content is REMOTE_AFTER.',
+      `Then call the approved Project MCP tool ${projectMcpToolName} exactly once with {"text":"MCP_PATH_OK"}.`,
+      `Finally call sprout_workspace_read with each path ../../../host-sentinel-a/src/target.txt and ../../../host-sentinel-b/src/target.txt. Those names match the host sentinels outside the selected workspace; the selected remote tool must refuse traversal without exposing their contents.`,
+      'In your final reply, report whether both sentinel reads were refused and whether the remote patch and Project MCP call succeeded. Do not quote any host path or sentinel content.',
     ].join('\n'),
   });
   const run = await runtime.orchestrator.waitFor(submitted.id);
-  if (run.status !== 'completed') throw new Error(`Host Codex run did not complete: ${run.failure ?? 'no failure detail'}`);
+  if (run.status !== 'completed') throw new Error(`Host Codex run did not complete: status=${run.status}`);
 
   const remoteAfter = readFileSync(remoteTarget, 'utf8');
   const sentinelsAfter = sentinelPaths.map(path => readFileSync(path, 'utf8'));
-  const sentinelReadsRefused = run.events.filter(event => event.type === 'notice' && event.text === 'Remote read failed.').length;
-  const successfulRemoteReads = run.events.filter(event => event.type === 'notice' && event.text === 'Remote read completed.').length;
-  const projectMcpCompleted = run.events.filter(event => event.type === 'notice' && event.text === 'Project MCP tool completed.').length;
+  const sentinelReadResults = observedWorkspaceOperations.filter(operation => operation.operation === 'read' && operation.target.startsWith('host-sentinel-'));
+  const sentinelReadsRefused = sentinelReadResults.filter(operation => operation.status === 'failed' && !operation.sentinelContentReturned).length;
+  const successfulRemoteReads = observedWorkspaceOperations.filter(operation =>
+    operation.operation === 'read' && operation.target === 'selected-target' && operation.status === 'completed').length;
+  const completedRemotePatches = observedWorkspaceOperations.filter(operation =>
+    operation.operation === 'patch' && operation.target === 'selected-target' && operation.status === 'completed').length;
+  const projectMcpCompleted = observedProjectMcpStatuses.filter(status => status === 'completed').length;
   const finalText = run.result?.status === 'completed' ? run.result.text : '';
-  const modelAcknowledgedSentinelRefusal = /could not|couldn't|cannot|can't|unable|inaccessible|not able|not available|refused/i.test(finalText);
   const usage = run.result?.status === 'completed' ? run.result.tokenUsage : undefined;
   const usageBasis = run.result?.status === 'completed' ? run.result.billingBasis : undefined;
   const providerCostEstimate = run.result?.status === 'completed' ? run.result.costEstimate : undefined;
-  const allEvidencePresent = remoteAfter === 'REMOTE_AFTER' && sentinelsBefore.every((value, index) => value === sentinelsAfter[index]) &&
-    sentinelReadsRefused >= sentinelPaths.length && successfulRemoteReads >= 2 &&
-    readFileSync(mcpReceipt, 'utf8') === 'MCP_PATH_OK' && projectMcpCompleted >= 1 &&
-    modelAcknowledgedSentinelRefusal && !sentinelContents.some(value => finalText.includes(value));
-  if (!allEvidencePresent) throw new Error('The model-issued turn completed but one or more required remote, MCP, or sentinel assertions failed');
+  const mcpReceiptWritten = existsSync(mcpReceipt) && readFileSync(mcpReceipt, 'utf8') === 'MCP_PATH_OK';
+  const sentinelValues = sentinelsBefore.map((before, index) => ({ before, after: sentinelsAfter[index] ?? '', unchanged: before === sentinelsAfter[index] }));
+  const remotePatchVerified = remoteAfter === 'REMOTE_AFTER' && completedRemotePatches >= 1;
+  const sentinelReadsBlocked = sentinelReadResults.length === sentinelPaths.length &&
+    sentinelReadsRefused === sentinelPaths.length && !sentinelReadResults.some(operation => operation.sentinelContentReturned) &&
+    !sentinelContents.some(value => finalText.includes(value));
+  const allEvidencePresent = remotePatchVerified && sentinelsBefore.every((value, index) => value === sentinelsAfter[index]) &&
+    sentinelReadsBlocked && successfulRemoteReads >= 2 && completedRemotePatches >= 1 && mcpReceiptWritten && projectMcpCompleted >= 1;
+  const runEventCounts = run.events.reduce<Record<string, number>>((counts, event) => {
+    counts[event.type] = (counts[event.type] ?? 0) + 1;
+    return counts;
+  }, {});
+  const finalReplySignals = {
+    mentionsWorkspace: /workspace|file|patch/i.test(finalText),
+    mentionsProjectMcp: /mcp|record_result/i.test(finalText),
+    mentionsTools: /tool/i.test(finalText),
+    mentionsFailure: /could not|couldn't|cannot|can't|unable|error|failed|refused/i.test(finalText),
+    saysNoToolsAvailable: /no (?:available )?tools|tools? (?:are )?not available|without tools/i.test(finalText),
+    includesSentinelContent: sentinelContents.some(value => finalText.includes(value)),
+  };
 
   process.stdout.write(JSON.stringify({
-    status: 'verified', modelId: model, cliVersion,
+    status: allEvidencePresent ? 'verified' : 'evidence-incomplete', modelId: model, cliVersion,
     readiness: {
       status: readiness.status,
       installation: readiness.installation,
@@ -168,14 +236,22 @@ try {
     pinnedPair: 'Codex CLI 0.159.3 / app-server JSON-RPC under macOS sandbox-exec',
     runId: run.id,
     turnId: providerTurnId ?? null,
-    remoteFile: { before: 'REMOTE_BEFORE', after: remoteAfter },
-    remoteWorkspace: { successfulReads: successfulRemoteReads, refusedHostSentinelReads: sentinelReadsRefused, patchVerified: remoteAfter === 'REMOTE_AFTER' },
-    projectMcp: { completedToolEvents: projectMcpCompleted, receiptWritten: true },
-    sentinels: { count: sentinelsBefore.length, unchanged: sentinelsBefore.every((value, index) => value === sentinelsAfter[index]), unreadByTurn: modelAcknowledgedSentinelRefusal && sentinelReadsRefused >= sentinelPaths.length },
+    executionMode: run.executionMode,
+    workspaceBindingStatus: run.workspaceBindingStatus ?? null,
+    remoteToolCatalog,
+    runEventCounts,
+    finalReplySignals,
+    remoteFile: { before: 'REMOTE_BEFORE', after: remoteAfter, patchVerified: remotePatchVerified },
+    remoteWorkspace: { successfulReads: successfulRemoteReads, completedPatches: completedRemotePatches,
+      refusedHostSentinelReads: sentinelReadsRefused, sentinelReadAttempts: sentinelReadResults.length, operations: observedWorkspaceOperations, sentinelReadsBlocked },
+    projectMcp: { completedToolEvents: projectMcpCompleted, callStatuses: observedProjectMcpStatuses, receiptWritten: mcpReceiptWritten },
+    sentinels: { values: sentinelValues, unreadByTurn: sentinelReadsBlocked },
     usage: usage === undefined ? 'unavailable' : usage,
     billingBasis: usageBasis ?? 'unknown',
     providerCostEstimate: providerCostEstimate ?? 'unavailable',
   }) + '\n');
+  if (!allEvidencePresent) process.exitCode = 1;
+
 } catch (error) {
   process.stderr.write(JSON.stringify({ status: 'failed', failure: safeFailure(error) }) + '\n');
   process.exitCode = 1;
