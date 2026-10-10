@@ -22,6 +22,12 @@ import {
  * Prints sanitized facts only and removes temporary Pi session and workspace data.
  */
 const root = await mkdtemp(join(tmpdir(), 'sprout-host-task-probe-'));
+const interruptRecoveryMode = process.argv.includes('--interrupt-recovery');
+let markHostSessionStarted: () => void = () => undefined;
+const hostSessionStarted = new Promise<void>(resolveStarted => { markHostSessionStarted = resolveStarted; });
+let hostSessionStartCount = 0;
+let hostInterruptCalls = 0;
+let diagnosticFacts: Record<string, unknown> | undefined;
 let runtime: Awaited<ReturnType<typeof createRuntime>> | undefined;
 let taskLeaseId: string | undefined;
 let stage = 'host-pi-profile';
@@ -258,9 +264,15 @@ function observeTaskCapabilities(adapter: HostPiEngineAdapter): HostPiEngineAdap
         run(prompt: string) {
           runPromptNamesTarget = prompt.includes(taskFixturePath);
           runPromptContainsExactRead = prompt.includes(`"path":"${taskFixturePath}"`);
-          return session.run(prompt);
+          const turn = session.run(prompt);
+          hostSessionStartCount += 1;
+          markHostSessionStarted();
+          return turn;
         },
-        interrupt: session.interrupt.bind(session),
+        interrupt: async () => {
+          hostInterruptCalls += 1;
+          return session.interrupt();
+        },
         close: session.close.bind(session),
       }));
     },
@@ -381,11 +393,103 @@ createInterface({ input: process.stdin }).on('line', line => {
         process.exitCode = 1;
       } else {
         stage = 'model-issued-task-run';
-        const advanced = await runtime.taskAdmissions.advanceForHuman(taskId, {
+        let advanced = await runtime.taskAdmissions.advanceForHuman(taskId, {
           targetAgentId: 'scout',
           reason: 'Run the bounded workspace and MCP check.',
           prompt: `Use exactly these five tools once each in this order: remote_read, remote_edit, remote_command, mcp_fixture_echo, mcp_http-fixture_http_echo. The exact single file is ${taskFixturePath} with no extension at the root of the authorized Project workspace, not the Pi session or Task context directory. First call remote_read with exactly {"path":"${taskFixturePath}"}. Next call remote_edit on that same file with exactly {"path":"${taskFixturePath}","oldText":"before","newText":"after"}. Then call remote_command with executable "node" and args ${JSON.stringify(taskCommandArgs)}; omit cwd because it runs from the Project workspace root. Call mcp_fixture_echo once with exactly {"text":"STDIO_OK"}. Call mcp_http-fixture_http_echo once with exactly {"text":"HTTP_OK"}. Do not call remote_search or any other tool, repeat calls, or include tool arguments, file contents, or command output in your final response. Report the check result in one short sentence.`,
         });
+        let interruptionFacts: Record<string, unknown> = { requested: false };
+        if (interruptRecoveryMode) {
+          stage = 'wait-for-host-session-start';
+          await waitForBounded(hostSessionStarted);
+          stage = 'request-human-pause';
+          const paused = await runtime.taskControls.pauseForHuman(taskId, {
+            reason: 'Verify Host-run Pi interruption and deliberate Task recovery.',
+          });
+          stage = 'interrupt-active-task-run';
+          const interruptedTask = await runtime.taskControls.interruptForHuman(taskId, {
+            reason: 'Settle the active Host-run Pi turn for the recovery check.',
+          });
+          stage = 'read-stopped-run-and-links';
+          const stoppedRun = await waitForBounded(runtime.orchestrator.waitFor(advanced.runId));
+          const runsBeforeResume = (await runtime.tasks.getWithRuns(taskId))?.runs ?? [];
+          const leaseStateDuringRecovery = runtime.pool.getLease(taskLeaseId)?.state ?? 'missing';
+          const leaseHeldDuringRecovery = leaseStateDuringRecovery === 'active' || leaseStateDuringRecovery === 'recovering';
+          diagnosticFacts = {
+            taskLifecycleAfterInterruption: interruptedTask.environmentLifecycleState ?? 'missing',
+            taskRecoveryStateAfterInterruption: interruptedTask.recoveryState ?? 'none',
+            taskPauseStateAfterInterruption: interruptedTask.pauseState ?? 'none',
+            leaseStateAfterInterruption: leaseStateDuringRecovery,
+            activeRunPresentAfterInterruption: interruptedTask.activeRunId !== undefined,
+            stoppedRunStatus: stoppedRun.status,
+            linkedRunCountBeforeRecovery: runsBeforeResume.length,
+            linkedRunSummaryStatus: runsBeforeResume[0]?.summary?.status ?? 'missing',
+          };
+          stage = 'production-reconciliation-after-stop';
+          const productionReconciliationAttempted = interruptedTask.environmentLifecycleState !== 'recovery' &&
+            leaseStateDuringRecovery === 'recovering';
+          if (productionReconciliationAttempted) await runtime.reconcile();
+          const taskBeforeRecovery = await runtime.tasks.get(taskId);
+          if (taskBeforeRecovery === undefined) throw new Error('task-missing-after-reconciliation');
+          stage = 'human-task-recovery';
+          let resumedTask = taskBeforeRecovery.environmentLifecycleState === 'recovery'
+            ? await runtime.taskControls.recoverForHuman(taskId, {
+              action: 'resume',
+              reason: 'Resume the Task through Environment recovery after the stopped Host-run Pi turn.',
+            })
+            : taskBeforeRecovery;
+          if (resumedTask.pauseState === 'paused') {
+            resumedTask = await runtime.taskControls.resumeForHuman(taskId, {
+              reason: 'Clear the Human pause after Environment recovery.',
+            });
+          }
+          const noReplayBeforeAdvance = runsBeforeResume.length === 1 &&
+            runsBeforeResume[0]?.runId === advanced.runId && runsBeforeResume[0]?.summary?.status === 'stopped' &&
+            interruptedTask.activeRunId === undefined;
+          interruptionFacts = {
+            ...diagnosticFacts,
+            productionReconciliationAttempted,
+            lifecycleAfterReconciliation: taskBeforeRecovery.environmentLifecycleState ?? 'missing',
+            taskStatusAfterRecovery: resumedTask.status,
+            lifecycleAfterRecovery: resumedTask.environmentLifecycleState ?? 'missing',
+            pauseStateAfterRecovery: resumedTask.pauseState ?? 'none',
+            leaseStateAfterRecovery: runtime.pool.getLease(taskLeaseId)?.state ?? 'missing',
+            activeRunPresentAfterRecovery: resumedTask.activeRunId !== undefined,
+            requested: true,
+            hostSessionStarted: hostSessionStartCount > 0,
+            adapterInterruptCalls: hostInterruptCalls,
+            pauseWasRequested: paused.pauseState === 'requested',
+            runSettledStopped: stoppedRun.status === 'stopped',
+            taskPausedAfterInterruption: interruptedTask.pauseState === 'paused',
+            taskIdleAfterInterruption: interruptedTask.environmentLifecycleState === 'idle',
+            leaseHeldDuringRecovery,
+            noReplayBeforeDeliberateAdvance: noReplayBeforeAdvance,
+            humanResumeClearedPause: resumedTask.pauseState === undefined,
+          };
+          if (!noReplayBeforeAdvance || !leaseHeldDuringRecovery || resumedTask.pauseState !== undefined ||
+              stoppedRun.status !== 'stopped' || hostInterruptCalls === 0) {
+            throw new Error('host-run-interruption-recovery-incomplete');
+          }
+          stage = 'deliberate-post-recovery-admission';
+          const beforeNewAdvance = await runtime.tasks.get(taskId);
+          diagnosticFacts = {
+            ...interruptionFacts,
+            taskStatusBeforeNewAdvance: beforeNewAdvance?.status ?? 'missing',
+            lifecycleBeforeNewAdvance: beforeNewAdvance?.environmentLifecycleState ?? 'missing',
+            pauseStateBeforeNewAdvance: beforeNewAdvance?.pauseState ?? 'none',
+            leaseStateBeforeNewAdvance: runtime.pool.getLease(taskLeaseId)?.state ?? 'missing',
+            activeRunBeforeNewAdvance: beforeNewAdvance?.activeRunId !== undefined,
+          };
+          advanced = await runtime.taskAdmissions.advanceForHuman(taskId, {
+            targetAgentId: 'scout',
+            reason: 'Deliberately run a new bounded check after recovery.',
+            prompt: `Use exactly these five tools once each in this order: remote_read, remote_edit, remote_command, mcp_fixture_echo, mcp_http-fixture_http_echo. The exact single file is ${taskFixturePath} with no extension at the root of the authorized Project workspace, not the Pi session or Task context directory. First call remote_read with exactly {"path":"${taskFixturePath}"}. Next call remote_edit on that same file with exactly {"path":"${taskFixturePath}","oldText":"before","newText":"after"}. Then call remote_command with executable "node" and args ${JSON.stringify(taskCommandArgs)}; omit cwd because it runs from the Project workspace root. Call mcp_fixture_echo once with exactly {"text":"STDIO_OK"}. Call mcp_http-fixture_http_echo once with exactly {"text":"HTTP_OK"}. Do not call remote_search or any other tool, repeat calls, or include tool arguments, file contents, or command output in your final response. Report the check result in one short sentence.`,
+          });
+          stage = 'deliberate-post-recovery-run-id-check';
+          if (advanced.runId === runsBeforeResume[0]?.runId) throw new Error('post-recovery-run-replayed-old-id');
+          interruptionFacts = { ...interruptionFacts, deliberateNewRunAdmitted: true };
+          diagnosticFacts = interruptionFacts;
+        }
         const settledRun = await waitForBounded(runtime.orchestrator.waitFor(advanced.runId));
         const afterRunTask = await runtime.tasks.get(taskId);
         const nestedRunUsedTaskLease = settledRun.leaseId === taskLeaseId;
@@ -452,13 +556,15 @@ createInterface({ input: process.stdin }).on('line', line => {
           taskEndedSafely,
           workspacePersistsAfterTaskEnd,
           finalLeaseState: runtime.pool.getLease(taskLeaseId)?.state ?? 'missing',
+          interruptionRecovery: interruptionFacts,
         });
         if (!accepted) process.exitCode = 1;
       }
     }
   }
 } catch (error) {
-  report({ outcome: 'blocked', reason: 'bounded-probe-failed', stage, ...sanitizedProbeErrorFields(error) });
+  report({ outcome: 'blocked', reason: 'bounded-probe-failed', stage, ...sanitizedProbeErrorFields(error),
+    ...(diagnosticFacts !== undefined ? { interruptionRecoveryFacts: diagnosticFacts } : {}) });
   process.exitCode = 2;
 } finally {
   if (runtime) await runtime.close().catch(() => undefined);
