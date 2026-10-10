@@ -12,6 +12,11 @@ import { sanitizedTurnFailure } from './turn-failure.ts';
 import { EngineResumeRefusedError } from './port.ts';
 
 import type { AgentRunEvent, RemoteProjectMcpTools, RemoteWorkspaceTools } from './port.ts';
+import { EnvironmentPool } from '../environment/pool.ts';
+import { AgentRegistry } from '../agent/registry.ts';
+import { ProjectRegistry } from '../project/registry.ts';
+import { InMemoryRunStore } from '../run/store.ts';
+import { RunOrchestrator } from '../run/orchestrator.ts';
 
 
 interface WireMessage {
@@ -132,6 +137,59 @@ async function collect(turn: { events: AsyncIterable<AgentRunEvent> }): Promise<
   return events;
 }
 
+
+test('Environment-hosted Codex events are sanitized before emission and durable Run persistence', async () => {
+  const sensitive = [
+    '/Users/fixture-user/.config/codex/auth.json', 'runnerbox-9', 'host=remote-fixture-3', 'port=43671',
+    'https://fixture-user:fixture-passphrase@service.example/api', 'token=tok_fixtureSecretValue',
+    '{"api_key":"JSON_SECRET_MATERIAL"}',
+  ].join(' ');
+  const server = new FakeCodexServer((request, self) => {
+    if (request.method === 'initialize') self.respond(request.id, {});
+    if (request.method === 'thread/start') self.respond(request.id, { thread: { id: 'thread-privacy' } });
+    if (request.method === 'turn/start') {
+      self.respond(request.id, { turn: { id: 'turn-privacy' } });
+      self.notify('item/started', { item: {
+        type: 'commandExecution', command: sensitive, commandActions: [{ command: sensitive }],
+      } });
+      self.notify('item/commandExecution/outputDelta', { delta: sensitive });
+      self.notify('item/completed', { item: { type: 'commandExecution', aggregatedOutput: sensitive, exitCode: 0 } });
+      self.notify('item/completed', { item: { type: 'agentMessage', text: 'Codex completed.' } });
+      self.notify('turn/completed', { turn: { id: 'turn-privacy', status: 'completed', error: null } });
+    }
+  });
+  const pool = new EnvironmentPool({
+    definitions: [{ id: 'fixture-environment', platform: 'macos', capabilities: [{ name: 'agent-run', requiresLease: true }] }],
+    instances: [{ id: 'fixture-worker', definitionId: 'fixture-environment' }],
+  });
+  const runs = new InMemoryRunStore();
+  const orchestrator = new RunOrchestrator({
+    engines: new Map([['codex', startAdapter(server)]]),
+    agents: new AgentRegistry([{
+      id: 'codex-agent', name: 'Codex agent', engine: 'codex', capability: 'agent-run',
+      workingDirectory: '/tmp', instructions: 'Run the privacy persistence scenario.',
+    }]),
+    projects: new ProjectRegistry([{
+      id: 'privacy-project', goal: 'Verify Codex event privacy.', rules: [], availableEnvironmentInstanceIds: ['fixture-worker'],
+      memberships: [{ agentId: 'codex-agent', responsibilities: [], collaborationInstructions: '' }],
+    }]),
+    pool, store: runs, leaseTtlMs: 60_000,
+  });
+  const submitted = await orchestrator.submit({ agentId: 'codex-agent', projectId: 'privacy-project', prompt: 'Run the scenario.' });
+  const emitted = await orchestrator.waitFor(submitted.id);
+  const persisted = await runs.get(submitted.id);
+  assert.ok(persisted);
+  assert.equal(emitted.status, 'completed');
+  assert.deepEqual(persisted.events, emitted.events);
+  assert.deepEqual(emitted.events.map(event => event.type), ['tool-call', 'tool-output', 'tool-output', 'message']);
+  for (const marker of [
+    '/Users/fixture-user', 'runnerbox-9', 'remote-fixture-3', '43671',
+    'fixture-user:fixture-passphrase', 'tok_fixtureSecretValue', 'JSON_SECRET_MATERIAL',
+  ]) {
+    assert.equal(JSON.stringify(emitted.events).includes(marker), false, `emitted events omit ${marker}`);
+    assert.equal(JSON.stringify(persisted.events).includes(marker), false, `durable events omit ${marker}`);
+  }
+});
 
 test('Codex publishes typed remote tools and dispatches app-server dynamic tool calls', async () => {
   let remoteReadCalls = 0;

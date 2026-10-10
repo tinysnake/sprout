@@ -19,7 +19,13 @@ import {
 import type { CollaborationStore } from './collaboration/store.ts';
 import type { EngineAdapter } from './engine/port.ts';
 import { createProductionHostPiAdapter, isHostPiEffortSupported, type HostPiEngineAdapter, type HostPiReadiness } from './engine/pi-host.ts';
-import { createProductionHostCodexAdapter, type HostCodexEngineAdapter, type HostCodexReadiness } from './engine/codex-host.ts';
+import {
+  createProductionHostCodexAdapter,
+  HOST_CODEX_PRODUCTION_ADOPTION_ENABLED,
+  HOST_CODEX_PRODUCTION_BLOCK_REASON,
+  type HostCodexEngineAdapter,
+  type HostCodexReadiness,
+} from './engine/codex-host.ts';
 import { hostRunEffortSupported } from './engine/host-profile.ts';
 import type { HostEngineReadiness, HostRunEngineAdapter } from './engine/host-profile.ts';
 import type { EnvironmentDefinition, EnvironmentInstance } from './environment/model.ts';
@@ -650,6 +656,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
   const hostCodex = options.hostCodex ?? (options.environment === undefined
     ? createProductionHostCodexAdapter(process.env)
     : undefined);
+  const hostCodexProductionBlockReason = options.environment === undefined && hostCodex === undefined &&
+    !HOST_CODEX_PRODUCTION_ADOPTION_ENABLED
+    ? HOST_CODEX_PRODUCTION_BLOCK_REASON
+    : undefined;
   const hostProfiles: HostRunEngineAdapter[] = [];
   if (hostPi !== undefined) hostProfiles.push(hostPi);
   if (hostCodex !== undefined) hostProfiles.push(hostCodex);
@@ -2027,7 +2037,8 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     operations = new OperatorDiagnostics({ store: stores.operations ?? new MemoryOperationalStore(), schema: stores.schemaVersion ?? null, auth: operatorSessions, enrollments, recovery,
       executionStrategy,
       hostPiReadiness: () => hostPi === undefined ? Promise.resolve(undefined) : hostPi.readiness(),
-  hostCodexReadiness: () => hostCodex === undefined ? Promise.resolve(undefined) : hostCodex.readiness(),
+      hostCodexReadiness: () => hostCodex === undefined ? Promise.resolve(undefined) : hostCodex.readiness(),
+      ...(hostCodexProductionBlockReason !== undefined ? { hostCodexProductionBlockReason } : {}),
       connected: (instanceId) => workerGateway.liveFor(instanceId) !== undefined,
       run: async (id) => {
         const run = orchestrator.get(id) ?? await durableStores.runs.get(id);

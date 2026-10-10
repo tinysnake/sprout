@@ -1,6 +1,9 @@
 import type { AgentRunEvent, EngineTurnResult } from './port.ts';
 import type { JsonRpcNotification } from './jsonrpc.ts';
+import { redactSensitiveText } from '../environment/privacy.ts';
 import { classifyEngineTurnFailure, isRetryableEngineTurnFailure, sanitizedTurnFailure, type EngineTurnFailureCause } from './turn-failure.ts';
+
+const JSON_CREDENTIAL_ASSIGNMENT = /"(password|passwd|pwd|secret|token|api[_-]?\s?key|apikey|access[_-]?\s?key|secret[_-]?\s?key|private[_-]?\s?key|signing[_-]?\s?key|encryption[_-]?\s?key|client[_-]?\s?secret|auth[_-]?\s?token|credentials?)"\s*:\s*("(?:\\.|[^"\\])*"|[^,}\]\s]+)/gi;
 
 /**
  * Translation from Codex `app-server` notifications into the engine-neutral run
@@ -60,14 +63,14 @@ export function mapCodexNotification(
   switch (notification.method) {
     case 'item/agentMessage/delta': {
       const params = notification.params as { delta?: string } | undefined;
-      const delta = params?.delta ?? '';
+      const delta = sanitizeCodexEventText(params?.delta ?? '');
       state.text += delta;
-      return { events: [{ type: 'message', text: delta, final: false }] };
+      return { events: delta === '' ? [] : [{ type: 'message', text: delta, final: false }] };
     }
 
     case 'item/commandExecution/outputDelta': {
       const params = notification.params as { delta?: string } | undefined;
-      const delta = params?.delta ?? '';
+      const delta = sanitizeCodexEventText(params?.delta ?? '');
       return delta === '' ? { events: [] } : { events: [{ type: 'tool-output', text: delta }] };
     }
 
@@ -75,7 +78,7 @@ export function mapCodexNotification(
       const params = notification.params as { item?: CodexItem } | undefined;
       const item = params?.item;
       if (item?.type === 'commandExecution') {
-        const what = firstCommandAction(item) ?? item.command ?? 'command';
+        const what = sanitizeCodexEventText(firstCommandAction(item) ?? item.command ?? 'command') || 'command';
         return { events: [{ type: 'tool-call', name: 'shell', detail: what }] };
       }
       if (item?.type === 'dynamicToolCall' && typeof item.tool === 'string') {
@@ -92,12 +95,14 @@ export function mapCodexNotification(
       const params = notification.params as { item?: CodexItem } | undefined;
       const item = params?.item;
       if (item?.type === 'agentMessage' && typeof item.text === 'string') {
-        state.finalText = item.text;
-        return { events: [{ type: 'message', text: item.text, final: true }] };
+        state.finalText = sanitizeCodexEventText(item.text);
+        return { events: [{ type: 'message', text: state.finalText, final: true }] };
       }
       if (item?.type === 'commandExecution') {
-        const output = item.aggregatedOutput ?? undefined;
-        const summary = output ?? `exit ${item.exitCode ?? 'unknown'}`;
+        const output = item.aggregatedOutput === undefined || item.aggregatedOutput === null
+          ? undefined
+          : sanitizeCodexEventText(item.aggregatedOutput);
+        const summary = output || `exit ${item.exitCode ?? 'unknown'}`;
         return { events: [{ type: 'tool-output', text: summary }] };
       }
       if (item?.type === 'dynamicToolCall' && typeof item.tool === 'string') {
@@ -174,6 +179,12 @@ function failTurn(cause: EngineTurnFailureCause): CodexNotificationOutcome {
       ...(isRetryableEngineTurnFailure(cause) ? { retryable: true as const } : {}),
     },
   };
+}
+
+function sanitizeCodexEventText(value: string): string {
+  const redacted = redactSensitiveText(value.replace(JSON_CREDENTIAL_ASSIGNMENT, '"$1":"<redacted-credential>"'));
+  const trailingLineBreaks = value.match(/[\r\n]+$/)?.[0] ?? '';
+  return `${redacted}${trailingLineBreaks}`;
 }
 
 function dynamicToolEventName(tool: string): string {

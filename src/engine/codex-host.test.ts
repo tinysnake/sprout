@@ -99,7 +99,8 @@ test('Host Codex readiness refuses a profile when any local tool control remains
 test('Host Codex requires the exact configured model and supported effort before starting its pinned app-server', async t => {
   const root = mkdtempSync(join(tmpdir(), 'sprout-host-codex-profile-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const context = fixture(root);
+  let observedTurnId: string | undefined;
+  const context = fixture(root, { onTurnStarted: turnId => { observedTurnId = turnId; } });
   const readiness = await context.adapter.readiness(true);
   assert.equal(readiness.status, 'ready');
   assert.equal(readiness.version, CODEX_HOST_VERSION);
@@ -128,6 +129,7 @@ test('Host Codex requires the exact configured model and supported effort before
   const events = [];
   for await (const event of turn.events) events.push(event);
   const result = await turn.completion;
+  assert.equal(observedTurnId, 'host-codex-turn', 'local observer receives the opaque provider turn identity');
   assert.deepEqual(events, [{ type: 'message', text: 'Host Codex reply.', final: true }]);
   assert.equal(result.status, 'completed');
   if (result.status === 'completed') {
@@ -215,14 +217,17 @@ test('Host Codex macOS isolation denies host sentinel access outside its private
   assert.equal(readFileSync(sentinel, 'utf8'), 'HOST_SENTINEL');
 });
 
-test('production Host Codex requires an explicit model setting', async t => {
+test('production Host Codex stays blocked by the unresolved #248 prerequisite even with an explicit model setting', async t => {
   const root = mkdtempSync(join(tmpdir(), 'sprout-host-codex-config-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const codexHome = join(root, 'codex-home');
   mkdirSync(codexHome, { recursive: true });
-  assert.equal(createProductionHostCodexAdapter({ SPROUT_HOST_CODEX_BIN: '/usr/bin/true' }, { runnerRoot: join(root, 'runner') }), undefined);
-  const adapter = createProductionHostCodexAdapter({
+  assert.equal(createProductionHostCodexAdapter({
     SPROUT_HOST_CODEX_BIN: '/usr/bin/true', SPROUT_HOST_CODEX_MODEL: 'provider/model-explicit', CODEX_HOME: codexHome,
-  }, { runnerRoot: join(root, 'runner') });
-  assert.equal(adapter?.authorizedModel, 'provider/model-explicit');
+  }, { runnerRoot: join(root, 'runner') }), undefined);
+  const developmentAdapter = new HostCodexEngineAdapter({
+    binaryPath: '/usr/bin/true', model: 'provider/model-explicit', codexHome,
+    runnerRoot: join(root, 'development-runner'), probeProcess: async input => ready(input),
+  });
+  assert.equal(developmentAdapter.authorizedModel, 'provider/model-explicit', 'direct development injection keeps conformance testable');
 });

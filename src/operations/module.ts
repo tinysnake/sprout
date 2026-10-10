@@ -28,6 +28,7 @@ export class OperatorDiagnostics {
     readonly executionStrategy: ExecutionStrategy;
     readonly hostPiReadiness?: () => Promise<HostPiReadiness | undefined>;
     readonly hostCodexReadiness?: () => Promise<HostCodexReadiness | undefined>;
+    readonly hostCodexProductionBlockReason?: string;
     readonly connected?: (instanceId: string) => boolean;
     readonly run?: (id: string) => Promise<Pick<AgentRun, 'id' | 'projectId' | 'agentId'> | undefined>;
     readonly task?: (id: string) => Promise<Pick<Task, 'id' | 'projectId'> | undefined>;
@@ -57,14 +58,16 @@ export class OperatorDiagnostics {
         adapterControls: hostPi.adapterControls,
         ...(hostPi.version !== undefined ? { version: hostPi.version } : {}),
       } }),
-      ...(hostCodex === undefined ? { hostCodex: { status: 'not-configured' as const } } : { hostCodex: {
-        status: hostCodex.status,
-        installation: hostCodex.installation,
-        authentication: hostCodex.authentication,
-        modelAvailability: hostCodex.modelAvailability,
-        adapterControls: hostCodex.adapterControls,
-        ...(hostCodex.version !== undefined ? { version: hostCodex.version } : {}),
-      } }),
+      ...(this.options.hostCodexProductionBlockReason !== undefined
+        ? { hostCodex: { status: 'blocked' as const, reason: this.options.hostCodexProductionBlockReason } }
+        : hostCodex === undefined ? { hostCodex: { status: 'not-configured' as const } } : { hostCodex: {
+          status: hostCodex.status,
+          installation: hostCodex.installation,
+          authentication: hostCodex.authentication,
+          modelAvailability: hostCodex.modelAvailability,
+          adapterControls: hostCodex.adapterControls,
+          ...(hostCodex.version !== undefined ? { version: hostCodex.version } : {}),
+        } }),
       session: { authenticated: true, activeCount: sessions.length },
       access: { boundary: 'private-network-and-authentication', publicInternetSupported: false },
       responsibilities: { web: ['sessions', 'enrollment', 'recovery', 'diagnostics'], hostLocal: ['credentials', 'engine-login', 'service', 'network', 'backup', 'upgrade'] } };

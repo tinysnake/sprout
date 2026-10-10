@@ -64,6 +64,8 @@ export interface CodexAdapterOptions {
   readonly spawnProcess?: (binaryPath: string, args: readonly string[], env?: NodeJS.ProcessEnv) => CodexProcess;
   /** Version string attached to provider-usage observations. */
   readonly sourceVersion?: string;
+  /** Optional local observer for the opaque provider turn identity. */
+  readonly onTurnStarted?: (turnId: string) => void;
 }
 
 export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
@@ -172,6 +174,7 @@ export class CodexEngineAdapter implements EngineAdapter {
       agentId: request.agentId,
       toolBridge: dynamicTools,
       sourceVersion: this.#options.sourceVersion ?? 'codex-cli 0.154.0',
+      ...(this.#options.onTurnStarted !== undefined ? { onTurnStarted: this.#options.onTurnStarted } : {}),
     });
     return session;
   }
@@ -274,6 +277,7 @@ interface CodexSessionOptions {
   readonly agentId: string;
   readonly toolBridge: ReturnType<typeof createCodexDynamicToolBridge>;
   readonly sourceVersion: string;
+  readonly onTurnStarted?: (turnId: string) => void;
 }
 
 export class CodexSession implements EngineSession {
@@ -289,6 +293,7 @@ export class CodexSession implements EngineSession {
   readonly #threadId: string;
   readonly #toolBridge: ReturnType<typeof createCodexDynamicToolBridge>;
   readonly #sourceVersion: string;
+  readonly #onTurnStarted: ((turnId: string) => void) | undefined;
   #turnId: string | undefined;
   /** Usage updates are keyed by turn because Codex emits them separately. */
   readonly #tokenUsageByTurnId = new Map<string, CodexTurnUsageEntry>();
@@ -309,6 +314,7 @@ export class CodexSession implements EngineSession {
     this.#threadId = options.threadId;
     this.#toolBridge = options.toolBridge;
     this.#sourceVersion = options.sourceVersion;
+    this.#onTurnStarted = options.onTurnStarted;
     this.sessionId = options.threadId;
     this.engineSessionKey = options.threadId;
   }
@@ -417,6 +423,7 @@ export class CodexSession implements EngineSession {
       threadId: this.#threadId,
       input: [{ type: 'text', text: prompt }],
     });
+    try { this.#onTurnStarted?.(response.turn.id); } catch { /* Local identity observation cannot change the engine outcome. */ }
     return response.turn.id;
   }
 

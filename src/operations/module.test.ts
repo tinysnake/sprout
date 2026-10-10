@@ -120,3 +120,22 @@ test('Host Pi and Codex Settings project local readiness facts without exposing 
   assert.equal(JSON.stringify(settings).includes(secretProfileId), false);
   assert.equal(JSON.stringify(settings).includes(secretCodexProfileId), false);
 });
+
+test('Settings reports the unresolved production Host Codex prerequisite as blocked', async () => {
+  const auth = new OperatorSessionService({ store: new InMemoryOperatorSessionStore() });
+  await auth.initializeOrRecover('synthetic-credential');
+  const login = (await auth.signIn('synthetic-credential'))!;
+  const session = await auth.authenticate(login.bearerToken);
+  assert.ok(session.authenticated);
+  const operations = new OperatorDiagnostics({
+    store: new MemoryOperationalStore(), schema: 22, auth,
+    executionStrategy: createExecutionStrategy('host-run', true),
+    hostCodexProductionBlockReason: 'Production Host-run Codex is blocked while the #248 host-authority-exclusion prerequisite remains unresolved.',
+    enrollments: { list: async () => [] } as never,
+    recovery: { list: async () => [] } as never,
+  });
+  assert.deepEqual((await operations.settings(session.session.id)).hostCodex, {
+    status: 'blocked',
+    reason: 'Production Host-run Codex is blocked while the #248 host-authority-exclusion prerequisite remains unresolved.',
+  });
+});

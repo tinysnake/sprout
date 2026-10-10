@@ -82,7 +82,8 @@ export interface OperatorSettings {
     readonly version?: string;
   };
   readonly hostCodex?: {
-    readonly status: 'not-configured' | 'ready' | 'unavailable' | 'unknown';
+    readonly status: 'not-configured' | 'ready' | 'unavailable' | 'unknown' | 'blocked';
+    readonly reason?: string;
     readonly installation?: 'ready' | 'missing' | 'unsupported' | 'unknown';
     readonly authentication?: 'ready' | 'not-ready' | 'unknown';
     readonly modelAvailability?: 'available' | 'unavailable' | 'unknown';

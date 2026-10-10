@@ -12,6 +12,10 @@ import type { HostEngineReadiness, HostRunEngineAdapter } from './host-profile.t
 import { macOsTimezoneFiles } from './host-runtime-files.ts';
 
 export const CODEX_HOST_VERSION = '0.159.3';
+/** #248's host-authority-exclusion prerequisite is unresolved; production adoption stays closed. */
+export const HOST_CODEX_PRODUCTION_ADOPTION_ENABLED = false;
+export const HOST_CODEX_PRODUCTION_BLOCK_REASON =
+  'Production Host-run Codex is blocked while the #248 host-authority-exclusion prerequisite remains unresolved.';
 const MODEL_PAGE_SIZE = 200;
 const DYNAMIC_TOOL_PROBE: CodexDynamicToolSpec = {
   type: 'function',
@@ -49,6 +53,8 @@ export interface HostCodexAdapterOptions {
   readonly clock?: () => number;
   readonly probeProcess?: (input: HostCodexProbeInput) => Promise<HostCodexReadiness>;
   readonly spawnProcess?: (input: HostCodexLaunchInput, args: readonly string[], env?: NodeJS.ProcessEnv) => CodexProcess;
+  /** Optional local observer for the opaque provider turn identity. */
+  readonly onTurnStarted?: (turnId: string) => void;
 }
 
 export interface HostCodexProbeInput {
@@ -136,6 +142,7 @@ export class HostCodexEngineAdapter implements HostRunEngineAdapter {
         args: CODEX_SERVER_ARGS,
         sandbox: 'read-only',
         sourceVersion: `codex-cli ${CODEX_HOST_VERSION}`,
+        ...(this.#options.onTurnStarted !== undefined ? { onTurnStarted: this.#options.onTurnStarted } : {}),
         spawnProcess: (_binaryPath, args, env) => (this.#options.spawnProcess ?? spawnHostCodex)({
           ...this.#probe,
           agentId: request.agentId,
@@ -393,6 +400,7 @@ export function createProductionHostCodexAdapter(
   environment: NodeJS.ProcessEnv = process.env,
   paths: { readonly runnerRoot?: string } = {},
 ): HostCodexEngineAdapter | undefined {
+  if (!HOST_CODEX_PRODUCTION_ADOPTION_ENABLED) return undefined;
   const model = environment['SPROUT_HOST_CODEX_MODEL'];
   if (model === undefined || model === '') return undefined;
   try {

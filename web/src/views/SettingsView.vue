@@ -670,7 +670,8 @@ function handleStatusKey(e: KeyboardEvent, tab: SettingsCategoryTab) {
               </h3>
               <Badge :variant="settingsData?.hostCodex?.status === 'ready' ? 'success' : 'warning'">{{ settingsData?.hostCodex?.status ?? 'Unknown' }}</Badge>
             </div>
-            <p class="text-xs text-[var(--text-secondary)]">This non-inference probe checks the pinned Codex version, local authentication, the exact configured model, and remote-tool controls. It does not send a model request or depend on an Environment Worker. Local readiness does not establish host-authority exclusion; production Codex Host-run remains blocked by the outstanding prerequisite recorded in #248.</p>
+            <p v-if="settingsData?.hostCodex?.status === 'blocked'" class="text-xs text-[var(--text-secondary)]">{{ settingsData.hostCodex.reason }}</p>
+            <p v-else class="text-xs text-[var(--text-secondary)]">This non-inference probe checks the pinned Codex version, local authentication, the exact configured model, and remote-tool controls. It does not send a model request or depend on an Environment Worker. Local readiness does not establish host-authority exclusion; production Codex Host-run remains blocked by the outstanding prerequisite recorded in #248.</p>
             <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
               <div class="p-2.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)]">
                 <span class="text-[10px] uppercase font-bold text-[var(--text-muted)] block">Installation</span>
