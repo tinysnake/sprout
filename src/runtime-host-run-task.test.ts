@@ -6,19 +6,22 @@ import { join } from 'node:path';
 import { ScriptedEngineAdapter } from './engine/scripted.ts';
 import type { HostPiEngineAdapter } from './engine/pi-host.ts';
 import { HostCodexEngineAdapter } from './engine/codex-host.ts';
+import type { HostClaudeEngineAdapter } from './engine/claude-host.ts';
 import type { StartSessionRequest } from './engine/port.ts';
 import { loadOrCreateWorkerIdentity, workerPublicKey } from './worker/enrollment-connector.ts';
 import { toTaskContextState } from './web/views.ts';
 import { connectRuntimeWorker, createRuntime, hostConfiguration, INSTANCE_ID, project, scriptedTurn } from './runtime-test-harness.ts';
 
-for (const hostEngine of ['pi', 'codex'] as const) test(`Human-authorized Host-run Task uses Sprout ${hostEngine} and keeps workspace and MCP under its Environment lease`, async (t) => {
+for (const hostEngine of ['pi', 'codex', 'claude'] as const) test(`Human-authorized Host-run Task uses Sprout ${hostEngine} and keeps workspace and MCP under its Environment lease`, async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-host-task-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const workerRoot = join(directory, 'worker');
   const workspace = join(workerRoot, 'repos', 'host-task');
   const keyPath = join(directory, 'worker-key.pem');
   const model = 'provider/model-host';
+  const effort = hostEngine === 'claude' ? 'high' : 'medium';
   let readinessProbeCalls = 0;
+  let claudeEffortReady = false;
   const codexProfile = hostEngine === 'codex' ? new HostCodexEngineAdapter({
     binaryPath: '/usr/bin/true', model,
     runnerRoot: join(directory, 'codex-runner'), codexHome: directory,
@@ -37,9 +40,10 @@ for (const hostEngine of ['pi', 'codex'] as const) test(`Human-authorized Host-r
   let runtime: Awaited<ReturnType<typeof createRuntime>>;
   const host = {
     id: hostEngine, profileId, authorizedModel: model, capabilities: engine.capabilities,
-    supportsEffort: (effort: string) => codexProfile?.supportsEffort(effort) ?? true,
+    supportsEffort: (requestedEffort: string) => codexProfile?.supportsEffort(requestedEffort) ?? (hostEngine === 'claude' ? claudeEffortReady && requestedEffort === 'high' : true),
     async readiness() {
       if (codexProfile !== undefined) return codexProfile.readiness();
+      if (hostEngine === 'claude') { readinessProbeCalls += 1; claudeEffortReady = true; }
       return { profileId, engine: hostEngine, status: 'ready', installation: 'ready', authentication: 'ready',
         modelAvailability: 'available', adapterControls: 'ready', version: '1.0.4', observedAt: 1 };
     },
@@ -83,17 +87,19 @@ for (const hostEngine of ['pi', 'codex'] as const) test(`Human-authorized Host-r
         close: session.close.bind(session),
       };
     },
-  } as unknown as HostPiEngineAdapter | HostCodexEngineAdapter;
+  } as unknown as HostPiEngineAdapter | HostCodexEngineAdapter | HostClaudeEngineAdapter;
 
   runtime = await createRuntime({ configuration: hostConfiguration({
     executionMode: 'host-run', environmentSource: 'enrollment', databasePath: join(directory, 'state.db'),
     runtimeConfiguration: {
-      agents: [{ id: 'scout', name: 'Scout', engine: hostEngine, capability: 'agent-run', model, effort: 'medium',
-        workOptions: [{ id: `host-${hostEngine}`, engine: hostEngine, workModel: model, effort: 'medium' }] }],
+      agents: [{ id: 'scout', name: 'Scout', engine: hostEngine, capability: 'agent-run', model, effort,
+        workOptions: [{ id: `host-${hostEngine}`, engine: hostEngine, workModel: model, effort }] }],
       project: { ...project(), memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }] },
     },
   }), projectRoot: '/synthetic/project-root',
-    ...(hostEngine === 'pi' ? { hostPi: host as HostPiEngineAdapter } : { hostCodex: host as HostCodexEngineAdapter }) });
+    ...(hostEngine === 'pi' ? { hostPi: host as HostPiEngineAdapter }
+      : hostEngine === 'codex' ? { hostCodex: host as HostCodexEngineAdapter }
+        : { hostClaude: host as HostClaudeEngineAdapter }) });
   try {
     const identity = loadOrCreateWorkerIdentity(keyPath);
     const enrollment = await runtime.enrollments.requestEnrollment({
@@ -145,9 +151,9 @@ for (const hostEngine of ['pi', 'codex'] as const) test(`Human-authorized Host-r
     assert.equal(begun.task.executionPlacement?.mode, 'host-run');
     assert.equal(runtime.pool.getLease(taskLeaseId)?.holderKind, 'task');
     assert.equal(runtime.pool.leases().length, 1);
-    if (codexProfile !== undefined) {
-      assert.equal(codexProfile.supportsEffort('medium'), true,
-        'Task eligibility establishes readiness before checking the dynamic effort');
+    if (hostEngine === 'claude') {
+      assert.equal(claudeEffortReady, true, 'Task eligibility establishes readiness before checking Claude effort');
+      assert.ok(readinessProbeCalls >= 1, 'the Claude Task path probes before selecting the configured effort');
     }
 
     const advanced = await runtime.taskAdmissions.advanceForHuman(taskId, {
@@ -163,6 +169,8 @@ for (const hostEngine of ['pi', 'codex'] as const) test(`Human-authorized Host-r
     if (codexProfile !== undefined) {
       assert.ok(readinessProbeCalls >= 1,
         'the Task-held Host Codex path establishes readiness before effort selection');
+    } else if (hostEngine === 'claude') {
+      assert.ok(readinessProbeCalls >= 1, 'the Task-held Host Claude path establishes readiness before effort selection');
     } else {
       assert.equal(readinessProbeCalls, 0);
     }

@@ -111,7 +111,7 @@ export class HostClaudeEngineAdapter implements HostRunEngineAdapter {
     let settings: ClaudeUserSettings;
     try { settings = readClaudeUserSettings(this.#probe.settingsPath); }
     catch { throw new EngineStartError('Host Claude user configuration is unavailable'); }
-    if (settings.model !== this.authorizedModel || settings.effortLevel !== effort) {
+    if (settings.model !== this.authorizedModel || settings.effortLevel !== effort || !settings.hasAuthToken || settings.baseUrl === '') {
       throw new EngineStartError('Host Claude user configuration no longer matches the authorized profile');
     }
     const agentDigest = createHash('sha256').update(request.agentId).digest('hex').slice(0, 24);
@@ -273,7 +273,8 @@ function hostClaudeIsolationProfile(input: HostClaudeLaunchInput): string {
   const runnerRoot = realpathSync(input.agentRoot);
   const controlRoot = realpathSync(input.controlRoot);
   const authHelper = fileURLToPath(new URL('./claude-auth-helper.mjs', import.meta.url));
-  const runtimeRoots = new Set([nodeRoot, packageRoot, dirname(packageRoot), '/System', '/usr', '/bin', '/sbin', '/dev', '/private/etc']);
+  const runtimeRoots = new Set([nodeRoot, dirname(nodeRoot), packageRoot, dirname(packageRoot),
+    ...(existsSync('/opt/homebrew') ? ['/opt/homebrew'] : []), '/System', '/usr', '/bin', '/sbin', '/dev', '/private/etc']);
   const quote = (path: string): string => JSON.stringify(path);
   return [
     '(version 1)', '(allow default)', '(deny file-read*)', '(deny file-write*)', '(allow file-read-metadata)',
