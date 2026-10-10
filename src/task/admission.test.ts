@@ -220,7 +220,7 @@ test('failure before lease acquisition leaves the proposal open and creates no T
 
   const conflicted = fixture();
   const waiting = await propose(conflicted);
-  const held = conflicted.pool.acquireLease({ instanceId: 'env-a', capability: 'agent-run', holderId: 'other-work', ttlMs: 1000 });
+  const held = conflicted.pool.acquireLease({ instanceId: 'env-a', capability: 'agent-run', mode: 'read-write', holderId: 'other-work', ttlMs: 1000 });
   assert.equal(held.ok, true);
   await assert.rejects(
     conflicted.admissions.beginProposal(waiting.id, { memberId: 'operator', memberKind: 'human' }, beginInput({ memberId: 'operator', memberKind: 'human' })),
@@ -254,7 +254,7 @@ test('begin reports a typed conflict when a Task-held lease is recovering', asyn
   const context = fixture();
   const proposal = await propose(context);
   const held = context.pool.acquireLease({
-    instanceId: 'env-a', capability: 'agent-run', holderId: 'recovering-task', taskId: 'recovering-task', ttlMs: 1000,
+    instanceId: 'env-a', capability: 'agent-run', mode: 'read-write', holderId: 'recovering-task', taskId: 'recovering-task', ttlMs: 1000,
   });
   assert.ok(held.ok);
   assert.equal(context.pool.markRecovering(held.lease.id)?.state, 'recovering');
@@ -272,7 +272,7 @@ test('legacy begin also exposes typed Task lease reservation refusals', async ()
   const context = fixture();
   const task = await context.tasks.create({ projectId: 'project', title: 'Legacy Task', goal: 'Begin safely.', assignedAgentId: 'scout' });
   const held = context.pool.acquireLease({
-    instanceId: 'env-a', capability: 'agent-run', holderId: 'recovering-task', taskId: 'recovering-task', ttlMs: 1000,
+    instanceId: 'env-a', capability: 'agent-run', mode: 'read-write', holderId: 'recovering-task', taskId: 'recovering-task', ttlMs: 1000,
   });
   assert.ok(held.ok);
   assert.equal(context.pool.markRecovering(held.lease.id)?.state, 'recovering');
@@ -438,7 +438,7 @@ test('SQLite restart preserves the consumed proposal snapshot and rolls back a p
       createdAt: 101, updatedAt: 101,
     };
     const rollbackLease: EnvironmentLease = {
-      id: 'rollback-lease', instanceId: 'env-b', capability: 'agent-run', holderId: rollbackTask.id,
+      id: 'rollback-lease', instanceId: 'env-b', capability: 'agent-run', mode: 'read-write', holderId: rollbackTask.id,
       holderKind: 'task', taskId: rollbackTask.id, acquiredAt: 101, expiresAt: 1000, state: 'active',
     };
     await assert.rejects(store.tasks.createBeginningWithLease(rollbackTask, rollbackLease, () => {

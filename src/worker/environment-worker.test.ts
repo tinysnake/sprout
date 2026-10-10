@@ -332,9 +332,9 @@ test('macOS, Windows, and container environments record the same lease rules and
   // Capability names and lease rules are the same vocabulary everywhere, which is
   // why the lease registry needs no platform-specific rule (see CONTEXT.md).
   const expectedCapabilities = [
-    { name: 'agent-run', requiresLease: true },
-    { name: 'project-mcp', requiresLease: true },
-    { name: 'read-only-investigation', requiresLease: false },
+    { name: 'agent-run', requiresLease: true, leaseMode: 'read-write' },
+    { name: 'project-mcp', requiresLease: true, leaseMode: 'read-write' },
+    { name: 'read-only-investigation', requiresLease: true, leaseMode: 'read' },
   ];
   for (const selected of [macos, windows, container]) {
     assert.deepEqual(selected.definition.capabilities, expectedCapabilities);

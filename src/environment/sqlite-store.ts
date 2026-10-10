@@ -18,15 +18,16 @@ import { migrateOrInitializeDatabase } from '../store/schema.ts';
  * `BEGIN`/`COMMIT` of their own and rely on the shared `TransactionCoordinator`
  * to hold the boundary.
  *
- * The plain `LeaseStore` SQL, table, columns, and migration behaviour are
- * unchanged from the M1 adapter; this file only relocates the class from `run/`
- * to `environment/` and adds the boundary methods whose SQL also came from M1.
+ * The `LeaseStore` schema now records the declared access mode. Its migration
+ * defaults historical rows to `read-write`, preserving their former exclusive
+ * behavior; the Task transaction boundary still owns the Task-specific SQL.
  */
 
 interface LeaseRow {
   readonly id: string;
   readonly instance_id: string;
   readonly capability: string;
+  readonly mode: string | null;
   readonly holder_id: string;
   readonly holder_kind: 'run' | 'task' | null;
   readonly run_id: string | null;
@@ -63,6 +64,7 @@ export class SqliteLeaseStore implements LeaseStore, TaskLeaseBinding {
         id TEXT PRIMARY KEY,
         instance_id TEXT NOT NULL,
         capability TEXT NOT NULL,
+        mode TEXT NOT NULL DEFAULT 'read-write',
         holder_id TEXT NOT NULL,
         holder_kind TEXT,
         run_id TEXT,
@@ -74,6 +76,7 @@ export class SqliteLeaseStore implements LeaseStore, TaskLeaseBinding {
     `);
     this.#addColumnIfMissing('environment_leases', 'holder_kind', 'TEXT');
     this.#addColumnIfMissing('environment_leases', 'task_id', 'TEXT');
+    this.#addColumnIfMissing('environment_leases', 'mode', "TEXT NOT NULL DEFAULT 'read-write'");
   }
 
   #addColumnIfMissing(table: string, column: string, type: string): void {
@@ -85,9 +88,10 @@ export class SqliteLeaseStore implements LeaseStore, TaskLeaseBinding {
     this.#db
       .prepare(
         `INSERT INTO environment_leases
-           (id, instance_id, capability, holder_id, holder_kind, run_id, task_id, acquired_at, expires_at, state)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (id, instance_id, capability, mode, holder_id, holder_kind, run_id, task_id, acquired_at, expires_at, state)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
+           mode = excluded.mode,
            expires_at = excluded.expires_at,
            state = excluded.state,
            run_id = excluded.run_id,
@@ -98,6 +102,7 @@ export class SqliteLeaseStore implements LeaseStore, TaskLeaseBinding {
         lease.id,
         lease.instanceId,
         lease.capability,
+        lease.mode,
         lease.holderId,
         lease.holderKind ?? null,
         lease.runId ?? null,
@@ -125,18 +130,20 @@ export class SqliteLeaseStore implements LeaseStore, TaskLeaseBinding {
    * inside the Task adapter; only their owner moved here.
    */
   insertTaskHeldLease(lease: EnvironmentLease): void {
-    const conflict = this.#db.prepare(
-      `SELECT id FROM environment_leases
-        WHERE instance_id = ? AND state IN ('active', 'recovering') LIMIT 1`,
-    ).get(lease.instanceId);
-    if (conflict) throw new Error(`environment ${lease.instanceId} is unavailable`);
+    const conflicts = this.#db.prepare(
+      `SELECT id, holder_id, mode, state FROM environment_leases
+        WHERE instance_id = ? AND state IN ('active', 'recovering') ORDER BY acquired_at, id`,
+    ).all(lease.instanceId) as unknown as readonly { id: string; holder_id: string; mode: string; state: string }[];
+    if (conflicts.some((current) => lease.mode === 'read-write' || current.mode !== 'read' || current.state === 'recovering')) {
+      throw new Error(`environment ${lease.instanceId} is unavailable`);
+    }
     this.#db
       .prepare(
         `INSERT INTO environment_leases
-       (id, instance_id, capability, holder_id, holder_kind, run_id, task_id, acquired_at, expires_at, state)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, instance_id, capability, mode, holder_id, holder_kind, run_id, task_id, acquired_at, expires_at, state)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(lease.id, lease.instanceId, lease.capability, lease.holderId, 'task', lease.runId ?? null,
+      .run(lease.id, lease.instanceId, lease.capability, lease.mode, lease.holderId, 'task', lease.runId ?? null,
         lease.taskId ?? null, lease.acquiredAt, lease.expiresAt, lease.state);
   }
 
@@ -176,6 +183,7 @@ function toLease(row: LeaseRow): EnvironmentLease {
     id: row.id,
     instanceId: row.instance_id,
     capability: row.capability,
+    mode: row.mode === 'read' ? 'read' : 'read-write',
     holderId: row.holder_id,
     ...(row.holder_kind !== null ? { holderKind: row.holder_kind } : {}),
     ...(row.run_id !== null ? { runId: row.run_id } : {}),

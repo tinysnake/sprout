@@ -1604,10 +1604,11 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         });
         const entry = projectCatalogEntry(inputs[inputs.length - 1]!);
         const existing = persistedInstances.get(entry.instanceId);
-        if (existing === undefined || existing.enrollmentId !== entry.enrollmentId) {
-          // Persist the durable catalog record once per enrolled instance. The
-          // record is pure identity, so an offline, revoked, or archived
-          // instance survives SQLite reopen without a Worker ever connecting.
+        if (existing === undefined || existing.enrollmentId !== entry.enrollmentId ||
+            JSON.stringify(existing.definition) !== JSON.stringify(entry.definition) ||
+            JSON.stringify(existing.instance) !== JSON.stringify(entry.instance)) {
+          // Persist portable identity and declaration changes while retaining
+          // offline, revoked, and archived instances across SQLite reopen.
           await openedStoresForCatalog.environmentCatalog.save({
             instanceId: entry.instanceId,
             enrollmentId: entry.enrollmentId,
@@ -1968,11 +1969,14 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       catalogProjectionRevision += 1;
       if (environmentCatalog.clearEpoch(closed.enrollmentId, closed.epoch.epoch)) {
         publishCatalogMembership();
-        const lease = pool.activeLease(closed.environmentInstanceId);
-        if (lease !== undefined) {
-          // Synchronous admission fence before any async Task/store work.
+        const leases = pool.activeLeases(closed.environmentInstanceId).filter((lease) => lease.state === 'active');
+        for (const lease of leases) {
+          // Synchronously fence every holder before any async Task/store work.
           pool.markRecovering(lease.id);
-          const loss = (async () => {
+        }
+        if (leases.length > 0) {
+          const priorLoss = channelLosses.get(closed.environmentInstanceId);
+          const recoveryJobs = leases.map((lease) => (async () => {
             const enrollment = await enrollments.get(closed.enrollmentId);
             const task = lease.taskId !== undefined ? await durableStores.tasks.get(lease.taskId) : undefined;
             const lostRunId = task?.activeRunId ?? lease.runId;
@@ -1984,7 +1988,8 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
             if (lease.taskId !== undefined) {
               await taskLifecycle.workerChannelLost(lease.taskId);
             }
-          })();
+          })());
+          const loss = Promise.all([...(priorLoss === undefined ? [] : [priorLoss]), ...recoveryJobs]).then(() => undefined);
           void loss.catch(() => options.onWorkerLog?.('Worker channel loss protection is incomplete; admission remains fenced.'));
           channelLosses.set(closed.environmentInstanceId, loss);
         }

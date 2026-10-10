@@ -160,6 +160,7 @@ for (const backend of ['memory', 'sqlite'] as const) {
       const held = h.runtime.pool.acquireLease({
         instanceId: INSTANCE_ID,
         capability: 'agent-run',
+        mode: 'read-write',
         holderId: 'competing-task',
         ttlMs: 60_000,
       });

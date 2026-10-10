@@ -175,6 +175,7 @@ test('the pool publishes exactly the eligible membership and preserves lease his
   const acquired = pool.acquireLease({
     instanceId: 'host-a',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'scout',
     runId: 'run-1',
     ttlMs: 60_000,

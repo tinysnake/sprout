@@ -86,6 +86,7 @@ test('E2: two eligible instances stay independent and a lease conflict is observ
     const first = runtime.pool.acquireLease({
       instanceId: 'host-a',
       capability: ADMISSION_CAPABILITY,
+      mode: 'read-write',
       holderId: 'scout',
       runId: 'run-a',
       ttlMs: 60_000,
@@ -94,6 +95,7 @@ test('E2: two eligible instances stay independent and a lease conflict is observ
     const conflict = runtime.pool.acquireLease({
       instanceId: 'host-a',
       capability: ADMISSION_CAPABILITY,
+      mode: 'read-write',
       holderId: 'scribe',
       runId: 'run-b',
       ttlMs: 60_000,
@@ -104,6 +106,7 @@ test('E2: two eligible instances stay independent and a lease conflict is observ
     const other = runtime.pool.acquireLease({
       instanceId: 'host-b',
       capability: ADMISSION_CAPABILITY,
+      mode: 'read-write',
       holderId: 'scribe',
       runId: 'run-c',
       ttlMs: 60_000,
@@ -129,6 +132,7 @@ test('E2: a disconnected instance loses eligibility but keeps its catalog record
     const lease = runtime.pool.acquireLease({
       instanceId: 'host-a',
       capability: ADMISSION_CAPABILITY,
+      mode: 'read-write',
       holderId: 'scout',
       runId: 'run-a',
       ttlMs: 60_000,
@@ -177,7 +181,7 @@ test('E2: replacement and stale readiness ordering never re-admit a prior epoch 
     const enrollmentA = await enrollEligibleInstance(runtime, 'host-a', join(directory, 'host-a-key.pem'));
     await enrollEligibleInstance(runtime, 'host-b', join(directory, 'host-b-key.pem'));
     const lease = runtime.pool.acquireLease({
-      instanceId: 'host-a', capability: ADMISSION_CAPABILITY, holderId: 'scout', runId: 'run-a', ttlMs: 60_000,
+      instanceId: 'host-a', capability: ADMISSION_CAPABILITY, mode: 'read-write', holderId: 'scout', runId: 'run-a', ttlMs: 60_000,
     });
     assert.equal(lease.ok, true);
     const firstAuthority = testComposition(runtime).workerGateway.authorizeObservation('host-a')!;
@@ -199,7 +203,7 @@ test('E2: replacement and stale readiness ordering never re-admit a prior epoch 
     await runtime.refreshEnvironmentCatalog();
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false);
     const blocked = runtime.pool.acquireLease({
-      instanceId: 'host-a', capability: ADMISSION_CAPABILITY, holderId: 'scribe', runId: 'run-stale', ttlMs: 60_000,
+      instanceId: 'host-a', capability: ADMISSION_CAPABILITY, mode: 'read-write', holderId: 'scribe', runId: 'run-stale', ttlMs: 60_000,
     });
     assert.equal(blocked.ok, false);
 
@@ -209,7 +213,7 @@ test('E2: replacement and stale readiness ordering never re-admit a prior epoch 
     assert.equal(runtime.environmentCatalog.entry('host-a')?.eligible, false,
       'fresh readiness cannot bypass a protected run lease with no recovery proof');
     const conflict = runtime.pool.acquireLease({
-      instanceId: 'host-a', capability: ADMISSION_CAPABILITY, holderId: 'scribe', runId: 'run-conflict', ttlMs: 60_000,
+      instanceId: 'host-a', capability: ADMISSION_CAPABILITY, mode: 'read-write', holderId: 'scribe', runId: 'run-conflict', ttlMs: 60_000,
     });
     assert.equal(conflict.ok, false);
     if (!conflict.ok) assert.equal(conflict.reason, 'unknown-capability', 'recovery bars admission before lease matching');

@@ -634,6 +634,7 @@ test('a directly constructed domain adapter and the shared handle observe the sa
       id: 'lease-1',
       instanceId: 'mac-mini-1',
       capability: 'agent-run',
+      mode: 'read-write' as const,
       holderId: 'run-1',
       holderKind: 'run' as const,
       runId: 'run-1',

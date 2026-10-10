@@ -757,7 +757,7 @@ export class RunOrchestrator {
       mcpEnvironmentInstanceId = resolution.instanceId;
       if (!taskBound && selectedWorkEnvironmentInstanceId === undefined) {
         const acquired = await this.#pool.acquireLeaseRevalidated({
-          instanceId: resolution.instanceId, capability: 'project-mcp', holderId: initial.id, runId: initial.id, ttlMs: this.#leaseTtlMs,
+          instanceId: resolution.instanceId, capability: 'project-mcp', mode: 'read-write', holderId: initial.id, runId: initial.id, ttlMs: this.#leaseTtlMs,
         });
         if (!acquired.ok) return refuse(`Project MCP Environment lease is unavailable (${acquired.reason})`);
         mcpLeaseId = acquired.lease.id;
@@ -773,7 +773,7 @@ export class RunOrchestrator {
         return refuse('the selected Work Environment is not authorized for Agent-run operations');
       }
       const acquired = await this.#pool.acquireLeaseRevalidated({
-        instanceId: resolution.instanceId, capability: 'agent-run', holderId: initial.id, runId: initial.id, ttlMs: this.#leaseTtlMs,
+        instanceId: resolution.instanceId, capability: 'agent-run', mode: 'read-write', holderId: initial.id, runId: initial.id, ttlMs: this.#leaseTtlMs,
       });
       if (!acquired.ok) {
         stopAdmissionKeepalive?.();
@@ -886,7 +886,11 @@ export class RunOrchestrator {
               environmentInstanceId: lease.instanceId, leaseId: lease.id, runId: initial.id,
               holderKind: lease.holderKind ?? 'run', holderId: lease.holderId,
               ...(lease.taskId !== undefined ? { taskId: lease.taskId } : {}),
-              leaseCapability: lease.capability === 'agent-run' ? 'agent-run' as const : 'project-mcp' as const,
+              leaseCapability: lease.capability === 'agent-run'
+                ? 'agent-run' as const
+                : lease.capability === 'read-only-investigation'
+                  ? 'read-only-investigation' as const
+                  : 'project-mcp' as const,
               ...(bindingFence !== undefined ? { bindingFence } : {}),
               canRelease: () => containingLeaseCanRelease,
             };
@@ -1394,6 +1398,7 @@ export class RunOrchestrator {
       acquired = nestedTaskLease ? undefined : await this.#pool.acquireLeaseRevalidated({
         instanceId: initial.environmentInstanceId,
         capability: agent.capability,
+        mode: 'read-write',
         holderId: agent.id,
         runId: initial.id,
         ttlMs: this.#leaseTtlMs,
@@ -1932,6 +1937,7 @@ function sanitizeRunWorkspaceBinding(
     ...(Number.isSafeInteger(binding.catalogGeneration) && binding.catalogGeneration! > 0 ? { catalogGeneration: binding.catalogGeneration } : {}),
     ...(typeof binding.catalogIdentity === 'string' && /^[A-Fa-f0-9]{64}$/.test(binding.catalogIdentity)
       ? { catalogIdentity: binding.catalogIdentity.toLowerCase() } : {}),
+    ...(binding.leaseMode === 'read' || binding.leaseMode === 'read-write' ? { leaseMode: binding.leaseMode } : {}),
     ...(binding.workspaceId !== undefined
       ? { workspaceId: sanitizeIdentifier(binding.workspaceId, { fallback: 'unknown-workspace', kind: 'digest' }) }
       : {}),

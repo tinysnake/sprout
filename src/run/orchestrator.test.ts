@@ -270,7 +270,7 @@ test('Chat interruption refuses Task runs and leaves their Task-held lease to Ta
     turns: [{ events: [{ type: 'notice', text: 'task work' }], result: completed, settleAfterMs: 5_000 }],
   });
   const reserved = pool.acquireLease({
-    instanceId: 'mac-mini-1', capability: 'agent-run', holderId: 'task-1', taskId: 'task-1', ttlMs: 60_000,
+    instanceId: 'mac-mini-1', capability: 'agent-run', mode: 'read-write', holderId: 'task-1', taskId: 'task-1', ttlMs: 60_000,
   });
   assert.ok(reserved.ok);
   const { id } = await orchestrator.submit({

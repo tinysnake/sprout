@@ -120,6 +120,7 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
     { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
     { name: 'instance_id', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'capability', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'mode', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'holder_id', type: 'TEXT', notnull: 1, pk: 0 },
     { name: 'holder_kind', type: 'TEXT', notnull: 0, pk: 0 },
     { name: 'run_id', type: 'TEXT', notnull: 0, pk: 0 },

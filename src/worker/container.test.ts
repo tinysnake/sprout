@@ -104,7 +104,8 @@ test('a container environment declares the same lease rules as any other platfor
   // The platform difference is confined to the adapter: the lease registry needs
   // no container-specific rule.
   assert.equal(pool.requiresLease('container-1', 'agent-run'), true);
-  assert.equal(pool.requiresLease('container-1', 'read-only-investigation'), false);
+  assert.equal(pool.requiresLease('container-1', 'read-only-investigation'), true);
+  assert.equal(definition.capabilities.find((capability) => capability.name === 'read-only-investigation')?.leaseMode, 'read');
   assert.equal(definition.platform, 'container');
 });
 
@@ -114,6 +115,7 @@ test('a container instance is exclusive once leased, like any other environment'
   const first = pool.acquireLease({
     instanceId: 'container-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-a',
     ttlMs: 60_000,
   });
@@ -122,6 +124,7 @@ test('a container instance is exclusive once leased, like any other environment'
   const second = pool.acquireLease({
     instanceId: 'container-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-b',
     ttlMs: 60_000,
   });
