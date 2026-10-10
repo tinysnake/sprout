@@ -35,6 +35,8 @@ interface OperationFact {
 interface SessionFact {
   readonly environmentInstanceId: string;
   readonly instructions: string;
+  readonly workspaceOperations: readonly string[];
+  readonly projectMcpToolNames: readonly string[];
   readonly resumeSessionKey?: string;
   prompt?: string;
   readonly tools: string[];
@@ -43,6 +45,8 @@ interface SessionFact {
 const operations: OperationFact[] = [];
 const sessions: SessionFact[] = [];
 const workerRoots = new Map<string, string>();
+const capturedRemoteWorkspace = new Map<string, NonNullable<StartSessionRequest['remoteWorkspace']>>();
+let staleBindingResult: RemoteWorkspaceOperationResult | undefined;
 
 function report(facts: Record<string, unknown>): void {
   process.stdout.write(`${JSON.stringify(facts)}\n`);
@@ -85,9 +89,12 @@ function observeHostPi(adapter: HostPiEngineAdapter): HostPiEngineAdapter {
       const remote = request.remoteWorkspace;
       if (remote === undefined) throw new Error('authorized Work Environment tools were not attached');
       const environmentInstanceId = remote.binding.environmentInstanceId;
+      capturedRemoteWorkspace.set(environmentInstanceId, remote);
       const sessionFact: SessionFact = {
         environmentInstanceId,
         instructions: request.instructions ?? '',
+        workspaceOperations: remote.operations ?? [],
+        projectMcpToolNames: request.remoteProjectMcp?.tools.map(tool => tool.name) ?? [],
         ...(request.resumeSessionKey !== undefined ? { resumeSessionKey: request.resumeSessionKey } : {}),
         tools: [],
       };
@@ -96,6 +103,11 @@ function observeHostPi(adapter: HostPiEngineAdapter): HostPiEngineAdapter {
       const observedWorkspace = {
         ...remote,
         async read(path: string): Promise<RemoteWorkspaceOperationResult> {
+          if (environmentInstanceId === ENVIRONMENT_B && staleBindingResult === undefined) {
+            const oldWorkspace = capturedRemoteWorkspace.get(ENVIRONMENT_A);
+            if (oldWorkspace === undefined) throw new Error('prior Workspace capability was not captured');
+            staleBindingResult = await oldWorkspace.read('origin.txt');
+          }
           const result = await remote.read(path);
           operations.push({
             environmentInstanceId,
@@ -237,28 +249,51 @@ try {
       const toolsA = sessions[0]?.tools ?? [];
       const toolsB = sessions[1]?.tools ?? [];
       const promptB = sessions[1]?.prompt ?? '';
-      const accepted = runA.status === 'completed' && runB.status === 'completed' &&
-        runA.workspaceBindingStatus === 'active' && runB.workspaceBindingStatus === 'active' &&
-        runA.workspaceBinding?.environmentInstanceId === ENVIRONMENT_A &&
-        runB.workspaceBinding?.environmentInstanceId === ENVIRONMENT_B &&
-        operations.length === 2 && operations[0]?.environmentInstanceId === ENVIRONMENT_A &&
-        operations[1]?.environmentInstanceId === ENVIRONMENT_B &&
-        operations.every(item => item.status === 'completed' && item.identityMatched && item.markerMatched) &&
-        toolsA.length === 1 && toolsA[0] === 'remote_read' && toolsB.length === 1 && toolsB[0] === 'remote_read' &&
-        sessions.length === 2 && sessions[0]?.resumeSessionKey === undefined && sessions[1]?.resumeSessionKey === undefined &&
-        sessions[1]?.instructions.includes(`Environment: ${ENVIRONMENT_B}`) === true &&
-        sessions[1]?.instructions.includes(`Sprout switched the current Work Environment from ${ENVIRONMENT_A} to ${ENVIRONMENT_B}`) === true &&
-        promptB.includes(`Environment ${ENVIRONMENT_A}`) && promptB.includes(MARKER_A) &&
-        finalA.includes(MARKER_A) && finalB.includes(MARKER_B) && !workerPathLeaks && !hostPathLeaks &&
-        localFileUnchanged && runALease === undefined && runBLease === undefined;
+      const acceptanceFacts = {
+        bothRunsCompleted: runA.status === 'completed' && runB.status === 'completed',
+        bothBindingsActive: runA.workspaceBindingStatus === 'active' && runB.workspaceBindingStatus === 'active',
+        requestedBindingsMatched: runA.workspaceBinding?.environmentInstanceId === ENVIRONMENT_A &&
+          runB.workspaceBinding?.environmentInstanceId === ENVIRONMENT_B,
+        bothReadsCompletedOnTheirBindings: operations.length === 2 &&
+          operations[0]?.environmentInstanceId === ENVIRONMENT_A && operations[0]?.status === 'completed' &&
+          operations[0]?.identityMatched && operations[0]?.markerMatched &&
+          operations[1]?.environmentInstanceId === ENVIRONMENT_B && operations[1]?.status === 'completed' &&
+          operations[1]?.identityMatched && operations[1]?.markerMatched,
+        staleBindingRefusedWithoutContent: staleBindingResult?.status === 'failed' &&
+          staleBindingResult.failure === 'remote-operation-blocked' && staleBindingResult.content === undefined,
+        onlyAuthorizedReadToolCalled: toolsA.length === 1 && toolsA[0] === 'remote_read' &&
+          toolsB.length === 1 && toolsB[0] === 'remote_read',
+        bothSessionsStartedFresh: sessions.length === 2 && sessions[0]?.resumeSessionKey === undefined &&
+          sessions[1]?.resumeSessionKey === undefined,
+        currentBindingSnapshotAndChangeRecorded: sessions[1]?.instructions.includes(`Environment: ${ENVIRONMENT_B}`) === true &&
+          sessions[1]?.instructions.includes(`Sprout switched the current Work Environment from ${ENVIRONMENT_A} to ${ENVIRONMENT_B}`) === true,
+        priorBindingFactsRestoredInPrompt: promptB.includes(`Environment ${ENVIRONMENT_A}`) && promptB.includes(MARKER_A),
+        modelRepliesMatchMarkers: finalA.includes(MARKER_A) && finalB.includes(MARKER_B),
+        noHostPathsLeaked: !workerPathLeaks && !hostPathLeaks,
+        hostLocalSentinelUnchanged: localFileUnchanged,
+        runLeasesReleased: runALease?.state === 'released' && runBLease?.state === 'released',
+      };
+      const accepted = Object.values(acceptanceFacts).every(Boolean);
       report({
         outcome: accepted ? 'real-pi-binding-switch-passed' : 'real-pi-binding-switch-incomplete',
+        acceptanceFacts,
         piVersion: readiness.version ?? 'unknown',
         runStatuses: [runA.status, runB.status],
         bindingStatuses: [runA.workspaceBindingStatus ?? 'missing', runB.workspaceBindingStatus ?? 'missing'],
         requestedEnvironmentSequence: [runA.requestedWorkEnvironmentInstanceId ?? 'none', runB.requestedWorkEnvironmentInstanceId ?? 'none'],
         actualEnvironmentSequence: [runA.workspaceBinding?.environmentInstanceId ?? 'none', runB.workspaceBinding?.environmentInstanceId ?? 'none'],
         operationStatuses: operations.map(item => item.status),
+        operationEnvironments: operations.map(item => item.environmentInstanceId),
+        staleBindingAttempt: staleBindingResult?.status === 'failed' && staleBindingResult.failure === 'remote-operation-blocked'
+          ? 'refused' : 'not-proven',
+        staleBindingAttemptHadNoContent: staleBindingResult?.content === undefined,
+        environmentBToolCatalog: {
+          workspaceOperations: sessions[1]?.workspaceOperations ?? [],
+          projectMcpToolCount: sessions[1]?.projectMcpToolNames.length ?? 0,
+          editorSpecificToolAvailable: false,
+        },
+        contextRestoration: promptB.includes(`Environment ${ENVIRONMENT_A}`) && promptB.includes(MARKER_A)
+          ? 'prior-binding-facts-included-in-handoff-prompt' : 'not-proven',
         operationBindingsMatched: operations.every(item => item.identityMatched),
         environmentMarkersMatched: operations.every(item => item.markerMatched),
         toolNamesByActivation: [toolsA, toolsB],

@@ -542,6 +542,7 @@ export function isolationProfile(input: HostPiProbeInput & { readonly agentRoot:
     fileURLToPath(new URL('./pi-error-facts.ts', import.meta.url)),
     fileURLToPath(new URL('./pi-host-tools.ts', import.meta.url)),
     fileURLToPath(new URL('../environment/privacy.ts', import.meta.url)),
+    fileURLToPath(new URL('../environment/iana-tlds.ts', import.meta.url)),
     // The runner and its shared sanitizer need these exact source modules and
     // the repository package scope; nothing else in the repository is readable.
     fileURLToPath(new URL('../../package.json', import.meta.url)),
