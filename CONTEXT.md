@@ -140,6 +140,10 @@ _Avoid_: Work Environment selection, Agent work option
 The host that runs an engine process, owns its engine session storage, and holds its engine login. It is the Environment host in `environment-hosted` mode and the Sprout host in `host-run` mode. A Host-run Engine profile has one explicit model authority and a host-local session namespace, independent of any Work Environment.
 _Avoid_: Work Environment, Project workspace
 
+**Host Engine readiness**:
+An observation of whether a Host Engine profile has the installation, authentication, authorized model, and controls required for admission. It is independent of Work Environment readiness; a ready profile does not by itself show that a model turn used or respected those controls.
+_Avoid_: Environment readiness, engine installation alone, conformance proof
+
 **Host Pi readiness**:
 A Sprout-host-local, non-inference observation that the pinned Pi runtime, configured authentication, exact authorized model, and required isolated adapter controls are available for one Host-run profile. It does not contact an Environment Worker or perform a model turn.
 _Avoid_: Environment readiness, smoke run, hidden model call

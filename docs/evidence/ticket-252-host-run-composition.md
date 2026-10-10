@@ -51,14 +51,37 @@ The seven original criteria are tracked in the final work record on #252. This e
 | Codex | Not run | No operations issued | Catalog accepted; no tool called | Not run | Not run | Not run | Not run | Not evidenced; no sentinel read attempt |
 | Claude Code | Not run | Model-issued remote read/edit; no command test | stdio Project MCP passed; HTTP/editor not run | Not run | Not run | Not run | Not run | No local host read/write attempt; no fallback proof |
 
+## Repository verification
+
+- `npm run typecheck` exited `0` after the Settings test change.
+- Inventory audit: 322 default-suite files partitioned into 242 `src/` files and 80 `web/src/` files; partitions had 0 overlap, 0 missing files, and 0 extras.
+- `npm test -- 'src/**/*.test.ts'` (180-second command timeout): 242 files, 1,966 passed, 0 failed, 42,187 ms.
+- `npm test -- 'web/src/**/*.test.ts'` (180-second command timeout, after the two-direction Settings test change): 80 files, 517 passed, 0 failed, 142,285 ms.
+- Combined: 322 files, 2,483 passed, 0 failed, matching the stated baseline at `feb40a3b2`.
+- The targeted Settings DOM run after its change passed 18/18 tests in 20,436 ms; it is also included in the final Web partition.
+- `src/execution-mode.test.ts` covers argument parsing and refusal before host configuration/database setup. `src/task/environment-lifecycle.test.ts` covers SQLite placement/lease preservation and mismatch refusal before Task advancement. `src/web/views.test.ts`, `web/src/modules/tasks/tasks.dom.test.ts`, and `web/src/modules/settings/settings.dom.test.ts` cover placement projections, mismatch presentation, and read-only mode refresh behavior.
+
+## Acceptance assessment
+
+1. **Startup modes and Settings reconnect — verified for the composed service/API/browser path.** The actual service forwarded both explicit values, omission returned to Environment-hosted, the same temporary database and authenticated Settings session survived restarts, and the browser test refreshed the displayed mode in both directions. The live service database did not contain a Task or Agent Run.
+2. **Three-engine composed acceptance matrix — incomplete.** The single bounded Claude Code scenario completed remote read/edit/stdio-MCP and Worker traversal refusal. Pi was blocked before a turn; Codex completed with zero tool calls. HTTP MCP, editor operations, stale-binding denial, context restoration, interruption/recovery, and Task lifecycle were not run as one model-issued matrix across all engines in this attempt.
+3. **Mode-changing restart and lifecycle — deterministic checks passed, live Task composition incomplete.** The test suite covers persisted placement and held leases across SQLite restart and refuses mismatched Task advancement without changing the lease. This attempt did not restart the live service with a seeded Task or exercise every mismatch control through real engines.
+4. **Model-issued isolation and no fallback — unmet.** No current-run evidence proves denied Sprout-host reads and writes across the three engines. Codex issued no remote operation; Pi did not start; Claude's traversal denial was enforced by the Worker workspace boundary and was not a Sprout-host filesystem denial. The Codex production host-authority prerequisite in #248 remains unresolved. A timeout or an untouched sentinel is not a denial proof.
+5. **Operational views and truthful usage — repository projection checks passed; live matrix partial.** The views keep process mode, recorded placement, Engine host profile, Work Environment, and mismatch reason distinct. The Codex run reported `unknown` billing basis and `unavailable` cost estimate; no billed cost is claimed. The Claude run reported token counts only.
+6. **Prior-ticket ownership and scope docs — preserved.** This branch adds final acceptance evidence, clarifies the Host Engine readiness term, records the current limitation in ADR-0016, updates the roadmap feature scope, and strengthens the Settings reconnect test. It does not replace prior adapter or Runtime implementations. #225 remains open and untouched.
+7. **Required checks and bounded engine scenarios — repository checks passed; feature acceptance remains unmet.** The commands and each live outcome are recorded above. `git diff --check feb40a3b2..HEAD` is recorded in the final work record after the final commit.
+
 ## Prior scope evidence and known limits
 
 - Ticket #248's accepted amendment explicitly leaves the Codex model-facing host-authority exclusion prerequisite unresolved. It does not claim broader host isolation or unblock production Host-run adoption.
-- Ticket #249's accepted amendment records an earlier Codex full run and a minimal read probe that completed with zero model-issued Sprout tool calls. That is not conformance evidence. The current run must be observed independently.
-- Ticket #251 and `docs/research/claude-host-run-conformance.md` contain the prior Claude model-issued fixture result. This ticket will report only scenarios run in this verification attempt as new live evidence.
+- Ticket #249's accepted amendment records an earlier Codex full run and minimal read probe with zero model-issued Sprout tool calls. This verification made one new bounded full run; the catalog was accepted, but the model again issued zero workspace or Project MCP calls.
+- Ticket #251 and `docs/research/claude-host-run-conformance.md` contain prior Claude evidence. The new Claude run recorded here is a separate bounded fixture outcome and does not expand that evidence to host-sentinel denial or the full lifecycle matrix.
+- The prompt named `scripts/codex-host-conformance.mjs`; the repository's existing harness is `scripts/codex-host-conformance.ts`. The existing TypeScript harness was reused without adding a replacement.
 
 ## Unsupported paths and boundaries
 
-- The existing Pi isolation probe is pinned to Pi `1.0.4`; the installed Pi CLI `1.1.0` is outside that probe's accepted version.
-- This session has not established Pi readiness or any Pi model-issued operation.
-- No private service endpoint, port, credential, account identity, or local home path is recorded here.
+- Pi `1.1.0` readiness was unknown, and the existing Pi isolation probe accepts only Pi `1.0.4`; no Pi model turn or isolation claim is made.
+- Codex CLI `0.159.3` had ready local profile facts and an accepted dynamic catalog, but no model-issued tool calls. No Codex remote operation or host read/write denial is claimed. Production Host-run Codex remains gated by #248.
+- Claude Code CLI `2.1.294` passed only remote read/edit/stdio-MCP and Worker path traversal refusal on macOS. HTTP MCP, editor tools, local Sprout-host read/write denial, stale binding, context restoration, interruption/recovery, Task lifecycle, and Windows isolation remain unevidenced by this run.
+- The Claude fixture's enrolled Worker had no remote engine facts and still completed the model-issued operation. That demonstrates no remote model-engine login requirement for this specific Claude fixture only.
+- No private service endpoint, port, credential, account identity, or local home path is recorded here. The Human's normal service invocation was not changed.
