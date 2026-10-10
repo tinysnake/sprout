@@ -5,6 +5,7 @@ import type { AgentDefinition } from '../agent/registry.ts';
 import { AgentRegistry } from '../agent/registry.ts';
 import { ScriptedEngineAdapter } from '../engine/scripted.ts';
 import type { HostPiEngineAdapter } from '../engine/pi-host.ts';
+import type { HostCodexEngineAdapter } from '../engine/codex-host.ts';
 import { createExecutionStrategy } from '../execution-mode.ts';
 import { EnvironmentPool } from '../environment/pool.ts';
 import type { Project } from '../project/model.ts';
@@ -114,6 +115,64 @@ test('Host-run Message uses the authorized local Pi profile without an Environme
   assert.equal((await context.orchestrator.waitFor(unscoped.id)).status, 'completed');
   assert.equal(context.engine.requests[3]?.resumeSessionKey, undefined);
   assert.equal((await context.sessionKeys.list()).length, 2, 'unscoped work saves no native key');
+});
+
+test('ordinary Codex Host-run Message uses the local profile without contacting an Environment', async () => {
+  const model = 'provider/model-codex-host';
+  const codexAgent: AgentDefinition = { ...agent, id: 'agent-codex', engine: 'codex', model };
+  const codexProject: Project = {
+    ...project,
+    memberships: [{ agentId: codexAgent.id, responsibilities: ['Reply to messages'], collaborationInstructions: 'Be direct.' }],
+  };
+  const engine = new ScriptedEngineAdapter({ turns: [{
+    events: [{ type: 'message', text: 'Reply from Codex', final: true }],
+    result: {
+      status: 'completed', text: 'Reply from Codex',
+      tokenUsage: { promptTokens: 11, completionTokens: 4, totalTokens: 15 },
+      detailedTokens: { inputTokens: 11, outputTokens: 4, totalTokens: 15 },
+      source: 'codex-app-server', sourceVersion: 'codex-cli 0.159.3', billingBasis: 'unknown',
+    },
+  }] });
+  let environmentAdapterLookups = 0;
+  let readinessChecks = 0;
+  const hostCodex = {
+    id: 'codex', profileId: 'host-codex-message-profile', authorizedModel: model,
+    capabilities: engine.capabilities, supportsEffort: (effort: string) => effort === 'medium',
+    async readiness() {
+      readinessChecks += 1;
+      return { profileId: 'host-codex-message-profile', engine: 'codex', status: 'ready', installation: 'ready',
+        authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready',
+        version: '0.159.3', supportedEfforts: ['medium'], observedAt: 10_000 };
+    },
+    async startSession(request: import('../engine/port.ts').StartSessionRequest) {
+      assert.equal(request.remoteWorkspace, undefined);
+      assert.equal(request.remoteProjectMcp, undefined);
+      return engine.startSession(request);
+    },
+  } as unknown as HostCodexEngineAdapter;
+  const pool = new EnvironmentPool({ definitions: [], instances: [] });
+  const orchestrator = new RunOrchestrator({
+    engines: async () => { environmentAdapterLookups += 1; throw new Error('Environment adapter lookup must not run'); },
+    hostCodex,
+    agents: new AgentRegistry([codexAgent]),
+    projects: new ProjectRegistry([codexProject]),
+    pool,
+    store: new InMemoryRunStore(),
+    sessionKeys: new InMemorySessionKeyStore(),
+    executionStrategy: createExecutionStrategy('host-run', true),
+    clock: { now: () => 10_000 },
+  });
+
+  const submitted = await orchestrator.submit({ agentId: codexAgent.id, projectId: codexProject.id, prompt: 'Reply locally.' });
+  const run = await orchestrator.waitFor(submitted.id);
+  assert.equal(run.status, 'completed');
+  assert.equal(run.executionMode, 'host-run');
+  assert.equal(run.workOption?.engine, 'codex');
+  assert.equal(run.engineHostProfileId, 'host-codex-message-profile');
+  assert.deepEqual(run.tokenUsage, { promptTokens: 11, completionTokens: 4, totalTokens: 15 });
+  assert.equal(environmentAdapterLookups, 0);
+  assert.equal(readinessChecks, 1);
+  assert.deepEqual(pool.leases(), []);
 });
 
 test('Host-run admission refuses unauthorized models, unready profiles, and Task bindings before the engine starts', async () => {

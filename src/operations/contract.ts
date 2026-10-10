@@ -1,4 +1,5 @@
 import { isFeedDeepLink, type FeedTarget } from '../web/feed.ts';
+import type { HostCodexProbeFailure } from '../engine/codex-host.ts';
 import type { ExecutionMode } from '../execution-mode.ts';
 
 /** Diagnostics select finite facts and validated routing identities; never content. */
@@ -72,6 +73,7 @@ export interface OperatorSettings {
   /** Authoritative execution mode selected when this Sprout process started. */
   readonly executionMode: ExecutionMode;
   /** Read-only local Pi readiness; independent of Environment Worker readiness. */
+  /** Read-only local Pi readiness; independent of Environment Worker readiness. */
   readonly hostPi?: {
     readonly status: 'not-configured' | 'ready' | 'unavailable' | 'unknown';
     readonly installation?: 'ready' | 'missing' | 'unsupported' | 'unknown';
@@ -79,6 +81,16 @@ export interface OperatorSettings {
     readonly modelAvailability?: 'available' | 'unavailable' | 'unknown';
     readonly adapterControls?: 'ready' | 'unavailable' | 'unknown';
     readonly version?: string;
+  };
+  readonly hostCodex?: {
+    readonly status: 'not-configured' | 'ready' | 'unavailable' | 'unknown' | 'blocked';
+    readonly reason?: string;
+    readonly installation?: 'ready' | 'missing' | 'unsupported' | 'unknown';
+    readonly authentication?: 'ready' | 'not-ready' | 'unknown';
+    readonly modelAvailability?: 'available' | 'unavailable' | 'unknown';
+    readonly adapterControls?: 'ready' | 'unavailable' | 'unknown';
+    readonly version?: string;
+    readonly probeFailure?: HostCodexProbeFailure;
   };
   readonly session: { readonly authenticated: true; readonly activeCount: number };
   readonly access: { readonly boundary: 'private-network-and-authentication'; readonly publicInternetSupported: false };

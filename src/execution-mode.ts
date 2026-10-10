@@ -47,7 +47,7 @@ export interface ExecutionStrategy {
 }
 
 const HOST_RUN_UNAVAILABLE =
-  'Host-run execution is unavailable because this host does not meet the isolated Pi conversation controls.';
+  'Host-run execution is unavailable because this host has no configured, ready Engine profile.';
 
 /** Construct the one immutable execution strategy for a Sprout process. */
 export function createExecutionStrategy(mode: ExecutionMode, hostRunSupported = false): ExecutionStrategy {
