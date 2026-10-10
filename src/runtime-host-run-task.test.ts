@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ScriptedEngineAdapter } from './engine/scripted.ts';
 import type { HostPiEngineAdapter } from './engine/pi-host.ts';
-import type { HostCodexEngineAdapter } from './engine/codex-host.ts';
+import { HostCodexEngineAdapter } from './engine/codex-host.ts';
 import type { StartSessionRequest } from './engine/port.ts';
 import { loadOrCreateWorkerIdentity, workerPublicKey } from './worker/enrollment-connector.ts';
 import { toTaskContextState } from './web/views.ts';
@@ -18,7 +18,18 @@ for (const hostEngine of ['pi', 'codex'] as const) test(`Human-authorized Host-r
   const workspace = join(workerRoot, 'repos', 'host-task');
   const keyPath = join(directory, 'worker-key.pem');
   const model = 'provider/model-host';
-  const profileId = `host-task-profile-${hostEngine}`;
+  let readinessProbeCalls = 0;
+  const codexProfile = hostEngine === 'codex' ? new HostCodexEngineAdapter({
+    binaryPath: '/usr/bin/true', model,
+    runnerRoot: join(directory, 'codex-runner'), codexHome: directory,
+    probeProcess: async input => {
+      readinessProbeCalls += 1;
+      return { profileId: input.profileId, engine: 'codex', status: 'ready', installation: 'ready',
+        authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready',
+        version: '0.159.3', supportedEfforts: ['medium'], observedAt: 1 };
+    },
+  }) : undefined;
+  const profileId = codexProfile?.profileId ?? `host-task-profile-${hostEngine}`;
   const engine = new ScriptedEngineAdapter({ turns: [scriptedTurn('Task step completed.')] });
   let runToolsUsed = false;
   let hostInstructions = '';
@@ -26,12 +37,11 @@ for (const hostEngine of ['pi', 'codex'] as const) test(`Human-authorized Host-r
   let runtime: Awaited<ReturnType<typeof createRuntime>>;
   const host = {
     id: hostEngine, profileId, authorizedModel: model, capabilities: engine.capabilities,
-    supportsEffort: () => true,
+    supportsEffort: (effort: string) => codexProfile?.supportsEffort(effort) ?? true,
     async readiness() {
+      if (codexProfile !== undefined) return codexProfile.readiness();
       return { profileId, engine: hostEngine, status: 'ready', installation: 'ready', authentication: 'ready',
-        modelAvailability: 'available', adapterControls: 'ready',
-        ...(hostEngine === 'codex' ? { version: '0.159.3', supportedEfforts: ['medium'] } : { version: '1.0.4' }),
-        observedAt: 1 };
+        modelAvailability: 'available', adapterControls: 'ready', version: '1.0.4', observedAt: 1 };
     },
     async startSession(request: StartSessionRequest) {
       hostInstructions = request.instructions ?? '';
@@ -115,6 +125,10 @@ for (const hostEngine of ['pi', 'codex'] as const) test(`Human-authorized Host-r
     writeFileSync(join(workspace, '.mcp.json'), JSON.stringify({
       mcpServers: { fixture: { command: process.execPath, args: ['--input-type=module', '-e', mcpServer] } },
     }));
+    if (codexProfile !== undefined) {
+      assert.equal(codexProfile.supportsEffort('medium'), false,
+        'a fresh Host Codex profile has not inferred supported effort');
+    }
 
     const actor = await runtime.taskProposals.humanAuthority('host-task-project');
     const proposal = await runtime.taskProposals.propose('host-task-project', actor, {
@@ -131,6 +145,10 @@ for (const hostEngine of ['pi', 'codex'] as const) test(`Human-authorized Host-r
     assert.equal(begun.task.executionPlacement?.mode, 'host-run');
     assert.equal(runtime.pool.getLease(taskLeaseId)?.holderKind, 'task');
     assert.equal(runtime.pool.leases().length, 1);
+    if (codexProfile !== undefined) {
+      assert.equal(codexProfile.supportsEffort('medium'), true,
+        'Task eligibility establishes readiness before checking the dynamic effort');
+    }
 
     const advanced = await runtime.taskAdmissions.advanceForHuman(taskId, {
       targetAgentId: 'scout', reason: 'Run the bounded workspace check.',
@@ -142,6 +160,12 @@ for (const hostEngine of ['pi', 'codex'] as const) test(`Human-authorized Host-r
     assert.equal(settled.workOption?.engine, hostEngine);
     assert.equal(settled.leaseId, taskLeaseId);
     assert.equal(runToolsUsed, true);
+    if (codexProfile !== undefined) {
+      assert.ok(readinessProbeCalls >= 1,
+        'the Task-held Host Codex path establishes readiness before effort selection');
+    } else {
+      assert.equal(readinessProbeCalls, 0);
+    }
     assert.equal(hostInstructions.includes('Sprout Task bootstrap'), false);
     assert.equal(hostInstructions.includes('.sprout/tasks'), false);
     assert.ok(sessionPrompt.includes('Use the selected Environment workspace and Project MCP tools.'));

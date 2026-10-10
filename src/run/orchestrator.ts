@@ -688,27 +688,27 @@ export class RunOrchestrator {
     let selectedOption: { readonly option: AgentWorkOption; readonly host: HostRunEngineAdapter } | undefined;
     for (const candidate of options) {
       const candidateHost = this.#hostEngines.get(candidate.engine);
-      if (candidateHost !== undefined && candidate.workModel === candidateHost.authorizedModel &&
-          hostRunEffortSupported(candidateHost, candidate.effort || 'medium')) {
+      if (candidateHost === undefined || candidate.workModel !== candidateHost.authorizedModel) continue;
+      const readiness = await candidateHost.readiness(true);
+      if (readiness.status !== 'ready') {
+        const reason = readiness.authentication === 'not-ready'
+          ? 'authentication is not ready'
+          : readiness.modelAvailability === 'unavailable'
+            ? 'the exact authorized model is unavailable'
+            : readiness.adapterControls === 'unavailable'
+              ? 'required isolated Engine controls are unavailable'
+              : readiness.installation !== 'ready'
+                ? 'the pinned Engine runtime is unavailable'
+                : 'readiness is unknown';
+        return refuse(`Host-run ${candidateHost.id} admission failed for this Engine profile: ${reason}`);
+      }
+      if (hostRunEffortSupported(candidateHost, candidate.effort || 'medium')) {
         selectedOption = { option: candidate, host: candidateHost };
         break;
       }
     }
     if (selectedOption === undefined) return refuse(`agent ${agent.id} has no work option authorized by a configured Host Engine profile`);
     const { option, host } = selectedOption;
-    const readiness = await host.readiness(true);
-    if (readiness.status !== 'ready') {
-      const reason = readiness.authentication === 'not-ready'
-        ? 'authentication is not ready'
-        : readiness.modelAvailability === 'unavailable'
-          ? 'the exact authorized model is unavailable'
-          : readiness.adapterControls === 'unavailable'
-            ? 'required isolated Engine controls are unavailable'
-            : readiness.installation !== 'ready'
-              ? 'the pinned Engine runtime is unavailable'
-              : 'readiness is unknown';
-      return refuse(`Host-run ${host.id} admission failed for this Engine profile: ${reason}`);
-    }
     const previousActivations = (await this.#runHistory())
       .filter((prior) => prior.agentId === agent.id && prior.projectId === selectedProject.id &&
         prior.taskId === undefined && sameActivationScope(prior.sessionKeyScope, initial.sessionKeyScope))
@@ -1141,18 +1141,19 @@ export class RunOrchestrator {
       let selected: { readonly option: AgentWorkOption; readonly host: HostRunEngineAdapter } | undefined;
       for (const option of options) {
         const host = this.#hostEngines.get(option.engine);
-        if (host !== undefined && option.workModel === host.authorizedModel && hostRunEffortSupported(host, option.effort || 'medium')) {
+        if (host === undefined || option.workModel !== host.authorizedModel) continue;
+        const readiness = await host.readiness();
+        if (readiness.status !== 'ready' || readiness.installation !== 'ready'
+          || readiness.authentication !== 'ready' || readiness.modelAvailability !== 'available'
+          || readiness.adapterControls !== 'ready') {
+          return { ok: false, reason: `Sprout-host ${host.id} model, authentication, installation, or adapter controls are not confirmed ready` };
+        }
+        if (hostRunEffortSupported(host, option.effort || 'medium')) {
           selected = { option, host };
           break;
         }
       }
       if (selected === undefined) return { ok: false, reason: 'no configured work option is authorized by a Sprout-host Engine profile' };
-      const readiness = await selected.host.readiness();
-      if (readiness.status !== 'ready' || readiness.installation !== 'ready'
-        || readiness.authentication !== 'ready' || readiness.modelAvailability !== 'available'
-        || readiness.adapterControls !== 'ready') {
-        return { ok: false, reason: `Sprout-host ${selected.host.id} model, authentication, installation, or adapter controls are not confirmed ready` };
-      }
       return { ok: true, option: selected.option };
     }
     const observed = this.#engineFacts
