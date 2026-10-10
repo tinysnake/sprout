@@ -88,13 +88,13 @@
         "src/operations/remote-operation-store.test.ts"
       ],
       "fileCount": 71,
-      "tests": 692,
-      "passed": 692,
+      "tests": 694,
+      "passed": 694,
       "failed": 0,
       "cancelled": 0,
       "skipped": 0,
       "todo": 0,
-      "durationMs": 3180.898166
+      "durationMs": 3179.5855
     },
     {
       "id": "B",
@@ -199,13 +199,13 @@
         "src/web/worker-readiness-api.test.ts"
       ],
       "fileCount": 90,
-      "tests": 681,
-      "passed": 681,
+      "tests": 682,
+      "passed": 682,
       "failed": 0,
       "cancelled": 0,
       "skipped": 0,
       "todo": 0,
-      "durationMs": 6577.306
+      "durationMs": 6604.776625
     },
     {
       "id": "C",
@@ -296,13 +296,13 @@
         "src/worker/workspace.test.ts"
       ],
       "fileCount": 80,
-      "tests": 584,
-      "passed": 584,
+      "tests": 585,
+      "passed": 585,
       "failed": 0,
       "cancelled": 0,
       "skipped": 0,
       "todo": 0,
-      "durationMs": 31063.257834
+      "durationMs": 31181.978625
     },
     {
       "id": "D",
@@ -398,13 +398,13 @@
       "cancelled": 0,
       "skipped": 0,
       "todo": 0,
-      "durationMs": 108698.950917
+      "durationMs": 108518.955083
     }
   ],
   "totals": {
     "files": 321,
-    "tests": 2474,
-    "passed": 2474,
+    "tests": 2478,
+    "passed": 2478,
     "failed": 0,
     "cancelled": 0,
     "skipped": 0,
@@ -419,5 +419,125 @@
     "duplicates": [],
     "exhaustiveAndDisjoint": true
   },
-  "note": "Partition C first had one worker journal timing failure and D first had one asynchronous UI timing failure; each bounded partition was immediately rerun and passed. Recorded counters and durations use the passing reruns."
+  "note": "Current A-D partition file inventories match the prior run and were audited against all default-suite files. Round 1 counters and its incomplete transient-failure detail are preserved under priorAttemptRound1; round 2 results are recorded separately.",
+  "reworkRound2": {
+    "verifiedCommit": "588130f411eb1257938a052ca3fb8cf8681a02e0",
+    "diffBase": "ccea10154",
+    "typecheck": {
+      "command": "npm run typecheck",
+      "result": "passed"
+    },
+    "baseline": {
+      "files": 321,
+      "tests": 2474,
+      "failed": 0
+    },
+    "redGreenEvidence": [
+      {
+        "finding": "F2",
+        "test": "a bounded model context suffix survives without admitting arbitrary bracketed text",
+        "file": "src/agent/identity.test.ts",
+        "red": {
+          "command": "npm test -- src/agent/identity.test.ts src/web/agent-router.test.ts src/engine/claude-host.test.ts",
+          "assertion": "Expected values to be strictly equal",
+          "actual": "group/auto-mimo-v2-6-flash1m",
+          "expected": "group/auto-mimo-v2-6-flash[1m]"
+        },
+        "green": {
+          "result": "passed in the 47-test focused run and partition A"
+        }
+      },
+      {
+        "finding": "F2",
+        "test": "the authorized Claude model round-trips through create, reconfigure, storage, and API reads",
+        "file": "src/web/agent-router.test.ts",
+        "red": {
+          "assertion": "Expected values to be strictly equal",
+          "actual": "group/auto-mimo-v2-6-flash1m",
+          "expected": "group/auto-mimo-v2-6-flash[1m]"
+        },
+        "green": {
+          "result": "passed in the 47-test focused run and partition B"
+        }
+      },
+      {
+        "finding": "F1",
+        "test": "Host Claude sanitizes assistant text and remote tool results before live events and final results",
+        "file": "src/engine/claude-host.test.ts",
+        "red": {
+          "assertion": "sensitive marker survived live Claude output: synthetic-secret"
+        },
+        "green": {
+          "result": "passed in the 47-test focused run and partition A"
+        }
+      }
+    ],
+    "transientFailures": [],
+    "focusedGreenCommand": "npm test -- src/runtime-host-claude-admission.test.ts src/runtime-host-run-task.test.ts src/engine/claude-host.test.ts src/agent/identity.test.ts src/web/agent-router.test.ts",
+    "focusedGreenResult": {
+      "tests": 47,
+      "passed": 47,
+      "failed": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    }
+  },
+  "priorAttemptRound1": {
+    "verifiedCommit": "ccea10154",
+    "partitions": [
+      {
+        "id": "A",
+        "fileCount": 71,
+        "tests": 692,
+        "passed": 692,
+        "failed": 0,
+        "durationMs": 3180.898166
+      },
+      {
+        "id": "B",
+        "fileCount": 90,
+        "tests": 681,
+        "passed": 681,
+        "failed": 0,
+        "durationMs": 6577.306
+      },
+      {
+        "id": "C",
+        "fileCount": 80,
+        "tests": 584,
+        "passed": 584,
+        "failed": 0,
+        "durationMs": 31063.257834
+      },
+      {
+        "id": "D",
+        "fileCount": 80,
+        "tests": 517,
+        "passed": 517,
+        "failed": 0,
+        "durationMs": 108698.950917
+      }
+    ],
+    "totals": {
+      "files": 321,
+      "tests": 2474,
+      "passed": 2474,
+      "failed": 0
+    },
+    "transientFailures": [
+      {
+        "partition": "C",
+        "testName": "not recorded",
+        "assertion": "not recorded",
+        "failureReason": "Worker event journaling timing failure; immediate rerun passed."
+      },
+      {
+        "partition": "D",
+        "testName": "not recorded",
+        "assertion": "not recorded",
+        "failureReason": "Asynchronous web usage query timing failure; immediate rerun passed."
+      }
+    ]
+  }
 }
