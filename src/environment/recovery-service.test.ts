@@ -196,7 +196,7 @@ test('overdue blocked lease exposes durable recovery and Human Force Release wit
   await built.store.save({ ...begun, status: 'blocked', environmentLifecycleState: 'blocked' });
   assert.equal(await built.recovery.forLease(leaseId), undefined);
   now = pool.getLease(leaseId)!.expiresAt;
-  assert.equal((await pool.acquireLeaseRevalidated({ instanceId: 'mac-1', capability: 'agent-run', holderId: 'other', ttlMs: 1000 })).ok, false);
+  assert.equal((await pool.acquireLeaseRevalidated({ instanceId: 'mac-1', capability: 'agent-run', mode: 'read-write', holderId: 'other', ttlMs: 1000 })).ok, false);
   const record = await built.recovery.forLease(leaseId);
   assert.equal(record?.phase, 'recovery');
   assert.equal(record?.cause, 'lease-overdue');
@@ -216,7 +216,7 @@ test('overdue blocked lease exposes durable recovery and Human Force Release wit
   assert.ok(stoppedTask?.forcedRelease?.unresolvedFacts.length);
   assert.ok(stoppedTask?.forcedRelease?.at);
   assert.equal((await built.recovery.forceReleaseHistory('mac-1')).length, 1);
-  assert.equal((await pool.acquireLeaseRevalidated({ instanceId: 'mac-1', capability: 'agent-run', holderId: 'other', ttlMs: 1000 })).ok, true);
+  assert.equal((await pool.acquireLeaseRevalidated({ instanceId: 'mac-1', capability: 'agent-run', mode: 'read-write', holderId: 'other', ttlMs: 1000 })).ok, true);
 });
 
 test('an interrupted nested run opens one durable recovery record and retains the Task lease', async () => {
@@ -239,6 +239,7 @@ test('an interrupted nested run opens one durable recovery record and retains th
   const competing = built.pool.acquireLease({
     instanceId: 'mac-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'task-2',
     taskId: 'task-2',
     ttlMs: 1,
@@ -467,7 +468,7 @@ test('ordinary decision record-write failures happen before holder mutation', as
     definitions: [definition], instances: [instance], idFactory: () => 'run-lease-1',
   });
   const acquired = pool.acquireLease({
-    instanceId: 'mac-1', capability: 'agent-run', holderId: 'run-1', runId: 'run-1', ttlMs: 60_000,
+    instanceId: 'mac-1', capability: 'agent-run', mode: 'read-write', holderId: 'run-1', runId: 'run-1', ttlMs: 60_000,
   });
   assert.equal(acquired.ok, true);
   if (!acquired.ok) return;
@@ -549,7 +550,7 @@ test('holder refusals restore open recovery for Resume, Discard, and Release', a
     definitions: [definition], instances: [instance], idFactory: () => 'run-lease-1',
   });
   const acquired = pool.acquireLease({
-    instanceId: 'mac-1', capability: 'agent-run', holderId: 'run-1', runId: 'run-1', ttlMs: 60_000,
+    instanceId: 'mac-1', capability: 'agent-run', mode: 'read-write', holderId: 'run-1', runId: 'run-1', ttlMs: 60_000,
   });
   assert.equal(acquired.ok, true);
   if (!acquired.ok) return;
@@ -618,7 +619,7 @@ test('ordinary run Release refuses a stale evidence gate before releasing its le
     definitions: [definition], instances: [instance], idFactory: () => 'run-lease-1',
   });
   const acquired = pool.acquireLease({
-    instanceId: 'mac-1', capability: 'agent-run', holderId: 'run-1', runId: 'run-1', ttlMs: 60_000,
+    instanceId: 'mac-1', capability: 'agent-run', mode: 'read-write', holderId: 'run-1', runId: 'run-1', ttlMs: 60_000,
   });
   assert.equal(acquired.ok, true);
   if (!acquired.ok) return;
@@ -764,7 +765,7 @@ test('ordinary Discard performs safe Task end: context recycled then lease relea
   });
   assert.equal(catalogEntry.eligible, true, 'a cleared recovery record restores catalog eligibility');
   assert.equal(pool.acquireLease({
-    instanceId: 'mac-1', capability: 'agent-run', holderId: 'next-task', taskId: 'next-task', ttlMs: 60_000,
+    instanceId: 'mac-1', capability: 'agent-run', mode: 'read-write', holderId: 'next-task', taskId: 'next-task', ttlMs: 60_000,
   }).ok, true, 'the released instance admits new work');
 });
 
@@ -957,7 +958,7 @@ for (const scenario of [
       ({ leaseId } = await interruptedTask(built));
     } else {
       const acquired = built.pool.acquireLease({
-        instanceId: 'mac-1', capability: 'agent-run', holderId: 'run-1', runId: 'run-1', ttlMs: 60_000,
+        instanceId: 'mac-1', capability: 'agent-run', mode: 'read-write', holderId: 'run-1', runId: 'run-1', ttlMs: 60_000,
       });
       assert.ok(acquired.ok);
       leaseId = acquired.lease.id;

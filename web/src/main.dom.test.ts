@@ -162,16 +162,21 @@ test('the rendered client drives Task lifecycle controls through the fetch bound
 
   const requests: FetchCall[] = [];
   let conflictResponse: Response | undefined;
-  const leases = () => [...tasks.values()]
-    .filter(({ task }) => task.environmentLeaseId !== undefined && !['ended', 'discarded'].includes(task.environmentLifecycleState ?? ''))
-    .map(({ task }) => ({
-      id: task.environmentLeaseId!,
-      instanceId: task.environmentInstanceId!,
-      capability: 'agent-run',
-      holderId: task.id,
-      holderKind: 'task',
-      state: task.environmentLifecycleState === 'recovery' ? 'recovering' : 'active',
-    }));
+  const leases = () => [
+    ...[...tasks.values()]
+      .filter(({ task }) => task.environmentLeaseId !== undefined && !['ended', 'discarded'].includes(task.environmentLifecycleState ?? ''))
+      .map(({ task }) => ({
+        id: task.environmentLeaseId!,
+        instanceId: task.environmentInstanceId!,
+        capability: 'agent-run',
+        mode: 'read-write',
+        holderId: task.id,
+        holderKind: 'task',
+        state: task.environmentLifecycleState === 'recovery' ? 'recovering' : 'active',
+      })),
+    { id: 'read-lease', instanceId: 'env-read', capability: 'read-only-investigation', mode: 'read',
+      holderId: 'reader-agent', holderKind: 'run', state: 'active' },
+  ];
 
   const fetchBoundary: typeof fetch = async (input, init) => {
     const path = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
@@ -280,6 +285,9 @@ test('the rendered client drives Task lifecycle controls through the fetch bound
     // as the shipped Web client does; no handler is imported or invoked directly.
     await vite.ssrLoadModule('/src/main.ts');
     await eventually(() => document.querySelectorAll('[data-task]').length === tasks.size, 'initial Task cards');
+    await eventually(() => document.querySelector('#lease-list')?.textContent?.includes('reader-agent') === true, 'initial lease list');
+    assert.match(document.querySelector('#lease-list')?.textContent ?? '', /reader-agent \[read, active\]/);
+    assert.match(document.querySelector('#lease-semantics')?.textContent ?? '', /Files may change.*do not get a snapshot or copy-on-write/);
     assert.match(document.querySelector('#run-totals')?.textContent ?? '', /3\.5 s cumulative duration/);
     assert.match(document.querySelector('#run-totals')?.textContent ?? '', /2,500 cumulative tokens/);
 

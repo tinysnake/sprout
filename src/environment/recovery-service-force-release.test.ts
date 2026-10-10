@@ -265,6 +265,7 @@ test('the recovery record and Force Release outcome survive a real SQLite reopen
     const acquired = pool.reserveTaskLease({
       instanceId: 'mac-1',
       capability: 'agent-run',
+      mode: 'read-write',
       holderId: 'task-1',
       taskId: 'task-1',
       ttlMs: 60_000,
@@ -393,7 +394,7 @@ test('Task lead authority override releases an interrupted Agent lease and prese
     const pool = new EnvironmentPool({
       definitions: [definition], instances: [instance], clock: { now: () => 10 }, idFactory: () => 'run-lease',
     });
-    const acquired = pool.acquireLease({ instanceId: 'mac-1', capability: 'agent-run', holderId: 'agent-origin', runId: 'run-origin', ttlMs: 60_000 });
+    const acquired = pool.acquireLease({ instanceId: 'mac-1', capability: 'agent-run', mode: 'read-write', holderId: 'agent-origin', runId: 'run-origin', ttlMs: 60_000 });
     assert.equal(acquired.ok, true);
     if (!acquired.ok) throw new Error('run lease was not admitted');
     let nextId = 0;

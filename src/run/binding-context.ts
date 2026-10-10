@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { sanitizeIdentifier } from '../environment/privacy.ts';
 import { sanitizeWorkspacePath } from '../project/access.ts';
+import { READ_ONLY_LEASE_SEMANTICS } from '../environment/pool.ts';
 import type { RemoteProjectMcpTools, RemoteWorkspaceTools } from '../engine/port.ts';
 import type { RunWorkspaceBinding } from './model.ts';
 
@@ -23,9 +24,11 @@ export function currentRunWorkspaceBinding(input: {
     ? binding.generation
     : undefined;
   const path = safeWorkspacePath(binding.path);
+  const leaseMode = workspace?.leaseMode;
   const catalogIdentity = createHash('sha256').update(JSON.stringify({
     binding: [binding.environmentInstanceId, binding.bindingId, binding.generation, binding.workspaceId, binding.kind, binding.path ?? ''],
     operations: [...new Set(operations)].sort(),
+    leaseMode,
     projectMcpTools: (mcp?.tools ?? []).map((tool) => ({
       name: tool.name, description: tool.description, inputSchema: tool.inputSchema,
     })).sort((left, right) => left.name.localeCompare(right.name)),
@@ -36,6 +39,7 @@ export function currentRunWorkspaceBinding(input: {
     ...(generation !== undefined ? { generation } : {}),
     workspaceId: sanitizeIdentifier(binding.workspaceId, { fallback: 'unknown-workspace', kind: 'digest' }),
     catalogIdentity,
+    ...(leaseMode !== undefined ? { leaseMode } : {}),
     kind: binding.kind === 'relative' ? 'relative' : 'default',
     ...(path !== undefined ? { path } : {}),
     ...(input.catalogGeneration !== undefined ? { catalogGeneration: input.catalogGeneration } : {}),
@@ -73,6 +77,8 @@ export function renderCurrentWorkspaceSnapshot(
     `Environment: ${environment}`,
     `Workspace binding generation: ${Number.isSafeInteger(binding.generation) ? binding.generation : 'unknown'}`,
     `Workspace identity: ${sanitizeIdentifier(binding.workspaceId ?? '', { fallback: 'unknown-workspace', kind: 'digest' })}`,
+    ...(binding.leaseMode !== undefined ? [`Environment lease mode: ${binding.leaseMode}`] : []),
+    ...(binding.leaseMode === 'read' ? [READ_ONLY_LEASE_SEMANTICS] : []),
     `Remote workspace operations: ${operations.length ? operations.join(', ') : 'none'}`,
     `Project MCP tools: ${mcpTools.length ? mcpTools.join(', ') : 'none'}`,
     ...(binding.catalogGeneration !== undefined ? [`Published tool catalog generation: ${binding.catalogGeneration}`] : []),

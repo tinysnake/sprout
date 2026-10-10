@@ -32,6 +32,7 @@ test('schema migration records legacy runs, begun Tasks, and continuation slots 
       id: 'lease-migration',
       instanceId: 'env-migration',
       capability: 'agent-run',
+      mode: 'read-write',
       holderId: 'task-migration',
       holderKind: 'task',
       taskId: 'task-migration',

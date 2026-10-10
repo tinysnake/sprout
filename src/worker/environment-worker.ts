@@ -93,9 +93,9 @@ export function selectEnvironmentWorker(
           id: profile.kind === 'windows' ? 'windows-workstation' : 'macos-workstation',
           platform: profile.platform,
           capabilities: [
-            { name: 'agent-run', requiresLease: true },
-            { name: 'project-mcp', requiresLease: true },
-            { name: 'read-only-investigation', requiresLease: false },
+            { name: 'agent-run', requiresLease: true, leaseMode: 'read-write' },
+            { name: 'project-mcp', requiresLease: true, leaseMode: 'read-write' },
+            { name: 'read-only-investigation', requiresLease: true, leaseMode: 'read' },
           ],
         };
 

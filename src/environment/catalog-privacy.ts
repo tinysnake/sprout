@@ -43,12 +43,16 @@ export function sanitizeEnvironmentCatalogRecord(input: {
     ? rawDefinition.capabilities.flatMap((candidate) => {
         const capability = object(candidate);
         if (capability.name === undefined) return [];
+        const requiresLease = capability.requiresLease === true;
         return [{
           name: sanitizeIdentifier(String(capability.name), {
             fallback: 'unknown-capability',
             kind: 'capability',
           }),
-          requiresLease: capability.requiresLease === true,
+          requiresLease,
+          ...(requiresLease ? {
+            leaseMode: capability.leaseMode === 'read' ? 'read' as const : 'read-write' as const,
+          } : {}),
         }];
       })
     : [];

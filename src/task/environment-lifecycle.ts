@@ -263,7 +263,7 @@ export class TaskEnvironmentLifecycle {
     await this.#pool.revalidateTaskLease(input.environmentInstanceId);
     const executionPlacement = this.#executionPlacementForEnvironment(input.environmentInstanceId);
     const acquired = this.#pool.reserveTaskLease({
-      instanceId: input.environmentInstanceId, capability: contextAgent.capability, holderId: task.id,
+      instanceId: input.environmentInstanceId, capability: contextAgent.capability, mode: 'read-write', holderId: task.id,
       taskId: task.id, ttlMs: this.#leaseTtlMs,
     });
     if (!acquired.ok) throw new TaskEnvironmentLeaseRefusal(input.environmentInstanceId, acquired);
@@ -332,7 +332,7 @@ export class TaskEnvironmentLifecycle {
       // durable state can expose a live lease with no owning Task binding.
       await this.#pool.revalidateTaskLease(resolution.instanceId);
       const acquired = this.#pool.reserveTaskLease({
-        instanceId: resolution.instanceId, capability: agent.capability, holderId: task.id,
+        instanceId: resolution.instanceId, capability: agent.capability, mode: 'read-write', holderId: task.id,
         taskId: task.id, ttlMs: this.#leaseTtlMs,
       });
       if (!acquired.ok) throw new TaskEnvironmentLeaseRefusal(resolution.instanceId, acquired, true);
@@ -549,6 +549,7 @@ export class TaskEnvironmentLifecycle {
     const acquired = this.#pool.reserveTaskLease({
       instanceId: task.environmentInstanceId,
       capability: contextAgent.capability,
+      mode: 'read-write',
       holderId: task.id,
       taskId: task.id,
       ttlMs: this.#leaseTtlMs,

@@ -63,7 +63,7 @@ for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unk
               // Only the lease clock and renewal interval are virtual; Worker I/O stays real.
               if (outcome === 'renewal-loss-past-ttl') t.mock.timers.setTime(Date.now() + 2 * leaseTtlMs);
               else for (let elapsed = 0; elapsed < 2 * leaseTtlMs; elapsed += 1_000) t.mock.timers.tick(1_000);
-              const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'competitor', runId: 'competitor', ttlMs: leaseTtlMs });
+              const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', mode: 'read-write', holderId: 'competitor', runId: 'competitor', ttlMs: leaseTtlMs });
               assert.equal(conflict.ok, false, 'an open MCP turn must refuse a second holder beyond TTL');
               assert.equal(runtime.pool.getLease(leaseId!)?.state, outcome === 'renewal-loss-past-ttl' ? 'recovering' : 'active');
               assert.deepEqual(runtime.pool.leases().map(row => row.id), [leaseId]);
@@ -124,7 +124,7 @@ for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unk
             await waitFor(() => existsSync(join(workspace, 'discovery-held')), 'real stdio MCP discovery request');
             leaseId = runtime.pool.leases()[0]!.id;
             for (let elapsed = 0; elapsed < 2 * leaseTtlMs; elapsed += 1_000) t.mock.timers.tick(1_000);
-            const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'discovery-competitor', runId: 'discovery-competitor', ttlMs: leaseTtlMs });
+            const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', mode: 'read-write', holderId: 'discovery-competitor', runId: 'discovery-competitor', ttlMs: leaseTtlMs });
             discoveryConflict = !conflict.ok;
             if (conflict.ok) runtime.pool.releaseLease(conflict.lease.id);
             discoveryLeaseState = runtime.pool.getLease(leaseId)?.state;
@@ -141,7 +141,7 @@ for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unk
             assert.equal(mcpStopped, true, 'workspace settlement follows confirmed MCP stop');
             assert.notEqual(runtime.pool.getLease(leaseId!)?.state, 'released');
             for (let elapsed = 0; elapsed < 2 * leaseTtlMs; elapsed += 1_000) t.mock.timers.tick(1_000);
-            const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'cleanup-competitor', runId: 'cleanup-competitor', ttlMs: leaseTtlMs });
+            const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', mode: 'read-write', holderId: 'cleanup-competitor', runId: 'cleanup-competitor', ttlMs: leaseTtlMs });
             assert.equal(conflict.ok, false, 'workspace cleanup still owns the same lease');
           }
           await settle(outcome);
@@ -154,7 +154,7 @@ for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unk
           assert.equal(workspaceSettled, false);
           assert.notEqual(runtime.pool.getLease(leaseId!)?.state, 'released');
           for (let elapsed = 0; elapsed < 2 * leaseTtlMs; elapsed += 1_000) t.mock.timers.tick(1_000);
-          const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'stop-competitor', runId: 'stop-competitor', ttlMs: leaseTtlMs });
+          const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', mode: 'read-write', holderId: 'stop-competitor', runId: 'stop-competitor', ttlMs: leaseTtlMs });
           assert.equal(conflict.ok, false, 'MCP stop still owns the same lease');
           const result = await actualStopProjectMcp(...args);
           assert.equal(result.status, 'stopped');
@@ -182,7 +182,7 @@ for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unk
           assert.equal(mcpStopped, true, 'MCP process stop must precede context recycling');
           await Promise.resolve();
           for (let elapsed = 0; elapsed < 2 * leaseTtlMs; elapsed += 1_000) t.mock.timers.tick(1_000);
-          const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'recycle-competitor', runId: 'recycle-competitor', ttlMs: leaseTtlMs });
+          const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', mode: 'read-write', holderId: 'recycle-competitor', runId: 'recycle-competitor', ttlMs: leaseTtlMs });
           assert.equal(conflict.ok, false, 'asynchronous recycling retains the lease beyond TTL');
           assert.equal(runtime.pool.getLease(leaseId!)?.state, 'active', 'renewal continues during asynchronous cleanup');
         }
@@ -222,7 +222,7 @@ for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unk
       if (outcome === 'confirmed' || outcome === 'no-mutation' || outcome === 'mcp-only-past-ttl' || outcome === 'first-mutation-past-ttl' || outcome === 'discovery-past-ttl') assert.equal(runtime.pool.getLease(leaseId!)?.state, 'released');
       else {
         assert.equal(runtime.pool.getLease(leaseId!)?.state, 'recovering');
-        const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'another-run', runId: 'another-run', ttlMs: 60_000 });
+        const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', mode: 'read-write', holderId: 'another-run', runId: 'another-run', ttlMs: 60_000 });
         assert.equal(conflict.ok, false);
         if (outcome === 'mutation-unknown') {
           const database = new DatabaseSync(join(directory, 'state.db'));
@@ -295,7 +295,7 @@ for (const outcome of ['confirmed', 'no-mutation', 'turn-unknown', 'mutation-unk
         }
       }
       if (outcome === 'mcp-only-past-ttl' || outcome === 'first-mutation-past-ttl') {
-        const next = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'after-cleanup', runId: 'after-cleanup', ttlMs: leaseTtlMs });
+        const next = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID, capability: 'agent-run', mode: 'read-write', holderId: 'after-cleanup', runId: 'after-cleanup', ttlMs: leaseTtlMs });
         assert.equal(next.ok, true, 'another holder enters only after confirmed cleanup');
         if (next.ok) runtime.pool.releaseLease(next.lease.id);
       }
@@ -417,7 +417,7 @@ test('restart reconciliation settles remote work without releasing an uncertain 
     } finally { initialDatabase.close(); }
     assert.equal(runtime.pool.getLease(leaseId)?.state, 'active', 'the in-flight Host-run retains its original active lease');
     const inFlightCompetitor = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID,
-      capability: 'agent-run', holderId: 'in-flight-competitor', runId: 'in-flight-competitor', ttlMs: 60_000 });
+      capability: 'agent-run', mode: 'read-write', holderId: 'in-flight-competitor', runId: 'in-flight-competitor', ttlMs: 60_000 });
     assert.equal(inFlightCompetitor.ok, false, 'the active Host-run lease still blocks competing admission');
     await runtime.close();
     runtime = undefined;
@@ -429,7 +429,7 @@ test('restart reconciliation settles remote work without releasing an uncertain 
     assert.equal(recoveredRun?.status, 'failed', `the Host-run status after restart is ${recoveredRun?.status ?? 'missing'}`);
     assert.equal(runtime.pool.getLease(leaseId)?.state, 'recovering', 'restart keeps the persisted lease in recovery');
     const competitor = await runtime.pool.acquireBoundOperationLeaseRevalidated({ instanceId: INSTANCE_ID,
-      capability: 'agent-run', holderId: 'restart-competitor', runId: 'restart-competitor', ttlMs: 60_000 });
+      capability: 'agent-run', mode: 'read-write', holderId: 'restart-competitor', runId: 'restart-competitor', ttlMs: 60_000 });
     assert.equal(competitor.ok, false, 'the original lease fences admission throughout reconciliation');
 
     await connectRuntimeWorker(runtime, requested.enrollment.id, keyPath, undefined, workerRoot);

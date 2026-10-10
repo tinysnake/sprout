@@ -268,13 +268,14 @@ test('the API lists leases and allows releasing a lease', async () => {
   const definition: EnvironmentDefinition = {
     id: 'macos-workstation',
     platform: 'macos',
-    capabilities: [{ name: 'agent-run', requiresLease: true }],
+    capabilities: [{ name: 'agent-run', requiresLease: true, leaseMode: 'read-write' }],
   };
   const instance: EnvironmentInstance = { id: 'mac-mini-1', definitionId: 'macos-workstation' };
   const pool = new EnvironmentPool({ definitions: [definition], instances: [instance] });
   const acquired = pool.acquireLease({
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-scout',
     ttlMs: 60_000,
   });
@@ -296,10 +297,16 @@ test('the API lists leases and allows releasing a lease', async () => {
   // GET /api/leases
   const listResponse = await fetch(`http://127.0.0.1:${port}/api/leases`);
   assert.equal(listResponse.status, 200);
-  const { leases } = (await listResponse.json()) as { leases: { id: string; state: string }[] };
+  const { leases, readOnlyLeaseSemantics } = (await listResponse.json()) as {
+    leases: { id: string; state: string; mode: string }[];
+    readOnlyLeaseSemantics: string;
+  };
   assert.equal(leases.length, 1);
   assert.equal(leases[0]?.id, acquired.lease.id);
   assert.equal(leases[0]?.state, 'recovering');
+  assert.equal(leases[0]?.mode, 'read-write');
+  assert.equal(readOnlyLeaseSemantics,
+    'Read-only leases allow concurrent readers. Files may change while a lease is held; there is no snapshot or copy-on-write.');
 
   // POST /api/leases/:id/release
   const releaseResponse = await fetch(`http://127.0.0.1:${port}/api/leases/${acquired.lease.id}/release`, {

@@ -33,6 +33,7 @@ test('a capacity-intensive capability can be leased exclusively', () => {
   const result = pool.acquireLease({
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-a',
     ttlMs: 60_000,
   });
@@ -47,6 +48,7 @@ test('a second holder cannot lease an instance that is already leased', () => {
   pool.acquireLease({
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-a',
     ttlMs: 60_000,
   });
@@ -54,6 +56,7 @@ test('a second holder cannot lease an instance that is already leased', () => {
   const conflict = pool.acquireLease({
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-b',
     ttlMs: 60_000,
   });
@@ -68,6 +71,7 @@ test('releasing a lease makes the instance acquirable again', () => {
   const first = pool.acquireLease({
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-a',
     ttlMs: 60_000,
   });
@@ -80,6 +84,7 @@ test('releasing a lease makes the instance acquirable again', () => {
   const second = pool.acquireLease({
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-b',
     ttlMs: 60_000,
   });
@@ -89,13 +94,13 @@ test('releasing a lease makes the instance acquirable again', () => {
 test('a restarted pool does not reuse the id of a released durable lease', () => {
   const store = new InMemoryLeaseStore();
   const firstPool = new EnvironmentPool({ definitions: [macDefinition], instances: [macInstance], store });
-  const first = firstPool.acquireLease({ instanceId: 'mac-mini-1', capability: 'agent-run', holderId: 'agent-a', ttlMs: 60_000 });
+  const first = firstPool.acquireLease({ instanceId: 'mac-mini-1', capability: 'agent-run', mode: 'read-write', holderId: 'agent-a', ttlMs: 60_000 });
   assert.equal(first.ok, true);
   if (!first.ok) return;
   firstPool.releaseLease(first.lease.id);
 
   const restartedPool = new EnvironmentPool({ definitions: [macDefinition], instances: [macInstance], store });
-  const second = restartedPool.acquireLease({ instanceId: 'mac-mini-1', capability: 'agent-run', holderId: 'agent-b', ttlMs: 60_000 });
+  const second = restartedPool.acquireLease({ instanceId: 'mac-mini-1', capability: 'agent-run', mode: 'read-write', holderId: 'agent-b', ttlMs: 60_000 });
   assert.equal(second.ok, true);
   if (!second.ok) return;
   assert.notEqual(second.lease.id, first.lease.id);
@@ -106,6 +111,7 @@ test('an expired lease stops blocking its instance', () => {
   pool.acquireLease({
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-a',
     ttlMs: 60_000,
   });
@@ -116,6 +122,7 @@ test('an expired lease stops blocking its instance', () => {
   const second = pool.acquireLease({
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-b',
     ttlMs: 60_000,
   });
@@ -127,6 +134,7 @@ test('extending an active lease keeps the instance reserved', () => {
   const acquired = pool.acquireLease({
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-a',
     ttlMs: 60_000,
   });
@@ -141,6 +149,7 @@ test('extending an active lease keeps the instance reserved', () => {
   const conflict = pool.acquireLease({
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-b',
     ttlMs: 60_000,
   });
@@ -155,6 +164,7 @@ test('a read-only capability does not require a lease', () => {
   const result = pool.acquireLease({
     instanceId: 'mac-mini-1',
     capability: 'read-only-investigation',
+    mode: 'read-write',
     holderId: 'agent-a',
     ttlMs: 60_000,
   });
@@ -168,6 +178,7 @@ test('leasing an unknown instance or capability fails precisely', () => {
   const unknownInstance = pool.acquireLease({
     instanceId: 'nope',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-a',
     ttlMs: 60_000,
   });
@@ -176,6 +187,7 @@ test('leasing an unknown instance or capability fails precisely', () => {
   const unknownCapability = pool.acquireLease({
     instanceId: 'mac-mini-1',
     capability: 'nope',
+    mode: 'read-write',
     holderId: 'agent-a',
     ttlMs: 60_000,
   });
@@ -187,6 +199,7 @@ test('leases are recorded for observability', () => {
   pool.acquireLease({
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-a',
     ttlMs: 60_000,
   });
@@ -200,6 +213,7 @@ test('a recovering lease blocks acquisition and callers see the recovery state',
   const acquired = pool.acquireLease({
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-a',
     ttlMs: 60_000,
   });
@@ -212,6 +226,7 @@ test('a recovering lease blocks acquisition and callers see the recovery state',
   const conflict = pool.acquireLease({
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-b',
     ttlMs: 60_000,
   });
@@ -226,6 +241,7 @@ test('resolving recovery makes the instance acquirable again', () => {
   const acquired = pool.acquireLease({
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-a',
     ttlMs: 60_000,
   });
@@ -239,6 +255,7 @@ test('resolving recovery makes the instance acquirable again', () => {
   const second = pool.acquireLease({
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-b',
     ttlMs: 60_000,
   });
@@ -250,6 +267,7 @@ test('a recovering lease does not expire with time and cannot be extended', () =
   const acquired = pool.acquireLease({
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-a',
     ttlMs: 60_000,
   });
@@ -264,6 +282,7 @@ test('a recovering lease does not expire with time and cannot be extended', () =
   const conflict = pool.acquireLease({
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-b',
     ttlMs: 60_000,
   });
@@ -284,6 +303,7 @@ test('lease changes persist to a LeaseStore', () => {
   const acquired = pool.acquireLease({
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-a',
     runId: 'run-1',
     ttlMs: 60_000,
@@ -307,6 +327,7 @@ test('leases in the store are reloaded on pool initialization', () => {
     id: 'lease-prior',
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-prior',
     acquiredAt: 1_000,
     expiresAt: 100_000,
@@ -324,9 +345,110 @@ test('leases in the store are reloaded on pool initialization', () => {
   const conflict = pool.acquireLease({
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-new',
     ttlMs: 60_000,
   });
   assert.equal(conflict.ok, false);
   assert.equal(conflict.ok === false && conflict.heldBy, 'agent-prior');
+});
+
+test('read leases share an instance while read-write leases exclude every holder', () => {
+  const definition: EnvironmentDefinition = {
+    ...macDefinition,
+    capabilities: [
+      { name: 'agent-run', requiresLease: true, leaseMode: 'read-write' },
+      { name: 'read-only-investigation', requiresLease: true, leaseMode: 'read' },
+    ],
+  };
+  const pool = new EnvironmentPool({ definitions: [definition], instances: [macInstance], clock: { now: () => 1_000 } });
+  const readA = pool.acquireLease({
+    instanceId: 'mac-mini-1', capability: 'read-only-investigation', mode: 'read',
+    holderId: 'reader-a', runId: 'run-reader-a', ttlMs: 60_000,
+  });
+  assert.equal(readA.ok, true);
+  const readB = pool.acquireLease({
+    instanceId: 'mac-mini-1', capability: 'read-only-investigation', mode: 'read',
+    holderId: 'reader-b', runId: 'run-reader-b', ttlMs: 60_000,
+  });
+  assert.equal(readB.ok, true, 'multiple readers may hold one instance concurrently');
+  const unsupportedReadWriter = pool.acquireLease({
+    instanceId: 'mac-mini-1', capability: 'agent-run', mode: 'read',
+    holderId: 'reader-with-write-capability', ttlMs: 60_000,
+  });
+  assert.equal(unsupportedReadWriter.ok === false && unsupportedReadWriter.reason, 'mode-not-supported');
+
+  const writerConflict = pool.acquireLease({
+    instanceId: 'mac-mini-1', capability: 'agent-run', mode: 'read-write',
+    holderId: 'writer', runId: 'run-writer', ttlMs: 60_000,
+  });
+  assert.equal(writerConflict.ok, false);
+  assert.equal(writerConflict.ok === false && writerConflict.reason, 'conflict');
+  assert.deepEqual(writerConflict.ok === false && writerConflict.conflict, {
+    kind: 'writer-blocked-by-readers',
+    readers: [
+      { leaseId: readA.ok ? readA.lease.id : '', holderId: 'reader-a', state: 'active' },
+      { leaseId: readB.ok ? readB.lease.id : '', holderId: 'reader-b', state: 'active' },
+    ],
+  });
+
+  if (readA.ok) pool.releaseLease(readA.lease.id);
+  if (readB.ok) pool.releaseLease(readB.lease.id);
+  const writer = pool.acquireLease({
+    instanceId: 'mac-mini-1', capability: 'agent-run', mode: 'read-write',
+    holderId: 'writer', runId: 'run-writer', ttlMs: 60_000,
+  });
+  assert.equal(writer.ok, true);
+  const secondWriter = pool.acquireLease({
+    instanceId: 'mac-mini-1', capability: 'agent-run', mode: 'read-write',
+    holderId: 'writer-b', runId: 'run-writer-b', ttlMs: 60_000,
+  });
+  assert.deepEqual(secondWriter.ok === false && secondWriter.conflict, {
+    kind: 'writer-blocked-by-writer',
+    writer: writer.ok ? { leaseId: writer.lease.id, holderId: 'writer', state: 'active' } : undefined,
+  });
+  const readerConflict = pool.acquireLease({
+    instanceId: 'mac-mini-1', capability: 'read-only-investigation', mode: 'read',
+    holderId: 'reader-c', runId: 'run-reader-c', ttlMs: 60_000,
+  });
+  assert.equal(readerConflict.ok, false);
+  assert.deepEqual(readerConflict.ok === false && readerConflict.conflict, {
+    kind: 'reader-blocked-by-writer',
+    writer: writer.ok ? { leaseId: writer.lease.id, holderId: 'writer', state: 'active' } : undefined,
+  });
+});
+
+test('recovery and release stay scoped to one reader lease', () => {
+  const definition: EnvironmentDefinition = {
+    ...macDefinition,
+    capabilities: [
+      { name: 'agent-run', requiresLease: true, leaseMode: 'read-write' },
+      { name: 'read-only-investigation', requiresLease: true, leaseMode: 'read' },
+    ],
+  };
+  const pool = new EnvironmentPool({ definitions: [definition], instances: [macInstance], clock: { now: () => 1_000 } });
+  const first = pool.acquireLease({ instanceId: 'mac-mini-1', capability: 'read-only-investigation', mode: 'read',
+    holderId: 'reader-a', runId: 'run-reader-a', ttlMs: 60_000 });
+  const second = pool.acquireLease({ instanceId: 'mac-mini-1', capability: 'read-only-investigation', mode: 'read',
+    holderId: 'reader-b', runId: 'run-reader-b', ttlMs: 60_000 });
+  assert.equal(first.ok, true);
+  assert.equal(second.ok, true);
+  if (!first.ok || !second.ok) return;
+
+  pool.markRecovering(first.lease.id);
+  const blocked = pool.acquireLease({ instanceId: 'mac-mini-1', capability: 'agent-run', mode: 'read-write',
+    holderId: 'writer', runId: 'run-writer', ttlMs: 60_000 });
+  assert.deepEqual(blocked.ok === false && blocked.conflict, {
+    kind: 'recovery',
+    holders: [{ leaseId: first.lease.id, holderId: 'reader-a', state: 'recovering' }],
+  });
+  assert.equal(pool.resolveRecovery(first.lease.id)?.state, 'released');
+  assert.deepEqual(pool.activeLeases('mac-mini-1').map((lease) => lease.id), [second.lease.id]);
+
+  const third = pool.acquireLease({ instanceId: 'mac-mini-1', capability: 'read-only-investigation', mode: 'read',
+    holderId: 'reader-c', runId: 'run-reader-c', ttlMs: 60_000 });
+  assert.equal(third.ok, true, 'resolving one reader leaves the other active and admits another reader');
+  pool.releaseLease(second.lease.id);
+  if (third.ok) pool.releaseLease(third.lease.id);
+  assert.deepEqual(pool.activeLeases('mac-mini-1'), []);
 });

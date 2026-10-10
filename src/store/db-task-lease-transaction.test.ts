@@ -93,7 +93,7 @@ test('a Task begin/end boundary calls the bound environment lease adapter, not l
   const store = new SqliteTaskStore({ filename: ':memory:', leases: binding });
   await store.create(sampleTask());
   const lease = {
-    id: 'lease-1', instanceId: 'mac-mini-1', capability: 'agent-run', holderId: 'task-1',
+    id: 'lease-1', instanceId: 'mac-mini-1', capability: 'agent-run', mode: 'read-write' as const, holderId: 'task-1',
     holderKind: 'task' as const, taskId: 'task-1', acquiredAt: 1, expiresAt: 2, state: 'active' as const,
   };
   await store.saveBeginningWithLease(sampleTask({ environmentLeaseId: 'lease-1' }), lease);
@@ -116,7 +116,7 @@ test('the composed handle binds the Task adapter to the environment lease port a
     // The Task store answers a begin boundary by writing the lease row through
     // the environment adapter, proving the mount is wired, not merely typed.
     const lease = {
-      id: 'lease-bound', instanceId: 'mac-mini-1', capability: 'agent-run', holderId: 'task-1',
+      id: 'lease-bound', instanceId: 'mac-mini-1', capability: 'agent-run', mode: 'read-write' as const, holderId: 'task-1',
       holderKind: 'task' as const, taskId: 'task-1', acquiredAt: 1, expiresAt: 2, state: 'active' as const,
     };
     return (async () => {
@@ -138,13 +138,13 @@ test('a failing Task begin rolls back both the Task row and the lease in the one
     // A conflicting live lease makes the boundary throw after the conflict read;
     // neither the Task write nor any lease row may survive.
     store.leases.insertTaskHeldLease({
-      id: 'lease-live', instanceId: 'mac-mini-1', capability: 'agent-run', holderId: 'run-1',
+      id: 'lease-live', instanceId: 'mac-mini-1', capability: 'agent-run', mode: 'read-write', holderId: 'run-1',
       holderKind: 'run', runId: 'run-1', acquiredAt: 1, expiresAt: 9_999_999_999, state: 'active',
     });
     await assert.rejects(
       store.tasks.saveBeginningWithLease(
         sampleTask({ environmentLeaseId: 'lease-new', environmentLifecycleState: 'beginning', assignedAgentId: 'pi' }),
-        { id: 'lease-new', instanceId: 'mac-mini-1', capability: 'agent-run', holderId: 'task-1',
+        { id: 'lease-new', instanceId: 'mac-mini-1', capability: 'agent-run', mode: 'read-write', holderId: 'task-1',
           holderKind: 'task', taskId: 'task-1', acquiredAt: 2, expiresAt: 3, state: 'active' },
       ),
       /unavailable/,

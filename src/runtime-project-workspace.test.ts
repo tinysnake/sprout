@@ -61,6 +61,7 @@ test('the composed Project access capability grants a validated workspace and ga
     id: 'lease-active-work',
     instanceId: INSTANCE_ID,
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'scout',
     holderKind: 'run',
     runId: 'missing-run',

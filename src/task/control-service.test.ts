@@ -576,7 +576,7 @@ test('stopped Resume rejects Agent authority and refuses a busy original Environ
   assert.equal(s.pool.getLease(oldLeaseId)?.state, 'released');
 
   const competing = s.pool.reserveTaskLease({
-    instanceId: stopped.environmentInstanceId!, capability: 'agent-run', holderId: 'other-task',
+    instanceId: stopped.environmentInstanceId!, capability: 'agent-run', mode: 'read-write', holderId: 'other-task',
     taskId: 'other-task', ttlMs: 60_000,
   });
   assert.ok(competing.ok);
@@ -784,7 +784,7 @@ test('reopening refuses an original Environment held by another Task without cha
   const ended = await s.controls.discardForHuman(s.taskId, { reason: 'End before testing Environment contention.' });
   const oldLeaseId = ended.environmentLeaseId!;
   const competing = s.pool.reserveTaskLease({
-    instanceId: ended.environmentInstanceId!, capability: 'agent-run', holderId: 'other-task', taskId: 'other-task', ttlMs: 60_000,
+    instanceId: ended.environmentInstanceId!, capability: 'agent-run', mode: 'read-write', holderId: 'other-task', taskId: 'other-task', ttlMs: 60_000,
   });
   assert.ok(competing.ok);
   s.pool.adoptLease(competing.lease);

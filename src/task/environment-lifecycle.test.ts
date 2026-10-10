@@ -199,7 +199,7 @@ test('overdue blocked Task lease enters retained recovery before competing acqui
   const begun = await scenario.lifecycle.begin('task-1');
   await scenario.store.save({ ...begun, status: 'blocked', environmentLifecycleState: 'blocked' });
   now = pool.getLease(begun.environmentLeaseId!)!.expiresAt;
-  const acquired = await pool.acquireLeaseRevalidated({ instanceId: 'mac-1', capability: 'agent-run', holderId: 'other', ttlMs: 1000 });
+  const acquired = await pool.acquireLeaseRevalidated({ instanceId: 'mac-1', capability: 'agent-run', mode: 'read-write', holderId: 'other', ttlMs: 1000 });
   assert.equal(acquired.ok, false);
   if (!acquired.ok) assert.equal(acquired.state, 'recovering');
   const recovering = await scenario.store.get('task-1');
@@ -210,7 +210,7 @@ test('overdue blocked Task lease enters retained recovery before competing acqui
   await scenario.lifecycle.recover('task-1', 'resume');
   assert.equal((await scenario.store.get('task-1'))?.environmentLifecycleState, 'blocked');
   assert.ok(pool.getLease(begun.environmentLeaseId!)!.expiresAt > now);
-  assert.equal((await pool.acquireLeaseRevalidated({ instanceId: 'mac-1', capability: 'agent-run', holderId: 'other', ttlMs: 1000 })).ok, false);
+  assert.equal((await pool.acquireLeaseRevalidated({ instanceId: 'mac-1', capability: 'agent-run', mode: 'read-write', holderId: 'other', ttlMs: 1000 })).ok, false);
 });
 
 test('begin binds a Task-owned non-expiring lease; nested settlement retains it and end releases after recycle', async () => {
@@ -355,7 +355,7 @@ test('interrupted nested work and restart retain exclusion until the owning Task
   const advanced = await scenario.lifecycle.advanceRun('task-1', 'pi', 'go');
   await scenario.lifecycle.settleRun('task-1', run(advanced.runId, 'interrupted'));
   assert.equal((await scenario.store.get('task-1'))?.environmentLifecycleState, 'recovery');
-  const competing = scenario.pool.acquireLease({ instanceId: 'mac-1', capability: 'agent-run', holderId: 'run-2', runId: 'run-2', ttlMs: 1 });
+  const competing = scenario.pool.acquireLease({ instanceId: 'mac-1', capability: 'agent-run', mode: 'read-write', holderId: 'run-2', runId: 'run-2', ttlMs: 1 });
   assert.equal(competing.ok, false);
   const resumed = await scenario.lifecycle.recover('task-1', 'resume');
   assert.equal(resumed.environmentLifecycleState, 'blocked');
@@ -370,7 +370,7 @@ test('interrupted nested work and restart retain exclusion until the owning Task
 test('a mode mismatch refuses Task advancement before changing run or lease state', async () => {
   const scenario = build();
   const reservation = scenario.pool.reserveTaskLease({
-    instanceId: 'mac-1', capability: 'agent-run', holderId: 'task-1', taskId: 'task-1', ttlMs: 60_000,
+    instanceId: 'mac-1', capability: 'agent-run', mode: 'read-write', holderId: 'task-1', taskId: 'task-1', ttlMs: 60_000,
   });
   assert.equal(reservation.ok, true);
   if (!reservation.ok) return;
@@ -580,7 +580,7 @@ test('SQLite restart recovers an interrupted nested run, retains exclusion, and 
     assert.equal(interrupted?.environmentLifecycleState, 'recovery');
     assert.equal(interrupted?.recoveryState, 'running');
     assert.equal(recovered.pool.getLease('lease-1')?.state, 'recovering');
-    const competing = recovered.pool.acquireLease({ instanceId: 'mac-1', capability: 'agent-run', holderId: 'task-2', taskId: 'task-2', ttlMs: 1 });
+    const competing = recovered.pool.acquireLease({ instanceId: 'mac-1', capability: 'agent-run', mode: 'read-write', holderId: 'task-2', taskId: 'task-2', ttlMs: 1 });
     assert.equal(competing.ok, false);
 
     assert.equal((await recovered.lifecycle.recover('task-1', 'resume')).environmentLifecycleState, 'blocked');

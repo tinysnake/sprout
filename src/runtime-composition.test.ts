@@ -152,7 +152,7 @@ async function assertRuntimeAuthorityOverrideRefusesDurableState(
     assert.equal((await stores.runs.get(runId))?.status, 'completed', 'the durable record starts terminal');
 
     const acquired = runtime.pool.acquireLease({
-      instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'scout', runId, ttlMs: 60_000,
+      instanceId: INSTANCE_ID, capability: 'agent-run', mode: 'read-write', holderId: 'scout', runId, ttlMs: 60_000,
     });
     assert.equal(acquired.ok, true);
     if (!acquired.ok) throw new Error('run lease was not admitted');

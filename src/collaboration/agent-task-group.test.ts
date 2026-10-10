@@ -140,6 +140,7 @@ async function buildHarness(options: {
         id: leaseId,
         instanceId: 'environment-alpha',
         capability: 'agent-run',
+        mode: 'read-write' as const,
         holderId: taskId,
         holderKind: 'task' as const,
         taskId,

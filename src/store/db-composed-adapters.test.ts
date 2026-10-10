@@ -60,7 +60,7 @@ test('a Task begin then end commits and releases its Task-held lease in one boun
     const store = new SqliteStore({ filename: path });
     await store.tasks.create(sampleTask());
     const lease = {
-      id: 'lease-task', instanceId: 'mac-mini-1', capability: 'agent-run', holderId: 'task-1',
+      id: 'lease-task', instanceId: 'mac-mini-1', capability: 'agent-run', mode: 'read-write' as const, holderId: 'task-1',
       holderKind: 'task' as const, taskId: 'task-1', acquiredAt: 1, expiresAt: 2, state: 'active' as const,
     };
     await store.tasks.saveBeginningWithLease(
@@ -96,7 +96,7 @@ test('every composed adapter writes, reopens from the file, and reads back', asy
     await first.tasks.create(sampleTask());
     await first.tasks.saveBeginningWithLease(
       sampleTask({ environmentLeaseId: 'lease-task', environmentLifecycleState: 'beginning', assignedAgentId: 'pi' }),
-      { id: 'lease-task', instanceId: 'mac-mini-1', capability: 'agent-run', holderId: 'task-1',
+      { id: 'lease-task', instanceId: 'mac-mini-1', capability: 'agent-run', mode: 'read-write', holderId: 'task-1',
         holderKind: 'task', taskId: 'task-1', acquiredAt: 1, expiresAt: 2, state: 'active' },
     );
     await first.tasks.linkRun({ taskId: 'task-1', runId: 'run-1', agentId: 'agent-scout', now: 3 });

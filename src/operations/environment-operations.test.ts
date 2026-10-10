@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { EnvironmentOperations } from './environment-operations.ts';
+import { EnvironmentPool, InMemoryLeaseStore } from '../environment/pool.ts';
+import type { EnvironmentDefinition, EnvironmentInstance } from '../environment/model.ts';
 import { MemoryRemoteOperationIdentityStore } from './remote-operation-store.ts';
 
 const projectId = 'project-pinned';
@@ -31,7 +33,7 @@ test('a pinned remote mutation refuses transport loss, revocation, and epoch cha
     holderKind: 'run' as const, holderId: agentId, leaseCapability: 'agent-run' as const,
     canRelease: () => false,
   };
-  const lease = { id: 'lease-a', instanceId: 'env-a', capability: 'agent-run', holderId: agentId,
+  const lease = { id: 'lease-a', instanceId: 'env-a', capability: 'agent-run', mode: 'read-write' as const, holderId: agentId,
     holderKind: 'run' as const, runId: 'run-pinned', acquiredAt: 1, expiresAt: 60_001, state: 'active' as const };
   const projects = { get: async () => ({
     id: projectId, status: 'active', content: { currentVersion: 1, versions: [{ version: 1,
@@ -123,72 +125,128 @@ test('a pinned remote mutation refuses transport loss, revocation, and epoch cha
   assert.equal(gateway.liveFor('env-b')?.epoch.connectionId, 'connection-b-1', 'a different live Environment never substitutes for the pinned target');
 });
 
-test('every bound workspace operation refuses without a containing lease and leaves the workspace unchanged', async () => {
-  let workerCalls = 0;
+test('a read-only workspace lease admits reads, refuses mutations, and preserves workspace bytes', async () => {
+  const definition: EnvironmentDefinition = {
+    id: 'definition-read-write-modes', platform: 'container', capabilities: [
+      { name: 'read-only-investigation', requiresLease: true, leaseMode: 'read' },
+      { name: 'agent-run', requiresLease: true, leaseMode: 'read-write' },
+    ],
+  };
+  const instance: EnvironmentInstance = { id: 'env-a', definitionId: definition.id };
+  const store = new InMemoryLeaseStore();
+  const pool = new EnvironmentPool({ definitions: [definition], instances: [instance], store, clock: { now: () => 1_000 } });
   let workspace = Buffer.from('workspace sentinel');
-  const initialWorkspace = Buffer.from(workspace);
-  const projects = { get: async () => ({
-    id: projectId, status: 'active', content: { currentVersion: 1, versions: [{ version: 1,
-      memberships: [{ memberId: agentId, memberKind: 'agent' }] }] },
-  }) };
-  const access = { listForProject: async () => [accessA] };
-  const live = {
-    enrollment: { id: 'enrollment-a', status: 'approved', worker: { identityDigest: 'worker-digest-a' } },
-    epoch: { epoch: 1, connectionId: 'connection-a-1' },
-  };
-  const gateway = {
-    liveFor: () => live,
-    currentConnectionEpoch: () => 1,
-    isCurrentConnection: () => true,
-  };
+  const originalWorkspace = Buffer.from(workspace);
+  let workerCalls = 0;
+  let mutationCalls = 0;
   const environment = {
     connectionEpoch: () => 1,
-    info: async () => {
+    info: async () => ({ environmentInstanceId: 'env-a', workspaceOperations: { version: 3,
+      operations: ['read', 'search', 'edit', 'patch', 'command'], maxReadBytes: 64 * 1024, maxSearchResults: 100 } }),
+    attachWorkspaceBinding: async () => ({ attached: true as const }),
+    executeWorkspaceFileOperation: async (_instanceId: string, request: { operation: string; operationId: string; path?: string }) => {
       workerCalls++;
-      return { environmentInstanceId: 'env-a', workspaceOperations: { version: 3, operations: ['read', 'search', 'edit', 'patch', 'command'],
-        maxReadBytes: 64 * 1024, maxSearchResults: 100 } };
-    },
-    attachWorkspaceBinding: async () => { workerCalls++; return { attached: true as const }; },
-    executeWorkspaceFileOperation: async (_instanceId: string, request: { operation: string }) => {
-      workerCalls++;
-      workspace = Buffer.from('changed workspace');
-      return { ...accessA.current, connectionEpoch: 1, operationId: 'unexpected', operation: request.operation,
-        status: 'completed' as const };
+      if (request.operation !== 'read' && request.operation !== 'search') {
+        mutationCalls++;
+        workspace = Buffer.from('changed workspace');
+      }
+      return {
+        projectId,
+        environmentInstanceId: instance.id,
+        bindingId: binding.bindingId,
+        generation: binding.generation,
+        connectionEpoch: 1,
+        workspaceId: binding.workspaceId,
+        operationId: request.operationId,
+        operation: request.operation,
+        status: 'completed' as const,
+        ...(request.operation === 'read' ? { path: request.path!, content: workspace.toString('utf8') } : {}),
+        ...(request.operation === 'search' ? { matches: [] } : {}),
+        ...(request.operation === 'edit' || request.operation === 'patch' ? { path: request.path!, changedPaths: [request.path!] } : {}),
+      };
     },
   };
   const operations = new EnvironmentOperations({
-    projects: projects as never,
-    access: access as never,
+    projects: { get: async () => ({ id: projectId, status: 'active', content: { currentVersion: 1, versions: [{ version: 1,
+      memberships: [{ memberId: agentId, memberKind: 'agent' }] }] } }) } as never,
+    access: { get: async () => accessA, listForProject: async () => [accessA] } as never,
     environment: environment as never,
-    gateway: gateway as never,
-    catalog: { entry: () => ({ definition: { capabilities: [
-      { name: 'read-only-investigation', requiresLease: false }, { name: 'agent-run', requiresLease: true },
-    ] } }) } as never,
+    gateway: {
+      liveFor: () => ({ enrollment: { id: 'enrollment-a', status: 'approved', worker: { identityDigest: 'worker-digest-a' } },
+        epoch: { epoch: 1, connectionId: 'connection-a-1' } }),
+      currentConnectionEpoch: () => 1, isCurrentConnection: () => true,
+    } as never,
+    catalog: { entry: () => ({ definition }) } as never,
     enrollments: { get: async () => ({ id: 'enrollment-a', environmentInstanceId: 'env-a', status: 'approved',
       capabilityPermissions: { 'read-only-investigation': true, 'agent-run': true } }) } as never,
     store: new MemoryRemoteOperationIdentityStore(),
-    pool: {
-      requiresLeaseForBoundOperation: () => true,
-      acquireBoundOperationLeaseRevalidated: async () => { throw new Error('lease acquisition should not occur'); },
-      extendLease: () => undefined, markRecovering: () => undefined, releaseLease: () => undefined,
-    } as never,
+    pool,
   });
 
-  const tools = await operations.attach(projectId, agentId, 'run-without-lease');
-  const attempts = await Promise.allSettled([
-    tools.read!('src/file.txt'),
-    tools.search!('needle'),
-    tools.edit!('src/file.txt', 'before', 'after', 'edit-without-lease'),
-    tools.patch!('src/file.txt', [{ before: 'before', after: 'after' }], 'patch-without-lease'),
-    tools.command!('npm', [], {}, 'command-without-lease'),
-  ]);
+  const tools = await operations.attach(projectId, agentId, 'run-read-only');
+  assert.equal(tools.leaseMode, 'read');
+  assert.deepEqual(tools.operations, ['read', 'search']);
+  const read = await tools.read!('src/file.txt', 'read-only-read');
+  assert.equal(read.status, 'completed', read.failure ?? '');
+  assert.equal(read.content, 'workspace sentinel');
+  const lease = pool.activeLeases(instance.id)[0];
+  assert.equal(lease?.mode, 'read');
+  assert.equal(store.get(lease!.id)?.mode, 'read');
 
-  for (const attempt of attempts) {
-    assert.equal(attempt.status, 'fulfilled', 'every operation returns an observable refusal');
-    const result = attempt.value;
-    assert.equal(result.status, 'failed');
-    assert.equal(result.failure, ['read', 'search'].includes(result.operation) ? 'lease-required' : 'containing-lease-unavailable');
-  }
-  assert.deepEqual(workspace, initialWorkspace, 'refused operations leave every workspace byte unchanged');
-  assert.equal(workerCalls, 0, 'refusal occurs before binding attachment, Worker inspection, or operation dispatch');
+  const attempts = await Promise.all([
+    tools.edit!('src/file.txt', 'workspace sentinel', 'changed', 'read-only-edit'),
+    tools.patch!('src/file.txt', [{ before: 'workspace sentinel', after: 'changed' }], 'read-only-patch'),
+    tools.command!('npm', [], {}, 'read-only-command'),
+  ]);
+  assert.deepEqual(attempts.map((result) => result.failure), ['read-only-lease', 'read-only-lease', 'read-only-lease']);
+  assert.deepEqual(workspace, originalWorkspace, 'mutation attempts leave the workspace byte-for-byte unchanged');
+  assert.equal(workerCalls, 1, 'only the read reaches the Worker');
+  assert.equal(mutationCalls, 0, 'the Worker receives no mutation');
+
+  await tools.settle?.('unknown');
+  assert.equal(pool.getLease(lease!.id)?.state, 'recovering');
+  assert.equal(pool.getLease(lease!.id)?.mode, 'read');
+  pool.resolveRecovery(lease!.id);
+  assert.deepEqual(pool.activeLeases(instance.id), []);
+});
+
+test('a read request exposes its writer conflict and does not dispatch', async () => {
+  const definition: EnvironmentDefinition = {
+    id: 'definition-reader-conflict', platform: 'container', capabilities: [
+      { name: 'read-only-investigation', requiresLease: true, leaseMode: 'read' },
+      { name: 'agent-run', requiresLease: true, leaseMode: 'read-write' },
+    ],
+  };
+  const instance: EnvironmentInstance = { id: 'env-a', definitionId: definition.id };
+  const pool = new EnvironmentPool({ definitions: [definition], instances: [instance], idFactory: () => 'writer-lease', clock: { now: () => 1_000 } });
+  assert.equal(pool.acquireLease({ instanceId: instance.id, capability: 'agent-run', mode: 'read-write',
+    holderId: 'writer-agent', runId: 'run-writer', ttlMs: 60_000 }).ok, true);
+  let workerCalls = 0;
+  const operations = new EnvironmentOperations({
+    projects: { get: async () => ({ id: projectId, status: 'active', content: { currentVersion: 1, versions: [{ version: 1,
+      memberships: [{ memberId: agentId, memberKind: 'agent' }] }] } }) } as never,
+    access: { get: async () => accessA, listForProject: async () => [accessA] } as never,
+    environment: {
+      connectionEpoch: () => 1,
+      info: async () => ({ environmentInstanceId: 'env-a', workspaceOperations: { version: 3,
+        operations: ['read', 'search'], maxReadBytes: 64 * 1024, maxSearchResults: 100 } }),
+      executeWorkspaceFileOperation: async () => { workerCalls++; throw new Error('unexpected'); },
+    } as never,
+    gateway: {
+      liveFor: () => ({ enrollment: { id: 'enrollment-a', status: 'approved', worker: { identityDigest: 'worker-digest-a' } },
+        epoch: { epoch: 1, connectionId: 'connection-a-1' } }),
+      currentConnectionEpoch: () => 1, isCurrentConnection: () => true,
+    } as never,
+    catalog: { entry: () => ({ definition }) } as never,
+    enrollments: { get: async () => ({ id: 'enrollment-a', environmentInstanceId: 'env-a', status: 'approved',
+      capabilityPermissions: { 'read-only-investigation': true } }) } as never,
+    store: new MemoryRemoteOperationIdentityStore(),
+    pool,
+  });
+
+  const tools = await operations.attach(projectId, agentId, 'run-reader');
+  const result = await tools.read!('src/file.txt', 'reader-conflict');
+  assert.equal(result.failure, 'lease-conflict');
+  assert.deepEqual(result.leaseConflict, { leaseId: 'writer-lease', holderId: 'writer-agent', state: 'active' });
+  assert.equal(workerCalls, 0, 'a reader blocked by a writer never reaches the Worker');
 });

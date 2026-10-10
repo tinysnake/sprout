@@ -263,6 +263,7 @@ export async function recoveryApi(options: { readonly requiredEngines?: readonly
   const acquired = runtime.pool.reserveTaskLease({
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'task-1',
     taskId: 'task-1',
     ttlMs: 60_000,

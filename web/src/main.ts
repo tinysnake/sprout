@@ -71,6 +71,7 @@ interface LeaseView {
   readonly id: string;
   readonly instanceId: string;
   readonly capability: string;
+  readonly mode: 'read' | 'read-write';
   readonly holderId: string;
   readonly holderKind?: 'run' | 'task';
   readonly state: string;
@@ -947,7 +948,7 @@ function renderLeaseItem(lease: LeaseView): HTMLLIElement {
   const item = document.createElement('li');
   item.className = `lease lease-${lease.state}`;
   const label = document.createElement('span');
-  label.textContent = `${lease.instanceId} (${lease.capability}) — ${lease.holderId} [${lease.state}]`;
+  label.textContent = `${lease.instanceId} (${lease.capability}) — ${lease.holderId} [${lease.mode === 'read' ? 'read' : 'read-write'}, ${lease.state}]`;
   item.append(label);
 
   // A Task-held lease is resolved only through its owning Task's recovery

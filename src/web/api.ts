@@ -23,6 +23,7 @@ import {
 import { ConversationScopeError } from '../conversation/model.ts';
 import type { ConversationScopeService } from '../conversation/service.ts';
 import { redactSensitiveText } from '../environment/privacy.ts';
+import { READ_ONLY_LEASE_SEMANTICS } from '../environment/pool.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
 import type { TaskService } from '../task/service.ts';
 import type { TaskStatus, Task, TaskWithRuns } from '../task/model.ts';
@@ -1028,7 +1029,10 @@ export function createRunApi(options: RunApiOptions): RunApi {
 
     // GET /api/leases — list leases for observability.
     if (request.method === 'GET' && url.pathname === '/api/leases') {
-      sendJson(response, 200, { leases: orchestrator.leases() });
+      sendJson(response, 200, {
+        leases: orchestrator.leases(),
+        readOnlyLeaseSemantics: READ_ONLY_LEASE_SEMANTICS,
+      });
       return;
     }
 

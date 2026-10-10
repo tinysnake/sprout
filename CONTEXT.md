@@ -329,8 +329,8 @@ A core-issued opaque identity for one atomic, sanitized facts-and-probe commit. 
 _Avoid_: Browser authority token, current-ready assertion, Worker-supplied identity
 
 **Environment lease**:
-A time-bounded right to use an environment instance's lease-requiring capabilities, held either by a durable Task or by a one-round agent run. Uncommitted working files remain with the lease until preserved or discarded.
-_Avoid_: Agent environment, lock
+A time-bounded right to use an environment instance's lease-requiring capabilities. A `read` lease admits read-only operations and may share the instance with other `read` leases. A `read-write` lease admits one holder and excludes every other lease. Task-held leases and Agent-run execution leases use `read-write`; a Remote workspace operation using the read-only capability may acquire a `read` lease. A read lease does not include a stable snapshot or copy-on-write, so workspace files may change while readers hold leases.
+_Avoid_: Agent environment, lock, snapshot
 
 **Lease recovery**:
 The state an environment instance's lease enters after a timeout, holder loss, or interruption, during which the instance is not reassignable until recovery is explicitly resolved. An unfinished Task's lease stays reserved. A Task lead may investigate a lease and authority-override release another Agent's recovering run lease after risk acknowledgement; this permanently records unresolved facts without proving remote work settled. Evidence-based Resume, Discard, ordinary Release, and Human-only Force Release keep their existing authorities.

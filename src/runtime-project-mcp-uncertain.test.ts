@@ -82,7 +82,7 @@ test('an HTTP MCP call whose effect succeeds but response is lost remains uncert
           assert.ok(mcp);
           outwardResult = await mcp.call(mcp.tools[0]!.name, { value: 'apply once' });
           const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({
-            instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'competitor', runId: 'competitor', ttlMs: 60_000,
+            instanceId: INSTANCE_ID, capability: 'agent-run', mode: 'read-write', holderId: 'competitor', runId: 'competitor', ttlMs: 60_000,
           });
           if (conflict.ok) runtime.pool.releaseLease(conflict.lease.id);
           assert.equal(conflict.ok, false, 'the active containing lease refuses a competing activation');
@@ -137,7 +137,7 @@ test('an HTTP MCP call whose effect succeeds but response is lost remains uncert
     } finally { database.close(); }
     assert.equal(runtime.pool.getLease(leaseId)?.state, 'recovering');
     const conflict = await runtime.pool.acquireBoundOperationLeaseRevalidated({
-      instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'competitor-after-call', runId: 'competitor-after-call', ttlMs: 60_000,
+      instanceId: INSTANCE_ID, capability: 'agent-run', mode: 'read-write', holderId: 'competitor-after-call', runId: 'competitor-after-call', ttlMs: 60_000,
     });
     assert.equal(conflict.ok, false, 'another run cannot acquire the containing lease while the effect is uncertain');
     const recovery = await runtime.recovery.forLease(leaseId);
