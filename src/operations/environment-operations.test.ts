@@ -125,7 +125,86 @@ test('a pinned remote mutation refuses transport loss, revocation, and epoch cha
   assert.equal(gateway.liveFor('env-b')?.epoch.connectionId, 'connection-b-1', 'a different live Environment never substitutes for the pinned target');
 });
 
-test('a read-only workspace lease admits reads, refuses mutations, and preserves workspace bytes', async () => {
+test('workspace operations refuse all bound work without a containing lease', async () => {
+  const definition: EnvironmentDefinition = {
+    id: 'definition-no-containing-lease', platform: 'container', capabilities: [
+      { name: 'read-only-investigation', requiresLease: true, leaseMode: 'read' },
+      { name: 'agent-run', requiresLease: true, leaseMode: 'read-write' },
+    ],
+  };
+  const instance: EnvironmentInstance = { id: 'env-a', definitionId: definition.id };
+  const pool = new EnvironmentPool({ definitions: [definition], instances: [instance], clock: { now: () => 1_000 } });
+  let leaseAcquisitions = 0;
+  const acquireLease = pool.acquireLease.bind(pool);
+  pool.acquireLease = request => { leaseAcquisitions++; return acquireLease(request); };
+  const acquireBoundOperationLease = pool.acquireBoundOperationLeaseRevalidated.bind(pool);
+  pool.acquireBoundOperationLeaseRevalidated = async request => {
+    leaseAcquisitions++;
+    return acquireBoundOperationLease(request);
+  };
+  let workspace = Buffer.from('workspace sentinel');
+  const originalWorkspace = Buffer.from(workspace);
+  const workerDispatches: string[] = [];
+  const environment = {
+    connectionEpoch: () => 1,
+    info: async () => ({ environmentInstanceId: 'env-a', workspaceOperations: { version: 3,
+      operations: ['read', 'search', 'edit', 'patch', 'command'], maxReadBytes: 64 * 1024, maxSearchResults: 100 } }),
+    attachWorkspaceBinding: async () => ({ attached: true as const }),
+    executeWorkspaceFileOperation: async (_instanceId: string, request: { operation: string; operationId: string; path?: string }) => {
+      workerDispatches.push(request.operation);
+      if (request.operation !== 'read' && request.operation !== 'search') workspace = Buffer.from('changed workspace');
+      return {
+        projectId, environmentInstanceId: instance.id, bindingId: binding.bindingId, generation: binding.generation,
+        connectionEpoch: 1, workspaceId: binding.workspaceId, operationId: request.operationId,
+        operation: request.operation, status: 'completed' as const,
+        ...(request.operation === 'read' ? { path: request.path!, content: workspace.toString('utf8') } : {}),
+        ...(request.operation === 'search' ? { matches: [] } : {}),
+        ...(request.operation === 'edit' || request.operation === 'patch' ? { path: request.path!, changedPaths: [request.path!] } : {}),
+      };
+    },
+  };
+  const operations = new EnvironmentOperations({
+    projects: { get: async () => ({ id: projectId, status: 'active', content: { currentVersion: 1, versions: [{ version: 1,
+      memberships: [{ memberId: agentId, memberKind: 'agent' }] }] } }) } as never,
+    access: { get: async () => accessA, listForProject: async () => [accessA] } as never,
+    environment: environment as never,
+    gateway: {
+      liveFor: () => ({ enrollment: { id: 'enrollment-a', status: 'approved', worker: { identityDigest: 'worker-digest-a' } },
+        epoch: { epoch: 1, connectionId: 'connection-a-1' } }),
+      currentConnectionEpoch: () => 1, isCurrentConnection: () => true,
+    } as never,
+    catalog: { entry: () => ({ definition }) } as never,
+    enrollments: { get: async () => ({ id: 'enrollment-a', environmentInstanceId: 'env-a', status: 'approved',
+      capabilityPermissions: { 'read-only-investigation': true, 'agent-run': true } }) } as never,
+    store: new MemoryRemoteOperationIdentityStore(),
+    pool,
+  });
+
+  const tools = await operations.attach(projectId, agentId, 'run-without-lease');
+  const attempts = [
+    { operation: 'read', result: await tools.read('src/file.txt', 'no-lease-read') },
+    { operation: 'search', result: await tools.search('needle', undefined, 'no-lease-search') },
+    { operation: 'execute', result: await tools.command!('npm', [], {}, 'no-lease-execute') },
+    { operation: 'edit', result: await tools.edit!('src/file.txt', 'before', 'after', 'no-lease-edit') },
+    { operation: 'patch', result: await tools.patch!('src/file.txt', [{ before: 'before', after: 'after' }], 'no-lease-patch') },
+  ];
+
+  assert.deepEqual({
+    operations: tools.operations,
+    failures: attempts.map(({ operation, result }) => ({ operation, failure: result.failure })),
+    workerDispatches,
+    leaseAcquisitions,
+    workspaceUnchanged: workspace.equals(originalWorkspace),
+  }, {
+    operations: [],
+    failures: ['read', 'search', 'execute', 'edit', 'patch'].map(operation => ({ operation, failure: 'lease-required' })),
+    workerDispatches: [],
+    leaseAcquisitions: 0,
+    workspaceUnchanged: true,
+  });
+});
+
+test('a run borrows its admitted shared read lease for reads and refuses mutations', async () => {
   const definition: EnvironmentDefinition = {
     id: 'definition-read-write-modes', platform: 'container', capabilities: [
       { name: 'read-only-investigation', requiresLease: true, leaseMode: 'read' },
@@ -135,6 +214,19 @@ test('a read-only workspace lease admits reads, refuses mutations, and preserves
   const instance: EnvironmentInstance = { id: 'env-a', definitionId: definition.id };
   const store = new InMemoryLeaseStore();
   const pool = new EnvironmentPool({ definitions: [definition], instances: [instance], store, clock: { now: () => 1_000 } });
+  const admitted = pool.acquireLease({ instanceId: instance.id, capability: 'read-only-investigation', mode: 'read',
+    holderId: agentId, runId: 'run-read-only', ttlMs: 60_000 });
+  assert.equal(admitted.ok, true);
+  if (!admitted.ok) throw new Error('read lease admission failed');
+  const shared = pool.acquireLease({ instanceId: instance.id, capability: 'read-only-investigation', mode: 'read',
+    holderId: 'another-reader', runId: 'run-another-reader', ttlMs: 60_000 });
+  assert.equal(shared.ok, true, 'another run can hold a shared read lease');
+  assert.equal(pool.activeLeases(instance.id).length, 2, 'both admitted read leases coexist');
+  const containingLease = {
+    environmentInstanceId: instance.id, leaseId: admitted.lease.id, runId: 'run-read-only',
+    holderKind: 'run' as const, holderId: agentId, leaseCapability: 'read-only-investigation' as const,
+    canRelease: () => false,
+  };
   let workspace = Buffer.from('workspace sentinel');
   const originalWorkspace = Buffer.from(workspace);
   let workerCalls = 0;
@@ -183,15 +275,15 @@ test('a read-only workspace lease admits reads, refuses mutations, and preserves
     pool,
   });
 
-  const tools = await operations.attach(projectId, agentId, 'run-read-only');
+  const tools = await operations.attach(projectId, agentId, 'run-read-only', containingLease);
   assert.equal(tools.leaseMode, 'read');
   assert.deepEqual(tools.operations, ['read', 'search']);
   const read = await tools.read!('src/file.txt', 'read-only-read');
   assert.equal(read.status, 'completed', read.failure ?? '');
   assert.equal(read.content, 'workspace sentinel');
-  const lease = pool.activeLeases(instance.id)[0];
-  assert.equal(lease?.mode, 'read');
-  assert.equal(store.get(lease!.id)?.mode, 'read');
+  const lease = admitted.lease;
+  assert.equal(lease.mode, 'read');
+  assert.equal(store.get(lease.id)?.mode, 'read');
 
   const attempts = await Promise.all([
     tools.edit!('src/file.txt', 'workspace sentinel', 'changed', 'read-only-edit'),
@@ -202,51 +294,11 @@ test('a read-only workspace lease admits reads, refuses mutations, and preserves
   assert.deepEqual(workspace, originalWorkspace, 'mutation attempts leave the workspace byte-for-byte unchanged');
   assert.equal(workerCalls, 1, 'only the read reaches the Worker');
   assert.equal(mutationCalls, 0, 'the Worker receives no mutation');
+  if (shared.ok) pool.releaseLease(shared.lease.id);
 
   await tools.settle?.('unknown');
   assert.equal(pool.getLease(lease!.id)?.state, 'recovering');
   assert.equal(pool.getLease(lease!.id)?.mode, 'read');
   pool.resolveRecovery(lease!.id);
   assert.deepEqual(pool.activeLeases(instance.id), []);
-});
-
-test('a read request exposes its writer conflict and does not dispatch', async () => {
-  const definition: EnvironmentDefinition = {
-    id: 'definition-reader-conflict', platform: 'container', capabilities: [
-      { name: 'read-only-investigation', requiresLease: true, leaseMode: 'read' },
-      { name: 'agent-run', requiresLease: true, leaseMode: 'read-write' },
-    ],
-  };
-  const instance: EnvironmentInstance = { id: 'env-a', definitionId: definition.id };
-  const pool = new EnvironmentPool({ definitions: [definition], instances: [instance], idFactory: () => 'writer-lease', clock: { now: () => 1_000 } });
-  assert.equal(pool.acquireLease({ instanceId: instance.id, capability: 'agent-run', mode: 'read-write',
-    holderId: 'writer-agent', runId: 'run-writer', ttlMs: 60_000 }).ok, true);
-  let workerCalls = 0;
-  const operations = new EnvironmentOperations({
-    projects: { get: async () => ({ id: projectId, status: 'active', content: { currentVersion: 1, versions: [{ version: 1,
-      memberships: [{ memberId: agentId, memberKind: 'agent' }] }] } }) } as never,
-    access: { get: async () => accessA, listForProject: async () => [accessA] } as never,
-    environment: {
-      connectionEpoch: () => 1,
-      info: async () => ({ environmentInstanceId: 'env-a', workspaceOperations: { version: 3,
-        operations: ['read', 'search'], maxReadBytes: 64 * 1024, maxSearchResults: 100 } }),
-      executeWorkspaceFileOperation: async () => { workerCalls++; throw new Error('unexpected'); },
-    } as never,
-    gateway: {
-      liveFor: () => ({ enrollment: { id: 'enrollment-a', status: 'approved', worker: { identityDigest: 'worker-digest-a' } },
-        epoch: { epoch: 1, connectionId: 'connection-a-1' } }),
-      currentConnectionEpoch: () => 1, isCurrentConnection: () => true,
-    } as never,
-    catalog: { entry: () => ({ definition }) } as never,
-    enrollments: { get: async () => ({ id: 'enrollment-a', environmentInstanceId: 'env-a', status: 'approved',
-      capabilityPermissions: { 'read-only-investigation': true } }) } as never,
-    store: new MemoryRemoteOperationIdentityStore(),
-    pool,
-  });
-
-  const tools = await operations.attach(projectId, agentId, 'run-reader');
-  const result = await tools.read!('src/file.txt', 'reader-conflict');
-  assert.equal(result.failure, 'lease-conflict');
-  assert.deepEqual(result.leaseConflict, { leaseId: 'writer-lease', holderId: 'writer-agent', state: 'active' });
-  assert.equal(workerCalls, 0, 'a reader blocked by a writer never reaches the Worker');
 });
