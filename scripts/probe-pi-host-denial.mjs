@@ -36,7 +36,7 @@ const target = process.argv.at(-1);
 function attempt(operation, callback) {
   try { callback(); return { operation, outcome: 'completed', code: 'none' }; }
   catch (error) {
-    const code = ['EPERM', 'EACCES'].includes(error?.code) ? error.code : 'other';
+    const code = error?.code === 'EPERM' ? 'EPERM' : 'other';
     return { operation, outcome: code === 'other' ? 'failed' : 'refused', code };
   }
 }
@@ -78,8 +78,8 @@ process.stdout.write(JSON.stringify({ read, write }) + '\\n');
         }
         if (attempts) {
           const sentinelUnchanged = await readFile(sentinelPath, 'utf8') === sentinelContents;
-          const readDenied = attempts.read?.outcome === 'refused' && ['EPERM', 'EACCES'].includes(attempts.read.code);
-          const writeDenied = attempts.write?.outcome === 'refused' && ['EPERM', 'EACCES'].includes(attempts.write.code);
+          const readDenied = attempts.read?.outcome === 'refused' && attempts.read.code === 'EPERM';
+          const writeDenied = attempts.write?.outcome === 'refused' && attempts.write.code === 'EPERM';
           const denied = readDenied && writeDenied && sentinelUnchanged;
           report({
             outcome: denied ? 'sandbox-read-write-denied' : 'sandbox-denial-incomplete',
