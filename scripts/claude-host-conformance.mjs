@@ -170,13 +170,25 @@ try {
         const result = await tools.read(path, operationId);
         observations.workspace.push({
           operation: 'read', pathClass: classify(path), status: result.status, taskLeaseHeld: taskLeaseHeld(),
-          ...(result.failure === 'invalid-path' ? { failure: 'invalid-path' } : {}),
+          ...(result.failure !== undefined ? { failure: result.failure } : {}),
         });
         return result;
       },
       edit: async (path, oldText, newText, operationId) => {
         const result = await tools.edit(path, oldText, newText, operationId);
-        observations.workspace.push({ operation: 'edit', pathClass: classify(path), status: result.status, taskLeaseHeld: taskLeaseHeld() });
+        observations.workspace.push({
+          operation: 'edit', pathClass: classify(path), status: result.status, taskLeaseHeld: taskLeaseHeld(),
+          ...(result.failure !== undefined ? { failure: result.failure } : {}),
+        });
+        return result;
+      },
+      search: async (query, path, operationId) => {
+        const result = await tools.search(query, path, operationId);
+        observations.workspace.push({
+          operation: 'search', pathClass: path === undefined ? 'workspace-root' : classify(path),
+          status: result.status, taskLeaseHeld: taskLeaseHeld(),
+          ...(result.failure !== undefined ? { failure: result.failure } : {}),
+        });
         return result;
       },
       ...(typeof tools.command === 'function' ? {
@@ -189,7 +201,8 @@ try {
             argsMatched: args.length === 2 && args[0] === '--test' && args[1] === 'proof.test.cjs',
             cwd: options.cwd ?? '.', timeoutMs: options.timeoutMs ?? 30_000,
             exitCode: result.exitCode ?? null,
-            testOutputMatched: output.includes('# tests 1') && output.includes('# pass 1') && output.includes('# fail 0'),
+            testOutputMatched: output.includes('tests 1') && output.includes('pass 1') && output.includes('fail 0') &&
+              output.includes('authorized remote origin marker matches the edited fixture'),
             output, taskLeaseHeld: taskLeaseHeld(),
           });
           return result;
@@ -362,7 +375,9 @@ try {
         runUsedTaskLease = run.leaseId === taskLeaseId;
         taskLeaseHeldAfterRun = taskLeaseHeld();
         const observed = [...observations.workspace, ...observations.projectMcp];
-        taskLeaseHeldForEveryOperation = observed.length === 4 && observed.every(row => row.taskLeaseHeld);
+        taskLeaseHeldForEveryOperation = observed.length >= 4 && observed.length <= (taskCommandMode ? 12 : 4) &&
+          observed.every(row => row.taskLeaseHeld);
+        const unexpectedWorkspaceSuccess = observations.workspace.some(row => row.pathClass === 'other' && row.status === 'completed');
         const httpOperations = observations.projectMcp.filter(row => row.tool === 'http' && row.status === 'completed' && row.inputMatched && row.outputMatched);
         const stdioOperations = observations.projectMcp.filter(row => row.tool === 'stdio' && row.status === 'completed' && row.inputMatched && row.outputMatched);
         httpMcpPassed = taskHttpMode && httpMcpToolCalls === 1 && httpMcpInputsMatched && httpOperations.length === 1;
@@ -376,7 +391,8 @@ try {
         const taskOperationsComplete = run.status === 'completed' && run.workOption?.engine === 'claude' &&
           observations.workspace.filter(row => row.operation === 'read' && row.pathClass === 'origin' && row.status === 'completed').length === 1 &&
           observations.workspace.filter(row => row.operation === 'edit' && row.pathClass === 'proof' && row.status === 'completed').length === 1 &&
-          stdioOperations.length === 1 && taskLeaseHeldForEveryOperation && finalFiles.proofMatches && finalFiles.projectMcpMatches &&
+          stdioOperations.length === 1 && taskLeaseHeldForEveryOperation && !unexpectedWorkspaceSuccess &&
+          finalFiles.proofMatches && finalFiles.projectMcpMatches &&
           (taskCommandMode ? remoteCommandTestPassed : httpMcpPassed);
         if (taskOperationsComplete && runUsedTaskLease && taskIdleAfterRun && taskLeaseHeldAfterRun) {
           const claim = await runtime.taskControls.submitCompletionClaimForHuman(taskId, {
