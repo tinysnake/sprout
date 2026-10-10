@@ -230,6 +230,7 @@ test('the Host Pi sandbox profile compiles with default-deny file rules', { skip
     assert.ok(profile.includes('(allow file-read* (literal "/")'));
     assert.match(profile, /\(deny file-read\*\)/);
     assert.match(profile, /\(deny file-write\*\)/);
+    assert.ok(profile.includes('iana-tlds.ts'), 'runner privacy dependency remains readable in the sandbox');
     assert.match(profile, /\(deny network\*\)/);
     const result = spawnSync('/usr/bin/sandbox-exec', ['-p', profile, '/usr/bin/true'], { timeout: 10_000 });
     assert.equal(result.error, undefined);
