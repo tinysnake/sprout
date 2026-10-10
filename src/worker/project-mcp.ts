@@ -797,4 +797,3 @@ function waitForExit(child: ChildProcessWithoutNullStreams, ms: number): Promise
     child.once('close', onClose);
   });
 }
-

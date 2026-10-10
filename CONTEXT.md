@@ -333,7 +333,7 @@ A core-issued opaque identity for one atomic, sanitized facts-and-probe commit. 
 _Avoid_: Browser authority token, current-ready assertion, Worker-supplied identity
 
 **Environment lease**:
-A time-bounded right to use an environment instance's lease-requiring capabilities. A `read` lease admits read-only operations and may share the instance with other `read` leases. A `read-write` lease admits one holder and excludes every other lease. Task-held leases and Agent-run execution leases use `read-write`; a Remote workspace operation using the read-only capability may acquire a `read` lease. A read lease does not include a stable snapshot or copy-on-write, so workspace files may change while readers hold leases.
+A time-bounded right to use an environment instance's lease-requiring capabilities. A `read` lease admits read-only operations and may share the instance with other `read` leases. A `read-write` lease admits one holder and excludes every other lease. Task-held leases and Agent-run execution leases use `read-write`; a Remote workspace operation uses only the lease already held by its containing run or Task, including an admitted `read` lease for read-only work. Environment Operations and Project MCP borrow the containing lease and never acquire leases for themselves. A read lease does not include a stable snapshot or copy-on-write, so workspace files may change while readers hold leases.
 _Avoid_: Agent environment, lock, snapshot
 
 **Lease recovery**:

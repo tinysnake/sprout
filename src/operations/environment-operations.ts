@@ -21,9 +21,8 @@ const MAX_SUPPORTED_SEARCH_RESULTS = 100;
 const MAX_COMMAND_OUTPUT_BYTES = 32 * 1024;
 const MUTATION_CAPABILITY = 'agent-run';
 const READ_CAPABILITY = 'read-only-investigation';
-type LeaseAcquisitionResult = {
-  readonly acquired?: EnvironmentLease;
-  readonly conflict?: { readonly leaseId: string; readonly holderId: string; readonly state: 'active' | 'recovering' };
+type LeaseExtensionResult = {
+  readonly extended?: EnvironmentLease;
   readonly failure?: string;
 };
 
@@ -99,7 +98,7 @@ export class EnvironmentOperations {
   readonly #onUncertainMcp: ((scope: ProjectMcpLeaseScope) => Promise<void>) | undefined;
   readonly #onUncertainOperation: ((leaseId: string) => Promise<void>) | undefined;
   readonly #clock: () => number;
-  readonly #pool: Pick<EnvironmentPool, 'getLease' | 'requiresLeaseForBoundOperation' | 'acquireBoundOperationLeaseRevalidated' | 'extendLease' | 'keepLeaseUntilCleanup' | 'markRecovering' | 'releaseLease'> | undefined;
+  readonly #pool: Pick<EnvironmentPool, 'getLease' | 'requiresLeaseForBoundOperation' | 'extendLease' | 'keepLeaseUntilCleanup' | 'markRecovering' | 'releaseLease'> | undefined;
   readonly #leaseTtlMs: number;
 
   constructor(options: {
@@ -109,7 +108,7 @@ export class EnvironmentOperations {
     readonly gateway: EnvironmentOperationsGateway;
     readonly catalog: EnvironmentOperationsCatalog;
     readonly enrollments: EnvironmentOperationsEnrollments;
-    readonly pool?: Pick<EnvironmentPool, 'getLease' | 'requiresLeaseForBoundOperation' | 'acquireBoundOperationLeaseRevalidated' | 'extendLease' | 'keepLeaseUntilCleanup' | 'markRecovering' | 'releaseLease'>;
+    readonly pool?: Pick<EnvironmentPool, 'getLease' | 'requiresLeaseForBoundOperation' | 'extendLease' | 'keepLeaseUntilCleanup' | 'markRecovering' | 'releaseLease'>;
     readonly store: RemoteOperationIdentityStore;
     readonly onUncertainMcp?: (scope: ProjectMcpLeaseScope) => Promise<void>;
     readonly onUncertainOperation?: (leaseId: string) => Promise<void>;
@@ -598,11 +597,7 @@ export class EnvironmentOperations {
     let runContextState: 'absent' | 'prepared' | 'unknown' = 'absent';
     let contextPreparationUncertain = false;
     let mutationLease: EnvironmentLease | undefined = containingLease === undefined ? undefined : this.#pool?.getLease(containingLease.leaseId);
-    const workspaceMode: LeaseMode | undefined = containingLease !== undefined
-      ? mutationLease?.mode
-      : runId !== undefined ? 'read' : undefined;
-    let workspaceBindingAttached = false;
-    let workspaceBindingAttachment: Promise<void> | undefined;
+    const workspaceMode: LeaseMode | undefined = containingLease !== undefined ? mutationLease?.mode : undefined;
     if (containingLease !== undefined && (containingLease.runId !== runId ||
         !sameMcpLease(mutationLease, containingLease) || mutationLease?.state !== 'active')) {
       throw new RemoteWorkspaceUnavailableError('lease-required');
@@ -611,13 +606,11 @@ export class EnvironmentOperations {
       try {
         if (!this.#environment.attachWorkspaceBinding) throw new Error('unsupported');
         await this.#environment.attachWorkspaceBinding(access.environmentInstanceId, identity);
-        workspaceBindingAttached = true;
       } catch {
         throw new RemoteWorkspaceUnavailableError('worker-refused');
       }
     }
-    let leaseAcquisition: Promise<LeaseAcquisitionResult> | undefined;
-    let readLeaseAcquisition: Promise<LeaseAcquisitionResult> | undefined;
+    let leaseExtension: Promise<LeaseExtensionResult> | undefined;
     let pendingOperations = 0;
     let uncertainOutcome = false;
     let leaseCompromised = false;
@@ -636,96 +629,26 @@ export class EnvironmentOperations {
       });
     };
 
-    const ensureWorkspaceBindingAttached = async (): Promise<void> => {
-      if (workspaceBindingAttached) return;
-      if (workspaceBindingAttachment !== undefined) {
-        await workspaceBindingAttachment;
-        workspaceBindingAttached = true;
-        return;
-      }
-      const pending = (async () => {
-        if (!this.#environment.attachWorkspaceBinding) throw new Error('unsupported');
-        await this.#environment.attachWorkspaceBinding(access.environmentInstanceId, identity);
-      })();
-      workspaceBindingAttachment = pending;
-      try {
-        await pending;
-        workspaceBindingAttached = true;
-      } finally {
-        if (workspaceBindingAttachment === pending) workspaceBindingAttachment = undefined;
-      }
-    };
-
     if (containingLease !== undefined && mutationLease !== undefined) keepMutationLeaseAlive();
 
-    const acquireMutationLease = async (): Promise<LeaseAcquisitionResult> => {
+    const extendContainingMutationLease = async (): Promise<LeaseExtensionResult> => {
       if (runId === undefined) return { failure: 'run-required' };
       if (this.#pool === undefined) return { failure: 'lease-pool-unavailable' };
       if (this.#pool.requiresLeaseForBoundOperation(access.environmentInstanceId, MUTATION_CAPABILITY) !== true) return { failure: 'lease-capability-unavailable' };
-      const prior = mutationLease;
-      if (containingLease !== undefined) {
-        const lease = this.#pool.getLease(containingLease.leaseId);
-        if (containingLease.runId !== runId || !sameMcpLease(lease, containingLease) || lease?.state !== 'active') {
-          return { failure: 'containing-lease-unavailable' };
-        }
-        mutationLease = lease;
+      if (containingLease === undefined) return { failure: 'containing-lease-unavailable' };
+      const lease = this.#pool.getLease(containingLease.leaseId);
+      if (containingLease.runId !== runId || !sameMcpLease(lease, containingLease) || lease?.state !== 'active') {
+        return { failure: 'containing-lease-unavailable' };
       }
-      if (prior !== undefined || mutationLease !== undefined) {
-        const active = mutationLease!;
-        const extended = this.#pool.extendLease(active.id, this.#leaseTtlMs);
-        if (extended === undefined) {
-          uncertainOutcome = true;
-          this.#pool.markRecovering(active.id);
-          return {};
-        }
-        mutationLease = extended;
-        keepMutationLeaseAlive();
-        return { acquired: extended };
+      const extended = this.#pool.extendLease(lease.id, this.#leaseTtlMs);
+      if (extended === undefined) {
+        uncertainOutcome = true;
+        this.#pool.markRecovering(lease.id);
+        return {};
       }
-      return { failure: 'containing-lease-unavailable' };
-    };
-
-    const acquireReadLease = (): Promise<LeaseAcquisitionResult> => {
-      if (mutationLease?.mode === 'read' && mutationLease.state === 'active') return Promise.resolve({ acquired: mutationLease });
-      if (readLeaseAcquisition !== undefined) return readLeaseAcquisition;
-      const pending: Promise<LeaseAcquisitionResult> = (async () => {
-        if (runId === undefined) return { failure: 'run-required' };
-        if (this.#pool === undefined) return { failure: 'lease-pool-unavailable' };
-        if (this.#pool.requiresLeaseForBoundOperation(access.environmentInstanceId, READ_CAPABILITY) !== true) {
-          return { failure: 'lease-capability-unavailable' };
-        }
-        try {
-          const acquired = await this.#pool.acquireBoundOperationLeaseRevalidated({
-            instanceId: access.environmentInstanceId,
-            capability: READ_CAPABILITY,
-            mode: 'read',
-            holderId: agentId,
-            runId,
-            ttlMs: this.#leaseTtlMs,
-          });
-          if (!acquired.ok) {
-            const conflictHolder = acquired.conflict?.kind === 'reader-blocked-by-writer'
-              ? acquired.conflict.writer
-              : acquired.conflict?.kind === 'recovery' ? acquired.conflict.holders[0] : undefined;
-            const conflict: LeaseAcquisitionResult['conflict'] = conflictHolder === undefined
-              ? undefined
-              : { leaseId: conflictHolder.leaseId, holderId: conflictHolder.holderId,
-                state: conflictHolder.state === 'recovering' ? 'recovering' : 'active' };
-            return {
-              failure: acquired.reason === 'conflict' ? 'lease-conflict' : acquired.reason,
-              ...(conflict !== undefined ? { conflict } : {}),
-            };
-          }
-          mutationLease = acquired.lease;
-          keepMutationLeaseAlive();
-          return { acquired: acquired.lease };
-        } catch {
-          return { failure: 'lease-unavailable' };
-        }
-      })();
-      readLeaseAcquisition = pending;
-      void pending.finally(() => { if (readLeaseAcquisition === pending) readLeaseAcquisition = undefined; });
-      return pending;
+      mutationLease = extended;
+      keepMutationLeaseAlive();
+      return { extended };
     };
 
     const settleLeaseIfReady = async (): Promise<void> => {
@@ -806,38 +729,20 @@ export class EnvironmentOperations {
       }
       if (!mutating) {
         if (containingLease === undefined) {
-          const acquired = await acquireReadLease();
-          if (!acquired.acquired) {
-            const failure = acquired.failure === 'run-required' || acquired.failure === 'lease-capability-unavailable'
-              ? 'lease-required'
-              : acquired.failure ?? 'lease-unavailable';
-            return operationResult(fixed, operationId, operation, 'failed', failure, acquired.conflict);
-          }
-          row = { ...row, ...operationLeaseIdentity(acquired.acquired) };
+          return operationResult(fixed, operationId, operation, 'failed', 'lease-required');
         }
         const currentLease = mutationLease === undefined ? undefined : this.#pool?.getLease(mutationLease.id);
-        const leaseValid = containingLease !== undefined
-          ? sameMcpLease(currentLease, containingLease)
-          : currentLease?.mode === 'read' && currentLease.holderId === agentId && currentLease.runId === runId;
-        if (!leaseValid || currentLease?.state !== 'active') {
+        if (!sameMcpLease(currentLease, containingLease) || currentLease?.state !== 'active') {
           return operationResult(fixed, operationId, operation, 'failed', 'containing-lease-unavailable');
         }
         mutationLease = currentLease;
         keepMutationLeaseAlive();
-        if (containingLease === undefined) {
-          try {
-            await ensureWorkspaceBindingAttached();
-          } catch {
-            return operationResult(fixed, operationId, operation, 'failed', 'worker-unavailable');
-          }
-        }
       }
       if (mutating && (runId === undefined || requestedOperationId === undefined || requestedOperationId.length < 1 || requestedOperationId.length > 512)) {
         return operationResult(fixed, operationId, operation, 'failed', 'operation-identity-required');
       }
       if (mutating && containingLease === undefined) {
-        const lease = await acquireMutationLease();
-        return operationResult(fixed, operationId, operation, 'failed', lease.failure ?? 'containing-lease-unavailable', lease.conflict);
+        return operationResult(fixed, operationId, operation, 'failed', 'lease-required');
       }
       if (mutating) {
         try {
@@ -851,15 +756,15 @@ export class EnvironmentOperations {
         if (!capability || capability.requiresLease !== true || !supported || runId === undefined || this.#pool === undefined) {
           return operationResult(fixed, operationId, operation, 'failed', 'lease-required');
         }
-        if (leaseAcquisition === undefined) {
-          leaseAcquisition = acquireMutationLease();
-          void leaseAcquisition.finally(() => { leaseAcquisition = undefined; });
+        if (leaseExtension === undefined) {
+          leaseExtension = extendContainingMutationLease();
+          void leaseExtension.finally(() => { leaseExtension = undefined; });
         }
-        const lease = await leaseAcquisition;
-        if (!lease.acquired) {
-          return operationResult(fixed, operationId, operation, 'failed', lease.conflict ? 'lease-conflict' : (lease.failure ?? 'lease-unavailable'), lease.conflict);
+        const lease = await leaseExtension;
+        if (!lease.extended) {
+          return operationResult(fixed, operationId, operation, 'failed', lease.failure ?? 'lease-unavailable');
         }
-        row = { ...row, ...operationLeaseIdentity(lease.acquired) };
+        row = { ...row, ...operationLeaseIdentity(lease.extended) };
         try {
           await this.#assertCurrent(projectId, agentId, access.environmentInstanceId, fixed, MUTATION_CAPABILITY);
         } catch {
@@ -1004,9 +909,7 @@ export class EnvironmentOperations {
     };
 
     const remoteOperations: ('read' | 'search' | 'edit' | 'patch' | 'command')[] = [];
-    const canAcquireReadLease = runId !== undefined && this.#pool?.requiresLeaseForBoundOperation(
-      access.environmentInstanceId, READ_CAPABILITY) === true;
-    if (containingLease !== undefined || canAcquireReadLease) remoteOperations.push('read', 'search');
+    if (containingLease !== undefined) remoteOperations.push('read', 'search');
     if (containingLease !== undefined && mutationLease?.mode !== 'read') {
       const enrollment = await this.#enrollments.get(live.enrollment.id);
       const mutationCapability = this.#catalog.entry(access.environmentInstanceId)?.definition.capabilities.find(c => c.name === MUTATION_CAPABILITY);

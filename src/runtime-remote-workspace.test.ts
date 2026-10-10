@@ -24,7 +24,7 @@ import {
   waitFor,
 } from './runtime-test-harness.ts';
 
-for (const hostEngine of ['pi', 'codex'] as const) test(`a selected Host-run ${hostEngine} Work Environment leases authorized Project reads`, async (t) => {
+for (const hostEngine of ['pi', 'codex'] as const) test(`a selected Host-run ${hostEngine} Work Environment borrows admitted shared read leases`, async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-remote-read-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const workerRoot = join(directory, 'worker-workspaces');
@@ -121,8 +121,27 @@ for (const hostEngine of ['pi', 'codex'] as const) test(`a selected Host-run ${h
     assert.equal(direct.failure, 'lease-required');
     assert.equal(readFileSync(join(workerRoot, 'repos', 'remote-read', 'sentinel.txt'), 'utf8'), 'REMOTE_WORKER_SENTINEL');
 
-    const readerA = await runtime.environmentOperations.attach('remote-read-project', 'scout', 'read-only-run-a');
-    const readerB = await runtime.environmentOperations.attach('remote-read-project', 'scout', 'read-only-run-b');
+    const admitReadLease = async (runId: string) => {
+      // Seed the containing run leases before attaching Environment Operations.
+      const admission = await runtime.pool.acquireBoundOperationLeaseRevalidated({
+        instanceId: INSTANCE_ID, capability: 'read-only-investigation', mode: 'read',
+        holderId: 'scout', runId, ttlMs: 60_000,
+      });
+      assert.equal(admission.ok, true);
+      if (!admission.ok) throw new Error('read lease admission failed');
+      return {
+        lease: admission.lease,
+        containingLease: {
+          environmentInstanceId: admission.lease.instanceId, leaseId: admission.lease.id, runId,
+          holderKind: 'run' as const, holderId: admission.lease.holderId,
+          leaseCapability: 'read-only-investigation' as const, canRelease: () => true,
+        },
+      };
+    };
+    const admittedA = await admitReadLease('read-only-run-a');
+    const admittedB = await admitReadLease('read-only-run-b');
+    const readerA = await runtime.environmentOperations.attach('remote-read-project', 'scout', 'read-only-run-a', admittedA.containingLease);
+    const readerB = await runtime.environmentOperations.attach('remote-read-project', 'scout', 'read-only-run-b', admittedB.containingLease);
     assert.equal(readerA.leaseMode, 'read');
     assert.deepEqual(readerA.operations, ['read', 'search']);
     const [readA, readB] = await Promise.all([
@@ -921,7 +940,7 @@ test('selected Host-run performs remote edits and commands under an Agent-run le
     assert.equal(holder.ok, true);
     const blockedTools = await runtime.environmentOperations.attach('remote-mutation-project', 'scout', 'blocked-run');
     const blocked = await blockedTools.edit!('src/target.txt', 'REMOTE_PATCHED', 'SHOULD_NOT_APPLY', 'blocked-edit-1');
-    assert.equal(blocked.failure, 'read-only-lease');
+    assert.equal(blocked.failure, 'lease-required', 'a run without its containing lease cannot use another run\'s lease');
     assert.equal(readFileSync(join(workerRoot, 'repos', 'remote-mutation', 'src', 'target.txt'), 'utf8'), 'REMOTE_PATCHED');
     assert.equal(runtime.pool.getLease(holder.lease.id)?.state, 'active', 'refused workspace tools do not alter the competing lease');
     runtime.pool.releaseLease(holder.lease.id);
