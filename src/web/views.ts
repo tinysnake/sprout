@@ -1256,6 +1256,7 @@ export interface RunWorkspaceBindingAttributionView {
   readonly bindingId?: string;
   readonly generation?: number;
   readonly catalogGeneration?: number;
+  readonly leaseMode?: 'read' | 'read-write';
   readonly workspaceId: string;
   readonly kind: string;
   readonly path?: string;
@@ -1277,6 +1278,7 @@ function toRunWorkspaceBindingAttribution(run: AgentRun): RunWorkspaceBindingAtt
     ...(Number.isSafeInteger(binding.generation) && binding.generation! > 0 ? { generation: binding.generation } : {}),
     ...(Number.isSafeInteger(binding.catalogGeneration) && binding.catalogGeneration! > 0
       ? { catalogGeneration: binding.catalogGeneration } : {}),
+    ...(binding.leaseMode === 'read' || binding.leaseMode === 'read-write' ? { leaseMode: binding.leaseMode } : {}),
     workspaceId: sanitizeIdentifier(binding.workspaceId ?? '', { fallback: 'unknown-workspace', kind: 'digest' }),
     kind: binding.kind === 'relative' ? 'relative' : 'default',
     ...(path !== undefined ? { path } : {}),

@@ -1,6 +1,7 @@
 import type { AgentRunEvent, EngineTurnResult, TokenUsage, DetailedTokenDimensions } from '../engine/port.ts';
 import type { AgentWorkOption } from '../agent/model.ts';
 import type { WorkspaceSelectionKind } from '../project/access.ts';
+import type { EnvironmentLeaseMode } from '../environment/model.ts';
 import type { ExecutionPlacement, SessionKeyScope } from '../execution-placement.ts';
 
 export type { TokenUsage, DetailedTokenDimensions } from '../engine/port.ts';
@@ -23,6 +24,8 @@ export interface RunWorkspaceBinding {
   readonly catalogGeneration?: number;
   /** One-way identity of the immutable Worker catalog, independent of publication generation. */
   readonly catalogIdentity?: string;
+  /** Permission mode held for this Environment workspace surface. */
+  readonly leaseMode?: EnvironmentLeaseMode;
   readonly workspaceId?: string;
   readonly kind: WorkspaceSelectionKind;
   /** Worker-root-relative location, when the workspace named one. */

@@ -9,8 +9,7 @@ import type { ProjectService } from '../project/authority-service.ts';
 import { PROJECT_MCP_CONFIGURATION_FORMAT } from '../project/authority-model.ts';
 import type { ProjectEnvironmentAccess, WorkspaceBinding } from '../project/access.ts';
 import type { RuntimeEnvironment, WorkerGatewayView } from '../runtime.ts';
-import type { EnvironmentPool } from '../environment/pool.ts';
-import type { EnvironmentLease } from '../environment/pool.ts';
+import type { EnvironmentPool, EnvironmentLease, LeaseMode } from '../environment/pool.ts';
 import { EMPTY_REMOTE_WORK_RECOVERY_EVIDENCE, type RemoteWorkRecoveryEvidence } from '../environment/recovery.ts';
 import type { EnvironmentCatalog } from '../environment/catalog.ts';
 import type { EnvironmentEnrollmentService } from '../environment/enrollment-service.ts';
@@ -21,6 +20,12 @@ const MAX_SUPPORTED_READ_BYTES = 64 * 1024;
 const MAX_SUPPORTED_SEARCH_RESULTS = 100;
 const MAX_COMMAND_OUTPUT_BYTES = 32 * 1024;
 const MUTATION_CAPABILITY = 'agent-run';
+const READ_CAPABILITY = 'read-only-investigation';
+type LeaseAcquisitionResult = {
+  readonly acquired?: EnvironmentLease;
+  readonly conflict?: { readonly leaseId: string; readonly holderId: string; readonly state: 'active' | 'recovering' };
+  readonly failure?: string;
+};
 
 export type RemoteWorkspaceBlock = 'project-denied' | 'access-ended' | 'workspace-unbound' | 'worker-offline' | 'stale-epoch' | 'stale-generation' | 'unsupported' | 'capability-denied' | 'lease-required' | 'worker-refused';
 export interface ProjectMcpLeaseScope extends ProjectMcpLeaseIdentity {
@@ -30,7 +35,8 @@ export interface ProjectMcpLeaseScope extends ProjectMcpLeaseIdentity {
   readonly leaseCapability: 'project-mcp' | 'agent-run';
 }
 
-export interface WorkspaceContainingLease extends ProjectMcpLeaseScope {
+export interface WorkspaceContainingLease extends Omit<ProjectMcpLeaseScope, 'leaseCapability'> {
+  readonly leaseCapability: 'project-mcp' | 'agent-run' | 'read-only-investigation';
   /** The containing owner permits release only after every other surface has settled. */
   readonly canRelease: () => boolean;
 }
@@ -93,7 +99,7 @@ export class EnvironmentOperations {
   readonly #onUncertainMcp: ((scope: ProjectMcpLeaseScope) => Promise<void>) | undefined;
   readonly #onUncertainOperation: ((leaseId: string) => Promise<void>) | undefined;
   readonly #clock: () => number;
-  readonly #pool: Pick<EnvironmentPool, 'getLease' | 'requiresLeaseForBoundOperation' | 'extendLease' | 'keepLeaseUntilCleanup' | 'markRecovering' | 'releaseLease'> | undefined;
+  readonly #pool: Pick<EnvironmentPool, 'getLease' | 'requiresLeaseForBoundOperation' | 'acquireBoundOperationLeaseRevalidated' | 'extendLease' | 'keepLeaseUntilCleanup' | 'markRecovering' | 'releaseLease'> | undefined;
   readonly #leaseTtlMs: number;
 
   constructor(options: {
@@ -103,7 +109,7 @@ export class EnvironmentOperations {
     readonly gateway: EnvironmentOperationsGateway;
     readonly catalog: EnvironmentOperationsCatalog;
     readonly enrollments: EnvironmentOperationsEnrollments;
-    readonly pool?: Pick<EnvironmentPool, 'getLease' | 'requiresLeaseForBoundOperation' | 'extendLease' | 'keepLeaseUntilCleanup' | 'markRecovering' | 'releaseLease'>;
+    readonly pool?: Pick<EnvironmentPool, 'getLease' | 'requiresLeaseForBoundOperation' | 'acquireBoundOperationLeaseRevalidated' | 'extendLease' | 'keepLeaseUntilCleanup' | 'markRecovering' | 'releaseLease'>;
     readonly store: RemoteOperationIdentityStore;
     readonly onUncertainMcp?: (scope: ProjectMcpLeaseScope) => Promise<void>;
     readonly onUncertainOperation?: (leaseId: string) => Promise<void>;
@@ -146,7 +152,7 @@ export class EnvironmentOperations {
     const result: RemoteWorkspaceReadiness[] = [];
     for (const access of rows) {
       const binding = access.current;
-      const reason = await this.#blockReason(projectId, undefined, access, binding);
+      const reason = await this.#blockReason(projectId, undefined, access, binding, true);
       result.push({ environmentInstanceId: access.environmentInstanceId,
         ...(binding ? { bindingId: binding.bindingId, ...(binding.generation !== undefined ? { generation: binding.generation } : {}) } : {}),
         status: reason ? 'blocked' : 'ready', ...(reason ? { reason } : {}) });
@@ -560,7 +566,7 @@ export class EnvironmentOperations {
     for (const access of accesses) {
       const binding = access.current;
       if (!binding) continue;
-      const reason = await this.#blockReason(projectId, agentId, access, binding, containingLease !== undefined);
+      const reason = await this.#blockReason(projectId, agentId, access, binding, true);
       if (reason) { last = reason; continue; }
       selected = { access, binding };
       break;
@@ -592,6 +598,11 @@ export class EnvironmentOperations {
     let runContextState: 'absent' | 'prepared' | 'unknown' = 'absent';
     let contextPreparationUncertain = false;
     let mutationLease: EnvironmentLease | undefined = containingLease === undefined ? undefined : this.#pool?.getLease(containingLease.leaseId);
+    const workspaceMode: LeaseMode | undefined = containingLease !== undefined
+      ? mutationLease?.mode
+      : runId !== undefined ? 'read' : undefined;
+    let workspaceBindingAttached = false;
+    let workspaceBindingAttachment: Promise<void> | undefined;
     if (containingLease !== undefined && (containingLease.runId !== runId ||
         !sameMcpLease(mutationLease, containingLease) || mutationLease?.state !== 'active')) {
       throw new RemoteWorkspaceUnavailableError('lease-required');
@@ -600,11 +611,13 @@ export class EnvironmentOperations {
       try {
         if (!this.#environment.attachWorkspaceBinding) throw new Error('unsupported');
         await this.#environment.attachWorkspaceBinding(access.environmentInstanceId, identity);
+        workspaceBindingAttached = true;
       } catch {
         throw new RemoteWorkspaceUnavailableError('worker-refused');
       }
     }
-    let leaseAcquisition: Promise<{ readonly acquired?: EnvironmentLease; readonly conflict?: { readonly holderId: string; readonly state: 'active' | 'recovering' }; readonly failure?: string }> | undefined;
+    let leaseAcquisition: Promise<LeaseAcquisitionResult> | undefined;
+    let readLeaseAcquisition: Promise<LeaseAcquisitionResult> | undefined;
     let pendingOperations = 0;
     let uncertainOutcome = false;
     let leaseCompromised = false;
@@ -623,9 +636,29 @@ export class EnvironmentOperations {
       });
     };
 
+    const ensureWorkspaceBindingAttached = async (): Promise<void> => {
+      if (workspaceBindingAttached) return;
+      if (workspaceBindingAttachment !== undefined) {
+        await workspaceBindingAttachment;
+        workspaceBindingAttached = true;
+        return;
+      }
+      const pending = (async () => {
+        if (!this.#environment.attachWorkspaceBinding) throw new Error('unsupported');
+        await this.#environment.attachWorkspaceBinding(access.environmentInstanceId, identity);
+      })();
+      workspaceBindingAttachment = pending;
+      try {
+        await pending;
+        workspaceBindingAttached = true;
+      } finally {
+        if (workspaceBindingAttachment === pending) workspaceBindingAttachment = undefined;
+      }
+    };
+
     if (containingLease !== undefined && mutationLease !== undefined) keepMutationLeaseAlive();
 
-    const acquireMutationLease = async (): Promise<{ readonly acquired?: EnvironmentLease; readonly conflict?: { readonly holderId: string; readonly state: 'active' | 'recovering' }; readonly failure?: string }> => {
+    const acquireMutationLease = async (): Promise<LeaseAcquisitionResult> => {
       if (runId === undefined) return { failure: 'run-required' };
       if (this.#pool === undefined) return { failure: 'lease-pool-unavailable' };
       if (this.#pool.requiresLeaseForBoundOperation(access.environmentInstanceId, MUTATION_CAPABILITY) !== true) return { failure: 'lease-capability-unavailable' };
@@ -650,6 +683,49 @@ export class EnvironmentOperations {
         return { acquired: extended };
       }
       return { failure: 'containing-lease-unavailable' };
+    };
+
+    const acquireReadLease = (): Promise<LeaseAcquisitionResult> => {
+      if (mutationLease?.mode === 'read' && mutationLease.state === 'active') return Promise.resolve({ acquired: mutationLease });
+      if (readLeaseAcquisition !== undefined) return readLeaseAcquisition;
+      const pending: Promise<LeaseAcquisitionResult> = (async () => {
+        if (runId === undefined) return { failure: 'run-required' };
+        if (this.#pool === undefined) return { failure: 'lease-pool-unavailable' };
+        if (this.#pool.requiresLeaseForBoundOperation(access.environmentInstanceId, READ_CAPABILITY) !== true) {
+          return { failure: 'lease-capability-unavailable' };
+        }
+        try {
+          const acquired = await this.#pool.acquireBoundOperationLeaseRevalidated({
+            instanceId: access.environmentInstanceId,
+            capability: READ_CAPABILITY,
+            mode: 'read',
+            holderId: agentId,
+            runId,
+            ttlMs: this.#leaseTtlMs,
+          });
+          if (!acquired.ok) {
+            const conflictHolder = acquired.conflict?.kind === 'reader-blocked-by-writer'
+              ? acquired.conflict.writer
+              : acquired.conflict?.kind === 'recovery' ? acquired.conflict.holders[0] : undefined;
+            const conflict: LeaseAcquisitionResult['conflict'] = conflictHolder === undefined
+              ? undefined
+              : { leaseId: conflictHolder.leaseId, holderId: conflictHolder.holderId,
+                state: conflictHolder.state === 'recovering' ? 'recovering' : 'active' };
+            return {
+              failure: acquired.reason === 'conflict' ? 'lease-conflict' : acquired.reason,
+              ...(conflict !== undefined ? { conflict } : {}),
+            };
+          }
+          mutationLease = acquired.lease;
+          keepMutationLeaseAlive();
+          return { acquired: acquired.lease };
+        } catch {
+          return { failure: 'lease-unavailable' };
+        }
+      })();
+      readLeaseAcquisition = pending;
+      void pending.finally(() => { if (readLeaseAcquisition === pending) readLeaseAcquisition = undefined; });
+      return pending;
     };
 
     const settleLeaseIfReady = async (): Promise<void> => {
@@ -725,15 +801,36 @@ export class EnvironmentOperations {
         return operationResult(fixed, operationId, operation, 'failed', normalized.failure);
       }
       const mutating = operation === 'edit' || operation === 'patch' || operation === 'command';
+      if (mutating && workspaceMode === 'read') {
+        return operationResult(fixed, operationId, operation, 'failed', 'read-only-lease');
+      }
       if (!mutating) {
         if (containingLease === undefined) {
-          return operationResult(fixed, operationId, operation, 'failed', 'lease-required');
+          const acquired = await acquireReadLease();
+          if (!acquired.acquired) {
+            const failure = acquired.failure === 'run-required' || acquired.failure === 'lease-capability-unavailable'
+              ? 'lease-required'
+              : acquired.failure ?? 'lease-unavailable';
+            return operationResult(fixed, operationId, operation, 'failed', failure, acquired.conflict);
+          }
+          row = { ...row, ...operationLeaseIdentity(acquired.acquired) };
         }
-        const currentLease = this.#pool?.getLease(containingLease.leaseId);
-        if (!sameMcpLease(currentLease, containingLease) || currentLease?.state !== 'active') {
+        const currentLease = mutationLease === undefined ? undefined : this.#pool?.getLease(mutationLease.id);
+        const leaseValid = containingLease !== undefined
+          ? sameMcpLease(currentLease, containingLease)
+          : currentLease?.mode === 'read' && currentLease.holderId === agentId && currentLease.runId === runId;
+        if (!leaseValid || currentLease?.state !== 'active') {
           return operationResult(fixed, operationId, operation, 'failed', 'containing-lease-unavailable');
         }
         mutationLease = currentLease;
+        keepMutationLeaseAlive();
+        if (containingLease === undefined) {
+          try {
+            await ensureWorkspaceBindingAttached();
+          } catch {
+            return operationResult(fixed, operationId, operation, 'failed', 'worker-unavailable');
+          }
+        }
       }
       if (mutating && (runId === undefined || requestedOperationId === undefined || requestedOperationId.length < 1 || requestedOperationId.length > 512)) {
         return operationResult(fixed, operationId, operation, 'failed', 'operation-identity-required');
@@ -907,8 +1004,10 @@ export class EnvironmentOperations {
     };
 
     const remoteOperations: ('read' | 'search' | 'edit' | 'patch' | 'command')[] = [];
-    if (containingLease !== undefined) {
-      remoteOperations.push('read', 'search');
+    const canAcquireReadLease = runId !== undefined && this.#pool?.requiresLeaseForBoundOperation(
+      access.environmentInstanceId, READ_CAPABILITY) === true;
+    if (containingLease !== undefined || canAcquireReadLease) remoteOperations.push('read', 'search');
+    if (containingLease !== undefined && mutationLease?.mode !== 'read') {
       const enrollment = await this.#enrollments.get(live.enrollment.id);
       const mutationCapability = this.#catalog.entry(access.environmentInstanceId)?.definition.capabilities.find(c => c.name === MUTATION_CAPABILITY);
       const operations = await this.#environment.info?.(access.environmentInstanceId);
@@ -923,6 +1022,7 @@ export class EnvironmentOperations {
         generation: binding.generation!, connectionEpoch: epoch, workspaceId: binding.workspaceId, kind: binding.kind,
         ...(binding.path !== undefined ? { path: binding.path } : {}) },
       ...(options.bindingFence !== undefined ? { bindingFence: options.bindingFence } : {}),
+      ...(workspaceMode !== undefined ? { leaseMode: workspaceMode } : {}),
       operations: remoteOperations,
       read: (path, operationId) => execute('read', { path }, operationId),
       search: (query, path, operationId) => execute('search', { query, ...(path !== undefined ? { path } : {}) }, operationId),
@@ -933,6 +1033,7 @@ export class EnvironmentOperations {
       }, operationId, onProgress),
       settle: async outcome => {
         settlementRequested = true;
+        if (outcome === 'unknown') uncertainOutcome = true;
         if (outcome === 'unknown' && mutationLease !== undefined) this.#pool?.markRecovering(mutationLease.id);
         if (outcome === 'unknown') stopLeaseKeepalive?.();
         if (outcome === 'unknown') {
@@ -1278,9 +1379,10 @@ function projectMcpLeaseIdentity(scope: ProjectMcpLeaseScope): ProjectMcpLeaseId
     ...(scope.taskId !== undefined ? { taskId: scope.taskId } : {}),
   };
 }
-function sameMcpLease(lease: EnvironmentLease | undefined, scope: ProjectMcpLeaseScope): boolean {
+function sameMcpLease(lease: EnvironmentLease | undefined, scope: ProjectMcpLeaseScope | WorkspaceContainingLease): boolean {
+  const expectedMode = scope.leaseCapability === READ_CAPABILITY ? 'read' : 'read-write';
   if (!lease || lease.id !== scope.leaseId || lease.instanceId !== scope.environmentInstanceId || lease.capability !== scope.leaseCapability ||
-      (lease.holderKind ?? 'run') !== scope.holderKind || lease.holderId !== scope.holderId) return false;
+      lease.mode !== expectedMode || (lease.holderKind ?? 'run') !== scope.holderKind || lease.holderId !== scope.holderId) return false;
   if (scope.holderKind === 'run') return scope.taskId === undefined && lease.taskId === undefined && lease.runId === scope.runId;
   return scope.taskId !== undefined && scope.holderId === scope.taskId && lease.taskId === scope.taskId;
 }
@@ -1424,7 +1526,7 @@ function stableOperationId(runId: string | undefined, requested: string | undefi
 }
 
 function operationResult(identity: AttachWorkspaceBindingParams, operationId: string, operation: 'read' | 'search' | 'edit' | 'patch' | 'command', status: 'completed' | 'failed' | 'cancelled' | 'recovery-required', failure?: string,
-  leaseConflict?: { readonly holderId: string; readonly state: 'active' | 'recovering' }): RemoteWorkspaceOperationResult {
+  leaseConflict?: { readonly leaseId: string; readonly holderId: string; readonly state: 'active' | 'recovering' }): RemoteWorkspaceOperationResult {
   return { operationId, projectId: identity.projectId, environmentInstanceId: identity.environmentInstanceId,
     bindingId: identity.bindingId, generation: identity.generation, connectionEpoch: identity.connectionEpoch,
     workspaceId: identity.workspaceId, operation, status, ...(failure !== undefined ? { failure } : {}),

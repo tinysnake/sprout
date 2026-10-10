@@ -11,6 +11,7 @@ import type { HostPiEngineAdapter } from './engine/pi-host.ts';
 import type { HostCodexEngineAdapter } from './engine/codex-host.ts';
 import type { AgentRunEvent, RemoteWorkspaceOperationResult, StartSessionRequest } from './engine/port.ts';
 import { toRunView } from './web/views.ts';
+import { privateInput, signIn } from './web/api-harness.ts';
 import type { ProjectMcpClientLauncher } from './worker/project-mcp.ts';
 import { loadOrCreateWorkerIdentity, workerPublicKey } from './worker/enrollment-connector.ts';
 import {
@@ -28,6 +29,7 @@ for (const hostEngine of ['pi', 'codex'] as const) test(`a selected Host-run ${h
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const workerRoot = join(directory, 'worker-workspaces');
   const keyPath = join(directory, 'worker-key.pem');
+  const credential = privateInput();
   const model = 'provider/model-host';
   const runtimeProject = { ...project(), memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }] };
   const profileId = `profile-runtime-remote-read-${hostEngine}`;
@@ -77,6 +79,7 @@ for (const hostEngine of ['pi', 'codex'] as const) test(`a selected Host-run ${h
         project: runtimeProject,
       },
       databasePath: join(directory, 'state.db'),
+      operatorCredential: credential,
     }),
     projectRoot: '/synthetic/project-root',
     ...(hostEngine === 'pi' ? { hostPi: host as HostPiEngineAdapter } : { hostCodex: host as HostCodexEngineAdapter }),
@@ -118,17 +121,58 @@ for (const hostEngine of ['pi', 'codex'] as const) test(`a selected Host-run ${h
     assert.equal(direct.failure, 'lease-required');
     assert.equal(readFileSync(join(workerRoot, 'repos', 'remote-read', 'sentinel.txt'), 'utf8'), 'REMOTE_WORKER_SENTINEL');
 
+    const readerA = await runtime.environmentOperations.attach('remote-read-project', 'scout', 'read-only-run-a');
+    const readerB = await runtime.environmentOperations.attach('remote-read-project', 'scout', 'read-only-run-b');
+    assert.equal(readerA.leaseMode, 'read');
+    assert.deepEqual(readerA.operations, ['read', 'search']);
+    const [readA, readB] = await Promise.all([
+      readerA.read('sentinel.txt', 'read-only-operation-a'),
+      readerB.read('sentinel.txt', 'read-only-operation-b'),
+    ]);
+    assert.equal(readA.status, 'completed', readA.failure ?? '');
+    assert.equal(readB.status, 'completed', readB.failure ?? '');
+    const readLeases = runtime.pool.activeLeases(INSTANCE_ID);
+    assert.equal(readLeases.length, 2);
+    assert.ok(readLeases.every((lease) => lease.mode === 'read'));
+
+    const address = runtime.api.server.address();
+    const port = address !== null && typeof address === 'object' ? address.port : (await runtime.api.listen(0, '127.0.0.1')).port;
+    const base = `http://127.0.0.1:${port}`;
+    const browser = await signIn(base, credential);
+    const leaseResponse = await fetch(`${base}/api/leases`, { headers: { cookie: browser.cookie } });
+    assert.equal(leaseResponse.status, 200);
+    const leaseProjection = await leaseResponse.json() as {
+      leases: { id: string; mode: string; state: string; runId?: string }[];
+      readOnlyLeaseSemantics: string;
+    };
+    assert.equal(leaseProjection.leases.filter((lease) => lease.state === 'active' && lease.mode === 'read').length, 2);
+    assert.match(leaseProjection.readOnlyLeaseSemantics, /concurrent readers/);
+    assert.match(leaseProjection.readOnlyLeaseSemantics, /Files may change/);
+    assert.match(leaseProjection.readOnlyLeaseSemantics, /no snapshot or copy-on-write/);
+
+    const blockedWriter = await runtime.orchestrator.submit({
+      agentId: 'scout', projectId: 'remote-read-project', workEnvironmentInstanceId: INSTANCE_ID, prompt: 'Try to read while readers hold leases.',
+    });
+    const blockedRun = await runtime.orchestrator.waitFor(blockedWriter.id);
+    assert.equal(blockedRun.status, 'failed');
+    await readerA.settle?.('settled');
+    await readerB.settle?.('settled');
+    assert.deepEqual(runtime.pool.activeLeases(INSTANCE_ID), []);
+
     const { id } = await runtime.orchestrator.submit({
       agentId: 'scout', projectId: 'remote-read-project', workEnvironmentInstanceId: INSTANCE_ID, prompt: 'Read sentinel.txt.',
     });
     const run = await runtime.orchestrator.waitFor(id);
     if (run.status !== 'completed') throw new Error(`Host-run failed: ${run.failure ?? 'no failure detail'}`);
+    assert.equal(run.workspaceBinding?.leaseMode, 'read-write');
+    assert.equal(toRunView(run).workspaceBinding?.leaseMode, 'read-write');
     assert.equal(run.executionMode, 'host-run');
     assert.equal(run.engineHostProfileId, profileId);
     assert.equal(observed.length, 1);
     assert.equal(observed[0]?.status, 'completed');
     assert.equal(observed[0]?.content, 'REMOTE_WORKER_SENTINEL');
-    assert.ok(runtime.pool.leases().every(row => row.state === 'released'), 'the selected Agent-run lease releases after settled remote reading');
+    assert.ok(runtime.pool.leases().every(row => row.state === 'released'), 'all settled remote read and write leases release');
+    assert.equal(runtime.pool.getLease(run.leaseId!)?.mode, 'read-write', 'the Host-run writer enters through the real run acquisition path');
   } finally {
     await runtime.close();
   }
@@ -295,6 +339,61 @@ test('selected Host-run keeps scoped Environment history while independent conve
     if (staleRead?.status !== 'failed') throw new Error(`Prior binding read was not rejected: ${JSON.stringify(staleRead)}`);
     assert.equal(reads.length, 3, 'the stale call never executes against either Worker');
     assert.ok(runtime.pool.leases().every(row => row.state === 'released'), 'selected read-only Work Environment leases release after the run');
+  } finally {
+    await runtime.close();
+  }
+});
+test('Worker channel loss protects every concurrent read lease with Environment recovery', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-read-recovery-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const keyPath = join(directory, 'worker-key.pem');
+  const runtime = await createRuntime({
+    configuration: hostConfiguration({
+      executionMode: 'host-run', environmentSource: 'enrollment',
+      databasePath: join(directory, 'state.db'),
+    }),
+    projectRoot: '/synthetic/project-root',
+  });
+  try {
+    const identity = loadOrCreateWorkerIdentity(keyPath);
+    const enrollment = await runtime.enrollments.requestEnrollment({
+      environmentInstanceId: INSTANCE_ID, displayName: 'Concurrent reader Worker',
+      publicKey: workerPublicKey(identity.privateKey), platform: 'macos', protocolVersion: '3.0',
+      capabilityRequests: ['read-only-investigation'], engineFacts: [],
+    });
+    await runtime.enrollments.approve(enrollment.enrollment.id, {
+      capabilityPermissions: { 'read-only-investigation': true },
+    });
+    const connection = await connectRuntimeWorker(
+      runtime, enrollment.enrollment.id, keyPath, undefined, join(directory, 'worker-workspaces'),
+    );
+    const acquireRead = (holderId: string) => runtime.pool.acquireBoundOperationLeaseRevalidated({
+      instanceId: INSTANCE_ID, capability: 'read-only-investigation', mode: 'read',
+      holderId, runId: holderId, ttlMs: 60_000,
+    });
+    const first = await acquireRead('reader-one');
+    const second = await acquireRead('reader-two');
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    if (!first.ok || !second.ok) throw new Error('both read leases should be admitted');
+
+    connection.close();
+    await waitFor(() => runtime.workerGateway.liveFor(INSTANCE_ID) === undefined, 'Worker disconnection');
+    assert.deepEqual(
+      [runtime.pool.getLease(first.lease.id)?.state, runtime.pool.getLease(second.lease.id)?.state],
+      ['recovering', 'recovering'],
+      'loss of one Worker channel fences every reader that depended on it',
+    );
+    await waitFor(async () =>
+      Boolean(await runtime.recovery.forLease(first.lease.id)) &&
+      Boolean(await runtime.recovery.forLease(second.lease.id)),
+    'recovery records for both read leases');
+
+    const blocked = await acquireRead('reader-three');
+    assert.equal(blocked.ok, false);
+    if (blocked.ok) throw new Error('recovery must block a new reader');
+    assert.equal(blocked.conflict?.kind, 'recovery');
+    assert.equal(blocked.conflict?.kind === 'recovery' ? blocked.conflict.holders.length : 0, 2);
   } finally {
     await runtime.close();
   }
@@ -817,12 +916,12 @@ test('selected Host-run performs remote edits and commands under an Agent-run le
     assert.equal(sameIdentity.failure, 'operation-outcome-inspection-required');
 
     const holder = await runtime.pool.acquireBoundOperationLeaseRevalidated({
-      instanceId: INSTANCE_ID, capability: 'agent-run', holderId: 'other-agent', runId: 'other-run', ttlMs: 60_000,
+      instanceId: INSTANCE_ID, capability: 'agent-run', mode: 'read-write', holderId: 'other-agent', runId: 'other-run', ttlMs: 60_000,
     });
     assert.equal(holder.ok, true);
     const blockedTools = await runtime.environmentOperations.attach('remote-mutation-project', 'scout', 'blocked-run');
     const blocked = await blockedTools.edit!('src/target.txt', 'REMOTE_PATCHED', 'SHOULD_NOT_APPLY', 'blocked-edit-1');
-    assert.equal(blocked.failure, 'containing-lease-unavailable');
+    assert.equal(blocked.failure, 'read-only-lease');
     assert.equal(readFileSync(join(workerRoot, 'repos', 'remote-mutation', 'src', 'target.txt'), 'utf8'), 'REMOTE_PATCHED');
     assert.equal(runtime.pool.getLease(holder.lease.id)?.state, 'active', 'refused workspace tools do not alter the competing lease');
     runtime.pool.releaseLease(holder.lease.id);

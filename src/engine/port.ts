@@ -182,7 +182,7 @@ export interface RemoteWorkspaceOperationResult {
   readonly changedPaths?: readonly string[];
   readonly truncated?: boolean;
   readonly failure?: string;
-  readonly leaseConflict?: { readonly holderId: string; readonly state: 'active' | 'recovering' };
+  readonly leaseConflict?: { readonly leaseId: string; readonly holderId: string; readonly state: 'active' | 'recovering' };
 }
 
 
@@ -235,6 +235,7 @@ export interface RemoteWorkspaceTools {
     readonly kind?: 'default' | 'relative';
     readonly path?: string;
   };
+  readonly leaseMode?: import('../environment/model.ts').EnvironmentLeaseMode;
   readonly bindingFence?: BindingGenerationFence;
   readonly operations?: readonly ('read' | 'search' | 'edit' | 'patch' | 'command')[];
   read(path: string, operationId?: string): Promise<RemoteWorkspaceOperationResult>;
@@ -243,14 +244,14 @@ export interface RemoteWorkspaceTools {
   command?(executable: string, args: readonly string[], options: { readonly cwd?: string; readonly timeoutMs?: number }, operationId: string,
     onProgress?: (progress: RemoteWorkspaceProgress) => void): Promise<RemoteWorkspaceOperationResult>;
   patch?(path: string, hunks: readonly { readonly before: string; readonly after: string }[], operationId?: string): Promise<RemoteWorkspaceOperationResult>;
-  /** Release or protect a lazily acquired mutation lease after run settlement. */
+  /** Release or protect the attached Environment lease after run settlement. */
   settle?(outcome: 'settled' | 'unknown'): Promise<void>;
   inspect(operationId: string): Promise<{ readonly status: string; readonly operation?: RemoteWorkspaceOperationResult }>;
   cancel(operationId: string): Promise<{ readonly accepted: boolean; readonly status: string }>;
 }
 
 export interface StartSessionRequest {
-  /** An opaque, core-authorized read-only Project workspace capability for Host-run tools. */
+  /** An opaque Project workspace capability. Read leases allow concurrent readers; files may change while held, with no snapshot or copy-on-write. */
   readonly remoteWorkspace?: RemoteWorkspaceTools;
   /** Origin-bound MCP tools backed by the containing run's active Environment lease. */
   readonly remoteProjectMcp?: RemoteProjectMcpTools;

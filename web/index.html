@@ -104,6 +104,7 @@
 
       <section id="leases" aria-live="polite">
         <h2>Environment Leases</h2>
+        <p id="lease-semantics">Read leases allow concurrent readers. Files may change while a read lease is held; readers do not get a snapshot or copy-on-write.</p>
         <ul id="lease-list"></ul>
       </section>
 
