@@ -18,14 +18,22 @@
 
 The Pi results are blockers, not passes. They establish neither model-issued host isolation nor a Host-run Message/Task outcome for the installed Pi profile.
 
+### Codex
+
+| Scenario | Actual result | Evidence |
+| --- | --- | --- |
+| Full origin-sensitive model-issued run | **Incomplete after one bounded run.** The readiness probe reported installation, authentication, model availability, adapter controls, and dynamic tool support ready. The app server accepted the required workspace and Project MCP tool catalog, but the completed model turn issued **zero** workspace or Project MCP calls. The remote file remained `REMOTE_BEFORE`; both same-name host sentinels remained byte-identical; no sentinel read attempt occurred. | Command: `SPROUT_HOST_CODEX_MODEL=gpt-6.1-sol SPROUT_HOST_CODEX_CONFORMANCE_MODE=full node scripts/codex-host-conformance.ts`; Codex CLI `0.159.3`, macOS `sandbox-exec`. |
+
+The model emitted 73 message events and 3 notices, then completed without using the accepted dynamic tools. The run recorded 12,600 prompt tokens and 49 completion tokens; billing basis was `unknown` and provider cost estimate was `unavailable`. This is not a pass and does not establish denied host reads/writes or no fallback. The attempt was not retried. The separate #248 host-authority prerequisite remains unresolved.
+
 ## Acceptance matrix
 
-The seven original criteria are tracked in the final work record on #252. This evidence file will be updated after each bounded engine scenario and before proceeding to the next one.
+The seven original criteria are tracked in the final work record on #252. This evidence file records each bounded engine scenario before proceeding to another one.
 
 | Engine | No-Environment conversation | Remote read/edit/test | stdio/HTTP/editor tools | Stale binding | Context restoration | Interruption/recovery | Task lifecycle | Host read/write denial, no fallback |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Pi | Blocked before model turn | Not run | Not run | Not run | Not run | Not run | Not run | Not evidenced in this attempt |
-| Codex | Pending | Pending | Pending | Pending | Pending | Pending | Pending | Pending |
+| Codex | Not run | No operations issued | Catalog accepted; no tool called | Not run | Not run | Not run | Not run | Not evidenced; no sentinel read attempt |
 | Claude Code | Pending | Pending | Pending | Pending | Pending | Pending | Pending | Pending |
 
 ## Prior scope evidence and known limits
