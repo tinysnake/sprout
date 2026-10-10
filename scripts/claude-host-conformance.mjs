@@ -357,7 +357,7 @@ try {
       };
       const readiness = await runtime.hostClaudeReadiness();
       const finalMessage = run.events.filter(event => event.type === 'message' && event.final).at(-1);
-      const exactPong = finalMessage?.text.trim() === 'PONG';
+      const exactPong = finalMessage?.text === 'PONG';
       const modelIssuedTools = run.events.filter(event => event.type === 'tool-call').map(event => event.name);
       let taskAfterRun;
       let taskIdleAfterRun = false;
@@ -425,7 +425,8 @@ try {
       const noEnvironmentPassed = noEnvironmentMode && run.status === 'completed' && run.workOption?.engine === 'claude' &&
         run.executionPlacement?.mode === 'host-run' && run.environmentInstanceId === '' && run.workspaceBinding === undefined &&
         run.workspaceBindingStatus === 'detached' && observations.workspaceCatalog.length === 0 &&
-        observations.workspace.length === 0 && observations.projectMcp.length === 0 && modelIssuedTools.length === 0 && exactPong;
+        observations.workspace.length === 0 && observations.projectMcp.length === 0 && leaseStates.length === 0 &&
+        modelIssuedTools.length === 0 && exactPong;
       const expectedEvidence = noEnvironmentMode
         ? noEnvironmentPassed
         : taskCommandMode
@@ -456,6 +457,7 @@ try {
         environmentAttached: run.environmentInstanceId !== '',
         workspaceBindingPresent: run.workspaceBinding !== undefined,
         workspaceBindingStatus: run.workspaceBindingStatus,
+        finalText: finalMessage?.text ?? null,
         exactPong,
         modelIssuedTools,
         workspaceCatalog: observations.workspaceCatalog,
