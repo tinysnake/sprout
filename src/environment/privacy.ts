@@ -491,6 +491,17 @@ export function sanitizeIdentifier(value: string, options: SanitizeIdentifierOpt
   // outright rather than reduced to its non-punctuation characters.
   const redacted = redactSensitiveText(trimmed);
   if (redacted !== trimmed || /<redacted-[a-z-]+>/i.test(redacted)) return options.fallback;
+  // Claude Code gateway aliases may carry a context-window qualifier. Admit
+  // only that bounded suffix shape, after structural redaction, and preserve it
+  // verbatim; arbitrary bracketed text remains outside the model identifier
+  // grammar and is refused instead of punctuation-stripped into another id.
+  if (kind === 'model' && /[\[\]]/.test(trimmed)) {
+    const qualified = /^([A-Za-z][A-Za-z0-9._/-]*)\[([1-9]\d{0,2}[km])\]$/i.exec(trimmed);
+    if (qualified === null || trimmed.length > maxLength || !matchesIdentifierShape(qualified[1] ?? '', kind)) {
+      return options.fallback;
+    }
+    return trimmed;
+  }
   // Stage 2: drop characters no identifier category may contain and bound it.
   // A single interior slash is a provider-scoped model id (`xiaomi/mimo-v2.6-flash`,
   // `openrouter/moonshotai/kimi-k2.6`), the form engines actually resolve, so it

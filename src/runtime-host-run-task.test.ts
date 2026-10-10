@@ -7,6 +7,7 @@ import { ScriptedEngineAdapter } from './engine/scripted.ts';
 import type { HostPiEngineAdapter } from './engine/pi-host.ts';
 import { HostCodexEngineAdapter } from './engine/codex-host.ts';
 import type { HostClaudeEngineAdapter } from './engine/claude-host.ts';
+import { CLAUDE_CODE_AUTHORIZED_MODEL } from './engine/claude-host.ts';
 import type { StartSessionRequest } from './engine/port.ts';
 import { loadOrCreateWorkerIdentity, workerPublicKey } from './worker/enrollment-connector.ts';
 import { toTaskContextState } from './web/views.ts';
@@ -18,7 +19,7 @@ for (const hostEngine of ['pi', 'codex', 'claude'] as const) test(`Human-authori
   const workerRoot = join(directory, 'worker');
   const workspace = join(workerRoot, 'repos', 'host-task');
   const keyPath = join(directory, 'worker-key.pem');
-  const model = 'provider/model-host';
+  const model = hostEngine === 'claude' ? CLAUDE_CODE_AUTHORIZED_MODEL : 'provider/model-host';
   const effort = hostEngine === 'claude' ? 'high' : 'medium';
   let readinessProbeCalls = 0;
   let claudeEffortReady = false;
@@ -37,6 +38,7 @@ for (const hostEngine of ['pi', 'codex', 'claude'] as const) test(`Human-authori
   let runToolsUsed = false;
   let hostInstructions = '';
   let sessionPrompt = '';
+  let hostSessionStarts = 0;
   let runtime: Awaited<ReturnType<typeof createRuntime>>;
   const host = {
     id: hostEngine, profileId, authorizedModel: model, capabilities: engine.capabilities,
@@ -48,6 +50,7 @@ for (const hostEngine of ['pi', 'codex', 'claude'] as const) test(`Human-authori
         modelAvailability: 'available', adapterControls: 'ready', version: '1.0.4', observedAt: 1 };
     },
     async startSession(request: StartSessionRequest) {
+      hostSessionStarts += 1;
       hostInstructions = request.instructions ?? '';
       const session = await engine.startSession(request);
       return {
@@ -55,6 +58,7 @@ for (const hostEngine of ['pi', 'codex', 'claude'] as const) test(`Human-authori
         run(prompt: string) {
           sessionPrompt = prompt;
           const turn = session.run(prompt);
+          if (request.remoteWorkspace === undefined) return turn;
           return { events: turn.events, completion: (async () => {
             const leaseRows = runtime.pool.leases();
             assert.equal(leaseRows.length, 1, 'workspace and MCP calls share the Task lease');
@@ -101,6 +105,20 @@ for (const hostEngine of ['pi', 'codex', 'claude'] as const) test(`Human-authori
       : hostEngine === 'codex' ? { hostCodex: host as HostCodexEngineAdapter }
         : { hostClaude: host as HostClaudeEngineAdapter }) });
   try {
+    if (hostEngine === 'claude') {
+      const option = { id: 'host-claude-authorized', engine: 'claude', workModel: CLAUDE_CODE_AUTHORIZED_MODEL, effort: 'high' };
+      const created = await runtime.agentService.create({ id: 'scout', displayName: 'Scout', workOptions: [option] });
+      assert.equal(created.configuration.versions[0]!.options[0]!.workModel, CLAUDE_CODE_AUTHORIZED_MODEL);
+      const configured = await runtime.agentService.reconfigure('scout', { workOptions: [option] });
+      assert.equal(configured.configuration.versions[1]!.options[0]!.workModel, CLAUDE_CODE_AUTHORIZED_MODEL);
+      const conversation = await runtime.orchestrator.submit({ agentId: 'scout', projectId: 'composition-project', prompt: 'Reply without remote work.' });
+      const conversationRun = await runtime.orchestrator.waitFor(conversation.id);
+      assert.equal(conversationRun.status, 'completed', conversationRun.failure ?? 'service-created Claude conversation was refused');
+      assert.equal(conversationRun.workOption?.workModel, CLAUDE_CODE_AUTHORIZED_MODEL);
+      assert.equal(conversationRun.executionPlacement?.engineHost?.id, profileId, 'the Human-selected Host Claude profile admitted the run');
+      assert.equal(runtime.pool.leases().length, 0, 'Host-run conversation did not fall back to Environment work');
+      assert.equal(hostSessionStarts, 1);
+    }
     const identity = loadOrCreateWorkerIdentity(keyPath);
     const enrollment = await runtime.enrollments.requestEnrollment({
       environmentInstanceId: INSTANCE_ID, displayName: 'Host Task Worker',
@@ -164,6 +182,7 @@ for (const hostEngine of ['pi', 'codex', 'claude'] as const) test(`Human-authori
     assert.equal(settled.executionPlacement?.mode, 'host-run');
     assert.equal(settled.executionPlacement?.engineHost?.id, profileId);
     assert.equal(settled.workOption?.engine, hostEngine);
+    if (hostEngine === 'claude') assert.equal(settled.workOption?.workModel, CLAUDE_CODE_AUTHORIZED_MODEL);
     assert.equal(settled.leaseId, taskLeaseId);
     assert.equal(runToolsUsed, true);
     if (codexProfile !== undefined) {

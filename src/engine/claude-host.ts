@@ -11,6 +11,7 @@ import { EngineStartError, type EngineSession, type EngineTurn, type EngineTurnR
 import type { HostEngineReadiness, HostRunEngineAdapter } from './host-profile.ts';
 import type { RemoteProjectMcpTools, RemoteWorkspaceOperationResult, RemoteWorkspaceTools } from './port.ts';
 import { macOsTimezoneFiles } from './host-runtime-files.ts';
+import { redactSensitiveText } from '../environment/privacy.ts';
 
 export const CLAUDE_CODE_HOST_VERSION = '2.1.294';
 /** Human-authorized value resolved from Claude Code's read-only user settings. */
@@ -541,8 +542,9 @@ class HostClaudeSession implements EngineSession {
       for (const block of event.message.content) {
         if (!isRecord(block)) continue;
         if (block.type === 'text' && typeof block.text === 'string') {
-          this.#turnText += block.text;
-          this.#activeQueue?.push({ type: 'message', text: block.text, final: false });
+          const text = sanitizeClaudeEventText(block.text);
+          this.#turnText += text;
+          this.#activeQueue?.push({ type: 'message', text, final: false });
         } else if (block.type === 'tool_use' && typeof block.name === 'string') {
           if (!this.#allowedTools.some(tool => `mcp__${MCP_SERVER_NAME}__${tool.name}` === block.name)) { this.#protocolFailure = true; continue; }
           this.#activeQueue?.push({ type: 'tool-call', name: block.name, detail: 'Authorized Environment operation.' });
@@ -553,13 +555,14 @@ class HostClaudeSession implements EngineSession {
     if (event.type === 'user' && isRecord(event.message) && Array.isArray(event.message.content)) {
       for (const block of event.message.content) if (isRecord(block) && block.type === 'tool_result') {
         const text = Array.isArray(block.content) ? block.content.filter(isRecord).filter(item => item.type === 'text' && typeof item.text === 'string').map(item => item.text).join('\n') : '';
-        if (text !== '') this.#activeQueue?.push({ type: 'tool-output', text });
+        const sanitized = sanitizeClaudeEventText(text);
+        if (sanitized !== '') this.#activeQueue?.push({ type: 'tool-output', text: sanitized });
       }
       return;
     }
     if (event.type === 'result') {
       this.#resultObserved = true;
-      if (typeof event.result === 'string') this.#turnText = event.result;
+      if (typeof event.result === 'string') this.#turnText = sanitizeClaudeEventText(event.result);
       if (isRecord(event.usage)) this.#turnUsage = Object.fromEntries(Object.entries(event.usage).filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1])));
       if (event.subtype !== 'success' || event.is_error === true) this.#protocolFailure = true;
     }
@@ -581,6 +584,12 @@ class HostClaudeSession implements EngineSession {
     this.#activeQueue?.push({ type: 'message', text: finalText, final: true });
     finish(result);
   }
+}
+
+function sanitizeClaudeEventText(value: string): string {
+  const redacted = redactSensitiveText(value);
+  const trailingLineBreaks = value.match(/[\r\n]+$/)?.[0] ?? '';
+  return `${redacted}${trailingLineBreaks}`;
 }
 
 interface ClaudeTool {

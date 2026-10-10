@@ -12,7 +12,7 @@ import {
   hostClaudeIsolationProfileForTest,
   type HostClaudeLaunchInput,
 } from './claude-host.ts';
-import type { RemoteWorkspaceTools, StartSessionRequest } from './port.ts';
+import type { AgentRunEvent, RemoteWorkspaceTools, StartSessionRequest } from './port.ts';
 
 function settings(path: string, values: { readonly model?: string; readonly effortLevel?: string; readonly token?: string } = {}): void {
   writeFileSync(path, JSON.stringify({
@@ -25,7 +25,7 @@ function settings(path: string, values: { readonly model?: string; readonly effo
   }), { mode: 0o600 });
 }
 
-function request(): StartSessionRequest {
+function request(remoteContent = 'REMOTE_CONTENT'): StartSessionRequest {
   const tools: RemoteWorkspaceTools = {
     binding: { projectId: 'project', environmentInstanceId: 'environment', bindingId: 'binding', generation: 1,
       connectionEpoch: 1, workspaceId: 'workspace', kind: 'default' },
@@ -35,7 +35,7 @@ function request(): StartSessionRequest {
       assert.match(operationId ?? '', /^[0-9a-f-]{36}$/);
       return { operationId: operationId ?? 'missing', projectId: 'project', environmentInstanceId: 'environment',
         bindingId: 'binding', generation: 1, connectionEpoch: 1, workspaceId: 'workspace', operation: 'read',
-        status: 'completed', path, content: 'REMOTE_CONTENT' };
+        status: 'completed', path, content: remoteContent };
     },
     async search() { throw new Error('not exposed'); },
     async inspect() { return { status: 'unknown' }; },
@@ -84,6 +84,7 @@ process.stdin.on('end', async () => {
     mcp_servers: [{ name: 'sprout', status: 'connected' }] }) + '\n');
   const called = await rpc('tools/call', { name: 'workspace_read', arguments: { path: 'remote.txt' } });
   process.stdout.write(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: names[0] }] } }) + '\n');
+  process.stdout.write(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'safe assistant before api_key=synthetic-secret endpoint https://gateway.invalid:4312 hostname buildbox-7 path /Users/worker/private.txt after' }] } }) + '\n');
   process.stdout.write(JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', content: called.result.content }] } }) + '\n');
   process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'Remote read complete.', usage: { input_tokens: 7, output_tokens: 3 } }) + '\n');
   socket.end();
@@ -237,6 +238,59 @@ test('Host Claude bridges only typed Environment tools and translates native str
     assert.ok(observed.includes('tool-call'));
     assert.ok(observed.includes('tool-output'));
     assert.ok(observed.includes('message'));
+  } finally { await session.close(); }
+});
+
+test('Host Claude sanitizes assistant text and remote tool results before live events and final results', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-claude-output-privacy-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const settingsPath = join(directory, 'settings.json');
+  settings(settingsPath);
+  const binaryDirectory = join(directory, 'bin');
+  mkdirSync(binaryDirectory);
+  const binaryPath = join(binaryDirectory, 'claude');
+  writeFileSync(binaryPath, 'synthetic CLI executable\\n', { mode: 0o700 });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${binaryDirectory}${delimiter}${previousPath ?? ''}`;
+  t.after(() => { if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath; });
+  const assistantMarkers = 'api_key=synthetic-secret endpoint https://gateway.invalid:4312 hostname buildbox-7 path /Users/worker/private.txt';
+  const toolMarkers = 'token=remote-secret https://remote.invalid:8443 node-12 /private/remote/secret.txt';
+  const remoteWorkspace = request(`safe tool before ${toolMarkers} after`).remoteWorkspace!;
+  const script = fakeCliScript()
+    .replace('api_key=synthetic-secret endpoint https://gateway.invalid:4312 hostname buildbox-7 path /Users/worker/private.txt', assistantMarkers)
+    .replace("'Remote read complete.'", JSON.stringify(`safe final before ${assistantMarkers} after`));
+  const adapter = new HostClaudeEngineAdapter({
+    binaryPath: 'claude', settingsPath, runnerRoot: join(directory, 'runner'),
+    probeProcess: async input => ({ profileId: input.profileId, engine: 'claude', status: 'ready', installation: 'ready',
+      authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready', version: '2.1.294',
+      resolvedModel: CLAUDE_CODE_AUTHORIZED_MODEL, supportedEfforts: ['high'], observedAt: 1 }),
+    spawnProcess: (_input, args) => spawn(process.execPath, ['-e', script, '--', ...args], {
+      stdio: ['pipe', 'pipe', 'pipe'], detached: true,
+    }),
+  });
+  const session = await adapter.startSession({ ...request(), remoteWorkspace });
+  try {
+    const turn = session.run('Read one authorized remote file.');
+    const eventDrain = (async () => {
+      const events: AgentRunEvent[] = [];
+      for await (const event of turn.events) events.push(event);
+      return events;
+    })();
+    const result = await turn.completion;
+    const events = await eventDrain;
+    assert.equal(result.status, 'completed');
+    if (result.status !== 'completed') return;
+    const serialized = JSON.stringify({ events, result });
+    for (const marker of ['synthetic-secret', 'gateway.invalid', 'buildbox-7', '/Users/worker/private.txt',
+      'remote-secret', 'remote.invalid', 'node-12', '/private/remote/secret.txt']) {
+      assert.ok(!serialized.includes(marker), `sensitive marker survived live Claude output: ${marker}`);
+    }
+    assert.ok(events.some(event => event.type === 'message' && event.text.includes('safe assistant before')));
+    assert.ok(events.some(event => event.type === 'message' && event.text.includes('after')));
+    assert.ok(events.some(event => event.type === 'tool-output' && event.text.includes('safe tool before')));
+    assert.ok(events.some(event => event.type === 'tool-output' && event.text.includes('after')));
+    assert.ok(result.text.includes('safe final before'));
+    assert.ok(result.text.includes('after'));
   } finally { await session.close(); }
 });
 
