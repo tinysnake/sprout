@@ -1,4 +1,4 @@
-/** Bounded model-issued Host-run fixture; --task-http exercises HTTP Project MCP within a Task. */
+/** Bounded Host-run conformance fixtures for no-Environment and authorized Workspace/Project MCP Task scenarios. */
 import { createServer } from 'node:http';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
