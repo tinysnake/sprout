@@ -138,6 +138,25 @@ proves there is no leftover engine session and its Task context and lease agree
 with the Sprout instance. When a run was active, or those facts cannot be
 established, the Environment remains in reconciliation or recovery.
 
+## Lease modes and shared readers
+
+Environment capabilities declare a lease mode. `read` leases allow several
+read-only Remote workspace operations to use the same Environment at once. A
+`read-write` lease admits one holder and blocks both readers and other writers.
+An active writer blocks readers, and active readers block a writer; recovery
+continues to block every new lease until each recovering lease is resolved.
+
+A read lease protects access authority and recovery ownership only. It does not
+freeze the Project workspace, provide a snapshot, or use copy-on-write. Files
+may change while a read lease is active, so readers observe the workspace as it
+exists when each operation runs. Task-held leases remain exclusive `read-write`
+leases. Lease observability reports each holder's mode, and acquisition conflicts
+identify the writer or all readers that block the request.
+
+Recovery and release remain holder-specific. If a reader's outcome becomes
+uncertain, that read lease enters recovery and blocks new leases; resolving or
+releasing it does not release another reader's lease.
+
 ## Normal recovery and safe release
 
 A reconnecting socket is not proof that an Environment is safe to reassign.
