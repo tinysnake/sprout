@@ -32,11 +32,13 @@ const sentinelPaths = [
   join(directory, 'host-sentinel-b', workspaceRelativePath),
 ];
 const sentinelContents = ['HOST_SENTINEL_ALPHA', 'HOST_SENTINEL_BETA'];
-const projectMcpToolName = `sprout_project_mcp_${createHash('sha256').update('record_result').digest('hex').slice(0, 16)}`;
+const projectMcpDeclaredToolName = 'mcp_conformance_record_result';
+const projectMcpToolName = `sprout_project_mcp_${createHash('sha256').update(projectMcpDeclaredToolName).digest('hex').slice(0, 16)}`;
 let runtime: Awaited<ReturnType<typeof createRuntime>> | undefined;
 let providerTurnId: string | undefined;
+let acceptedDynamicToolNames: readonly string[] | undefined;
 let observedWorkspaceOperations: { readonly operation: string; readonly target: string; readonly status: string; readonly sentinelContentReturned: boolean }[] = [];
-let observedProjectMcpStatuses: string[] = [];
+let observedProjectMcpCalls: { readonly toolName: string; readonly status: string }[] = [];
 
 function safeFailure(error: unknown): string {
   const source = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
@@ -55,6 +57,7 @@ try {
     runnerRoot,
     ...(process.env['CODEX_HOME'] !== undefined ? { codexHome: process.env['CODEX_HOME'] } : {}),
     onTurnStarted: (turnId: string) => { providerTurnId = turnId; },
+    onDynamicToolCatalogAccepted: (toolNames: readonly string[]) => { acceptedDynamicToolNames = [...toolNames]; },
   };
   const hostCodex = new HostCodexEngineAdapter(codexOptions);
   let remoteToolCatalog = { workspaceOperations: [] as readonly string[], projectMcpToolCount: 0 };
@@ -88,7 +91,7 @@ try {
       ...sourceProjectMcp,
       call: async (name: string, arguments_: Readonly<Record<string, unknown>>) => {
         const result = await sourceProjectMcp.call(name, arguments_);
-        observedProjectMcpStatuses.push(result.status);
+        observedProjectMcpCalls.push({ toolName: name, status: result.status });
         return result;
       },
     };
@@ -173,42 +176,54 @@ try {
     projectId, environmentInstanceId: workerId, selection: { kind: 'relative', path: 'repos/conformance' },
   });
 
-  const sentinelsBefore = sentinelPaths.map(path => readFileSync(path, 'utf8'));
+  const sentinelsBefore = sentinelPaths.map(path => readFileSync(path));
   const submitted = await runtime.orchestrator.submit({
     agentId, projectId, workEnvironmentInstanceId: workerId,
     prompt: [
-      'Complete every operation below by calling the named Sprout tools. Do not answer from your own knowledge and do not write a final reply until all available remote operations have been called.',
-      'First call sprout_workspace_read with exactly {"path":"src/target.txt"}.',
-      'Then call sprout_workspace_patch with exactly {"path":"src/target.txt","hunks":[{"before":"REMOTE_BEFORE","after":"REMOTE_AFTER"}]}.',
-      'Call sprout_workspace_read again with exactly {"path":"src/target.txt"} and verify the returned content is REMOTE_AFTER.',
-      `Then call the approved Project MCP tool ${projectMcpToolName} exactly once with {"text":"MCP_PATH_OK"}.`,
-      `Finally call sprout_workspace_read with each path ../../../host-sentinel-a/src/target.txt and ../../../host-sentinel-b/src/target.txt. Those names match the host sentinels outside the selected workspace; the selected remote tool must refuse traversal without exposing their contents.`,
-      'In your final reply, report whether both sentinel reads were refused and whether the remote patch and Project MCP call succeeded. Do not quote any host path or sentinel content.',
+      'Use the dynamic tools listed below and perform every call in order before writing a final answer. A final answer before all calls complete is incorrect. Do not claim a tool is unavailable if its exact name appears here.',
+      '1. Call sprout_workspace_read with exactly {"path":"src/target.txt"}; confirm the current content is REMOTE_BEFORE.',
+      '2. Call sprout_workspace_patch with exactly {"path":"src/target.txt","hunks":[{"before":"REMOTE_BEFORE","after":"REMOTE_AFTER"}]}.',
+      '3. Call sprout_workspace_read again with exactly {"path":"src/target.txt"}; verify the content is REMOTE_AFTER.',
+      `4. Call the approved Project MCP dynamic tool ${projectMcpToolName} exactly once with {"text":"MCP_PATH_OK"}.`,
+      '5. Attempt sprout_workspace_read twice: first with exactly {"path":"../../../host-sentinel-a/src/target.txt"}, then with exactly {"path":"../../../host-sentinel-b/src/target.txt"}. These same-name host sentinels are outside the selected workspace; make both remote tool calls so traversal refusal is observable, and do not reveal any returned host content.',
+      'In your final reply, briefly report the patch, MCP call, and sentinel read outcome. Do not quote paths or sentinel contents.',
     ].join('\n'),
   });
   const run = await runtime.orchestrator.waitFor(submitted.id);
   if (run.status !== 'completed') throw new Error(`Host Codex run did not complete: status=${run.status}`);
 
   const remoteAfter = readFileSync(remoteTarget, 'utf8');
-  const sentinelsAfter = sentinelPaths.map(path => readFileSync(path, 'utf8'));
+  const sentinelsAfter = sentinelPaths.map(path => readFileSync(path));
   const sentinelReadResults = observedWorkspaceOperations.filter(operation => operation.operation === 'read' && operation.target.startsWith('host-sentinel-'));
   const sentinelReadsRefused = sentinelReadResults.filter(operation => operation.status === 'failed' && !operation.sentinelContentReturned).length;
   const successfulRemoteReads = observedWorkspaceOperations.filter(operation =>
     operation.operation === 'read' && operation.target === 'selected-target' && operation.status === 'completed').length;
   const completedRemotePatches = observedWorkspaceOperations.filter(operation =>
     operation.operation === 'patch' && operation.target === 'selected-target' && operation.status === 'completed').length;
-  const projectMcpCompleted = observedProjectMcpStatuses.filter(status => status === 'completed').length;
+  const projectMcpCompleted = observedProjectMcpCalls.filter(call => call.status === 'completed').length;
   const finalText = run.result?.status === 'completed' ? run.result.text : '';
   const usage = run.result?.status === 'completed' ? run.result.tokenUsage : undefined;
   const usageBasis = run.result?.status === 'completed' ? run.result.billingBasis : undefined;
   const providerCostEstimate = run.result?.status === 'completed' ? run.result.costEstimate : undefined;
   const mcpReceiptWritten = existsSync(mcpReceipt) && readFileSync(mcpReceipt, 'utf8') === 'MCP_PATH_OK';
-  const sentinelValues = sentinelsBefore.map((before, index) => ({ before, after: sentinelsAfter[index] ?? '', unchanged: before === sentinelsAfter[index] }));
+  const sentinelValues = sentinelsBefore.map((before, index) => {
+    const after = sentinelsAfter[index] ?? Buffer.alloc(0);
+    return {
+      byteLengthBefore: before.length,
+      byteLengthAfter: after.length,
+      sha256Before: createHash('sha256').update(before).digest('hex'),
+      sha256After: createHash('sha256').update(after).digest('hex'),
+      byteIdentical: before.equals(after),
+    };
+  });
+  const sentinelsByteIdentical = sentinelValues.every(sentinel => sentinel.byteIdentical);
+  const requiredToolNames = ['sprout_workspace_read', 'sprout_workspace_patch', projectMcpToolName];
+  const requiredToolNamesAccepted = requiredToolNames.every(name => acceptedDynamicToolNames?.includes(name) === true);
   const remotePatchVerified = remoteAfter === 'REMOTE_AFTER' && completedRemotePatches >= 1;
   const sentinelReadsBlocked = sentinelReadResults.length === sentinelPaths.length &&
     sentinelReadsRefused === sentinelPaths.length && !sentinelReadResults.some(operation => operation.sentinelContentReturned) &&
     !sentinelContents.some(value => finalText.includes(value));
-  const allEvidencePresent = remotePatchVerified && sentinelsBefore.every((value, index) => value === sentinelsAfter[index]) &&
+  const allEvidencePresent = requiredToolNamesAccepted && remotePatchVerified && sentinelsByteIdentical &&
     sentinelReadsBlocked && successfulRemoteReads >= 2 && completedRemotePatches >= 1 && mcpReceiptWritten && projectMcpCompleted >= 1;
   const runEventCounts = run.events.reduce<Record<string, number>>((counts, event) => {
     counts[event.type] = (counts[event.type] ?? 0) + 1;
@@ -230,7 +245,8 @@ try {
       installation: readiness.installation,
       authentication: readiness.authentication,
       modelAvailability: readiness.modelAvailability,
-      controlsFoundDisabled: controls,
+      controlsVerifiedDisabled: readiness.adapterControls === 'ready' ? controls : [],
+      adapterControls: readiness.adapterControls,
       dynamicToolSupportAccepted: readiness.adapterControls === 'ready',
     },
     pinnedPair: 'Codex CLI 0.159.3 / app-server JSON-RPC under macOS sandbox-exec',
@@ -239,13 +255,25 @@ try {
     executionMode: run.executionMode,
     workspaceBindingStatus: run.workspaceBindingStatus ?? null,
     remoteToolCatalog,
+    acceptedDynamicToolCatalog: {
+      appServerAccepted: acceptedDynamicToolNames !== undefined,
+      names: acceptedDynamicToolNames ?? [],
+      requiredNamesPresent: requiredToolNamesAccepted,
+    },
     runEventCounts,
     finalReplySignals,
     remoteFile: { before: 'REMOTE_BEFORE', after: remoteAfter, patchVerified: remotePatchVerified },
     remoteWorkspace: { successfulReads: successfulRemoteReads, completedPatches: completedRemotePatches,
       refusedHostSentinelReads: sentinelReadsRefused, sentinelReadAttempts: sentinelReadResults.length, operations: observedWorkspaceOperations, sentinelReadsBlocked },
-    projectMcp: { completedToolEvents: projectMcpCompleted, callStatuses: observedProjectMcpStatuses, receiptWritten: mcpReceiptWritten },
-    sentinels: { values: sentinelValues, unreadByTurn: sentinelReadsBlocked },
+    projectMcp: {
+      exposedToolName: projectMcpToolName,
+      declaredToolName: projectMcpDeclaredToolName,
+      completedToolEvents: projectMcpCompleted,
+      calls: observedProjectMcpCalls,
+      receiptWritten: mcpReceiptWritten,
+      resultSummary: projectMcpCompleted > 0 ? 'remote MCP fixture call completed' : 'no completed remote MCP fixture call',
+    },
+    sentinels: { fixtures: sentinelValues, byteIdentical: sentinelsByteIdentical, unreadByTurn: sentinelReadsBlocked },
     usage: usage === undefined ? 'unavailable' : usage,
     billingBasis: usageBasis ?? 'unknown',
     providerCostEstimate: providerCostEstimate ?? 'unavailable',

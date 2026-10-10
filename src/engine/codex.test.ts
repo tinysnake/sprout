@@ -193,6 +193,7 @@ test('Environment-hosted Codex events are sanitized before emission and durable 
 
 test('Codex publishes typed remote tools and dispatches app-server dynamic tool calls', async () => {
   let remoteReadCalls = 0;
+  let acceptedToolNames: readonly string[] | undefined;
   const remoteWorkspace: RemoteWorkspaceTools = {
     binding: { projectId: 'project-remote', environmentInstanceId: 'environment-remote', bindingId: 'binding-remote',
       generation: 3, connectionEpoch: 2, workspaceId: 'workspace-remote' },
@@ -228,12 +229,17 @@ test('Codex publishes typed remote tools and dispatches app-server dynamic tool 
       });
     }
   });
-  const session = await startAdapter(server).startSession({ agentId: 'agent-remote', workingDirectory: '/tmp', remoteWorkspace });
+  const session = await new CodexEngineAdapter({
+    binaryPath: '/usr/bin/true',
+    spawnProcess: () => server.process,
+    onDynamicToolCatalogAccepted: names => { acceptedToolNames = names; },
+  }).startSession({ agentId: 'agent-remote', workingDirectory: '/tmp', remoteWorkspace });
   const turn = session.run('Read src/remote.txt.');
   const events = await collect(turn);
   assert.equal((await turn.completion).status, 'completed');
   const initialization = server.requests.find(row => row.method === 'initialize')?.params as Record<string, unknown>;
   assert.deepEqual(initialization.capabilities, { experimentalApi: true });
+  assert.deepEqual(acceptedToolNames, ['sprout_workspace_read'], 'observer sees only names from the accepted thread catalog');
   const start = server.requests.find(row => row.method === 'thread/start')?.params as Record<string, unknown>;
   assert.deepEqual(start.dynamicTools, [{ type: 'function', name: 'sprout_workspace_read',
     description: 'Read a file from the selected remote Project workspace.',

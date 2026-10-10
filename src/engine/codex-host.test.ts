@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import type { CodexProcess } from './codex.ts';
+import type { RemoteWorkspaceTools } from './port.ts';
 import { JsonRpcError } from './jsonrpc.ts';
 import {
   CODEX_HOST_VERSION,
@@ -116,7 +117,11 @@ test('Host Codex requires the exact configured model and supported effort before
   const root = mkdtempSync(join(tmpdir(), 'sprout-host-codex-profile-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   let observedTurnId: string | undefined;
-  const context = fixture(root, { onTurnStarted: turnId => { observedTurnId = turnId; } });
+  let acceptedDynamicToolNames: readonly string[] | undefined;
+  const context = fixture(root, {
+    onTurnStarted: turnId => { observedTurnId = turnId; },
+    onDynamicToolCatalogAccepted: names => { acceptedDynamicToolNames = names; },
+  });
   const readiness = await context.adapter.readiness(true);
   assert.equal(readiness.status, 'ready');
   assert.equal(readiness.version, CODEX_HOST_VERSION);
@@ -129,8 +134,20 @@ test('Host Codex requires the exact configured model and supported effort before
     model: 'provider/model-authorized', effort: 'xhigh' }), /does not support/);
   assert.equal(context.launches.length, 0, 'unauthorized model and effort requests never launch Codex');
 
+  const remoteWorkspace: RemoteWorkspaceTools = {
+    binding: { projectId: 'project-a', environmentInstanceId: 'worker-a', bindingId: 'binding-a',
+      generation: 1, connectionEpoch: 1, workspaceId: 'workspace-a' },
+    operations: ['read'],
+    async read(path) { return { operationId: 'read-a', projectId: 'project-a', environmentInstanceId: 'worker-a',
+      bindingId: 'binding-a', generation: 1, connectionEpoch: 1, workspaceId: 'workspace-a', operation: 'read',
+      status: 'completed', path, content: 'fixture' }; },
+    async search() { throw new Error('unexpected search'); },
+    async inspect() { return { status: 'not-found' }; },
+    async cancel() { return { accepted: false, status: 'not-found' }; },
+  };
   const session = await context.adapter.startSession({ agentId: 'agent-a', workingDirectory: 'opaque',
-    model: 'provider/model-authorized', effort: 'medium' });
+    model: 'provider/model-authorized', effort: 'medium', remoteWorkspace });
+  assert.deepEqual(acceptedDynamicToolNames, ['sprout_workspace_read'], 'Host profile forwards the accepted dynamic catalog observer');
   assert.equal(session.sessionId, 'host-codex-thread');
   assert.equal(context.launchInputs[0]?.codexHome, realpathSync(context.codexHome));
   const args = context.launches[0]?.args ?? [];
@@ -146,6 +163,7 @@ test('Host Codex requires the exact configured model and supported effort before
   for await (const event of turn.events) events.push(event);
   const result = await turn.completion;
   assert.equal(observedTurnId, 'host-codex-turn', 'local observer receives the opaque provider turn identity');
+  assert.deepEqual(acceptedDynamicToolNames, ['sprout_workspace_read']);
   assert.deepEqual(events, [{ type: 'message', text: 'Host Codex reply.', final: true }]);
   assert.equal(result.status, 'completed');
   if (result.status === 'completed') {

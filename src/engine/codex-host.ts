@@ -103,6 +103,8 @@ export interface HostCodexAdapterOptions {
   readonly clock?: () => number;
   readonly probeProcess?: (input: HostCodexProbeInput) => Promise<HostCodexReadiness>;
   readonly spawnProcess?: (input: HostCodexLaunchInput, args: readonly string[], env?: NodeJS.ProcessEnv) => CodexProcess;
+  /** Optional local observer for dynamic tools accepted when opening a thread. */
+  readonly onDynamicToolCatalogAccepted?: (toolNames: readonly string[]) => void;
   /** Optional local observer for the opaque provider turn identity. */
   readonly onTurnStarted?: (turnId: string) => void;
 }
@@ -192,6 +194,8 @@ export class HostCodexEngineAdapter implements HostRunEngineAdapter {
         args: CODEX_SERVER_ARGS,
         sandbox: 'read-only',
         sourceVersion: `codex-cli ${CODEX_HOST_VERSION}`,
+        ...(this.#options.onDynamicToolCatalogAccepted !== undefined
+          ? { onDynamicToolCatalogAccepted: this.#options.onDynamicToolCatalogAccepted } : {}),
         ...(this.#options.onTurnStarted !== undefined ? { onTurnStarted: this.#options.onTurnStarted } : {}),
         spawnProcess: (_binaryPath, args, env) => (this.#options.spawnProcess ?? spawnHostCodex)({
           ...this.#probe,

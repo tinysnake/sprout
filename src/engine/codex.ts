@@ -64,6 +64,8 @@ export interface CodexAdapterOptions {
   readonly spawnProcess?: (binaryPath: string, args: readonly string[], env?: NodeJS.ProcessEnv) => CodexProcess;
   /** Version string attached to provider-usage observations. */
   readonly sourceVersion?: string;
+  /** Optional local observer for dynamic tools accepted when opening a thread. */
+  readonly onDynamicToolCatalogAccepted?: (toolNames: readonly string[]) => void;
   /** Optional local observer for the opaque provider turn identity. */
   readonly onTurnStarted?: (turnId: string) => void;
 }
@@ -146,6 +148,7 @@ export class CodexEngineAdapter implements EngineAdapter {
     let started: { thread: { id: string } };
     try {
       started = await this.#openThread(transport, request, dynamicTools.specs);
+      this.#options.onDynamicToolCatalogAccepted?.(dynamicTools.specs.map(tool => tool.name));
     } catch (error) {
       transport.close();
       process.kill('SIGTERM');
