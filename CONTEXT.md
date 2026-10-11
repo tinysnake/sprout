@@ -32,6 +32,10 @@ _Avoid_: Project, group
 A temporary collaboration scope within one Project, containing a subset of current Project members together with an optional goal and rules, its own channel, and durable membership history. It may provide context and provenance for work but does not own Tasks, Environment access, Project workspaces, or leases.
 _Avoid_: Project, Task, default group
 
+**Working group owner**:
+The one current Human or Agent member responsible for a Working group's coordination and assigned work, distinct from its historical creator. Ownership is managed by the Human, and responsibility follows the current owner.
+_Avoid_: Working group creator, lease owner
+
 **Task group**:
 A temporary conversation scope within one Project, bound to exactly one Task and shared by every current Project member. It carries the Task's title, goal, and constraints, and preserves its conversation history when the scope is frozen after an ended status or Force Release. A Force Released `stopped` Task remains active intent; its group stays read-only until direct Resume.
 _Avoid_: Working group, Task thread, direct message
@@ -43,6 +47,14 @@ _Avoid_: Agent reply, Task blocker, automatic retry
 **Working group channel**:
 The shared conversation whose participants are the current members of one Working group.
 _Avoid_: Project channel, direct message
+
+**Working group glance**:
+The Working group's read-only surface of its current state — assigned Tasks and pending lease escrows among them — projected from existing records and rendered identically for every current member as a Human panel and an explicit Agent query. It is state, not conversation: no Messages, notifications, or history.
+_Avoid_: WG board, blackboard, WG feed, Working group channel
+
+**Glance entry**:
+One item of current state rendered by a Working group glance, such as an assigned Task or a pending lease escrow. Its source record owns its lifecycle and visibility.
+_Avoid_: board item, feed item, notification
 
 **Conversation scope**:
 The durable identity and governance of one Project-owned communication context: the one Project channel, one Project-scoped direct conversation, one Working group channel, or one Task group. It binds its Messages to membership, versioned governing facts, and read-only rules; ended Task groups and Force Released stopped Task groups preserve their records and history while frozen. A stopped Task remains active intent and its group returns to writable state on Resume.
@@ -335,6 +347,14 @@ _Avoid_: Browser authority token, current-ready assertion, Worker-supplied ident
 **Environment lease**:
 A time-bounded right to use an environment instance's lease-requiring capabilities. A `read` lease admits read-only operations and may share the instance with other `read` leases. A `read-write` lease admits one holder and excludes every other lease. Task-held leases and Agent-run execution leases use `read-write`; a Remote workspace operation uses only the lease already held by its containing run or Task, including an admitted `read` lease for read-only work. Environment Operations and Project MCP borrow the containing lease and never acquire leases for themselves. A read lease does not include a stable snapshot or copy-on-write, so workspace files may change while readers hold leases.
 _Avoid_: Agent environment, lock, snapshot
+
+**Lease escrow**:
+The retained reservation of an Environment instance across Agent-run handoffs while an authorized successor has yet to take over. It preserves exclusive occupancy without making its Working group the lease owner; takeover does not make the reservation end automatically with the successor's run.
+_Avoid_: Lease release, Task pause, lease recovery
+
+**Lease takeover scope**:
+The eligibility boundary for taking over an escrowed Environment lease, identifying either the current Agent members of one Working group or one specific current Agent member of that group. It refers to stable Working group and Agent identities rather than display names.
+_Avoid_: Lease owner, group name, Environment access grant
 
 **Lease recovery**:
 The state an environment instance's lease enters after a timeout, holder loss, or interruption, during which the instance is not reassignable until recovery is explicitly resolved. An unfinished Task's lease stays reserved. A Task lead may investigate a lease and authority-override release another Agent's recovering run lease after risk acknowledgement; this permanently records unresolved facts without proving remote work settled. Evidence-based Resume, Discard, ordinary Release, and Human-only Force Release keep their existing authorities.
