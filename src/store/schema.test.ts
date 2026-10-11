@@ -10,7 +10,7 @@ import { ADMISSION_CAPABILITY, projectCatalogEntry } from '../environment/catalo
 import { createPendingEnrollment } from '../environment/enrollment.ts';
 import { SUPPORTED_WORKER_PROTOCOL } from '../environment/enrollment-service.ts';
 import { WorkerConnectionRegistry } from '../environment/worker-epoch.ts';
-import { CURRENT_SCHEMA_VERSION, MIN_SUPPORTED_SCHEMA_VERSION, MAX_SUPPORTED_SCHEMA_VERSION, SUPPORTED_SCHEMA_RANGE, SchemaMigrationError, migrateOrInitializeDatabase, getSchemaVersion, defaultSafetyCopyPath, type MigrationStep } from './schema.ts';
+import { CURRENT_SCHEMA_VERSION, SUPPORTED_SCHEMA_RANGE, SchemaMigrationError, migrateOrInitializeDatabase, getSchemaVersion, defaultSafetyCopyPath, type MigrationStep } from './schema.ts';
 import { SqliteStore } from './db.ts';
 
 function withTempDir<T>(fn: (dir: string) => Promise<T> | T): Promise<T> {
@@ -22,17 +22,6 @@ function withTempDir<T>(fn: (dir: string) => Promise<T> | T): Promise<T> {
     });
 }
 
-
-test('schema constants declare supported version range', () => {
-  assert.equal(CURRENT_SCHEMA_VERSION, 32);
-  assert.equal(MIN_SUPPORTED_SCHEMA_VERSION, 0);
-  assert.equal(MAX_SUPPORTED_SCHEMA_VERSION, 32);
-  assert.deepEqual(SUPPORTED_SCHEMA_RANGE, {
-    min: 0,
-    max: 32,
-    current: 32,
-  });
-});
 
 test('v31 migration adds durable MCP process and operation identities', async () => {
   await withTempDir((dir) => {
@@ -266,6 +255,13 @@ test('empty store creation initializes full schema at current version with no sa
     const store = new SqliteStore({ filename: dbPath });
     assert.equal(store.schemaVersion, CURRENT_SCHEMA_VERSION);
     assert.equal(getSchemaVersion(store.db), CURRENT_SCHEMA_VERSION);
+    // The declared supported range must stay consistent with the shipped
+    // version: migrateOrInitializeDatabase refuses an inconsistent range on
+    // every open, so this invariant belongs to the real creation path.
+    assert.equal(SUPPORTED_SCHEMA_RANGE.current, CURRENT_SCHEMA_VERSION);
+    assert.ok(SUPPORTED_SCHEMA_RANGE.min <= SUPPORTED_SCHEMA_RANGE.max);
+    assert.ok(SUPPORTED_SCHEMA_RANGE.current <= SUPPORTED_SCHEMA_RANGE.max);
+    assert.ok(SUPPORTED_SCHEMA_RANGE.current >= SUPPORTED_SCHEMA_RANGE.min);
 
     // No pre-migration safety copy is created for a brand-new empty store
     assert.equal(existsSync(safetyPath), false, 'empty store must not create a safety copy');

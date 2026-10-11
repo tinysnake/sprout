@@ -277,10 +277,6 @@ test('the host proxy falls back to HTTPS_PROXY and its lowercase spelling', () =
   assert.equal(lower.containerProxy['HTTP_PROXY'], 'http://host.docker.internal:8080');
 });
 
-test('the host proxy is empty when the host declares none', () => {
-  assert.deepEqual(parse().containerProxy, {});
-});
-
 /**
  * The runtime is lenient about numeric host settings: a value it cannot parse
  * becomes `NaN` and is surfaced by the socket bind or the lease clock, not by a

@@ -152,28 +152,35 @@ test('ProductionUsageService: preserves unavailable facts and does not substitut
   assert.equal(item.costValuation.attributableBilledCostStatus, 'unavailable');
 });
 
-test('FixtureUsageService: returns accurate aggregates and scoped options', async () => {
+test('FixtureUsageService: aggregates derive from the activity list and filters scope both', async () => {
   const fixture = new FixtureUsageService();
 
   const acts = await fixture.listActivities();
-  assert.equal(acts.length, 10);
+  assert.ok(acts.length > 0, 'the fixture ships representative activities');
 
+  // The aggregate must be a function of the listed activities, not a parallel
+  // constant: dropping the list must drop the total with it.
   const aggregate = await fixture.getAggregate();
-  assert.equal(aggregate.totalActivities, 10);
+  assert.equal(aggregate.totalActivities, acts.length);
   assert.ok(aggregate.workModelSubtotal);
   assert.ok(aggregate.routingModelSubtotal);
   assert.equal(aggregate.billedCost.status, 'unavailable');
 
+  // Scoped options and filters partition the same fixture data coherently.
   const projects = await fixture.listProjects();
-  assert.equal(projects.length, 2);
+  assert.ok(projects.length > 0);
+  for (const project of projects) {
+    const scoped = await fixture.listActivities({ projectId: project.id });
+    assert.ok(scoped.length > 0, `${project.id} owns at least one activity`);
+    assert.ok(scoped.length < acts.length, `${project.id} does not own every activity`);
+    assert.ok(scoped.every((activity) => activity.projectId === project.id), 'the filter holds');
+  }
 
   const agents = await fixture.listAgents();
-  assert.equal(agents.length, 4);
-
+  assert.ok(agents.length > 0);
   const models = await fixture.listModels();
-  assert.ok(models.includes('claude-3-5-sonnet'));
-  assert.ok(models.includes('gpt-4o'));
-  assert.ok(models.includes('gpt-4o-mini'));
+  assert.ok(models.length > 0);
+  assert.ok(acts.every((activity) => models.includes(activity.model)), 'every activity names a listed model');
 });
 
 test('ProductionUsageService F9: settlement buckets bound the previous 30 days at exact instants', async (t) => {

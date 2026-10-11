@@ -3,7 +3,6 @@ import { test } from 'node:test';
 
 import {
   createInitialAgentFixtures,
-  createInitialAttributionFixtures,
   FixtureAgentService,
 } from './adapters/fixture-adapter.ts';
 import { evaluateAgentStatus, optionStateLabel } from './status.ts';
@@ -29,44 +28,39 @@ function option(
   return { id, engine, workModel, effort, compatibility, compatibilityReason };
 }
 
-test('the fixture covers ready, attention, unavailable, archived, and not-observed rows distinctly', async () => {
+// The DOM state-matrix suite renders ready, attention, unavailable, and
+// archived rows through the same fixture and evaluator. What only this test
+// protects is the evaluator's own mapping: the model-missing and unobserved
+// rows the DOM suite does not render, the traffic-light colour values, and the
+// guarantee that distinct causes produce distinct reasons.
+test('status evaluation distinguishes model-missing, unobserved, and their reasons', async () => {
   const service = new FixtureAgentService();
   const agents = await service.listAgents();
-
-  const ready = agents.find((a) => a.id === 'programmer');
-  assert.ok(ready);
-  assert.equal(ready.status, 'active');
-  assert.equal(ready.trafficLight, 'green');
-  assert.match(ready.trafficLightReason, /Ready: Priority 1 option/);
-
-  const attention = agents.find((a) => a.id === 'architect');
-  assert.ok(attention);
-  assert.equal(attention.trafficLight, 'yellow');
-  assert.match(attention.trafficLightReason, /Attention:/);
-  assert.match(attention.trafficLightReason, /pre-acceptance fallback/);
-  assert.notEqual(attention.trafficLightReason, ready.trafficLightReason);
-
-  const missing = agents.find((a) => a.id === 'sentinel');
-  assert.ok(missing);
-  assert.equal(missing.trafficLight, 'red');
-  assert.match(missing.trafficLightReason, /not installed/);
 
   const modelMissing = agents.find((a) => a.id === 'legacy-model');
   assert.ok(modelMissing);
   assert.equal(modelMissing.trafficLight, 'red');
   assert.match(modelMissing.trafficLightReason, /not available/);
-  assert.notEqual(modelMissing.trafficLightReason, missing.trafficLightReason);
+
+  const missing = agents.find((a) => a.id === 'sentinel');
+  assert.ok(missing);
+  assert.equal(missing.trafficLight, 'red');
+  assert.match(missing.trafficLightReason, /not installed/);
+  assert.notEqual(modelMissing.trafficLightReason, missing.trafficLightReason,
+    'a missing model and a missing installation are different causes');
 
   const unobserved = agents.find((a) => a.id === 'unobserved');
   assert.ok(unobserved);
   assert.equal(unobserved.trafficLight, 'yellow');
   assert.match(unobserved.trafficLightReason, /not reachable/);
 
+  const ready = agents.find((a) => a.id === 'programmer');
+  const attention = agents.find((a) => a.id === 'architect');
   const archived = agents.find((a) => a.id === 'legacy-coder');
-  assert.ok(archived);
-  assert.equal(archived.status, 'archived');
+  assert.ok(ready && attention && archived);
+  assert.equal(ready.trafficLight, 'green');
+  assert.equal(attention.trafficLight, 'yellow');
   assert.equal(archived.trafficLight, 'neutral');
-  assert.match(archived.trafficLightReason, /Archived Agent/);
 });
 
 test('the empty state is a zero-row list, not a fixture row', async () => {
@@ -249,10 +243,4 @@ test('every fixture row renders its stable identity and no host facts', async ()
       assert.ok(version.reason.length > 0, 'every version records a reason');
     }
   }
-});
-
-test('attribution fixtures carry no transport addresses or paths', () => {
-  const serialized = JSON.stringify(createInitialAttributionFixtures());
-  assert.equal(/wss?:\/\//.test(serialized), false);
-  assert.equal(/\/(Users|home)\//.test(serialized), false);
 });

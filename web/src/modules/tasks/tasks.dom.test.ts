@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { JSDOM } from 'jsdom';
 import type { RunView, TaskView, TaskWithRunsView } from '../../../../src/web/views.ts';
 import type { TaskProposal } from '../../../../src/task/proposal-model.ts';
@@ -8,58 +7,66 @@ import { BrowserRequestError } from '../../transport/browser-transport.ts';
 import type { TaskBlockerInput, TaskBrowserAdapter } from '../../adapters/task-api.ts';
 import type { ProjectManagementService, ProjectOverviewData } from '../projects/types.ts';
 import { createShellConnectionController } from '../../shell/connection.ts';
+import { closeDomStage, createSharedDomStage, unmountQuietly, type DomStage } from '../../test-support/dom-harness.ts';
 
-const GLOBALS = [
-  'HTMLElement', 'HTMLButtonElement', 'HTMLFormElement', 'HTMLInputElement', 'HTMLSelectElement', 'HTMLTextAreaElement',
-  'SVGElement', 'Element', 'Document', 'DocumentFragment', 'location', 'history', 'localStorage', 'navigator',
-  'getComputedStyle', 'Node', 'NodeFilter', 'Event', 'MouseEvent', 'KeyboardEvent', 'PointerEvent', 'FocusEvent',
-  'TouchEvent', 'CustomEvent',
-] as const;
+// The compilation environment and JSDOM are shared for the whole file: Vue
+// captures `document` while its modules evaluate, so swapping globals between
+// tests while reusing loaded modules is not a safe isolation strategy. What
+// each case still gets fresh is its application state — a new app, Pinia,
+// router, services, and an emptied mount point — reset by setupHarness.
+type SharedHarness = DomStage & {
+  createSproutApp: typeof import('../../app/main.ts')['createSproutApp'];
+};
+
+let sharedPromise: Promise<SharedHarness> | undefined;
+let mountedApp: { unmount(): void } | undefined;
+
+function sharedHarness(): Promise<SharedHarness> {
+  sharedPromise ??= (async () => {
+    const stage = await createSharedDomStage('http://sprout-operator.test/app/project/tasks');
+    const { createSproutApp } = await stage.vite.ssrLoadModule('/src/app/main.ts') as typeof import('../../app/main.ts');
+    return { ...stage, createSproutApp };
+  })();
+  return sharedPromise;
+}
 
 async function setupHarness() {
-  const html = await readFile(`${process.cwd()}/web/app/index.html`, 'utf8');
-  const dom = new JSDOM(html, { url: 'http://sprout-operator.test/app/project/tasks', pretendToBeVisual: true });
-  (dom.window as unknown as Record<string, unknown>).__SPROUT_TEST_MANUAL_MOUNT__ = true;
-  const values: Record<string, unknown> = {
-    window: dom.window,
-    document: dom.window.document,
-    ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
-    IntersectionObserver: class { observe() {} unobserve() {} disconnect() {} },
-    MutationObserver: dom.window.MutationObserver,
-    requestAnimationFrame: (callback: FrameRequestCallback) => setTimeout(callback, 10),
-    cancelAnimationFrame: (id: number) => clearTimeout(id),
-  };
-  for (const key of GLOBALS) values[key] = (dom.window as unknown as Record<string, unknown>)[key];
-  const originals = new Map<string, PropertyDescriptor | undefined>();
-  for (const [key, value] of Object.entries(values)) {
-    originals.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
-    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
-  }
-  const [{ createServer }, { default: vuePlugin }] = await Promise.all([import('vite'), import('@vitejs/plugin-vue')]);
-  const vite = await createServer({
-    root: `${process.cwd()}/web`, appType: 'custom', logLevel: 'error',
-    plugins: [{ name: 'force-client-vue', enforce: 'pre', transform(_code, _id, options) { if (options) options.ssr = false; } }, vuePlugin()],
-    server: { middlewareMode: true, hmr: false, ws: false }, optimizeDeps: { noDiscovery: true },
-  });
-  const mount = dom.window.document.querySelector('#app');
-  assert.ok(mount);
+  const { dom, vite, createSproutApp, mount: mountPoint } = await sharedHarness();
+  // Reset everything a previous case may have left behind on the shared stage.
+  unmountQuietly(mountedApp);
+  mountedApp = undefined;
+  mountPoint.innerHTML = '';
+  dom.window.localStorage.clear();
+  dom.window.history.replaceState({}, '', 'http://sprout-operator.test/app/project/tasks');
   return {
     dom,
     doc: dom.window.document,
     vite,
-    mount: (app: { mount: (element: Element) => unknown }) => app.mount(mount),
+    createSproutApp,
+    mount: (app: { mount: (element: Element) => unknown }) => app.mount(mountPoint),
     async cleanup() {
-      await vite.close();
-      for (const [key, descriptor] of originals) {
-        if (descriptor === undefined) Reflect.deleteProperty(globalThis, key);
-        else Object.defineProperty(globalThis, key, descriptor);
-      }
-      dom.window.close();
+      unmountQuietly(mountedApp);
+      mountedApp = undefined;
+      mountPoint.innerHTML = '';
     },
   };
 }
 
-const settle = (ms = 120) => new Promise((resolve) => setTimeout(resolve, ms));
+after(async () => {
+  await closeDomStage(await sharedPromise?.catch(() => undefined));
+});
+
+// A fixed sleep cannot prove the app finished rendering. By default wait for
+// the actual render pipeline instead: flush the pending timers and Vue's
+// microtask queue, then one animation frame (the harness rAF is a 10 ms
+// timer), then one more flush. Call sites that cover real debounced or timed
+// behaviour keep their explicit durations unchanged.
+const settle = async (ms = 0): Promise<void> => {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
+  await Promise.resolve();
+};
 const time = 1_800_000_100_000;
 const projectId = 'project-tasks-test';
 const project = {
@@ -260,13 +267,14 @@ function appServices(conflictCodes: readonly string[] = [], snapshot = overview)
 }
 
 async function mountTasks(vite: { ssrLoadModule: (path: string) => Promise<unknown> }, doc: Document, codes: readonly string[] = [], snapshot = overview, runService?: { getRun(id: string): Promise<RunView> }) {
-  const { createSproutApp } = await vite.ssrLoadModule('/src/app/main.ts') as typeof import('../../app/main.ts');
+  const { createSproutApp } = await sharedHarness();
   const { api, projects, calls, controlInputs, blockerCalls, beginInputs } = appServices(codes, snapshot);
   const connectionSource = createShellConnectionController({ status: 'online', connection: 'online', loading: false });
   const { app, router } = createSproutApp({ routerBase: '/app/', taskService: api, projectService: projects, connectionSource, runService });
   await router.push(`/project/tasks?project=${projectId}`);
   await router.isReady();
   app.mount(doc.querySelector('#app')!);
+  mountedApp = app;
   await settle();
   return { app, router, calls, controlInputs, blockerCalls, beginInputs };
 }

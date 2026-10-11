@@ -19,7 +19,7 @@ import {
   testComposition,
   waitFor,
 } from '../../runtime-test-harness.ts';
-import { WorkerRecoveryJournal, type JournalSnapshot } from '../recovery-journal.ts';
+import { WorkerRecoveryJournal, type JournalSnapshot, type JournalTurn } from '../recovery-journal.ts';
 
 import type { ReadinessCommandRunner } from '../readiness.ts';
 
@@ -166,6 +166,18 @@ test('a run executed on the product path journals turn events and settlement int
     rmSync(workerRoot, { recursive: true, force: true });
   });
 
+  // The journal keeps a turn event either in `events` (not yet acknowledged) or
+  // compacted into `acknowledged` (durably owned by the core) — never zero and
+  // never both, so the decisive invariant is that exactly one event's worth of
+  // evidence exists at any observation point. While the event itself is still
+  // journaled it must be the engine notice.
+  const assertTurnEventRetained = (turn: JournalTurn | undefined, label: string): void => {
+    assert.equal((turn?.events.length ?? 0) + (turn?.acknowledged ?? 0), 1, `turn event was journaled (${label})`);
+    if ((turn?.events.length ?? 0) > 0) {
+      assert.equal(turn?.events[0]?.event.type, 'notice', `journaled event is the engine notice (${label})`);
+    }
+  };
+
   const h = await readinessWorkflowHarness({ backend: 'sqlite', directory: dir, engineId: 'scripted' });
   const id = (await h.runtime.enrollments.list())[0]!.id;
   const keyPath = join(dir, 'worker-key.pem');
@@ -244,12 +256,18 @@ test('a run executed on the product path journals turn events and settlement int
     const journalPath = workerRecoveryJournalPath(paths.identityPath);
     assert.ok(existsSync(journalPath), 'recovery journal exists during run');
 
-    // Wait for the in-flight turn event to be journaled before channel loss
+    // Wait for the in-flight turn event to be journaled before channel loss.
+    // The core acknowledges events it has durably received, and an acknowledged
+    // event is compacted out of the journal by design; the decisive assertion
+    // therefore belongs to the observation point, not to a later re-read. The
+    // predicate accepts either state because the compaction may win the race.
     await waitFor(() => {
       if (!existsSync(journalPath)) return false;
       const snap = JSON.parse(readFileSync(journalPath, 'utf8')) as JournalSnapshot;
-      return (snap?.turns[0]?.events.length ?? 0) >= 1;
+      return (snap?.turns[0]?.events.length ?? 0) >= 1 || (snap?.turns[0]?.acknowledged ?? 0) >= 1;
     }, 'turn event journaled');
+    const journaled = JSON.parse(readFileSync(journalPath, 'utf8')) as JournalSnapshot;
+    assertTurnEventRetained(journaled.turns[0], 'while connected');
 
     // Simulate channel loss
     const stale = testComposition(h.runtime).workerGateway.liveFor(INSTANCE_ID)!;
@@ -270,8 +288,10 @@ test('a run executed on the product path journals turn events and settlement int
     const snap = JSON.parse(readFileSync(journalPath, 'utf8')) as JournalSnapshot;
     assert.equal(snap.turns.length, 1, 'turn is retained in journal');
     assert.equal(snap.turns[0]?.runId, runId, 'retained turn matches runId');
-    assert.equal(snap.turns[0]?.events.length, 1, 'turn event was journaled');
-    assert.equal(snap.turns[0]?.events[0]?.event.type, 'notice');
+    // After channel loss the journal must still hold every event the core has
+    // not acknowledged; an acknowledged event is compacted only once the core
+    // durably owns it.
+    assertTurnEventRetained(snap.turns[0], 'after channel loss');
     assert.equal(snap.turns[0]?.settlement?.status, 'interrupted', 'settlement was journaled');
     assert.equal(snap.engineStopped, true, 'engine stop was journaled on channel loss fence');
   } finally {

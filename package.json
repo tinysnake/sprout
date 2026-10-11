@@ -12,6 +12,10 @@
   },
   "scripts": {
     "test": "node scripts/test-summary.ts",
+    "test:quick": "node scripts/test-select.ts --run quick",
+    "test:affected": "node scripts/test-select.ts --run affected",
+    "test:extended": "node scripts/test-select.ts --run extended",
+    "test:audit": "node scripts/test-select.ts --audit",
     "test:bench": "node scripts/test-summary.ts --bench",
     "test:layout": "npm test -- 'scripts/tasks-layout.browser.test.ts'",
     "test:full": "node --test --test-concurrency=4 'src/**/*.test.ts' 'web/src/**/*.test.ts'",

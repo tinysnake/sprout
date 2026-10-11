@@ -5,89 +5,66 @@
  *
  * The router is exercised through its real configuration and a real
  * `createWebHistory` instance, so these assertions cover the shipped route table
- * rather than a copy of it. Each test gets a fresh document and history, so one
- * test's navigation cannot leak into the next.
+ * rather than a copy of it. The JSDOM window, globals, and compiled module
+ * graph are shared for the whole file — Vue captures `document` while its
+ * modules evaluate, so swapping globals while reusing loaded modules is not a
+ * safe isolation strategy. Each case instead gets a fresh application (app,
+ * Pinia, router, services), an emptied mount point, cleared storage, and a
+ * reset URL; history entries pushed by an earlier case sit below the current
+ * entry and cannot be reached by a later case's Back/Forward within its own
+ * pushes.
  */
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import { createFeedTestAdapter, recoveryAttentionSnapshot } from './feed-test-fixture.ts';
-import { JSDOM } from 'jsdom';
-import { createServer, type ViteDevServer } from 'vite';
+import type { ViteDevServer } from 'vite';
+import { closeDomStage, createSharedDomStage, unmountQuietly, type DomStage } from '../test-support/dom-harness.ts';
 
 const repoRoot = process.cwd();
-const html = await readFile(`${repoRoot}/web/app/index.html`, 'utf8');
 const chatPageSize = Number((await readFile(`${repoRoot}/web/src/modules/chat/views/ChatView.vue`, 'utf8')).match(/const CHAT_MESSAGE_PAGE_SIZE = (\d+)/)![1]);
 
-const GLOBALS = [
-  'HTMLElement', 'HTMLButtonElement', 'HTMLFormElement', 'HTMLInputElement', 'HTMLSelectElement',
-  'HTMLTextAreaElement', 'SVGElement', 'Element', 'Document', 'DocumentFragment', 'location',
-  'history', 'localStorage', 'navigator', 'getComputedStyle', 'Node', 'NodeFilter', 'Event',
-  'MouseEvent', 'KeyboardEvent', 'PointerEvent', 'FocusEvent', 'TouchEvent', 'CustomEvent',
-] as const;
-
 interface Harness {
-  dom: JSDOM;
+  dom: DomStage['dom'];
   doc: Document;
   mount: HTMLElement;
   vite: ViteDevServer;
   cleanup: () => Promise<void>;
 }
 
+let sharedPromise: Promise<DomStage> | undefined;
+
+function sharedStage(): Promise<DomStage> {
+  sharedPromise ??= createSharedDomStage('http://sprout-operator.test/app/feed');
+  return sharedPromise;
+}
+
 async function setupHarness(url = 'http://sprout-operator.test/app/feed'): Promise<Harness> {
-  const dom = new JSDOM(html, { url, pretendToBeVisual: true });
-  (dom.window as unknown as Record<string, unknown>)['__SPROUT_TEST_MANUAL_MOUNT__'] = true;
-
-  const values: Record<string, unknown> = {
-    window: dom.window,
-    document: dom.window.document,
-    ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
-    IntersectionObserver: class { observe() {} unobserve() {} disconnect() {} },
-    MutationObserver: dom.window.MutationObserver,
-    requestAnimationFrame: (cb: FrameRequestCallback) => setTimeout(cb, 10),
-    cancelAnimationFrame: (id: number) => clearTimeout(id),
-  };
-  for (const key of GLOBALS) values[key] = (dom.window as unknown as Record<string, unknown>)[key];
-
-  const originals = new Map<string, PropertyDescriptor | undefined>();
-  for (const [key, value] of Object.entries(values)) {
-    originals.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
-    Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
+  const { dom, vite, mount } = await sharedStage();
+  // Reset everything a previous case may have left behind on the shared stage.
+  unmountQuietly(mount);
+  mount.innerHTML = '';
+  dom.window.localStorage.clear();
+  dom.window.history.replaceState({}, '', url);
+  if (Object.getOwnPropertyDescriptor(dom.window, 'innerWidth') !== undefined) {
+    delete (dom.window as unknown as Record<string, unknown>)['innerWidth'];
   }
-
-  // Vue's runtime-dom reads `document` at module evaluation, and the plugin must
-  // compile templates for the browser (not SSR), so both imports happen here.
-  const [{ createServer }, { default: vuePlugin }] = await Promise.all([
-    import('vite'),
-    import('@vitejs/plugin-vue'),
-  ]);
-  const vite = await createServer({
-    root: `${repoRoot}/web`,
-    appType: 'custom',
-    logLevel: 'error',
-    plugins: [
-      { name: 'force-client-vue', enforce: 'pre', transform(_code, _id, opt) { if (opt) opt.ssr = false; } },
-      vuePlugin(),
-    ],
-    server: { middlewareMode: true, hmr: false, ws: false },
-    optimizeDeps: { noDiscovery: true },
-  });
 
   return {
     dom,
     doc: dom.window.document,
-    mount: dom.window.document.getElementById('app') as unknown as HTMLElement,
+    mount,
     vite,
     cleanup: async () => {
-      await vite.close();
-      for (const [key, original] of originals) {
-        if (original === undefined) Reflect.deleteProperty(globalThis, key);
-        else Object.defineProperty(globalThis, key, original);
-      }
-      dom.window.close();
+      unmountQuietly(mount);
+      mount.innerHTML = '';
     },
   };
 }
+
+after(async () => {
+  await closeDomStage(await sharedPromise?.catch(() => undefined));
+});
 
 const settle = (ms = 90) => new Promise((resolve) => setTimeout(resolve, ms));
 

@@ -9,9 +9,18 @@
  * Usage:  node scripts/test-summary.ts [--bench] [glob ...]
  */
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, globSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative } from 'node:path';
+import { dirname, join } from 'node:path';
+import {
+  appendObservation,
+  displayPath,
+  gitOutput,
+  observationDir,
+  pruneObservationRuns,
+  type ObservationRecord,
+} from './test-observation-store.ts';
 
 const DEFAULT_GLOBS = ['src/**/*.test.ts', 'web/src/**/*.test.ts'];
 const bench = process.argv.includes('--bench');
@@ -23,14 +32,11 @@ const targets = patterns.flatMap((pattern) => {
   if (matches.length === 0) throw new Error(`test pattern matched no files: ${pattern}`);
   return matches;
 });
-const timeoutMs = Number(process.env.SPROUT_TEST_TIMEOUT_MS ?? 180_000);
-// Diagnostics live in the repository but must not record local home paths.
-const displayPath = (file: string): string => {
-  if (!isAbsolute(file)) return file;
-  const local = relative(process.cwd(), file);
-  return local !== '..' && !local.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) && !isAbsolute(local)
-    ? local : `<external>/${basename(file)}`;
-};
+// Every agent-facing command is capped at 180 s. Keep the internal deadline
+// below that outer limit so the wrapper — not the harness — ends a hung suite
+// and still has measured room to write its final records.
+const timeoutMs = Number(process.env.SPROUT_TEST_TIMEOUT_MS ?? 175_000);
+const TEST_CONCURRENCY = 4;
 if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
   throw new Error('SPROUT_TEST_TIMEOUT_MS must be a positive integer');
 }
@@ -39,18 +45,47 @@ const dir = mkdtempSync(join(tmpdir(), 'sprout-test-'));
 const reportPath = join(dir, 'report.tap');
 const progressPath = join(dir, 'progress.jsonl');
 
+// Durable observation dataset: one JSONL file per run, streamed so an external
+// kill cannot erase completed-result evidence; storage, schema, and retention
+// live in test-observation-store.ts. A run file without a closing run_summary
+// record is incomplete.
+const obsDir = observationDir();
+const OBS_RETENTION = 500;
+mkdirSync(obsDir, { recursive: true, mode: 0o700 });
+pruneObservationRuns(obsDir, OBS_RETENTION);
+const runId = `${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}`;
+const runPath = join(obsDir, `${runId}.jsonl`);
+const sha256 = (data: string | Buffer): string => createHash('sha256').update(data).digest('hex');
+const appendRun = (record: ObservationRecord): void => appendObservation(runPath, record);
+appendRun({
+  record: 'run_started',
+  runId,
+  at: new Date().toISOString(),
+  commit: gitOutput(['rev-parse', 'HEAD'])?.trim() ?? null,
+  dirtyFingerprint: (() => {
+    const status = gitOutput(['status', '--porcelain']);
+    return status === null || status.trim() === '' ? null : sha256(status + (gitOutput(['diff', 'HEAD']) ?? ''));
+  })(),
+  inventoryDigest: sha256([...targets].sort().join('\n')),
+  targets: targets.map(displayPath),
+  node: process.version,
+  concurrency: TEST_CONCURRENCY,
+  timeoutMs,
+});
+
 const child = spawn(
   process.execPath,
   [
     '--test',
-    '--test-concurrency=4',
+    `--test-concurrency=${TEST_CONCURRENCY}`,
     '--test-reporter=tap',
     `--test-reporter-destination=${reportPath}`,
     `--test-reporter=${new URL('./test-progress-reporter.mjs', import.meta.url).pathname}`,
     `--test-reporter-destination=${progressPath}`,
     ...targets,
   ],
-  { stdio: 'inherit', detached: process.platform !== 'win32' },
+  { stdio: 'inherit', detached: process.platform !== 'win32',
+    env: { ...process.env, SPROUT_TEST_OBS_FILE: runPath, SPROUT_TEST_OBS_RUN_ID: runId } },
 );
 
 // Node's test runner spawns workers. Kill its process group, not just the
@@ -61,7 +96,10 @@ const killTree = (signal: NodeJS.Signals): void => {
     spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' }).unref();
   } else {
     try { process.kill(-child.pid, signal); } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+      // Best-effort cleanup: the group may already be gone (ESRCH) or its
+      // recycled pid no longer ours (EPERM). Neither may fail the wrapper.
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ESRCH' && code !== 'EPERM') throw error;
     }
   }
 };
@@ -71,6 +109,20 @@ const deadline = setTimeout(() => {
   timedOut = true;
   killTree('SIGKILL');
 }, timeoutMs);
+
+// A wrapper death must not orphan the detached test group. SIGTERM/SIGINT are
+// the common harness signals and get an explicit closing record; plain exits
+// get a best-effort sweep. SIGKILL is uncatchable — a run without its closing
+// run_summary record is then reported as incomplete by aggregation.
+const shutDown = (signal: NodeJS.Signals): void => {
+  clearTimeout(deadline);
+  killTree('SIGKILL');
+  appendRun({ record: 'run_summary', runId, at: new Date().toISOString(), disposition: 'interrupted', signal });
+  process.exit(130);
+};
+process.on('SIGTERM', () => shutDown('SIGTERM'));
+process.on('SIGINT', () => shutDown('SIGINT'));
+process.on('exit', () => killTree('SIGKILL'));
 
 const code = await new Promise<number>((resolve, reject) => {
   child.on('error', reject);
@@ -133,6 +185,8 @@ if (timedOut) {
   } catch (error) {
     process.stderr.write(`Test suite timed out after ${timeoutMs} ms; could not save diagnostic: ${error}\n`);
   }
+  appendRun({ record: 'run_summary', runId, at: new Date().toISOString(), disposition: 'timed_out',
+    timeoutMs, candidates, note: candidates.length ? 'Candidates, not proven causes.' : null });
   process.exit(124);
 }
 
@@ -267,5 +321,21 @@ if (failures.length > 0) {
   // The runner died without any diagnostic the extractor recognizes.
   process.stdout.write(`\nThe test run exited ${code} without a reported failure.\n`);
 }
+
+const counter = (name: string): number | null => {
+  const line = lines.find((entry) => entry.startsWith(`# ${name} `));
+  if (line === undefined) return null;
+  const value = Number(line.slice(name.length + 3).trim());
+  return Number.isFinite(value) ? value : null;
+};
+appendRun({
+  record: 'run_summary',
+  runId,
+  at: new Date().toISOString(),
+  disposition: code === 0 ? 'passed' : 'failed',
+  exitCode: code,
+  counts: { tests: counter('tests'), pass: counter('pass'), fail: counter('fail'),
+    cancelled: counter('cancelled'), skipped: counter('skipped') },
+});
 
 process.exit(timedOut ? 124 : code);
