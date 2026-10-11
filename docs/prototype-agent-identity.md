@@ -4,7 +4,7 @@
 
 This retained prototype artifact documents the design, interaction models, decision evidence, and architectural boundaries for **Agent Identity, Standing Instructions, Ordered Work Option Preferences, Environment Compatibility, Pre-Acceptance Fallback, and Non-Destructive Archiving** in the Sprout M2 Local Operator product (Ticket #66, Scope #44). It builds directly upon the shared shell baseline (#61), Feed & Attention baseline (#62), Multi-View Project baseline (#63), Chat Scopes baseline (#64), and Environment Management baseline (#65), strictly preserving the portable worker identity and management journey decisions settled in **ADR-0008** and **CONTEXT.md**.
 
-The interactive prototype artifact is executable via `npm run prototype` (serving `web/prototype/index.html`), with full DOM test coverage in `web/src/prototype/agents.dom.test.ts`.
+The interactive prototype artifact is executable via `npm run prototype` (serving `web/prototype/index.html`). Its historical DOM suite (`agents.dom.test.ts` and the other `agents-*.dom.test.ts` files) was removed on 2026-10-11 with the other prototype tests; the prototype is a frozen reference and is verified by review, not by the regression suite.
 
 ---
 

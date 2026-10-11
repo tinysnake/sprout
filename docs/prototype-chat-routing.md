@@ -10,7 +10,10 @@ are superseded: current direct-message and Agent collaboration contracts are in
 [agent-direct-messages.md](agent-direct-messages.md), ADR-0007, ADR-0014, and
 ADR-0015.
 
-The interactive prototype artifact is executable via `npm run prototype`, with full DOM test coverage in `web/src/prototype/chat.dom.test.ts` and `web/src/prototype/project.dom.test.ts`.
+The interactive prototype artifact is executable via `npm run prototype`. Its
+historical DOM suite (`chat.dom.test.ts`, `project.dom.test.ts`) was removed on
+2026-10-11 with the other prototype tests; the prototype is a frozen reference
+and is verified by review, not by the regression suite.
 
 ---
 

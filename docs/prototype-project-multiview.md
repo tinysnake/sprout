@@ -4,7 +4,7 @@
 
 This retained prototype artifact settles the **Multi-View Project Experience** and the complete **Project-Owned Task Operating Loop** for the Sprout M2 Local Operator product (Ticket #63, Scope #44). It builds on the accepted shared shell baseline (Ticket #61) and Feed baseline (Ticket #62) at base commit `6a48b137f886c3cfcbf941868361f74345617ac2`, implementing the product boundaries settled in ADR-0006, ADR-0007, and ADR-0008.
 
-The interactive prototype artifact is accessible at `web/prototype/index.html` via `npm run prototype`, with full DOM verification in `web/src/prototype/project.dom.test.ts`.
+The interactive prototype artifact is accessible at `web/prototype/index.html` via `npm run prototype`. Its historical DOM suite (`project.dom.test.ts`) was removed on 2026-10-11 with the other prototype tests; the prototype is a frozen reference and is verified by review, not by the regression suite.
 
 ---
 

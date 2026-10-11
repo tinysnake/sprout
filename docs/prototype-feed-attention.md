@@ -4,7 +4,10 @@
 
 This retained artifact documents the design, interaction models, decision evidence, and architectural boundaries for the **Feed & Attention Experience** in the Sprout M2 Local Operator product (Ticket #62, part of Scope #44). It builds upon the shared mobile-first shell baseline settled in Ticket #61 and ADR-0006 through ADR-0010, refined through owner grilling.
 
-The interactive prototype artifact is executable via `npm run prototype`, with full DOM test coverage in `web/src/prototype/feed.dom.test.ts`.
+The interactive prototype artifact is executable via `npm run prototype`. Its
+historical DOM suite (`feed.dom.test.ts`) was removed on 2026-10-11 with the
+other prototype tests; the prototype is a frozen reference and is verified by
+review, not by the regression suite.
 
 ---
 

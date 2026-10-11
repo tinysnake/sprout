@@ -4,7 +4,7 @@
 
 This baseline settles the shared visual language, responsive application framing, and interaction primitives for the Sprout M2 Local Operator experience (Ticket #61). It implements the product hierarchy and architectural boundaries settled in #60 grilling and ADR-0006 through ADR-0010.
 
-The interactive prototype artifact is accessible at `web/prototype/index.html` via `npm run prototype`, with full DOM verification in `web/src/prototype/shell.dom.test.ts`.
+The interactive prototype artifact is accessible at `web/prototype/index.html` via `npm run prototype`. Its historical DOM suite (`shell.dom.test.ts`) was removed on 2026-10-11 with the other prototype tests; the prototype is a frozen reference and is verified by review, not by the regression suite.
 
 ---
 

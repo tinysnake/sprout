@@ -154,8 +154,10 @@ coverage, or changing the provenance and unknown-not-zero contract.
 ## Verification and reuse rule
 
 The retained UI is in `web/src/prototype/views/usage-view.ts`, its state fixture
-is in `web/src/prototype/state.ts`, and focused DOM checks live in
-`web/src/prototype/usage.dom.test.ts`.
+is in `web/src/prototype/state.ts`. The focused DOM checks formerly in
+`web/src/prototype/usage.dom.test.ts` were removed on 2026-10-11 with the other
+prototype tests; the prototype is a frozen reference and is verified by
+review, not by the regression suite.
 
 Future production work must preserve this vocabulary and the independent
 observation history. It must not infer a bill from an estimate, reprice a frozen

@@ -13,7 +13,7 @@ limit.
 | --- | --- | --- | --- |
 | Quick core | `npm run test:quick` | All default-glob test files except `.dom.test.ts` suites and `src/worker/cli/worker-cli.macos.test.ts`: cheap logic, parsing, state machines, memory/SQLite database contracts, and the compact critical authority, lease, privacy, and recovery regressions | Meaningful implementation edits |
 | Affected behavior | `npm run test:affected` | Quick core plus the tests under each changed file's directory; any `web/` change also activates `web/src/modules/tasks/tasks.dom.test.ts` (permissions, stop confirmation, recovery) | Implementation completion and ticket review |
-| Extended regression | `npm run test:extended` | The 41 `*.dom.test.ts` suites (full DOM matrices, real rendering paths) plus `src/worker/cli/worker-cli.macos.test.ts` (platform startup) | Related DOM/platform changes; change-request or final integration; periodic regression |
+| Extended regression | `npm run test:extended` | The 20 remaining `*.dom.test.ts` suites (full DOM matrices, real rendering paths) plus `src/worker/cli/worker-cli.macos.test.ts` (platform startup) | Related DOM/platform changes; change-request or final integration; periodic regression |
 | Full | `npm test` | The complete default-glob inventory (quick ∪ extended) | Final composed result before integration into the target branch |
 | External conformance | hand-scheduled probes | Real engines, containers, and separately deployed Workers (`scripts/probe-*`, `scripts/*-conformance.*`); requires explicit prerequisites | Adapter/environment changes and the corresponding release acceptance |
 
@@ -40,6 +40,18 @@ concurrency 4): quick ≈ 49 s, extended ≈ 98 s, full ≈ 142 s wall. DOM suit
 (`routes.dom`, `tasks.dom`, `ChatView.dom`) dominate. These numbers age; the
 observation dataset (`node scripts/test-observations.ts`) is the source of
 current rates and durations.
+
+On 2026-10-11 the 21 historical prototype DOM suites
+(`web/src/prototype/*.dom.test.ts`, plus `environments.dom-responsive-privacy`
+and its `dom-harness.ts`) were **deleted**, not merely re-tiered. Rationale: the
+prototype is a frozen reference artifact being retired in two steps — the
+tests are removed now, the prototype code itself later; a freeze guard for
+code scheduled for deletion only delays that deletion. Protection forgone:
+prototype UI regressions and vue/vite/jsdom-upgrade breakage inside
+`web/src/prototype/` are no longer detected. That is accepted because no
+production path renders the prototype (the production isolation claim stays
+covered by `web/src/app/routes.dom.test.ts`), and the DOM cost figures above
+overstate the current suite until the next observation baseline.
 
 ## Verification
 

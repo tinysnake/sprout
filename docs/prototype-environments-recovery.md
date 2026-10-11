@@ -4,7 +4,10 @@
 
 This retained prototype artifact documents the design, interaction models, decision evidence, and architectural boundaries for **Environment Management, Health Facts, Lease Safety, Reconciliation, and Recovery** in the Sprout M2 Local Operator product (Ticket #65, Scope #44). It builds directly upon the shared shell baseline (#61), Feed & Attention baseline (#62), Multi-View Project baseline (#63), and Chat Scopes baseline (#64), preserving the task-held lease guarantees settled in ADR-0005, task authority in ADR-0006, management journeys in ADR-0008, and self-hosted operation and recovery promises in ADR-0009.
 
-The interactive prototype artifact is executable via `npm run prototype`, with full DOM test coverage in `web/src/prototype/environments.dom.test.ts`.
+The interactive prototype artifact is executable via `npm run prototype`. Its
+historical DOM suite (`environments.dom.test.ts`) was removed on 2026-10-11
+with the other prototype tests; the prototype is a frozen reference and is
+verified by review, not by the regression suite.
 
 ---
 
@@ -203,7 +206,7 @@ The prototype provides 100% interactive parity across 390px mobile screens and w
 
 ## 8. Verification & Review Drawer Recording
 
-- **DOM Test Suite**: `web/src/prototype/environments.dom.test.ts` (extensive tests covering health facts, traffic light reasons, approval, probes, disconnect, reconnect, reconciliation, resume, discard, force release typed confirmation, permissions, archive, mobile drill-down, and privacy boundaries).
+- **DOM Test Suite** (removed 2026-10-11): `web/src/prototype/environments.dom.test.ts` formerly covered health facts, traffic light reasons, approval, probes, disconnect, reconnect, reconciliation, resume, discard, force release typed confirmation, permissions, archive, mobile drill-down, and privacy boundaries.
 - **Owner Review Decision & Pattern Refinements**:
   1. *Streamlined Header & Filters*: Header card styled seamlessly like the Feed header (transparent background, no top/left/right borders, subtle bottom border). Title row buttons kept strictly inline on a single row (nowrap, right aligned), with Host and Guide buttons streamlined to icon-only (using standard manual/book icon). Filters restyled into 5 discrete box buttons (icon top, label bottom, auto-fitting single row) modeled after Attention urgency pills.
   2. *Top-Right Status Dot*: Environment card top-right badge/pill simplified to a small colored status dot aligned to the top-right of the title row.
