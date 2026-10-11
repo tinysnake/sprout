@@ -86,6 +86,18 @@ Nearby work deliberately excluded from this ticket.
 
 Write acceptance in terms of observable outcomes, not implementation steps. A ticket is ready only when a worker can distinguish success from partial completion without inventing a product decision.
 
+Write `## Constraints` as statements of preserved behavior, not as a copied rulebook. Each applicable constraint names the behavior to preserve, its current authoritative source, and its verification:
+
+```md
+## Constraints
+
+- Preserve: <the behavior this work must retain>
+  Source: <current spec, ADR, or approved decision>
+  Verification: <existing check, or the evidence this ticket must add>
+```
+
+Keep the full rule in its authoritative source; the ticket carries the pointer and the check, not a copy of the project's decision history. For a small change with no relevant shared behavior, one sentence saying so is enough.
+
 ### Work record
 
 On completing work, add this comment to its ticket:
@@ -97,7 +109,15 @@ On completing work, add this comment to its ticket:
 What now works or what was learned.
 
 ### Triage
-On a rework — an attempt following an acceptance failure on this ticket — state before changing anything: what you judge the actual problem to be, and why the previous attempt did not resolve it, based on every earlier work record and acceptance failure. Omit this section entirely on the ticket's first attempt.
+On a rework — an attempt following an acceptance failure on this ticket — state before changing anything: what you judge the actual problem to be, and why the previous attempt did not resolve it, based on every earlier work record and acceptance failure. When that judgment is uncertain, add:
+
+#### Next attempt
+- Unmet criterion: <exact criterion and source>
+- Current explanation: <judgment supported by prior evidence>
+- Change or experiment: <what this attempt will do differently>
+- Expected observation: <how the result confirms or rejects the explanation>
+
+Omit this section entirely on the ticket's first attempt.
 
 ### Evidence
 - Tests, commands, observed behaviour, screenshots, or source links
@@ -117,17 +137,57 @@ On a rework — an attempt following an acceptance failure on this ticket — st
 
 The record reports evidence; it does not redefine acceptance after implementation.
 
-The `### Triage` section is what keeps a rework from treating each acceptance failure as a fresh symptom. A rework that satisfies its findings without saying why the previous attempt failed has not shown it understood the problem, and the next acceptance is likely to fail the same way. This is the ticket-level counterpart to the escalation-exhaustion diagnosis in step 8: it is the worker's own reading of the history, not a separate diagnostic pass, and it neither amends acceptance nor creates tickets.
+The `### Triage` section is what keeps a rework from treating each acceptance failure as a fresh symptom. A rework that satisfies its findings without saying why the previous attempt failed has not shown it understood the problem, and the next acceptance is likely to fail the same way. This is the ticket-level counterpart to the escalation-exhaustion diagnosis in step 8: it is the worker's own reading of the history, not a separate diagnostic pass, and it neither amends acceptance nor creates tickets. An ordinary fix with a known cause needs only a short statement of the correction and the expected behavior. An uncertain retry must name the new variable or observation it will introduce; if the environment, method, and observations are unchanged, do not dispatch another implementation attempt — route the failure instead (step 7).
+
+### Unfinished handoff
+
+A session that claimed a ticket may end without posting its Work record: the process can die, the context can be exhausted, or the session can stop for a reason no observer can classify. That is an unfinished handoff, and it is neither completion nor proof the work is lost.
+
+Before the session context is discarded, preserve what exists:
+
+- the branch and commits produced so far, and the workspace state;
+- evidence already gathered (test runs, probes, links), sanitized under the privacy rules in `AGENTS.md`;
+- the ticket's current state and the exact unmet acceptance condition, when it is known;
+- an explicit note that no completion claim was posted — a missing Work record is recorded as missing, never inferred from pane state or silence.
+
+Replacing or abandoning the worker requires a recorded disposition — process loss, context exhaustion, cancellation, or a deliberate decision — and unfinished work is captured before disposal. Do not repeatedly prompt a stopped session merely to obtain a completion record it may be unable to produce.
+
+Distinguish assignment completion from acceptance: a reviewer that submits a FAIL verdict has completed its assignment, while a worker reporting unmet acceptance still has work outstanding. A ticket whose claiming session ended unfinished stays open; the next claimant reads the handoff record before acting and continues from the preserved branch and evidence rather than reconstructing the context from scratch.
+
+### Decision requests
+
+Before asking the Human anything, establish whether a decision is actually needed:
+
+- cause unclear, information missing, or results contradicting one another → investigate what is available here first; distinguish established results from remaining uncertainty;
+- requirements clear but implementation or verification fails → diagnose and repair under existing authorization;
+- the blocker is credentials, hardware access, or another Human-only action → explain the purpose and give precise action instructions, not a choice;
+- the same decision was already answered → proceed under that authorization; ask again only after a material change.
+
+A decision request is needed only when feasible alternatives require choosing product behavior, investment, or an accepted limitation. Prepare it as a self-contained explanation — a reader returning from an absence must understand it without reconstructing the session history:
+
+1. **Original goal** — the observable behavior that was wanted.
+2. **Current progress** — what already works and which results are established.
+3. **Problem and cause** — trigger, observed behavior, consequence; evidence and hypotheses stated separately.
+4. **Why a Human decision is needed** — the actual tradeoff or authority, and why ordinary implementation cannot choose it. Authority follows Acceptance change in step 8: verification corrections stay within existing authorization; changes to product commitments require the project's designated decision-maker.
+5. **Recommendation and alternatives** — for each feasible choice, what it enables, what limitation or risk it accepts, and how current work changes; only feasible choices, with measured cost or an explicit note that cost is unknown.
+6. **Exact decision** — one concrete question, the scope of the answer, and what happens afterward; which independent work continues meanwhile.
+
+Explain necessary technical terms through their effect on behavior, files, actions, and results; link the technical ledger instead of reproducing it. Scale the explanation to the decision's complexity — a simple question can combine parts, but a complex one keeps the causal explanation.
+
+Before sending: check that the original goal and problem are understandable without opening earlier messages, that the recommendation is grounded, that the question has a specific scope whose answer enables an executable next step, and that existing authorization has not already settled it. If the Human says the request is unclear, rewrite the whole explanation around the same decision rather than only adding options.
+
+After the reply, state the interpretation briefly and proceed within it; ask a follow-up only when the reply leaves a material ambiguity about behavior, authority, or risk. A reply that changes acceptance, constraints, or dependency edges updates the affected unfinished tickets and assignments through step 7's change notice. Record the decision, its rationale, accepted limitations, and affected work in the durable record — the map's `Decisions so far` or the ticket — so future readers understand why. Silence or elapsed time is never an answer.
 
 ### Vocabulary
 
 These terms are used by step 8 and by the coding pipeline that runs this loop automatically; they are process language, not Sprout product language, so they are defined here rather than in `CONTEXT.md`.
 
-- **Rework triage** — the short section a rework's Work record must carry: what the worker judges the actual problem to be, and why the previous attempt did not resolve it, written after reading the prior work records and acceptance failures and before changing anything. It is the worker's own reading, not step 8's diagnosis.
+- **Rework triage** — the short section a rework's Work record must carry: what the worker judges the actual problem to be, and why the previous attempt did not resolve it, written after reading the prior work records and acceptance failures and before changing anything. When the cause is uncertain it carries a `Next attempt` block naming the new variable or observation. It is the worker's own reading, not step 8's diagnosis.
 - **Diagnosis** — the bounded root-cause analysis of a ticket that keeps failing acceptance: evidence for each applicable cause, then exactly one outcome.
 - **Remediation** — the map, spec, or ticket set a diagnosis publishes when the real cause is larger than the ticket. It becomes a blocker of the paused ticket.
 - **Paused ticket** — a ticket whose remediation must be completed first. It keeps its history and is neither closed nor re-opened while paused.
-- **Amended acceptance** — the `## Acceptance` a diagnosis rewrites when the remedy is an over-strict or mis-scoped criterion. The amended list is what the next accept step verifies against; the original is preserved in the ticket's history.
+- **Amended acceptance** — the `## Acceptance` a diagnosis rewrites when the remedy is an over-strict or mis-scoped criterion. The amended list is what the next accept step verifies against; the original is preserved in the ticket's history. The amendment distinguishes a verification correction that retains the product commitment from a change to the commitment itself, which requires the project's designated decision-maker.
+- **Decision request** — a self-contained, six-part explanation ending in one concrete question with an explicit scope, used when feasible alternatives require choosing product behavior, investment, or an accepted limitation. It is distinct from `needs-info` (missing reporter information) and from step 8's *a human decides* outcome (a diagnosis's conclusion).
 
 ### Verification commands
 
@@ -152,11 +212,20 @@ Recompute the outcome frontier in `docs/roadmap.md`, then find the nearest unpro
 
 - If a missing fact blocks planning, create a `research` ticket.
 - If behaviour or an interface must be experienced, create a disposable `prototype` ticket.
-- If a human decision blocks progress, create a `grilling` ticket.
+- If a human decision blocks progress, create a `grilling` ticket whose body follows the Decision requests structure below.
 - If the outcome and acceptance are known, create a production `task` ticket.
 - Check `docs/references.md` for a mature equivalent design in a reference repository before planning implementation from scratch; when one exists, default to adopting it and note the reference in the ticket.
 
 Prefer the smallest work that either reduces decisive uncertainty or completes an end-to-end slice. Do not create speculative implementation tickets behind unresolved fog.
+
+Before declaring a ticket ready, run a readiness check on high-risk acceptance: acceptance that depends on external engines, platforms, installations, or authorization; requires evidence that a prohibited behavior did not occur; or combines preservation and rejection rules that may conflict. For each such criterion, the ticket must state:
+
+- the concrete input, conditions, and expected result that must be proved;
+- which authorized production interface can express the required action;
+- what observation distinguishes success, failure, and an action that never occurred;
+- the smallest missing prerequisite — research, prototype, installation, authorization, or decision.
+
+A mismatch between the required proof and the available interface is resolved by an authorized change to the verification or by an explicit prerequisite ticket; the ticket is not ready until it is resolved, and missing evidence stays missing until then. This is a targeted check for high-risk acceptance, not a checklist for every small change.
 
 Completion criterion: every proposed ticket contributes to the map outcome, has checkable acceptance, and contains no decision that belongs to an open prerequisite.
 
@@ -164,13 +233,13 @@ Completion criterion: every proposed ticket contributes to the map outcome, has 
 
 Link tickets to the map and record dependencies. The frontier is the set of open, unassigned children with no open blocker.
 
-Independent frontier tickets may run in parallel. Tickets sharing an unsettled interface or domain decision remain sequential until that prerequisite settles.
+Independent frontier tickets may run in parallel. Tickets sharing an unsettled interface or domain decision remain sequential until that prerequisite settles. Also check whether neighboring tickets affect the same settled behavior: shared settled rules support parallel work, while conflicting redefinitions must be resolved before dispatch.
 
 Completion criterion: each frontier ticket can be completed without guessing at another open ticket's answer.
 
 ### 4. Select and claim
 
-Before starting new work, inspect claimed tickets for submitted work records awaiting acceptance. Otherwise select the first frontier ticket in map order and claim it.
+Before starting new work, inspect claimed tickets for submitted work records awaiting acceptance. Otherwise select the first frontier ticket in map order and claim it. Reconcile the ticket's relevant constraint sources against the current integration state rather than reusing the original ticket breakdown unchanged.
 
 - Apply `ready-for-agent` when an autonomous coding agent can satisfy and verify acceptance.
 - Apply `ready-for-human` when hardware access, credentials, subjective judgement, or an external human action is essential.
@@ -184,19 +253,23 @@ Work only within the ticket outcome and constraints. If evidence invalidates the
 
 On a **rework** — an attempt after this ticket already failed acceptance — triage first: read every earlier work record on this ticket and every acceptance failure, including the exact unmet criterion, and state in the Work record what you judge the actual problem to be and why the previous attempt did not resolve it. Do this before making changes. Do not begin by working through the failures as a list of symptoms; that is what lets a fix satisfy its own criterion while leaving the shared cause in place. If the history does not cohere — a failure that keeps repeating, or one that contradicts an earlier attempt — report that rather than guessing.
 
+For applicable constraints, record the preserved behavior and its evidence in the Work record, or the conflict and its cause. A required rule change goes through the decision/replanning process; the worker does not redefine a settled rule to make its change fit.
+
 Run the acceptance checks, post the work record, and leave the issue open for acceptance.
 
 Completion criterion: every acceptance item points to evidence, and every deviation or newly discovered uncertainty is explicit. On a rework, the Work record's `### Triage` section states the judged problem and the evidence for that judgement.
 
 ### 6. Accept
 
-Compare the outcome and evidence against each original acceptance item.
+Compare the outcome and evidence against each original acceptance item. Verify both the ticket's new behavior and the relevant existing behavior named in its constraints; a passing test that expects behavior contrary to an approved rule is evidence of a conflict to resolve, not acceptance.
 
 - If all pass, add an acceptance comment, close the ticket, and append its durable result to the map's `Decisions so far`.
 - If any fail, comment with the exact unmet criterion and return the ticket to the appropriate ready state.
 - If the result invalidates the map, update `Fog` and re-evaluate before assigning more downstream work.
 
 Completion criterion: the ticket is either closed with evidence or open with a precise unmet acceptance condition.
+
+A research or prototype ticket may conclude with supported feasibility, a proven blocker, or a named prerequisite when its acceptance defines those as valid findings. An implementation ticket does not complete merely because its route is blocked: record what has been ruled out, the blocking condition, its smallest remedy, and the executable alternative that does not depend on that route; keep the ticket unfinished, link the prerequisite work as a blocker, and continue independent frontier work. Do not turn a research or prototype acceptance into an implicit requirement to deliver the complete production feature.
 
 ### 7. Continue or re-evaluate
 
@@ -208,6 +281,19 @@ Run evaluation again when:
 - evidence invalidates a decision or dependency;
 - an acceptance failure reveals a design problem;
 - `docs/goal.md` changes.
+
+When a decision changes, update the affected unfinished tickets and dependency edges, and send an explicit change notice to assignments already running under the old decision.
+
+Before assigning another implementation attempt after an acceptance failure, route the failure by the work its evidence supports:
+
+- implementation defect with a clear expectation → normal rework;
+- defective probe, fixture, or observation → repair the verification while preserving the behavioral requirement;
+- one decisive missing fact → the smallest bounded research or experiment that answers it;
+- unavailable installation, authorization, or external prerequisite → record the blocker and a concrete resumption condition;
+- requirements demanding incompatible outcomes under the same available conditions → a specification or product decision through this loop, without spending another implementation round;
+- repeated repairs with uncertain attribution → the step 8 diagnosis.
+
+Cite the evidence for the route and retain uncertainty where attribution is incomplete. A demonstrated specification conflict is decided, not repaired; an ordinary defect with a known cause still proceeds directly to proportionate rework.
 
 When a single ticket keeps failing acceptance past its repairs, do not just re-evaluate the map: diagnose that ticket (step 8) before assigning more work to it.
 
@@ -235,9 +321,30 @@ Then it chooses one outcome, and only one:
 - **build something first** — the diagnosis is larger than the ticket. Create the remediation as a map, a spec, or an explicit ticket set, link it as a blocker of this ticket (`Blocked by:`), record the pause on the ticket, and work the remediation first. The paused ticket keeps its history; it is not closed and not re-opened. When the remediation is resolved, resume the ticket.
 - **a human decides** — record the question and leave the ticket for a human.
 
+An acceptance amendment records its authority. Correcting a fixture, observation method, or predicate that retains the product commitment follows existing project authorization; reducing support, changing behavior or permissions, or accepting a new risk requires the project's designated decision-maker, normally the Human. Record the change on the ticket:
+
+```md
+### Acceptance change
+
+- Previous requirement: <text or revision reference>
+- Replacement: <new requirement>
+- Reason and evidence: <why the change is justified>
+- Authority: <decision or applicable project authorization>
+- Commitments retained: <what still must be proved>
+- Affected work: <tickets, probes, or reviews needing updates>
+```
+
+Workers and reviewers receive the same revised acceptance, and the previous version is retained for audit. Unproved items remain explicitly unproved. A diagnostician may propose changes within granted authority; it cannot remove a parent specification's commitment by rewriting a child ticket. Affected unfinished tickets are updated through step 7's change notice.
+
 A diagnosis is bounded: one per ticket. A repair that follows a diagnosis and then fails again goes to a human rather than back to another diagnosis.
 
 Completion criterion: the ticket carries an attribution with evidence and exactly one outcome; a fix-on-ticket plan is recorded (with any acceptance amendment) and the ticket returned to step 5; a build-first remediation exists as its own tracker item and is a blocker of the paused ticket; a human-decides ticket is left with a precise question and no work outstanding.
+
+## Composition of settled slices
+
+Independently accepted slices can still fail when they first meet. When completed slices first combine use of the same resource, authority, or lifecycle, verify one coherent path through their composition before treating integration as complete. Prefer existing high-level test interfaces and expand only to the affected behavior. A clean merge is not evidence of correct composition, and a full independent repository review is not required by default.
+
+Before integration is recorded complete, compare the assignment's captured constraint sources with current project decisions. If relevant behavior changed, reassess the implementation and evidence first; formatting-only source changes do not invalidate dependent work.
 
 ## Selection principle
 
