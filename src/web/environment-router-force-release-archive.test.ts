@@ -241,6 +241,7 @@ export async function recoveryApi(options: { readonly requiredEngines?: readonly
   const acquired = runtime.pool.reserveTaskLease({
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'task-1',
     taskId: 'task-1',
     ttlMs: 60_000,
@@ -364,6 +365,7 @@ test('archive and restore are authorized durable decisions with their ADR-0008 g
     const acquired = runtime.pool.acquireLease({
       instanceId: 'mac-mini-1',
       capability: 'agent-run',
+      mode: 'read-write',
       holderId: 'agent-scout',
       ttlMs: 60_000,
     });

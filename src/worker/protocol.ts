@@ -1,4 +1,4 @@
-import type { AgentRunEvent, EngineTurnResult, StandingInstructionsChannel, StreamingGranularity } from '../engine/port.ts';
+import type { AgentRunEvent, EngineTurnResult, RemoteWorkspaceOperationResult, StandingInstructionsChannel, StreamingGranularity } from '../engine/port.ts';
 
 /**
  * The core-to-worker protocol.
@@ -33,8 +33,23 @@ export const WORKER_METHODS = {
   /** Verify and recycle one owned Task context. */
   recycleTaskContext: 'context/recycle',
   inspectTaskContext: 'context/inspect',
+  /** Prepare one disposable Run context, separate from the persistent Project workspace. */
+  prepareRunContext: 'context/run/prepare',
+  /** Verify and recycle one settled disposable Run context. */
+  recycleRunContext: 'context/run/recycle',
+  inspectRunContext: 'context/run/inspect',
   /** Validate or prepare one Project workspace selection (#93). */
   validateWorkspace: 'workspace/validate',
+  /** Attach one already-authorized, generation-fenced Project workspace. */
+  attachWorkspaceBinding: 'workspace/binding/attach',
+  /** Execute, inspect, or cancel a bounded remote file operation. */
+  workspaceFileOperation: 'workspace/file-operation',
+  inspectProjectMcpConfiguration: 'project/mcp-configuration/inspect',
+  startProjectMcp: 'project/mcp/start',
+  callProjectMcpTool: 'project/mcp/tool-call',
+  stopProjectMcp: 'project/mcp/stop',
+  inspectWorkspaceFileOperation: 'workspace/file-operation/inspect',
+  cancelWorkspaceFileOperation: 'workspace/file-operation/cancel',
   recoverySnapshot: 'recovery/snapshot',
   recoveryAcknowledge: 'recovery/acknowledge',
   recoveryAcknowledgeContext: 'recovery/ack-context',
@@ -43,6 +58,8 @@ export const WORKER_METHODS = {
 export const WORKER_NOTIFICATIONS = {
   /** Wake core to pull the durable journal; contains no Worker-supplied facts. */
   recoveryChanged: 'recovery/changed',
+  /** Sequenced bounded output from an authorized remote Project command. */
+  workspaceOperationProgress: 'workspace/file-operation/progress',
   /** One run event, in order, for a turn in flight. */
   event: 'turn/event',
   /** A turn's terminal result. Always sent after that turn's events. */
@@ -161,11 +178,23 @@ export interface WorkerEngineDescription {
   readonly standingInstructions: StandingInstructionsChannel;
 }
 
+export interface WorkerWorkspaceOperations {
+  readonly version: 1 | 2 | 3;
+  readonly operations: readonly ('read' | 'search' | 'edit' | 'patch' | 'command' | 'inspect-mcp-configuration' | 'start-project-mcp' | 'call-project-mcp-tool' | 'stop-project-mcp')[];
+  readonly maxReadBytes: number;
+  readonly maxSearchResults: number;
+  readonly maxMutationBytes?: number;
+  readonly maxCommandOutputBytes?: number;
+  readonly maxCommandDurationMs?: number;
+}
+
 export interface WorkerInfo {
   readonly pid: number;
   /** The environment instance this worker serves. */
   readonly environmentInstanceId: string;
   readonly engines: readonly WorkerEngineDescription[];
+  /** File capabilities measured by the Worker, independent of engine readiness. */
+  readonly workspaceOperations?: WorkerWorkspaceOperations;
   /** Neutral protocol and engine readiness, when this Worker can report it. */
   readonly readiness?: WorkerReadinessFacts;
 }
@@ -262,6 +291,133 @@ export interface ValidateWorkspaceResult {
   readonly kind: 'default' | 'relative';
   /** Worker-root-relative location, when the selection named one. */
   readonly path?: string;
+}
+
+export interface WorkspaceBindingIdentity {
+  readonly projectId: string;
+  readonly environmentInstanceId: string;
+  readonly bindingId: string;
+  readonly generation: number;
+  readonly connectionEpoch: number;
+  readonly workspaceId: string;
+  readonly kind: 'default' | 'relative';
+  readonly path?: string;
+}
+
+export interface AttachWorkspaceBindingParams extends WorkspaceBindingIdentity {}
+export interface RunContextParams extends WorkspaceBindingIdentity { readonly runId: string }
+
+export interface InspectProjectMcpConfigurationParams extends WorkspaceBindingIdentity {
+  readonly format: 'claude-code-mcp-json-v1';
+}
+
+export interface ProjectMcpServerDescriptor {
+  readonly name: string;
+  readonly transport: 'stdio' | 'http';
+}
+
+export interface InspectProjectMcpConfigurationResult {
+  readonly status: 'valid' | 'missing' | 'invalid' | 'unsupported';
+  readonly format: 'claude-code-mcp-json-v1';
+  readonly servers: readonly ProjectMcpServerDescriptor[];
+}
+
+export interface ProjectMcpLeaseIdentity {
+  readonly leaseId: string;
+  readonly holderKind: 'run' | 'task';
+  readonly holderId: string;
+  readonly runId: string;
+  readonly taskId?: string;
+}
+
+export interface StartProjectMcpParams extends WorkspaceBindingIdentity, ProjectMcpLeaseIdentity {
+  readonly processId: string;
+  readonly format: 'claude-code-mcp-json-v1';
+}
+
+export interface ProjectMcpToolDeclaration {
+  readonly id: string;
+  readonly server: string;
+  readonly name: string;
+  readonly description: string;
+  readonly inputSchema: Readonly<Record<string, unknown>>;
+}
+
+export interface ProjectMcpServerStatus {
+  readonly name: string;
+  readonly status: 'ready' | 'missing-dependency' | 'invalid' | 'unsupported' | 'unavailable';
+  readonly tools: readonly ProjectMcpToolDeclaration[];
+}
+
+export interface StartProjectMcpResult {
+  readonly status: 'ready' | 'partial' | 'blocked';
+  readonly processId: string;
+  readonly reason?: 'not-selected' | 'missing' | 'invalid' | 'unsupported' | 'unavailable' | 'worker-refused';
+  readonly servers: readonly ProjectMcpServerStatus[];
+}
+
+export interface CallProjectMcpToolParams extends WorkspaceBindingIdentity, ProjectMcpLeaseIdentity {
+  readonly processId: string;
+  readonly operationId: string;
+  readonly toolId: string;
+  readonly arguments: Readonly<Record<string, unknown>>;
+}
+
+export interface CallProjectMcpToolResult {
+  readonly processId: string;
+  readonly operationId: string;
+  readonly status: 'completed' | 'failed' | 'unsupported';
+  /** The tool may have taken effect, but its HTTP reply was not received. */
+  readonly outcomeUnknown?: true;
+  readonly text?: string;
+  readonly reason?: 'unknown-tool' | 'invalid-arguments' | 'server-error' | 'invalid-result' | 'unsupported-feature' | 'timeout' | 'worker-refused';
+}
+
+export interface StopProjectMcpParams extends WorkspaceBindingIdentity, ProjectMcpLeaseIdentity {
+  readonly processId: string;
+}
+
+export interface StopProjectMcpResult {
+  readonly processId: string;
+  readonly status: 'stopped' | 'uncertain' | 'not-found';
+}
+
+export type WorkspaceFileOperationParams = Omit<WorkspaceBindingIdentity, 'path'> & {
+  /** Binding selection path, separate from the file path being read, searched, or changed. */
+  readonly workspacePath?: string;
+  readonly operationId: string;
+} & (
+  | { readonly operation: 'read'; readonly path: string }
+  | { readonly operation: 'search'; readonly path?: string; readonly query: string }
+  | { readonly operation: 'edit'; readonly path: string; readonly oldText: string; readonly newText: string }
+  | { readonly operation: 'patch'; readonly path: string; readonly hunks: readonly { readonly before: string; readonly after: string }[] }
+  | { readonly operation: 'command'; readonly runId: string; readonly executable: string; readonly args: readonly string[]; readonly cwd?: string; readonly timeoutMs?: number }
+);
+
+export type WorkspaceFileOperationResult = RemoteWorkspaceOperationResult;
+
+export interface WorkspaceCommandProgress {
+  readonly operationId: string;
+  readonly projectId: string;
+  readonly environmentInstanceId: string;
+  readonly bindingId: string;
+  readonly generation: number;
+  readonly connectionEpoch: number;
+  readonly workspaceId: string;
+  readonly sequence: number;
+  readonly stream: 'stdout' | 'stderr';
+  readonly text: string;
+}
+
+export interface InspectWorkspaceFileOperationParams extends WorkspaceBindingIdentity { readonly operationId: string }
+export interface InspectWorkspaceFileOperationResult {
+  readonly status: 'not-found' | 'running' | 'cancel-requested' | 'completed' | 'failed' | 'cancelled' | 'unknown' | 'recovery-required';
+  readonly result?: WorkspaceFileOperationResult;
+}
+export interface CancelWorkspaceFileOperationParams extends InspectWorkspaceFileOperationParams {}
+export interface CancelWorkspaceFileOperationResult {
+  readonly accepted: boolean;
+  readonly status: 'not-found' | 'running' | 'cancel-requested' | 'completed' | 'failed' | 'cancelled' | 'unknown' | 'recovery-required';
 }
 
 export interface StartSessionResult {

@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { SqliteOperationalStore } from '../operations/sqlite-store.ts';
+import { SqliteRemoteOperationIdentityStore } from '../operations/remote-operation-store.ts';
 import { diagnosticSubject } from '../operations/service.ts';
 
 import { SqliteRunStore, SqliteSessionKeyStore, SqliteRunReconnectRetryStore } from '../run/sqlite-store.ts';
@@ -151,6 +152,7 @@ export class SqliteStore {
   readonly usage: SqliteUsageStore;
   readonly schemaVersion: number;
   readonly operations: SqliteOperationalStore;
+  readonly remoteWorkspaceOperations: SqliteRemoteOperationIdentityStore;
 
   constructor(options: SqliteStoreOptions) {
     this.db = new DatabaseSync(options.filename);
@@ -180,6 +182,7 @@ export class SqliteStore {
     }
     this.schemaVersion = getSchemaVersion(this.db);
     this.operations = new SqliteOperationalStore(this.db);
+    this.remoteWorkspaceOperations = new SqliteRemoteOperationIdentityStore(this.db);
     if (this.schemaVersion >= 22 && !previouslyEmpty && previousVersion === this.schemaVersion) {
       recordMigrationFact(this.db, 'unchanged');
     }

@@ -216,8 +216,14 @@ for (const { variable, read, missing, present, parsed } of settings) {
   });
 }
 
+test('execution mode is a process startup fact and is not read from host environment preferences', () => {
+  assert.equal(parseHostConfiguration({}, { projectRoot, executionMode: 'host-run' }).executionMode, 'host-run');
+  assert.equal(parseHostConfiguration({}, { projectRoot }).executionMode, 'environment-hosted');
+});
+
 test('an empty host environment takes exactly the documented defaults', () => {
   assert.deepEqual(parse(), {
+    executionMode: 'environment-hosted',
     databasePath: join(projectRoot, 'sprout.db'),
     workingDirectory: projectRoot,
     port: 5174,

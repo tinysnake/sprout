@@ -21,7 +21,7 @@ Turn Sprout's evidenced coordination foundation into a self-hosted product that 
 **Scope**:
 
 1. One local technical lead operates a self-hosted Sprout instance.
-2. Codex and Pi are the required work engines; the already implemented `agy` and `opencode` adapters do not require long-running product acceptance during M2.
+2. Codex and Pi are the required general M2 work engines; Host-run feature #225 additionally requires Pi, Codex, and Claude Code compatibility. Claude Code is not a general M2 engine gate. Ticket #252's integrated three-engine evidence remains incomplete; see [its acceptance evidence](./evidence/ticket-252-host-run-composition.md). The already implemented `agy` and `opencode` adapters do not require long-running product acceptance during M2.
 3. macOS and Windows are the required operator environments.
 4. Projects, reusable Agents, Environment instances, memberships, Working groups, templates, and workspaces can be managed through the Web product rather than hand-written runtime JSON.
 5. A Task remains bound to one Environment instance from Task begin through Task end.

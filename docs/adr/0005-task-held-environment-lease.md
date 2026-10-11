@@ -43,6 +43,11 @@ lease. The two lease shapes coexist: the lease records whether a Task or a run i
 its holder, and only an unfinished Task is permitted to hold it across run
 boundaries.
 
+Task-held leases remain `read-write` and exclusive for their full lifetime. The
+separate `read` mode permits concurrent Remote workspace readers but gives them
+no snapshot or copy-on-write; files may change while those readers are active.
+It does not change Task begin, recovery, or end authority.
+
 ## Why timeout and interruption cannot silently reassign
 
 A Task lease is long-lived relative to the current TTL-based run lease, and it

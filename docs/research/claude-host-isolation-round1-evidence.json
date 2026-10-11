@@ -1,0 +1,222 @@
+{
+  "ticket": 250,
+  "base": "1d88fb0f",
+  "evidenceTier": "model-issued (Claude Code CLI pinned at 2.1.294, non-Claude backend via local gateway)",
+  "platform": "macOS",
+  "cli": "2.1.294",
+  "fixture": "separate local sandbox origin; not an enrolled remote deployment",
+  "turns": [
+    {
+      "types": {},
+      "toolUses": [],
+      "catalog": null,
+      "mcp": [],
+      "result": null,
+      "usage": null,
+      "exitCode": null,
+      "signal": "SIGKILL",
+      "timedOut": true,
+      "sessionObserved": false,
+      "interrupted": false,
+      "authHelperInvoked": true,
+      "resumeRequested": false,
+      "resumeMatchesRequested": false,
+      "newSessionComparedToPrevious": false
+    }
+  ],
+  "calls": [],
+  "negatives": {
+    "origin_host": {
+      "id": 1,
+      "ok": true,
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "origin_project": {
+      "id": 2,
+      "ok": true,
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "origin_history": {
+      "id": 3,
+      "ok": true,
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "origin_auth": {
+      "id": 4,
+      "ok": true,
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "engine_host": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "bridge_host": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "engine_project": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "bridge_project": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "engine_history": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "bridge_history": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "engine_remote": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "bridge_remote": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "engine_auth": {
+      "readDenied": false,
+      "writeDenied": true
+    },
+    "bridge_auth": {
+      "readDenied": true,
+      "writeDenied": true
+    },
+    "traversal": {
+      "id": 5,
+      "ok": false,
+      "reason": "path-or-content-denied"
+    },
+    "symlink": {
+      "id": 6,
+      "ok": false,
+      "reason": "path-or-content-denied"
+    },
+    "nested": {
+      "id": 7,
+      "ok": false,
+      "reason": "unsupported-operation"
+    },
+    "shell": {
+      "id": 8,
+      "ok": false,
+      "reason": "unsupported-operation"
+    }
+  },
+  "gaps": [
+    "Real Claude model behavior is unexercised.",
+    "E7 root-turn attribution race (upstream Claude issue #55 in #226) cannot be confirmed or refuted on this backend; open evidence gap.",
+    "Windows, enrolled cross-host deployment, production cancellation/fencing and authentication refresh unexercised.",
+    "Initial native catalog was not observed; dependent resume/catalog transition probes cannot establish safety.",
+    "Combined native exclusion, model-issued remote execution and outer engine isolation not proved; dependent integration remains blocked."
+  ],
+  "boot": {
+    "cliVersionUnderProfile": true,
+    "authHelperUnderProfile": true
+  },
+  "protocol": {
+    "initialized": true,
+    "catalog": [
+      "remote_read",
+      "remote_write"
+    ],
+    "calls": [
+      {
+        "name": "remote_read",
+        "target": "origin",
+        "ok": true,
+        "remoteMarker": true
+      },
+      {
+        "name": "remote_write",
+        "target": "effect",
+        "ok": true,
+        "remoteMarker": false
+      },
+      {
+        "name": "remote_read",
+        "target": "host-sentinel",
+        "ok": false,
+        "remoteMarker": false
+      },
+      {
+        "name": "remote_write",
+        "target": "auth",
+        "ok": false,
+        "remoteMarker": false
+      },
+      {
+        "name": "remote_read",
+        "target": "symlink",
+        "ok": false,
+        "remoteMarker": false
+      }
+    ]
+  },
+  "scriptedCalls": [
+    {
+      "op": "read",
+      "target": "origin",
+      "ok": true,
+      "remoteMarker": true,
+      "remoteEffect": false,
+      "readEffect": false
+    },
+    {
+      "op": "write",
+      "target": "effect",
+      "ok": true,
+      "remoteMarker": false,
+      "remoteEffect": false,
+      "readEffect": false
+    },
+    {
+      "op": "read",
+      "target": "host-sentinel",
+      "ok": false,
+      "remoteMarker": false,
+      "remoteEffect": false,
+      "readEffect": false
+    },
+    {
+      "op": "write",
+      "target": "auth",
+      "ok": false,
+      "remoteMarker": false,
+      "remoteEffect": false,
+      "readEffect": false
+    },
+    {
+      "op": "read",
+      "target": "symlink",
+      "ok": false,
+      "remoteMarker": false,
+      "remoteEffect": false,
+      "readEffect": false
+    }
+  ],
+  "nativeIsolation": true,
+  "diagnosticEmptyCatalog": false,
+  "final": {
+    "hostOriginUnchanged": true,
+    "hostEffectUnchanged": true,
+    "hostSentinelUnchanged": true,
+    "remoteEffect": false,
+    "ambientMarkerAbsent": true
+  },
+  "acceptance": {
+    "nativeCatalogExact": false,
+    "remoteReadChangeCheck": false,
+    "modelHostReadWriteDenied": false,
+    "configurationCanaryAbsent": true,
+    "combinedIsolation": false
+  }
+}

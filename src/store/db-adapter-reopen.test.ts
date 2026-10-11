@@ -54,6 +54,14 @@ interface ColumnShape {
 
 /** The exact composed schema shape, including the M2 authority boundary. */
 const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
+  environment_authority_override_releases: [
+    { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
+    { name: 'environment_instance_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'lease_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'origin_agent_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'at', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
+  ],
   environment_model_authorization_evidence: [
     { name: 'evidence_id', type: 'TEXT', notnull: 0, pk: 1 },
     { name: 'environment_instance_id', type: 'TEXT', notnull: 1, pk: 0 },
@@ -124,6 +132,75 @@ const EXPECTED_SCHEMA: Record<string, readonly ColumnShape[]> = {
   projects: [
     { name: 'id', type: 'TEXT', notnull: 0, pk: 1 },
     { name: 'document', type: 'TEXT', notnull: 1, pk: 0 },
+  ],
+  remote_workspace_operations: [
+    { name: 'operation_id', type: 'TEXT', notnull: 0, pk: 1 },
+    { name: 'fingerprint', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'project_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'environment_instance_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'binding_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'generation', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'connection_epoch', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'workspace_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'run_id', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'lease_id', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'holder_kind', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'holder_id', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'task_id', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'agent_id', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'enrollment_id', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'worker_identity_digest', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'workspace_kind', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'workspace_path', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'operation', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'state', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'updated_at', type: 'INTEGER', notnull: 1, pk: 0 },
+  ],
+  remote_project_mcp_processes: [
+    { name: 'process_id', type: 'TEXT', notnull: 0, pk: 1 },
+    { name: 'fingerprint', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'project_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'environment_instance_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'binding_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'generation', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'connection_epoch', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'workspace_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'agent_id', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'workspace_kind', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'workspace_path', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'lease_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'holder_kind', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'holder_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'run_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'task_id', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'enrollment_id', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'worker_identity_digest', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'state', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'updated_at', type: 'INTEGER', notnull: 1, pk: 0 },
+  ],
+  remote_project_mcp_operations: [
+    { name: 'operation_id', type: 'TEXT', notnull: 0, pk: 1 },
+    { name: 'fingerprint', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'process_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'tool_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'project_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'environment_instance_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'binding_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'generation', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'connection_epoch', type: 'INTEGER', notnull: 1, pk: 0 },
+    { name: 'workspace_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'agent_id', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'workspace_kind', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'workspace_path', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'lease_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'holder_kind', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'holder_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'run_id', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'task_id', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'enrollment_id', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'worker_identity_digest', type: 'TEXT', notnull: 0, pk: 0 },
+    { name: 'state', type: 'TEXT', notnull: 1, pk: 0 },
+    { name: 'updated_at', type: 'INTEGER', notnull: 1, pk: 0 },
   ],
   agent_session_keys: [
     { name: 'slot', type: 'TEXT', notnull: 0, pk: 1 },
@@ -557,6 +634,7 @@ test('a directly constructed domain adapter and the shared handle observe the sa
       id: 'lease-1',
       instanceId: 'mac-mini-1',
       capability: 'agent-run',
+      mode: 'read-write' as const,
       holderId: 'run-1',
       holderKind: 'run' as const,
       runId: 'run-1',
@@ -609,9 +687,8 @@ test('a database written with the pre-rehome schema still opens and reads back',
     writeHistoricalDatabase(path);
 
     const handle = new SqliteStore({ filename: path });
-    // Opening runs the idempotent `CREATE TABLE IF NOT EXISTS` and the
-    // `#addColumnIfMissing` migrations; a historical file must be left with the
-    // same nine tables rather than failing or duplicating one.
+    // Opening runs idempotent table creation and column migrations; historical
+    // files must remain readable while gaining any newer domain tables.
     const tables = handle.db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
       .all() as unknown as readonly { readonly name: string }[];

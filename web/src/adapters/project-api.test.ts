@@ -242,7 +242,9 @@ const access: ProjectEnvironmentAccessView = {
 };
 
 test('the access adapter reads and commands the additive access routes', async () => {
+  const readiness = [{ environmentInstanceId: 'mac-mini-1', bindingId: 'binding-2', generation: 3, status: 'blocked' as const, reason: 'worker-offline' as const }];
   const { transport, calls } = recordingTransport((path) => {
+    if (path.endsWith('/readiness')) return { readiness };
     if (path.endsWith('/access') && path.startsWith('/api/projects/')) {
       // A list route returns an array; a grant returns one record.
       return path === '/api/projects/project-sprout/access'
@@ -253,6 +255,7 @@ test('the access adapter reads and commands the additive access routes', async (
   });
   const adapter = createProjectAccessBrowserAdapter(transport);
   assert.deepEqual(await adapter.listProjectAccess('project-sprout'), [access]);
+  assert.deepEqual(await adapter.listWorkspaceBindingReadiness?.('project-sprout'), readiness);
   await adapter.grantProjectAccess('project-sprout', {
     environmentInstanceId: 'mac-mini-1',
     workspace: { kind: 'default' },
@@ -267,16 +270,17 @@ test('the access adapter reads and commands the additive access routes', async (
     calls.map((call) => call.path),
     [
       '/api/projects/project-sprout/access',
+      '/api/projects/project-sprout/access/readiness',
       '/api/projects/project-sprout/access',
       '/api/projects/project-sprout/access/mac-mini-1/workspace',
       '/api/projects/project-sprout/access/mac-mini-1/end',
     ],
   );
-  assert.deepEqual(JSON.parse(String(calls[1]?.init?.body)), {
+  assert.deepEqual(JSON.parse(String(calls[2]?.init?.body)), {
     environmentInstanceId: 'mac-mini-1',
     workspace: { kind: 'default' },
   });
-  const changed = JSON.parse(String(calls[2]?.init?.body)) as { workspace: { kind: string; path: string } };
+  const changed = JSON.parse(String(calls[3]?.init?.body)) as { workspace: { kind: string; path: string } };
   assert.equal(changed.workspace.path, 'repos/third');
   // The typed view exposes the Worker-relative location, never an absolute path.
   const serialized = JSON.stringify(access);

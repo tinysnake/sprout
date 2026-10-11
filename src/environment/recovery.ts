@@ -6,7 +6,7 @@
  * recovery record per protected lease, the neutral retained evidence a
  * reconnecting Worker synchronizes, and the deterministic safety rules that
  * decide whether uncertain work is still *reconciling*, is blocked in *recovery*
- * awaiting a Human decision, or has been *resolved*.
+ * awaiting an authorized decision, or has been *resolved*.
  *
  * Three distinctions are load-bearing and are deliberately impossible to
  * collapse here:
@@ -15,10 +15,11 @@
  *   record into `reconciling`; it never resolves it and never makes the
  *   Environment reassignable (ADR-0009).
  * - **Reconciling is not recovery.** `reconciling` means evidence is still being
- *   synchronized; `recovery` means the facts are in and a Human must decide.
- * - **Unresolved facts are named, not implied.** Force Release is refused unless
- *   at least one concrete unresolved fact is recorded, so the override can never
- *   be applied to a state nobody can explain.
+ *   synchronized; `recovery` means the facts are in and an authorized Human or
+ *   Task lead decision is required.
+ * - **Unresolved facts are named, not implied.** Force Release and Task lead
+ *   authority override are refused unless at least one concrete unresolved fact
+ *   is recorded, so neither override is applied to an unexplained state.
  *
  * Like `readiness.ts`, this Module is free of `node:*` so the browser wire
  * contract can share its vocabulary.
@@ -38,7 +39,7 @@ export type EnvironmentRecoveryCause =
  * The phase of one recovery record.
  *
  * `reconciling` is active evidence synchronization; `recovery` is a settled
- * uncertain state blocked on a Human decision; `resolved` is terminal history.
+ * uncertain state blocked on an authorized decision; `resolved` is terminal history.
  */
 export type EnvironmentRecoveryPhase = 'reconciling' | 'recovery' | 'resolved';
 
@@ -74,12 +75,45 @@ export interface ReconciliationDecision {
     | 'resumed'
     | 'discarded'
     | 'released'
-    | 'force-released';
-  /** `worker` proves identity; `system` is Sprout; `operator` is the Human. */
-  readonly actor: 'worker' | 'system' | 'operator';
+    | 'force-released'
+    | 'authority-override-released';
+  /** `worker` proves identity; `system` is Sprout; `operator` is the Human; `task-lead` is the authorized lead. */
+  readonly actor: 'worker' | 'system' | 'operator' | 'task-lead';
+  readonly actorId?: string;
+  readonly authorityTaskId?: string;
   readonly at: number;
   /** A bounded, sanitized explanation suitable for an operator. */
   readonly reason: string;
+}
+
+export interface RemoteWorkRecoveryEvidence {
+  readonly journalAvailable: boolean;
+  readonly workspaceOperations: {
+    readonly running: number;
+    readonly unknown: number;
+    readonly cancelRequested: number;
+    readonly recoveryRequired: number;
+  };
+  readonly projectMcpOperations: { readonly running: number; readonly uncertain: number };
+  readonly projectMcpProcesses: {
+    readonly starting: number;
+    readonly running: number;
+    readonly stopping: number;
+    readonly uncertain: number;
+  };
+}
+
+export const EMPTY_REMOTE_WORK_RECOVERY_EVIDENCE: RemoteWorkRecoveryEvidence = {
+  journalAvailable: true,
+  workspaceOperations: { running: 0, unknown: 0, cancelRequested: 0, recoveryRequired: 0 },
+  projectMcpOperations: { running: 0, uncertain: 0 },
+  projectMcpProcesses: { starting: 0, running: 0, stopping: 0, uncertain: 0 },
+};
+
+export function remoteWorkHasUnresolvedFacts(evidence: RemoteWorkRecoveryEvidence): boolean {
+  return !evidence.journalAvailable || Object.values(evidence.workspaceOperations).some(count => count > 0) ||
+    Object.values(evidence.projectMcpOperations).some(count => count > 0) ||
+    Object.values(evidence.projectMcpProcesses).some(count => count > 0);
 }
 
 /** One durable recovery record protecting one lease. */
@@ -105,6 +139,8 @@ export interface EnvironmentRecoveryRecord {
   readonly reconnectObservedAt?: number;
   /** The evidence the reconnecting Worker synchronized, once it has. */
   readonly evidence?: RetainedEvidence;
+  /** Core-reconciled remote outcomes, separate from Worker engine evidence. */
+  readonly remoteWorkEvidence?: RemoteWorkRecoveryEvidence;
   /** Every concrete fact still unproven, computed from the evidence. */
   readonly unresolvedFacts: readonly string[];
   readonly decisions: readonly ReconciliationDecision[];
@@ -138,6 +174,25 @@ export interface ForceReleaseRecord {
   readonly projectWorkspacePreserved: true;
   /** Unrecycled Task context is recorded as leftover data, never implied clean. */
   readonly unrecycledTaskContext: boolean;
+}
+
+export interface TaskLeadAuthorityOverrideReleaseRecord {
+  readonly id: string;
+  readonly action: 'task-lead-authority-override-release';
+  readonly environmentInstanceId: string;
+  readonly leaseId: string;
+  readonly holderKind: 'run';
+  readonly holderId: string;
+  readonly runId: string;
+  readonly authorityTaskId: string;
+  readonly actorId: string;
+  readonly actorKind: 'human' | 'agent';
+  readonly at: number;
+  readonly reason: string;
+  readonly risksAcknowledged: true;
+  readonly unresolvedFacts: readonly string[];
+  /** Snapshot keeps remote outcomes explicitly unconfirmed after the lease is gone. */
+  readonly remoteWorkEvidence: RemoteWorkRecoveryEvidence;
 }
 
 /** The exact phrase a Human must type to authorize Force Release. */
@@ -230,19 +285,29 @@ export const UNRESOLVED_FACT_WORKER_OFFLINE =
 export function deriveUnresolvedFacts(input: {
   readonly holderKind: 'task' | 'run';
   readonly evidence?: RetainedEvidence;
+  readonly remoteWorkEvidence?: RemoteWorkRecoveryEvidence;
   /** True once the same Worker identity reconnected and synchronized evidence. */
   readonly evidenceSynchronized: boolean;
 }): readonly string[] {
-  if (!input.evidenceSynchronized || input.evidence === undefined) {
-    return [UNRESOLVED_FACT_WORKER_OFFLINE];
-  }
   const facts: string[] = [];
-  if (!input.evidence.engineSessionStopped) facts.push(UNRESOLVED_FACT_ENGINE_SESSION);
-  if (!input.evidence.turnSettlementObserved) {
-    facts.push(UNRESOLVED_FACT_SETTLEMENT);
+  if (!input.evidenceSynchronized || input.evidence === undefined) {
+    facts.push(UNRESOLVED_FACT_WORKER_OFFLINE);
+  } else {
+    if (!input.evidence.engineSessionStopped) facts.push(UNRESOLVED_FACT_ENGINE_SESSION);
+    if (!input.evidence.turnSettlementObserved) facts.push(UNRESOLVED_FACT_SETTLEMENT);
+    if (input.holderKind === 'task' && !input.evidence.taskContextRecycled && !input.evidence.taskContextPrepared) {
+      facts.push(UNRESOLVED_FACT_TASK_CONTEXT);
+    }
   }
-  if (input.holderKind === 'task' && !input.evidence.taskContextRecycled && !input.evidence.taskContextPrepared) {
-    facts.push(UNRESOLVED_FACT_TASK_CONTEXT);
+  const remote = input.remoteWorkEvidence;
+  if (remote !== undefined) {
+    if (!remote.journalAvailable) facts.push('The remote operation journal could not be checked; operation and process outcomes remain unverified.');
+    const workspaceCount = Object.values(remote.workspaceOperations).reduce((sum, count) => sum + count, 0);
+    if (workspaceCount > 0) facts.push(`${workspaceCount} remote workspace operation(s) do not have a confirmed terminal outcome.`);
+    const mcpOperationCount = Object.values(remote.projectMcpOperations).reduce((sum, count) => sum + count, 0);
+    if (mcpOperationCount > 0) facts.push(`${mcpOperationCount} Project MCP tool call(s) do not have a confirmed terminal outcome.`);
+    const mcpProcessCount = Object.values(remote.projectMcpProcesses).reduce((sum, count) => sum + count, 0);
+    if (mcpProcessCount > 0) facts.push(`${mcpProcessCount} Project MCP process(es) have not been confirmed stopped.`);
   }
   return facts;
 }
@@ -253,16 +318,19 @@ export function deriveUnresolvedFacts(input: {
  * ADR-0009 is explicit: only the case where **no Agent run was active** may
  * return to clear automatically, and only after the Worker proved there is no
  * leftover engine session and its Task context and lease agree. An interrupted
- * run always settles into `recovery` because a Human must decide Resume or
- * Discard; it is never auto-released.
+ * run always settles into `recovery` because an authorized Human decision is
+ * required for ordinary Resume or Discard, or a Task lead may explicitly
+ * authority-override release another Agent run lease; it is never auto-released.
  */
 export function canAutoResolve(input: {
   readonly hadActiveRun: boolean;
   readonly holderKind: 'task' | 'run';
   readonly evidence: RetainedEvidence;
+  readonly remoteWorkEvidence?: RemoteWorkRecoveryEvidence;
 }): boolean {
   if (input.hadActiveRun) return false;
   if (input.holderKind !== 'task') return false;
+  if (input.remoteWorkEvidence !== undefined && remoteWorkHasUnresolvedFacts(input.remoteWorkEvidence)) return false;
   if (!input.evidence.engineSessionStopped) return false;
   if (!input.evidence.taskContextPrepared) return false;
   return true;
@@ -282,12 +350,14 @@ export function phaseAfterReconnect(): EnvironmentRecoveryPhase {
  * The phase after retained evidence is synchronized.
  *
  * `resolved` only for the no-active-run case above; otherwise `recovery`, which
- * demands a Human Resume, Discard, Release, or Force Release.
+ * requires an authorized Human decision, including a Task lead's bounded
+ * authority override for another Agent run lease.
  */
 export function phaseAfterEvidence(input: {
   readonly hadActiveRun: boolean;
   readonly holderKind: 'task' | 'run';
   readonly evidence: RetainedEvidence;
+  readonly remoteWorkEvidence?: RemoteWorkRecoveryEvidence;
 }): EnvironmentRecoveryPhase {
   return canAutoResolve(input) ? 'resolved' : 'recovery';
 }

@@ -1,5 +1,6 @@
 import type { AgentRunEvent, EngineTurnResult, TokenUsage, DetailedTokenDimensions } from './port.ts';
 import { extractPiCostEstimate } from '../usage/valuation.ts';
+import { sanitizeProjectText } from '../environment/privacy.ts';
 import { classifyEngineTurnFailure, isRetryableEngineTurnFailure, sanitizedTurnFailure, type EngineTurnFailureCause } from './turn-failure.ts';
 
 /**
@@ -24,6 +25,8 @@ import { classifyEngineTurnFailure, isRetryableEngineTurnFailure, sanitizedTurnF
  */
 
 export interface PiTurnState {
+  /** Versioned protocol source for usage attribution. */
+  sourceVersion: string;
   /** Assistant text accumulated in the current turn. */
   text: string;
   /** The last assistant text block completed, which is a turn's answer. */
@@ -41,8 +44,9 @@ export interface PiTurnState {
   } | undefined;
 }
 
-export function newPiTurnState(): PiTurnState {
+export function newPiTurnState(sourceVersion = 'pi 0.85.1'): PiTurnState {
   return {
+    sourceVersion,
     text: '',
     finalText: '',
     failure: undefined,
@@ -92,23 +96,25 @@ export function mapPiEvent(raw: unknown, state: PiTurnState): PiOutcome {
     case 'tool_execution_start': {
       const name = typeof message['toolName'] === 'string' ? message['toolName'] : 'tool';
       return {
-        events: [{ type: 'tool-call', name, detail: describeArguments(message['args']) }],
+        events: [{ type: 'tool-call', name, detail: name.startsWith('remote_') ? 'Remote operation requested.' : '' }],
       };
     }
 
     case 'tool_execution_update': {
-      const text = extractContent(message['partialResult']);
+      const text = sanitizeToolOutput(extractContent(message['partialResult']));
       return text === '' ? { events: [] } : { events: [{ type: 'tool-output', text }] };
     }
 
     case 'tool_execution_end': {
-      const text = extractContent(message['result']);
-      const isError = message['isError'] === true;
-      // A failed tool is reported, not treated as a failed turn: the engine
-      // decides whether the turn can continue, and it will say so.
-      if (text === '') {
-        return isError ? { events: [{ type: 'notice', text: 'tool failed' }] } : { events: [] };
+      const details = getRecord(getRecord(message['result'])?.['details']);
+      const operation = details?.['operation'];
+      const status = details?.['status'];
+      if (isRemoteOperation(operation) && isRemoteOperationStatus(status)) {
+        return { events: [{ type: 'notice', text: `Remote ${operation} ${status}.` }] };
       }
+      const text = sanitizeToolOutput(extractContent(message['result']));
+      const isError = message['isError'] === true;
+      if (text === '') return isError ? { events: [{ type: 'notice', text: 'tool failed' }] } : { events: [] };
       return { events: [{ type: 'tool-output', text }] };
     }
 
@@ -219,19 +225,22 @@ function mapAssistantUpdate(message: Record<string, unknown>, state: PiTurnState
   }
 }
 
-/** Pi reports tool arguments as a structured value; show them compactly. */
-function describeArguments(args: unknown): string {
-  if (typeof args === 'string') return args;
-  if (typeof args !== 'object' || args === null) return '';
-  const record = args as Record<string, unknown>;
-  // `command` is the meaningful detail for a shell tool; otherwise show the
-  // arguments so a reader can tell what the tool was asked to do.
-  if (typeof record['command'] === 'string') return record['command'];
-  try {
-    return JSON.stringify(record);
-  } catch {
-    return '';
-  }
+function sanitizeToolOutput(value: string): string {
+  return sanitizeProjectText(value, { fallback: '', maxLength: 2_048 });
+}
+
+function getRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null ? value as Record<string, unknown> : undefined;
+}
+
+function isRemoteOperation(value: unknown): value is 'read' | 'search' | 'edit' | 'patch' | 'command' | 'inspect' {
+  return typeof value === 'string' && ['read', 'search', 'edit', 'patch', 'command', 'inspect'].includes(value);
+}
+
+function isRemoteOperationStatus(value: unknown): value is string {
+  return typeof value === 'string' && [
+    'completed', 'failed', 'cancelled', 'recovery-required', 'unknown', 'not-found', 'running', 'cancel-requested',
+  ].includes(value);
 }
 
 /** Pull text out of Pi's content parts, or a plain string. */
@@ -275,7 +284,7 @@ function createPiTurnResult(
       ...(hasUsage ? {
         billingBasis: 'unknown' as const,
         source: 'pi-protocol:message_end',
-        sourceVersion: 'pi 0.85.1',
+        sourceVersion: state.sourceVersion,
       } : {}),
     };
   }
@@ -288,7 +297,7 @@ function createPiTurnResult(
     ...(hasUsage ? {
       billingBasis: 'unknown' as const,
       source: 'pi-protocol:message_end',
-      sourceVersion: 'pi 0.85.1',
+      sourceVersion: state.sourceVersion,
     } : {}),
   };
 }

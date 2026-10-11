@@ -66,6 +66,7 @@ export interface AgentCompatibilityView {
   readonly agentId: string;
   readonly environmentInstanceId?: string;
   readonly available: boolean;
+  readonly executionMode?: 'environment-hosted' | 'host-run';
   readonly firstAvailable?: AgentWorkOptionView;
   readonly unavailableReason?: string;
   readonly options: readonly AgentOptionCompatibilityView[];

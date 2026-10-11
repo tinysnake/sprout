@@ -9,14 +9,26 @@ import { AgentRegistry, type AgentDefinition } from './agent/registry.ts';
 import type { AgentStore } from './agent/store.ts';
 import { AgentService } from './agent/service.ts';
 import type { Agent } from './agent/model.ts';
+import type { AgentWorkOption } from './agent/model.ts';
 import { currentConfiguration, currentOptions } from './agent/model.ts';
-import { projectAgentCompatibility } from './agent/compatibility.ts';
+import { projectAgentCompatibility, type AgentCompatibilityProjection, type OptionAvailabilityState } from './agent/compatibility.ts';
 import {
   CollaborationCoordinator,
   type CollaborationCoordinatorOptions,
 } from './collaboration/coordinator.ts';
 import type { CollaborationStore } from './collaboration/store.ts';
 import type { EngineAdapter } from './engine/port.ts';
+import { createProductionHostPiAdapter, isHostPiEffortSupported, type HostPiEngineAdapter, type HostPiReadiness } from './engine/pi-host.ts';
+import {
+  createProductionHostCodexAdapter,
+  HOST_CODEX_PRODUCTION_ADOPTION_ENABLED,
+  HOST_CODEX_PRODUCTION_BLOCK_REASON,
+  type HostCodexEngineAdapter,
+  type HostCodexReadiness,
+} from './engine/codex-host.ts';
+import { hostRunEffortSupported } from './engine/host-profile.ts';
+import { createProductionHostClaudeAdapter, type HostClaudeEngineAdapter, type HostClaudeReadiness } from './engine/claude-host.ts';
+import type { HostEngineReadiness, HostRunEngineAdapter } from './engine/host-profile.ts';
 import type { EnvironmentDefinition, EnvironmentInstance } from './environment/model.ts';
 import {
   ADMISSION_CAPABILITY,
@@ -38,6 +50,8 @@ import {
   type EnvironmentEnrollmentServiceOptions,
 } from './environment/enrollment-service.ts';
 import type { EnvironmentSource, HostConfiguration } from './host-config.ts';
+import { createExecutionStrategy, executionModeAdmissionRefusal, type ExecutionStrategy } from './execution-mode.ts';
+import { engineHostProfileForPlatform, environmentEngineHost } from './execution-placement.ts';
 import type { Project } from './project/model.ts';
 import { ProjectRegistry } from './project/registry.ts';
 import { workspaceFor } from './project/resolve.ts';
@@ -99,6 +113,7 @@ import type { Task } from './task/model.ts';
 import type { TaskStore } from './task/store.ts';
 import type { WorkerInfo, WorkerReadinessProbeResult } from './worker/protocol.ts';
 import type { ValidateWorkspaceParams, ValidateWorkspaceResult } from './worker/protocol.ts';
+import type { AttachWorkspaceBindingParams, WorkspaceFileOperationParams, InspectWorkspaceFileOperationParams, CancelWorkspaceFileOperationParams, InspectWorkspaceFileOperationResult, CancelWorkspaceFileOperationResult, InspectProjectMcpConfigurationParams, InspectProjectMcpConfigurationResult } from './worker/protocol.ts';
 import { createAgentTaskGroupMessageSender } from './collaboration/agent-task-group.ts';
 import { createRunApi, type RunApi } from './web/api.ts';
 import { createEnvironmentRouter } from './web/environment-router.ts';
@@ -118,6 +133,8 @@ import { WorkerGateway } from './worker/gateway.ts';
 import { effectiveWorkOptions } from './agent/model.ts';
 import { readinessRequirements } from './environment/readiness.ts';
 import { EnvironmentReadinessWorkflow } from './environment/readiness-workflow.ts';
+import { EnvironmentOperations } from './operations/environment-operations.ts';
+import { MemoryRemoteOperationIdentityStore, type RemoteOperationIdentityStore } from './operations/remote-operation-store.ts';
 import { EnrollmentWorkerPort } from './worker/enrollment-port.ts';
 import type { UsageStore } from './usage/store.ts';
 import { InMemoryUsageStore } from './usage/store.ts';
@@ -125,7 +142,7 @@ import { UsageService } from './usage/service.ts';
 import { UsageAwareRoutingModelPort } from './usage/routing-adapter.ts';
 import type { WorkerConnectionEpochStore } from './environment/worker-epoch-store.ts';
 import { SUPPORTED_WORKER_PROTOCOL } from './environment/enrollment-service.ts';
-import { workSafetyFromRecovery } from './environment/recovery.ts';
+import { EMPTY_REMOTE_WORK_RECOVERY_EVIDENCE, workSafetyFromRecovery } from './environment/recovery.ts';
 
 /**
  * The in-process composition of one Sprout runtime.
@@ -170,6 +187,8 @@ export type { TaskContextWorker };
  */
 export interface RuntimeStores {
   readonly operations?: OperationalStore;
+  /** Durable identities for bounded remote Project file operations. */
+  readonly remoteWorkspaceOperations?: RemoteOperationIdentityStore;
   readonly schemaVersion?: number;
   readonly runs: RunStore;
   /** The bounded reconnect-retry gate, trigger, and per-run rows (#181). */
@@ -208,7 +227,7 @@ export interface RuntimeStores {
 }
 
 /** Application-visible stores cannot reserve or commit Worker observations. */
-export type RuntimeStoreViews = Omit<RuntimeStores, 'environmentReadiness'> & {
+export type RuntimeStoreViews = Omit<RuntimeStores, 'environmentReadiness' | 'remoteWorkspaceOperations'> & {
   readonly environmentReadiness: Pick<EnvironmentReadinessStore,
     'getReadiness' | 'getCurrentObservation' | 'listObservations' | 'listProbes' | 'getReceipt' | 'getObservation' | 'getAttempt'>;
 };
@@ -251,6 +270,25 @@ export interface RuntimeEnvironment {
     environmentInstanceId: string,
     input: ValidateWorkspaceParams,
   ): Promise<ValidateWorkspaceResult>;
+  /** Bind one authorized Project workspace on the current authenticated Worker. */
+  attachWorkspaceBinding?(environmentInstanceId: string, input: AttachWorkspaceBindingParams): Promise<{ readonly attached: true }>;
+  /** Create, recycle, or inspect one temporary Run context; Project files remain persistent. */
+  prepareRunContext?(environmentInstanceId: string, input: import('./worker/protocol.ts').RunContextParams): Promise<{ readonly prepared: true }>;
+  recycleRunContext?(environmentInstanceId: string, input: import('./worker/protocol.ts').RunContextParams): Promise<void>;
+  inspectRunContext?(environmentInstanceId: string, input: import('./worker/protocol.ts').RunContextParams): Promise<'present' | 'absent' | 'unknown'>;
+  /** Typed read-only Workspace operations on the already accepted Worker. */
+  executeWorkspaceFileOperation?(environmentInstanceId: string, input: WorkspaceFileOperationParams,
+    onProgress?: (progress: import('./worker/protocol.ts').WorkspaceCommandProgress) => void): Promise<import('./engine/port.ts').RemoteWorkspaceOperationResult>;
+  /** Inspect a Project-selected MCP manifest on the Worker without returning its contents. */
+  inspectProjectMcpConfiguration?(environmentInstanceId: string, input: InspectProjectMcpConfigurationParams): Promise<InspectProjectMcpConfigurationResult>;
+  /** Start, call, and stop selected Project MCP tools only on the bound Worker. */
+  startProjectMcp?(environmentInstanceId: string, input: import('./worker/protocol.ts').StartProjectMcpParams): Promise<import('./worker/protocol.ts').StartProjectMcpResult>;
+  callProjectMcpTool?(environmentInstanceId: string, input: import('./worker/protocol.ts').CallProjectMcpToolParams): Promise<import('./worker/protocol.ts').CallProjectMcpToolResult>;
+  stopProjectMcp?(environmentInstanceId: string, input: import('./worker/protocol.ts').StopProjectMcpParams): Promise<import('./worker/protocol.ts').StopProjectMcpResult>;
+  inspectWorkspaceFileOperation?(environmentInstanceId: string, input: InspectWorkspaceFileOperationParams): Promise<InspectWorkspaceFileOperationResult>;
+  cancelWorkspaceFileOperation?(environmentInstanceId: string, input: CancelWorkspaceFileOperationParams): Promise<CancelWorkspaceFileOperationResult>;
+  /** The authenticated Worker epoch that currently owns one instance. */
+  connectionEpoch?(environmentInstanceId: string): number | undefined;
   /**
    * The neutral Worker facts one environment instance reported on `worker/info`,
    * when it is connected (optional: readiness is an additive observation #87).
@@ -333,16 +371,26 @@ export interface SproutRuntime {
   readonly projectService: ProjectService;
   /** The Project Environment access and workspace capability (#93). */
   readonly projectAccess: ProjectAccessService;
+  /** Authorized, bounded read-only operations on enrolled Project workspaces. */
+  readonly environmentOperations: EnvironmentOperations;
   /** The Project conversation scopes, Working groups, and Task groups (#95, #210). */
   readonly conversationScopes: ConversationScopeService;
   /** The truthful Usage and cost observation capability (#105). */
   readonly usage: UsageService;
-  /**
-   * How this Sprout instance reaches its production Worker (ADR-0012 / E2).
-   * `configured` is the M1 carrier path retained only for an injected
-   * test/development carrier; `enrollment` is the production catalog path.
-   */
+  /** How this Sprout instance reaches its production Worker (ADR-0012 / E2). */
   readonly environmentSource: EnvironmentSource;
+  /** Immutable execution strategy selected once for this process. */
+  readonly executionStrategy: ExecutionStrategy;
+  /** The optional Sprout-host Pi profile used by Host-run conversations. */
+  readonly hostPi: HostPiEngineAdapter | undefined;
+  /** The optional Sprout-host Codex profile used by Host-run conversations. */
+  readonly hostCodex: HostCodexEngineAdapter | undefined;
+  /** The optional Sprout-host Claude Code profile used by Host-run conversations. */
+  readonly hostClaude: HostClaudeEngineAdapter | undefined;
+  /** Non-inference readiness observations independent of Environment Workers. */
+  hostPiReadiness(): Promise<HostPiReadiness | undefined>;
+  hostCodexReadiness(): Promise<HostCodexReadiness | undefined>;
+  hostClaudeReadiness(): Promise<HostClaudeReadiness | undefined>;
   /**
    * The enrollment-backed outbound Worker gateway and its connection epochs
    * (#115). Present so Web-created pending enrollments have a machine channel.
@@ -398,6 +446,12 @@ export interface SproutRuntimeOptions {
    * assembled without starting a worker or an engine.
    */
   readonly environment?: RuntimeEnvironment;
+  /** Injected local Pi Engine profile for Host-run composition and tests. */
+  readonly hostPi?: HostPiEngineAdapter;
+  /** Injected local Codex Engine profile for Host-run composition and tests. */
+  readonly hostCodex?: HostCodexEngineAdapter;
+  /** Injected local Claude Code Engine profile for Host-run composition and tests. */
+  readonly hostClaude?: HostClaudeEngineAdapter;
   /**
    * Overrides the production SQLite stores.
    *
@@ -424,6 +478,114 @@ export type SproutTestComposition = {
     workerGateway: WorkerGateway;
     readinessWorkflow: EnvironmentReadinessWorkflow;
 };
+
+export function projectHostPiCompatibility(
+  workOptions: readonly AgentWorkOption[],
+  host: HostPiEngineAdapter | undefined,
+  readiness: HostPiReadiness | undefined,
+): AgentCompatibilityProjection {
+  const options = workOptions.map((option) => {
+    let state: OptionAvailabilityState;
+    let reason: string;
+    if (host === undefined) {
+      state = 'unknown';
+      reason = 'No Sprout-host Pi profile is configured.';
+    } else if (option.engine !== 'pi') {
+      state = 'missing';
+      reason = 'Host-run supports the Pi engine only.';
+    } else if (option.workModel !== host.authorizedModel) {
+      state = 'model-unavailable';
+      reason = 'The exact work model is not authorized by the Sprout-host Pi profile.';
+    } else if (!isHostPiEffortSupported(option.effort || 'medium')) {
+      state = 'model-unavailable';
+      reason = 'The requested Pi effort is not supported by the Sprout host.';
+    } else if (readiness === undefined || readiness.status === 'unknown') {
+      state = 'unknown';
+      reason = 'Sprout-host Pi readiness is unknown.';
+    } else if (readiness.installation === 'missing' || readiness.installation === 'unsupported') {
+      state = 'missing';
+      reason = 'The pinned Pi runtime is unavailable on the Sprout host.';
+    } else if (readiness.authentication === 'not-ready') {
+      state = 'login-required';
+      reason = 'Pi authentication is not ready for the Sprout-host profile.';
+    } else if (readiness.modelAvailability === 'unavailable') {
+      state = 'model-unavailable';
+      reason = 'The exact authorized model is unavailable on the Sprout host.';
+    } else if (readiness.adapterControls === 'unavailable') {
+      state = 'model-unavailable';
+      reason = 'Required isolated Pi controls are unavailable on the Sprout host.';
+    } else if (readiness.status === 'unavailable') {
+      state = 'unknown';
+      reason = 'Sprout-host Pi readiness is unavailable or unverified.';
+    } else {
+      state = 'available';
+      reason = 'The exact Pi model and effort are ready on the Sprout host.';
+    }
+    return { option, state, reason };
+  });
+  const firstAvailable = options.find((option) => option.state === 'available');
+  return {
+    options,
+    available: firstAvailable !== undefined,
+    ...(firstAvailable !== undefined ? { firstAvailable: firstAvailable.option } : {}),
+    ...(firstAvailable === undefined ? { unavailableReason: options[0]?.reason ?? 'No work option is configured.' } : {}),
+    explanation: 'Host-run compatibility uses only the Sprout-host Pi profile. It does not inspect Environment readiness; Project membership and exact model authority are checked again at run admission.',
+  };
+}
+
+export function projectHostRunCompatibility(
+  workOptions: readonly AgentWorkOption[],
+  hosts: readonly HostRunEngineAdapter[],
+  readinessByEngine: ReadonlyMap<string, HostEngineReadiness>,
+): AgentCompatibilityProjection {
+  const hostByEngine = new Map(hosts.map(host => [host.id, host] as const));
+  const options = workOptions.map(option => {
+    const host = hostByEngine.get(option.engine);
+    const readiness = readinessByEngine.get(option.engine);
+    let state: OptionAvailabilityState;
+    let reason: string;
+    if (host === undefined) {
+      state = 'unknown';
+      reason = `No Sprout-host ${option.engine} profile is configured.`;
+    } else if (option.workModel !== host.authorizedModel) {
+      state = 'model-unavailable';
+      reason = `The exact work model is not authorized by the Sprout-host ${option.engine} profile.`;
+    } else if (!hostRunEffortSupported(host, option.effort || 'medium')) {
+      state = 'model-unavailable';
+      reason = `The requested ${option.engine} effort is not supported by the selected model.`;
+    } else if (readiness === undefined || readiness.status === 'unknown') {
+      state = 'unknown';
+      reason = `Sprout-host ${option.engine} readiness is unknown.`;
+    } else if (readiness.installation === 'missing' || readiness.installation === 'unsupported') {
+      state = 'missing';
+      reason = `The pinned ${option.engine} runtime is unavailable on the Sprout host.`;
+    } else if (readiness.authentication === 'not-ready') {
+      state = 'login-required';
+      reason = `${option.engine} authentication is not ready for the Sprout-host profile.`;
+    } else if (readiness.modelAvailability === 'unavailable') {
+      state = 'model-unavailable';
+      reason = `The exact authorized model is unavailable on the Sprout host.`;
+    } else if (readiness.adapterControls === 'unavailable') {
+      state = 'model-unavailable';
+      reason = `Required isolated ${option.engine} controls are unavailable on the Sprout host.`;
+    } else if (readiness.status === 'unavailable') {
+      state = 'unknown';
+      reason = `Sprout-host ${option.engine} readiness is unavailable or unverified.`;
+    } else {
+      state = 'available';
+      reason = `The exact ${option.engine} model and effort are ready on the Sprout host.`;
+    }
+    return { option, state, reason };
+  });
+  const firstAvailable = options.find(option => option.state === 'available');
+  return {
+    options,
+    available: firstAvailable !== undefined,
+    ...(firstAvailable !== undefined ? { firstAvailable: firstAvailable.option } : {}),
+    ...(firstAvailable === undefined ? { unavailableReason: options[0]?.reason ?? 'No work option is configured.' } : {}),
+    explanation: 'Host-run compatibility uses only configured Sprout-host Engine profiles. It does not inspect Environment readiness; Project membership, lease authority, and exact model grants are checked again at run admission.',
+  };
+}
 
 function taskGroupSyncInput(task: Task): TaskGroupSyncInput | undefined {
   const admission = task.admission;
@@ -494,6 +656,25 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     leaseTtlMs,
   } = configuration;
 
+  const hostPi = options.hostPi ?? (options.environment === undefined
+    ? createProductionHostPiAdapter(process.env, { providerRoot: join(projectRoot, '..', 'pi-extensions', 'pi-magpie') })
+    : undefined);
+  const hostCodex = options.hostCodex ?? (options.environment === undefined
+    ? createProductionHostCodexAdapter(process.env)
+    : undefined);
+  const hostClaude = options.hostClaude ?? (options.environment === undefined
+    ? createProductionHostClaudeAdapter()
+    : undefined);
+  const hostCodexProductionBlockReason = options.environment === undefined && hostCodex === undefined &&
+    !HOST_CODEX_PRODUCTION_ADOPTION_ENABLED
+    ? HOST_CODEX_PRODUCTION_BLOCK_REASON
+    : undefined;
+  const hostProfiles: HostRunEngineAdapter[] = [];
+  if (hostPi !== undefined) hostProfiles.push(hostPi);
+  if (hostCodex !== undefined) hostProfiles.push(hostCodex);
+  if (hostClaude !== undefined) hostProfiles.push(hostClaude);
+  const executionStrategy = createExecutionStrategy(configuration.executionMode, hostProfiles.length > 0);
+
   /**
    * The host facts carrier and platform selection both depend on.
    *
@@ -546,11 +727,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     // running; durable state has not been opened yet. Under the enrollment source
     // (ADR-0012) no Worker is connected at construction, so there is no engine to
     // validate: the accepted connection carries its engines when it arrives.
-    const engines =
-      environment === undefined
-        ? new Map<string, EngineAdapter>()
-        : await environment.adapters(instanceId);
-    if (environment !== undefined && !engines.has(engineId)) {
+    const engines = executionStrategy.mode === 'environment-hosted' && environment !== undefined
+      ? await environment.adapters(instanceId)
+      : new Map<string, EngineAdapter>();
+    if (executionStrategy.mode === 'environment-hosted' && environment !== undefined && !engines.has(engineId)) {
       throw new MissingEnvironmentEngineError({
         engineId,
         hostedEngineIds: [...engines.keys()],
@@ -567,6 +747,8 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
 
     stores = options.stores ?? new SqliteStore({ filename: databasePath });
     const durableStores: RuntimeStores = stores;
+    const remoteOperationIdentityStore: RemoteOperationIdentityStore =
+      durableStores.remoteWorkspaceOperations ?? new MemoryRemoteOperationIdentityStore();
     // A narrowed, non-optional alias: after this point a failed store open has
     // already thrown, so the graph below never sees `undefined`.
     const openedStores = stores;
@@ -995,6 +1177,15 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         ? { eligibleInstanceIds: [configuredInstance.id] }
         : { eligibleInstanceIds: [] }),
     });
+    const executionPlacementForEnvironment = (environmentInstanceId: string) => {
+      const refusal = executionModeAdmissionRefusal(executionStrategy);
+      if (refusal !== undefined) throw new Error(refusal);
+      const platform = pool.definition(environmentInstanceId)?.platform ?? 'unknown';
+      return {
+        mode: executionStrategy.mode,
+        engineHost: environmentEngineHost(environmentInstanceId, engineHostProfileForPlatform(platform)),
+      } as const;
+    };
     // A durable authority, readiness, or recovery change schedules an
     // asynchronous catalog re-projection (E2). The scheduled function is replaced
     // once `refreshEnvironmentCatalog` exists below; the indirection lets the
@@ -1027,6 +1218,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
      */
     let tasks: TaskService;
     let taskLifecycle: TaskEnvironmentLifecycle;
+    let environmentOperations: EnvironmentOperations | undefined;
 
     /**
      * The Environment reconciliation and recovery capability (#88).
@@ -1071,6 +1263,25 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       // replaced before the next run instead of failing it against a dead channel
       // (ADR-0003), and so execution follows the leased instance (F1, #18).
       engines: (requestedInstanceId) => runtimeEnvironment.adapters(requestedInstanceId),
+      executionStrategy,
+      remoteWorkspace: async (projectId, agentId, runId, containingLease, bindingOptions) => {
+        if (!environmentOperations) return undefined;
+        try { return await environmentOperations.attach(projectId, agentId, runId, containingLease, bindingOptions); }
+        catch { return undefined; }
+      },
+      projectMcpSelected: async (projectId) => {
+        const project = await projectService.get(projectId);
+        const content = project?.content.versions.find(version => version.version === project.content.currentVersion);
+        return project?.status === 'active' && content?.mcpConfiguration?.format === 'claude-code-mcp-json-v1';
+      },
+      remoteProjectMcp: (projectId, agentId, scope) => {
+        if (!environmentOperations) throw new Error('Project MCP operations are unavailable');
+        return environmentOperations.attachProjectMcpTools(projectId, agentId, scope);
+      },
+      ...(hostPi !== undefined ? { hostPi } : {}),
+      ...(hostCodex !== undefined ? { hostCodex } : {}),
+      ...(hostClaude !== undefined ? { hostClaude } : {}),
+      executionPlacementForEnvironment,
       agents,
       resolveAgent,
       // Observed engine facts (#87) per instance, so run admission can take the
@@ -1099,7 +1310,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           const path = sanitizeWorkspacePath(binding.path);
           if (path === undefined) return undefined;
           return {
+            environmentInstanceId: instanceId,
             ...(binding.bindingId !== undefined ? { bindingId: binding.bindingId } : {}),
+            ...(binding.generation !== undefined ? { generation: binding.generation } : {}),
             workspaceId: binding.workspaceId,
             kind: 'relative',
             path,
@@ -1107,7 +1320,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         }
         if (binding.kind !== 'default' || binding.path !== undefined) return undefined;
         return {
+          environmentInstanceId: instanceId,
           ...(binding.bindingId !== undefined ? { bindingId: binding.bindingId } : {}),
+          ...(binding.generation !== undefined ? { generation: binding.generation } : {}),
           workspaceId: binding.workspaceId,
           kind: 'default',
         };
@@ -1120,6 +1335,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       sessionKeys: stores.sessionKeys,
       tasks: {
         prompt: (input) => tasks.prompt(input),
+        executionPlacement: (input) => tasks.executionPlacement(input),
         link: (input) => tasks.link(input),
       },
       onTaskRunSettled: (input) => tasks.onRunSettled(input),
@@ -1153,6 +1369,8 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         sync: syncTaskGroup,
         withTaskGroupLock: (taskId, action) => conversationScopes.withTaskGroupLock(taskId, action),
       },
+      executionStrategy,
+      executionPlacementForEnvironment,
       leaseTtlMs,
       // Every Task entry into recovery opens the durable recovery record that
       // protects its lease (#88). The callback only records; the lifecycle keeps
@@ -1181,9 +1399,14 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       lifecycle: taskLifecycle,
       projects,
       agentAuthority: projectAgentAuthority,
+      executionStrategy,
     });
     const taskControls = new TaskControlService({
-      tasks, lifecycle: taskLifecycle, proposals: taskProposals, runs: orchestrator,
+      tasks, lifecycle: taskLifecycle, proposals: taskProposals, runs: orchestrator, executionStrategy,
+      leaseRecovery: {
+        inspectInstanceLease: (instanceId) => recovery.inspectInstanceLease(instanceId),
+        authorityOverrideRelease: (leaseId, input) => recovery.authorityOverrideRelease(leaseId, input),
+      },
     });
 
     recovery = new EnvironmentRecoveryService({
@@ -1196,6 +1419,21 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         return enrollment === undefined ? undefined : {
           enrollmentId: enrollment.id, identityDigest: enrollment.worker.identityDigest,
         };
+      },
+      remoteWorkEvidenceForLease: async (lease) => {
+        if (environmentOperations === undefined) return { ...EMPTY_REMOTE_WORK_RECOVERY_EVIDENCE, journalAvailable: false };
+        try { return await environmentOperations.remoteWorkEvidenceForLease(lease.id); }
+        catch { return { ...EMPTY_REMOTE_WORK_RECOVERY_EVIDENCE, journalAvailable: false }; }
+      },
+      // Only persisted state can authorize a recovery release: the orchestrator
+      // publishes its in-memory snapshot before the corresponding store save.
+      isRunActive: async (runId) => {
+        const run = await durableStores.runs.get(runId);
+        if (run === undefined) throw new Error('originating run state is unavailable');
+        const status: unknown = run.status;
+        if (status === 'queued' || status === 'running') return true;
+        if (status === 'completed' || status === 'failed' || status === 'stopped' || status === 'interrupted') return false;
+        throw new Error('originating run state is unavailable');
       },
       // The holder decisions reuse the existing lifecycle ordering rather than
       // re-implementing Task context cleanup or lease release here.
@@ -1212,6 +1450,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       taskRuns: async (taskId) =>
         (await durableStores.tasks.listRuns(taskId)).map((link) => link.runId),
       activeRunForTask: async (taskId) => (await durableStores.tasks.get(taskId))?.activeRunId,
+      onConfirmedLeaseRelease: (leaseId) => remoteOperationIdentityStore.resolveUncertainMcpOperationsForLease(leaseId, Date.now()),
       // A recovery change (open, reconnect, evidence, resolve, Force Release) is
       // a work-safety fact for the catalog, so eligibility follows it.
       onMutation: onEnrollmentMutation,
@@ -1365,10 +1604,11 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         });
         const entry = projectCatalogEntry(inputs[inputs.length - 1]!);
         const existing = persistedInstances.get(entry.instanceId);
-        if (existing === undefined || existing.enrollmentId !== entry.enrollmentId) {
-          // Persist the durable catalog record once per enrolled instance. The
-          // record is pure identity, so an offline, revoked, or archived
-          // instance survives SQLite reopen without a Worker ever connecting.
+        if (existing === undefined || existing.enrollmentId !== entry.enrollmentId ||
+            JSON.stringify(existing.definition) !== JSON.stringify(entry.definition) ||
+            JSON.stringify(existing.instance) !== JSON.stringify(entry.instance)) {
+          // Persist portable identity and declaration changes while retaining
+          // offline, revoked, and archived instances across SQLite reopen.
           await openedStoresForCatalog.environmentCatalog.save({
             instanceId: entry.instanceId,
             enrollmentId: entry.enrollmentId,
@@ -1397,6 +1637,9 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           definitions: [configuredDefinition],
           instances: [configuredInstance],
           eligibleInstanceIds: [configuredInstance.id],
+          capabilityEligibleInstanceIds: {
+            'project-mcp': configuredDefinition.capabilities.some(capability => capability.name === 'project-mcp') ? [configuredInstance.id] : [],
+          },
         });
         void noteRunReconnectRetry(acceptedInstanceId).catch(() => {
           process.stderr.write(
@@ -1409,6 +1652,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         definitions: environmentCatalog.entries().map((entry) => entry.definition),
         instances: environmentCatalog.entries().map((entry) => entry.instance),
         eligibleInstanceIds: environmentCatalog.eligibleInstanceIds(),
+        capabilityEligibleInstanceIds: {
+          'project-mcp': environmentCatalog.projectMcpEligibleInstanceIds(),
+          ...(executionStrategy.mode === 'host-run' ? { 'agent-run': environmentCatalog.hostRunTaskEligibleInstanceIds() } : {}),
+        },
       });
       void noteRunReconnectRetry(acceptedInstanceId).catch(() => {
         process.stderr.write(
@@ -1493,6 +1740,24 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       gateway: workerGateway,
       ...(options.onWorkerLog !== undefined ? { onLog: options.onWorkerLog } : {}),
     });
+    environmentOperations = new EnvironmentOperations({
+      projects: projectService,
+      access: projectAccessService,
+      environment: enrollmentEnvironment,
+      gateway: workerGateway,
+      catalog: environmentCatalog,
+      enrollments,
+      pool,
+      store: remoteOperationIdentityStore,
+      onUncertainMcp: async (scope) => {
+        await recovery.open({ leaseId: scope.leaseId, cause: 'cleanup-failed', hadActiveRun: true, runId: scope.runId });
+      },
+      onUncertainOperation: async (leaseId) => {
+        const lease = pool.getLease(leaseId);
+        await recovery.open({ leaseId, cause: 'cleanup-failed', hadActiveRun: true, ...(lease?.runId !== undefined ? { runId: lease.runId } : {}) });
+      },
+      leaseTtlMs: configuration.leaseTtlMs,
+    });
     switchableEnvironment?.setTarget(enrollmentEnvironment);
     /**
      * The one application-level readiness workflow (#124).
@@ -1551,6 +1816,8 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           await channelLosses.get(acceptance.enrollment.environmentInstanceId);
           if (!current() || acceptance.enrollment.capabilityPermissions['agent-run'] !== true ||
               durableStores.recovery.receiveWorkerTurn === undefined) return;
+          await environmentOperations.reconcileRemoteOperations(acceptance.enrollment.environmentInstanceId);
+          if (!current()) return;
           const snapshot = await acceptance.transport.request<import('./worker/recovery-journal.ts').JournalSnapshot | null>(
             'recovery/snapshot');
           if (!current() || snapshot === null || snapshot.epoch !== acceptance.epoch.epoch) return;
@@ -1640,9 +1907,11 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
             const idle = record.interruptedRunActive === false && record.holderKind === 'task' && record.runId === undefined;
             const contextState = record.taskId !== undefined && durableStores.recovery.workerContext !== undefined
               ? await durableStores.recovery.workerContext(acceptance.enrollment.id, record.taskId) : undefined;
+            const remoteWorkEvidence = await environmentOperations.remoteWorkEvidenceForLease(record.leaseId);
             if (!current()) return;
             await recovery.synchronizeEvidence(record.leaseId, {
               hadActiveRun: !idle,
+              remoteWorkEvidence,
               evidence: {
                 retainedEventCount: receipt?.eventCount ?? 0,
                 turnSettlementObserved: idle || (receipt?.terminal === true && !receipt.pending),
@@ -1700,11 +1969,14 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       catalogProjectionRevision += 1;
       if (environmentCatalog.clearEpoch(closed.enrollmentId, closed.epoch.epoch)) {
         publishCatalogMembership();
-        const lease = pool.activeLease(closed.environmentInstanceId);
-        if (lease !== undefined) {
-          // Synchronous admission fence before any async Task/store work.
+        const leases = pool.activeLeases(closed.environmentInstanceId).filter((lease) => lease.state === 'active');
+        for (const lease of leases) {
+          // Synchronously fence every holder before any async Task/store work.
           pool.markRecovering(lease.id);
-          const loss = (async () => {
+        }
+        if (leases.length > 0) {
+          const priorLoss = channelLosses.get(closed.environmentInstanceId);
+          const recoveryJobs = leases.map((lease) => (async () => {
             const enrollment = await enrollments.get(closed.enrollmentId);
             const task = lease.taskId !== undefined ? await durableStores.tasks.get(lease.taskId) : undefined;
             const lostRunId = task?.activeRunId ?? lease.runId;
@@ -1716,7 +1988,8 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
             if (lease.taskId !== undefined) {
               await taskLifecycle.workerChannelLost(lease.taskId);
             }
-          })();
+          })());
+          const loss = Promise.all([...(priorLoss === undefined ? [] : [priorLoss]), ...recoveryJobs]).then(() => undefined);
           void loss.catch(() => options.onWorkerLog?.('Worker channel loss protection is incomplete; admission remains fenced.'));
           channelLosses.set(closed.environmentInstanceId, loss);
         }
@@ -1778,6 +2051,11 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
     const requestWorkerProbe = (enrollmentId: string) => readinessWorkflow.request(enrollmentId);
 
     operations = new OperatorDiagnostics({ store: stores.operations ?? new MemoryOperationalStore(), schema: stores.schemaVersion ?? null, auth: operatorSessions, enrollments, recovery,
+      executionStrategy,
+      hostPiReadiness: () => hostPi === undefined ? Promise.resolve(undefined) : hostPi.readiness(),
+      hostCodexReadiness: () => hostCodex === undefined ? Promise.resolve(undefined) : hostCodex.readiness(),
+      hostClaudeReadiness: () => hostClaude === undefined ? Promise.resolve(undefined) : hostClaude.readiness(),
+      ...(hostCodexProductionBlockReason !== undefined ? { hostCodexProductionBlockReason } : {}),
       connected: (instanceId) => workerGateway.liveFor(instanceId) !== undefined,
       run: async (id) => {
         const run = orchestrator.get(id) ?? await durableStores.runs.get(id);
@@ -1893,6 +2171,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
 
     const api = createRunApi({
       orchestrator,
+      executionMode: executionStrategy.mode,
       agents,
       // The project channel is served over the same core: delivery, wake dispatch,
       // and projected replies all go through the one coordinator above, governed
@@ -1925,6 +2204,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           projects: projectService,
           legacyProjects: projects,
           access: projectAccessService,
+          environmentOperations,
           ...(projectCreationService !== undefined ? { creation: projectCreationService } : {}),
         }),
         // Conversation scopes and Working groups (#95), composed through the
@@ -1937,9 +2217,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         createChatRunRouter({ collaboration, scopes: conversationScopes, runs: orchestrator }),
         createTaskProposalRouter({ proposals: taskProposals }),
         createUsageRouter({ usage: usageService }),
-        createTaskAdmissionRouter({ admissions: taskAdmissions }),
+        createTaskAdmissionRouter({ admissions: taskAdmissions, processExecutionMode: executionStrategy.mode }),
         createTaskControlRouter({
           controls: taskControls,
+          processExecutionMode: executionStrategy.mode,
           end: async (taskId, input) => {
             const task = await tasks.get(taskId);
             if (environmentSource === 'enrollment' && task?.environmentLeaseId !== undefined &&
@@ -1952,6 +2233,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           },
           recover: async (taskId, input) => {
             const task = await tasks.get(taskId);
+            if (input.action === 'resume' && task !== undefined && task.recoveryState !== 'ending') {
+              taskControls.assertTaskMode(task);
+              taskControls.assertExecutionModeAvailable();
+            }
             if (environmentSource !== 'enrollment' || task?.environmentLeaseId === undefined ||
                 task.environmentLifecycleState !== 'recovery') {
               return taskControls.recoverForHuman(taskId, input);
@@ -1973,6 +2258,21 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
           agents: agentService,
           onMutation: scheduleCatalogRefresh,
           compatibility: async (agent: Agent, requestedInstanceId?: string) => {
+            if (executionStrategy.mode === 'host-run') {
+              const readinessByEngine = new Map<string, HostEngineReadiness>();
+              for (const host of hostProfiles) readinessByEngine.set(host.id, await host.readiness());
+              const projection = projectHostRunCompatibility(currentOptions(agent), hostProfiles, readinessByEngine);
+              return {
+                agentId: agent.id,
+                ...(requestedInstanceId !== undefined ? { environmentInstanceId: requestedInstanceId } : {}),
+                executionMode: executionStrategy.mode,
+                available: projection.available,
+                ...(projection.firstAvailable !== undefined ? { firstAvailable: projection.firstAvailable } : {}),
+                ...(projection.unavailableReason !== undefined ? { unavailableReason: projection.unavailableReason } : {}),
+                options: projection.options,
+                explanation: projection.explanation,
+              };
+            }
             // The compatibility projection reports the first eligible enrolled
             // instance's observed engines, falling back to enrolled instances
             // with observed facts when none is yet eligible (#129 AC1, AC2).
@@ -1993,6 +2293,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
               ...(projection.unavailableReason !== undefined ? { unavailableReason: projection.unavailableReason } : {}),
               options: projection.options,
               explanation: projection.explanation,
+              executionMode: executionStrategy.mode,
             };
           },
           runAttribution: async (runId: string) => {
@@ -2070,6 +2371,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       agentService,
       projectService,
       projectAccess: projectAccessService,
+      environmentOperations,
       conversationScopes,
       taskProposals,
       usage: usageService,
@@ -2078,8 +2380,22 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       workerGateway: gatewayView,
       enrollmentEnvironment,
       environmentSource,
+      executionStrategy,
+      hostPi,
+      hostCodex,
+      hostClaude,
       engines,
       refreshEnvironmentCatalog,
+
+      async hostPiReadiness(): Promise<HostPiReadiness | undefined> {
+        return hostPi === undefined ? undefined : hostPi.readiness(true);
+      },
+      async hostCodexReadiness(): Promise<HostCodexReadiness | undefined> {
+        return hostCodex === undefined ? undefined : hostCodex.readiness(true);
+      },
+      async hostClaudeReadiness(): Promise<HostClaudeReadiness | undefined> {
+        return hostClaude === undefined ? undefined : hostClaude.readiness(true);
+      },
 
       /** Reconcile runs, then Task lifecycle, then recovery records, then
        * collaboration; runs first so no reply can ever be fabricated for an
@@ -2129,6 +2445,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       startupReport(boundPort: number): string {
         return renderStartupReport({
           boundPort,
+          executionMode: executionStrategy.mode,
           agents,
           engines,
           instanceId,
@@ -2192,6 +2509,7 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
  */
 function renderStartupReport(input: {
   readonly boundPort: number;
+  readonly executionMode: ExecutionStrategy['mode'];
   readonly agents: AgentRegistry;
   readonly engines: ReadonlyMap<string, EngineAdapter>;
   readonly instanceId: string;
@@ -2216,6 +2534,7 @@ function renderStartupReport(input: {
         `${input.environmentKind === 'container' ? `, container ${input.containerName}` : `, cwd ${input.workingDirectory}`})\n`;
   let report =
     `Sprout listening on http://127.0.0.1:${input.boundPort}\n` +
+    `  execution:  ${input.executionMode}\n` +
     `  agent:      ${input.agents.list().map((agent) => agent.id).join(', ')}\n` +
     `  engine:     ${[...input.engines.keys()].join(', ') || '(none)'} (via environment worker)\n` +
     environmentLine +
@@ -2310,6 +2629,59 @@ class EnrollmentEnvironmentDelegate implements RuntimeEnvironment {
       return Promise.reject(new Error('the enrollment environment cannot validate Project workspaces'));
     }
     return target.validateWorkspace(environmentInstanceId, input);
+  }
+
+  attachWorkspaceBinding(environmentInstanceId: string, input: import('./worker/protocol.ts').AttachWorkspaceBindingParams) {
+    const target = this.#require();
+    if (target.attachWorkspaceBinding === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
+    return target.attachWorkspaceBinding(environmentInstanceId, input);
+  }
+
+  inspectProjectMcpConfiguration(environmentInstanceId: string, input: import('./worker/protocol.ts').InspectProjectMcpConfigurationParams) {
+    const target = this.#require();
+    if (target.inspectProjectMcpConfiguration === undefined) return Promise.reject(new Error('remote Project MCP inspection is unavailable'));
+    return target.inspectProjectMcpConfiguration(environmentInstanceId, input);
+  }
+
+  prepareRunContext(environmentInstanceId: string, input: import('./worker/protocol.ts').RunContextParams) {
+    const target = this.#require();
+    if (target.prepareRunContext === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
+    return target.prepareRunContext(environmentInstanceId, input);
+  }
+
+  recycleRunContext(environmentInstanceId: string, input: import('./worker/protocol.ts').RunContextParams) {
+    const target = this.#require();
+    if (target.recycleRunContext === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
+    return target.recycleRunContext(environmentInstanceId, input);
+  }
+
+  inspectRunContext(environmentInstanceId: string, input: import('./worker/protocol.ts').RunContextParams) {
+    const target = this.#require();
+    if (target.inspectRunContext === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
+    return target.inspectRunContext(environmentInstanceId, input);
+  }
+
+  executeWorkspaceFileOperation(environmentInstanceId: string, input: import('./worker/protocol.ts').WorkspaceFileOperationParams,
+    onProgress?: (progress: import('./worker/protocol.ts').WorkspaceCommandProgress) => void) {
+    const target = this.#require();
+    if (target.executeWorkspaceFileOperation === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
+    return target.executeWorkspaceFileOperation(environmentInstanceId, input, onProgress);
+  }
+
+  inspectWorkspaceFileOperation(environmentInstanceId: string, input: import('./worker/protocol.ts').InspectWorkspaceFileOperationParams) {
+    const target = this.#require();
+    if (target.inspectWorkspaceFileOperation === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
+    return target.inspectWorkspaceFileOperation(environmentInstanceId, input);
+  }
+
+  cancelWorkspaceFileOperation(environmentInstanceId: string, input: import('./worker/protocol.ts').CancelWorkspaceFileOperationParams) {
+    const target = this.#require();
+    if (target.cancelWorkspaceFileOperation === undefined) return Promise.reject(new Error('remote workspace operations are unavailable'));
+    return target.cancelWorkspaceFileOperation(environmentInstanceId, input);
+  }
+
+  connectionEpoch(environmentInstanceId: string): number | undefined {
+    return this.#target?.connectionEpoch?.(environmentInstanceId);
   }
 
   info(environmentInstanceId: string): Promise<WorkerInfo | undefined> {

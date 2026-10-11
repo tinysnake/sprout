@@ -18,6 +18,11 @@ const identity: SessionKeyIdentity = {
   agentId: 'agent-scout',
   engine: 'pi',
   environmentInstanceId: 'mac-mini-1',
+  executionPlacement: {
+    mode: 'environment-hosted',
+    engineHost: { kind: 'environment', id: 'mac-mini-1', profile: { platform: 'macos', boundary: 'shared-host' } },
+  },
+  scope: { kind: 'conversation', id: 'project-channel' },
   workingDirectory: '/srv/work',
 };
 
@@ -48,10 +53,37 @@ test('a stored key round-trips through SQLite across a restart', async () => {
     agentId: identity.agentId,
     engine: identity.engine,
     environmentInstanceId: identity.environmentInstanceId,
+    executionPlacement: identity.executionPlacement,
+    scope: identity.scope,
     workingDirectoryId: workingDirectoryId(identity.workingDirectory),
     key: 'sess-persisted',
     updatedAt: 1_000,
   });
+});
+
+test('Host-run continuation slots include the execution mode and Engine host profile', async () => {
+  const store = new InMemorySessionKeyStore();
+  const hostA: SessionKeyIdentity = {
+    ...identity,
+    environmentInstanceId: '',
+    executionPlacement: {
+      mode: 'host-run',
+      engineHost: { kind: 'sprout', id: 'profile-a', profile: { platform: 'macos', boundary: 'shared-host' } },
+    },
+  };
+  const hostB: SessionKeyIdentity = {
+    ...hostA,
+    executionPlacement: {
+      ...hostA.executionPlacement!,
+      engineHost: { ...hostA.executionPlacement!.engineHost, id: 'profile-b' },
+    },
+  };
+  await store.save({ ...hostA, key: 'host-a', updatedAt: 1_000 });
+  await store.save({ ...hostB, key: 'host-b', updatedAt: 1_001 });
+  assert.notEqual(sessionKeyId({ ...hostA, workingDirectory: identity.workingDirectory }),
+    sessionKeyId({ ...hostB, workingDirectory: identity.workingDirectory }));
+  assert.equal((await store.get({ ...hostA, workingDirectory: identity.workingDirectory }))?.key, 'host-a');
+  assert.equal((await store.get({ ...hostB, workingDirectory: identity.workingDirectory }))?.key, 'host-b');
 });
 
 test('re-saving a slot replaces its key instead of duplicating it', async () => {
@@ -84,6 +116,40 @@ test('two slots that differ only by working directory never collide', async () =
   assert.equal((await store.get({ ...identity, workingDirectory: '/srv/two' }))?.key, 'k-two');
 });
 
+test('execution mode, host profile, and authorized scope partition continuation slots', async () => {
+  const store = new InMemorySessionKeyStore();
+  await store.save(record({ key: 'private-session' }));
+  const hostRun = {
+    ...identity,
+    executionPlacement: {
+      mode: 'host-run' as const,
+      engineHost: {
+        kind: 'sprout' as const,
+        id: 'sprout-test',
+        profile: { platform: 'macos' as const, boundary: 'shared-host' as const },
+      },
+    },
+  };
+  const containerProfile = {
+    ...identity,
+    executionPlacement: {
+      ...identity.executionPlacement!,
+      engineHost: {
+        ...identity.executionPlacement!.engineHost,
+        profile: { platform: 'macos' as const, boundary: 'container' as const },
+      },
+    },
+  };
+  const otherConversation = { ...identity, scope: { kind: 'conversation' as const, id: 'another-channel' } };
+  const routingBatch = { ...identity, scope: { kind: 'routing-batch' as const, id: 'batch-1' } };
+  const taskScope = { ...identity, scope: { kind: 'task' as const, id: 'task-1' } };
+  assert.equal((await store.get(hostRun))?.key, undefined);
+  assert.equal((await store.get(containerProfile))?.key, undefined);
+  assert.equal((await store.get(otherConversation))?.key, undefined);
+  assert.equal((await store.get(routingBatch))?.key, undefined);
+  assert.equal((await store.get(taskScope))?.key, undefined);
+});
+
 test('a working directory containing the slot delimiter does not collide', () => {
   // The slot is a JSON tuple, not a joined string, precisely so a path
   // containing a delimiter cannot masquerade as another slot.
@@ -105,6 +171,40 @@ test('SQLite session-key rows do not retain the working directory verbatim', asy
   db.close();
 
   assert.equal(JSON.stringify(rows).includes(rawWorkingDirectory), false);
+});
+
+test('a versioned hashed session-key table is re-keyed with Environment-hosted identity dimensions', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-session-key-v2-'));
+  const dbPath = join(dir, 'sprout.db');
+  const db = new DatabaseSync(dbPath);
+  db.exec(`CREATE TABLE agent_session_keys (
+    slot TEXT PRIMARY KEY, agent_id TEXT NOT NULL, engine TEXT NOT NULL,
+    environment_instance_id TEXT NOT NULL, working_directory_id TEXT NOT NULL,
+    session_key TEXT NOT NULL, updated_at INTEGER NOT NULL
+  )`);
+  const directoryId = workingDirectoryId(identity.workingDirectory);
+  db.prepare(`INSERT INTO agent_session_keys VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+    JSON.stringify([identity.agentId, identity.engine, identity.environmentInstanceId, directoryId]),
+    identity.agentId, identity.engine, identity.environmentInstanceId, directoryId, 'sess-v2', 1_000,
+  );
+  const store = new SqliteSessionKeyStore({ db });
+  const restored = await store.get({
+    ...identity,
+    executionPlacement: {
+      mode: 'environment-hosted',
+      engineHost: { kind: 'environment', id: identity.environmentInstanceId, profile: { platform: 'unknown', boundary: 'unknown' } },
+    },
+    scope: { kind: 'conversation', id: 'legacy-unscoped' },
+  });
+  assert.equal(await store.get(identity), undefined, 'historical unscoped keys cannot enter an authorized conversation');
+  const rows = db.prepare('SELECT * FROM agent_session_keys').all();
+  store.close();
+  db.close();
+
+  assert.equal(restored?.key, 'sess-v2');
+  assert.equal(restored?.executionPlacement.mode, 'environment-hosted');
+  assert.equal(restored?.executionPlacement.engineHost.id, identity.environmentInstanceId);
+  assert.equal(rows.length, 1);
 });
 
 test('opening a legacy session-key table removes verbatim working directories', async () => {
@@ -134,7 +234,16 @@ test('opening a legacy session-key table removes verbatim working directories', 
   );
 
   const store = new SqliteSessionKeyStore({ db });
-  const restored = await store.get({ ...identity, workingDirectory: rawWorkingDirectory });
+  const restored = await store.get({
+    ...identity,
+    environmentInstanceId: 'mac-mini-1',
+    executionPlacement: {
+      mode: 'environment-hosted',
+      engineHost: { kind: 'environment', id: 'mac-mini-1', profile: { platform: 'unknown', boundary: 'unknown' } },
+    },
+    scope: { kind: 'conversation', id: 'legacy-unscoped' },
+    workingDirectory: rawWorkingDirectory,
+  });
   const rows = db.prepare('SELECT * FROM agent_session_keys').all();
   store.close();
   db.close();

@@ -33,6 +33,22 @@ import type { EngineAdapter } from '../engine/port.ts';
 import type {
   ValidateWorkspaceParams,
   ValidateWorkspaceResult,
+  AttachWorkspaceBindingParams,
+  WorkspaceFileOperationParams,
+  InspectWorkspaceFileOperationParams,
+  CancelWorkspaceFileOperationParams,
+  InspectWorkspaceFileOperationResult,
+  CancelWorkspaceFileOperationResult,
+  InspectProjectMcpConfigurationParams,
+  InspectProjectMcpConfigurationResult,
+  StartProjectMcpParams,
+  StartProjectMcpResult,
+  CallProjectMcpToolParams,
+  CallProjectMcpToolResult,
+  StopProjectMcpParams,
+  StopProjectMcpResult,
+  RunContextParams,
+  WorkspaceCommandProgress,
   WorkerInfo,
   WorkerReadinessProbeResult,
 } from './protocol.ts';
@@ -205,6 +221,96 @@ export class EnrollmentWorkerPort implements RuntimeEnvironment {
       throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
     }
     return connection.contexts.validateWorkspace(input);
+  }
+
+  async attachWorkspaceBinding(environmentInstanceId: string, input: AttachWorkspaceBindingParams): Promise<{ readonly attached: true }> {
+    const connection = await this.#connection(environmentInstanceId);
+    const operations = connection?.info.workspaceOperations;
+    if (!connection || !operations || ![1, 2, 3].includes(operations.version) ||
+      !operations.operations.includes('read') || !operations.operations.includes('search')) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    const currentEpoch = this.connectionEpoch(environmentInstanceId);
+    if (currentEpoch !== input.connectionEpoch) throw new Error('stale Worker epoch');
+    return connection.contexts.attachWorkspaceBinding(input);
+  }
+
+  async prepareRunContext(environmentInstanceId: string, input: RunContextParams): Promise<{ readonly prepared: true }> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    const result = await connection.contexts.prepareRunContext(input);
+    if (this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error('stale Worker epoch');
+    return result;
+  }
+
+  async recycleRunContext(environmentInstanceId: string, input: RunContextParams): Promise<void> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    await connection.contexts.recycleRunContext(input);
+    if (this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error('stale Worker epoch');
+  }
+
+  async inspectRunContext(environmentInstanceId: string, input: RunContextParams): Promise<'present' | 'absent' | 'unknown'> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    return connection.contexts.inspectRunContext(input);
+  }
+
+  async executeWorkspaceFileOperation(environmentInstanceId: string, input: WorkspaceFileOperationParams,
+    onProgress?: (progress: WorkspaceCommandProgress) => void): Promise<import('../engine/port.ts').RemoteWorkspaceOperationResult> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    const result = await connection.contexts.executeWorkspaceFileOperation(input, onProgress);
+    if (this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error('stale Worker epoch');
+    return result;
+  }
+
+  async inspectProjectMcpConfiguration(environmentInstanceId: string, input: InspectProjectMcpConfigurationParams): Promise<InspectProjectMcpConfigurationResult> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || !connection.info.workspaceOperations || ![1, 2, 3].includes(connection.info.workspaceOperations.version) ||
+      !connection.info.workspaceOperations.operations.includes('inspect-mcp-configuration') ||
+      this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    const result = await connection.contexts.inspectProjectMcpConfiguration(input);
+    if (this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error('stale Worker epoch');
+    return result;
+  }
+
+  async startProjectMcp(environmentInstanceId: string, input: StartProjectMcpParams): Promise<StartProjectMcpResult> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || !connection.info.workspaceOperations || ![1, 2, 3].includes(connection.info.workspaceOperations.version) || !connection.info.workspaceOperations.operations.includes('start-project-mcp') || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    const result = await connection.contexts.startProjectMcp(input);
+    if (this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error('stale Worker epoch');
+    return result;
+  }
+
+  async callProjectMcpTool(environmentInstanceId: string, input: CallProjectMcpToolParams): Promise<CallProjectMcpToolResult> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || !connection.info.workspaceOperations || ![1, 2, 3].includes(connection.info.workspaceOperations.version) || !connection.info.workspaceOperations.operations.includes('call-project-mcp-tool') || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    const result = await connection.contexts.callProjectMcpTool(input);
+    if (this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error('stale Worker epoch');
+    return result;
+  }
+
+  async stopProjectMcp(environmentInstanceId: string, input: StopProjectMcpParams): Promise<StopProjectMcpResult> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || !connection.info.workspaceOperations || ![1, 2, 3].includes(connection.info.workspaceOperations.version) || !connection.info.workspaceOperations.operations.includes('stop-project-mcp') || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    const result = await connection.contexts.stopProjectMcp(input);
+    if (this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error('stale Worker epoch');
+    return result;
+  }
+
+  async inspectWorkspaceFileOperation(environmentInstanceId: string, input: InspectWorkspaceFileOperationParams): Promise<InspectWorkspaceFileOperationResult> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    return connection.contexts.inspectWorkspaceFileOperation(input);
+  }
+
+  async cancelWorkspaceFileOperation(environmentInstanceId: string, input: CancelWorkspaceFileOperationParams): Promise<CancelWorkspaceFileOperationResult> {
+    const connection = await this.#connection(environmentInstanceId);
+    if (!connection || this.connectionEpoch(environmentInstanceId) !== input.connectionEpoch) throw new Error(WORKER_DIAGNOSTICS.connectionUnavailable);
+    return connection.contexts.cancelWorkspaceFileOperation(input);
+  }
+
+  connectionEpoch(environmentInstanceId: string): number | undefined {
+    return this.#gateway.liveFor(environmentInstanceId)?.epoch.epoch;
   }
 
   /**

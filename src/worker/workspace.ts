@@ -8,6 +8,7 @@ import type {
   TaskContextMaterialization,
   ValidateWorkspaceParams,
   ValidateWorkspaceResult,
+  RunContextParams,
 } from './protocol.ts';
 
 /**
@@ -21,6 +22,11 @@ export class WorkerWorkspace {
 
   constructor(root: string) {
     this.#root = resolve(root);
+  }
+
+  /** Private durable journal location owned by this Worker, outside Project workspaces. */
+  operationJournalDirectory(): string {
+    return join(this.#root, '.sprout-worker-state', 'workspace-operations');
   }
 
   async prepare(input: TaskContextMaterialization): Promise<PrepareTaskContextResult> {
@@ -125,6 +131,69 @@ export class WorkerWorkspace {
     } catch { return false; }
   }
 
+  /** Prepare one disposable run context outside the persistent Project tree. */
+  async prepareRunContext(input: RunContextParams): Promise<{ readonly prepared: true }> {
+    const root = await this.#rootPath();
+    const context = await this.#resolveRunContext(input, true);
+    const manifest = runContextManifest(input);
+    const path = join(context, 'manifest.json');
+    await regularFile(root, path, true);
+    try {
+      const existing = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+      if (!sameRunContextManifest(existing, manifest)) throw new Error('Run context identity conflict; refusing reuse');
+    } catch (error) {
+      if (!isNotFound(error)) throw error;
+      try { await writeFile(path, `${JSON.stringify(manifest, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' }); }
+      catch (writeError) {
+        if (!isAlreadyExists(writeError)) throw writeError;
+        const existing = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+        if (!sameRunContextManifest(existing, manifest)) throw new Error('Run context identity conflict; refusing reuse');
+      }
+    }
+    return { prepared: true };
+  }
+
+  /** Verify and remove only the Worker-owned temporary Run context. */
+  async recycleRunContext(input: RunContextParams): Promise<void> {
+    const root = await this.#rootPath();
+    let context: string;
+    try { context = await this.#resolveRunContext(input, false); }
+    catch (error) { if (isNotFound(error)) return; throw error; }
+    const manifestPath = join(context, 'manifest.json');
+    await regularFile(root, manifestPath);
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>;
+    if (!sameRunContextManifest(manifest, runContextManifest(input))) throw new Error('Run context identity does not match; refusing cleanup');
+    const files = await filesBelow(context);
+    if (!files.includes(manifestPath)) throw new Error('Run context manifest is missing; refusing cleanup');
+    await rm(context, { recursive: true, force: false });
+  }
+
+  async runContextDirectory(input: RunContextParams): Promise<string> {
+    const root = await this.#rootPath();
+    const context = await this.#resolveRunContext(input, false);
+    const manifestPath = join(context, 'manifest.json');
+    await regularFile(root, manifestPath);
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>;
+    if (!sameRunContextManifest(manifest, runContextManifest(input))) throw new Error('run-context-unavailable');
+    return context;
+  }
+
+  /** Fresh proof that the exact run context exists and contains only its manifest. */
+  async inspectRunContext(input: RunContextParams): Promise<'present' | 'absent' | 'unknown'> {
+    const root = await this.#rootPath();
+    let context: string;
+    try { context = await this.#resolveRunContext(input, false); }
+    catch (error) { return isNotFound(error) ? 'absent' : 'unknown'; }
+    try {
+      const manifestPath = join(context, 'manifest.json');
+      await regularFile(root, manifestPath);
+      const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>;
+      const files = await filesBelow(context);
+      return sameRunContextManifest(manifest, runContextManifest(input)) && files.includes(manifestPath)
+        ? 'present' : 'unknown';
+    } catch { return 'unknown'; }
+  }
+
   /**
    * Resolve one Project's workspace to its absolute location on this host.
    *
@@ -175,6 +244,13 @@ export class WorkerWorkspace {
     // it resolves this identity directly rather than hashing it a second time.
     await this.#workspace(root, input.projectId, true);
     return { workspaceId: token(input.projectId), kind: 'default' };
+  }
+
+  async #resolveRunContext(input: RunContextParams, create: boolean): Promise<string> {
+    if (!validRunContext(input)) throw new Error('Run context identity refused');
+    const root = await this.#rootPath();
+    const parent = await this.#directory(root, join(root, '.sprout-worker-state', 'run-contexts', token(input.projectId)), create);
+    return this.#directory(root, join(parent, token(input.runId)), create);
   }
 
   async #rootPath(): Promise<string> {
@@ -240,6 +316,30 @@ function token(value: string): string {
 }
 
 const OWNED_MARKER = '<!-- sprout:task-context -->\n';
+
+function runContextManifest(input: RunContextParams): Record<string, unknown> {
+  return { sprout: 'sprout-run-context-v1', projectId: input.projectId, runId: input.runId,
+    environmentInstanceId: input.environmentInstanceId, bindingId: input.bindingId, generation: input.generation,
+    connectionEpoch: input.connectionEpoch, workspaceId: input.workspaceId, kind: input.kind, ...(input.path !== undefined ? { path: input.path } : {}) };
+}
+
+function sameRunContextManifest(value: Record<string, unknown>, expected: Record<string, unknown>): boolean {
+  return Object.keys(expected).length === Object.keys(value).length && Object.entries(expected).every(([key, item]) => value[key] === item);
+}
+
+function validRunContext(input: RunContextParams): boolean {
+  return typeof input.projectId === 'string' && input.projectId.length > 0 && input.projectId.length <= 512 &&
+    typeof input.runId === 'string' && input.runId.length > 0 && input.runId.length <= 512 &&
+    typeof input.environmentInstanceId === 'string' && input.environmentInstanceId.length > 0 && input.environmentInstanceId.length <= 512 &&
+    typeof input.bindingId === 'string' && input.bindingId.length > 0 && input.bindingId.length <= 512 &&
+    Number.isSafeInteger(input.generation) && input.generation > 0 && Number.isSafeInteger(input.connectionEpoch) && input.connectionEpoch > 0 &&
+    typeof input.workspaceId === 'string' && input.workspaceId.length > 0 && input.workspaceId.length <= 512 &&
+    ((input.kind === 'default' && input.path === undefined) || (input.kind === 'relative' && typeof input.path === 'string' && isSafeRelativePath(input.path)));
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'EEXIST';
+}
 
 async function writeOwned(root: string, path: string, content: string): Promise<void> {
   await regularFile(root, path, true);

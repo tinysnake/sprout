@@ -14,7 +14,7 @@
  * the ordered options at admission, and the store seam persists the document.
  */
 
-import { sanitizeIdentifier, sanitizeOperatorText, redactSensitiveText } from '../environment/privacy.ts';
+import { redactProjectText, sanitizeIdentifier, sanitizeOperatorText } from '../environment/privacy.ts';
 
 /** The Agent lifecycle. Archived is a status, never a delete (ADR-0008). */
 export type AgentStatus = 'active' | 'archived';
@@ -193,7 +193,7 @@ export function sanitizeDisplayName(value: string | undefined): string {
  * usable becomes absent instructions.
  */
 export function sanitizeInstructions(value: string | undefined): string | undefined {
-  const text = redactSensitiveText((value ?? '').trim());
+  const text = redactProjectText((value ?? '').trim());
   if (text === '') return undefined;
   const bounded = text.length <= MAX_INSTRUCTIONS
     ? text

@@ -21,7 +21,7 @@ The single authentication boundary through which the Local Operator MVP's one Hu
 _Avoid_: Admin account, Team owner
 
 **Project**:
-A durable collaboration and management boundary with its own members, optional goal and rules, Environment access, Project workspaces, channels, and history. A Project remains complete when it has no Agent or Environment, although it cannot begin Agent work until the required resources are present.
+A durable collaboration and management boundary with its own members, optional goal and rules, Environment access, Project workspaces, channels, and history. A Project remains complete when it has no Agent or Environment; a project Message may still receive a Host-run reply when its Agent and Sprout-host Engine profile are authorized.
 _Avoid_: Project group, group chat
 
 **Project channel**:
@@ -100,16 +100,60 @@ _Avoid_: Agent role
 The persistent working area of one project inside one environment instance: the repository, project rules, IDE state, build results, and caches. It outlives any one Task or agent run, and successive Tasks in the same project and environment reuse it.
 _Avoid_: Environment instance, Task context directory
 
+**Project MCP configuration**:
+The Human-selected format that permits an Environment Worker to inspect the Project workspace's MCP server declarations when an authorized run holds its Environment lease. A repository file alone does not authorize server startup.
+_Avoid_: Repository MCP permission, implicit plugin configuration
+
+**Project MCP tool**:
+A typed operation advertised by a configured stdio or HTTP server and bound to its Environment Worker, Project workspace binding, and containing run or Task lease. HTTP endpoints and headers stay inside the Worker. The supported tool catalog does not imply support for MCP resources, prompts, cancellation, or server-to-client requests.
+_Avoid_: Universal MCP capability, arbitrary server selector
+
+**Run context**:
+A private, temporary working area inside an Environment for one Agent run. It holds disposable execution state while the Agent works in the persistent Project workspace; it does not replace or own that workspace.
+_Avoid_: Project workspace, Task context directory
+
+**Remote workspace operation**:
+A bounded request by an Agent run to read, search, edit, patch, or run an allowlisted command against its authorized Project workspace through one pinned Environment binding. Its outcome stays attributable to that request when the caller loses the response and must inspect it.
+_Avoid_: Host-local operation, Environment fallback
+
+**Remote workspace operation outcome**:
+The recorded result and settlement state of one Remote workspace operation. It may be completed, failed, cancelled, or require recovery; an uncertain outcome remains inspectable without creating a replacement operation.
+_Avoid_: Command log, retry result
+
 **Agent**:
 A persistent worker identity with its own capabilities, model configuration, and private memory, independent of any environment instance or project.
 _Avoid_: Process, bot instance, environment agent
 
 **Agent work option**:
-One entry in an Agent's ordered execution preferences, naming an engine, work model, and effort. At run admission Sprout chooses the first option available on the selected Environment instance, and it never changes options automatically after an engine accepts the run.
+One entry in an Agent's ordered execution preferences, naming an engine, work model, and effort. Environment-hosted admission checks the selected Environment's observed facts; Host-run admission checks the selected local Engine profile's exact authorized model and supported effort before accepting the Message run. Sprout never switches options after an engine accepts a run.
 _Avoid_: Environment binding, model fallback retry
 
+**Execution mode**:
+The immutable, process-wide choice made when a Sprout instance starts: `environment-hosted` places engine execution in the selected Environment worker, while `host-run` places supported one-round Message conversations and authorized Tasks on the Sprout host through a configured Host Engine profile. A standalone run may independently select a Project-authorized Work Environment for workspace access; without that selection, Host-run Message admission needs no work Environment lookup or lease and grants no Project workspace or MCP access. A Host-run Task requires Human approval and an active Task-held lease on the selected authorized Environment; the Host Engine performs nested activations while that Worker supplies Task context, Project workspace operations, and selected Project MCP tools under the same lease. Omission selects `environment-hosted` on every startup. Settings reports the effective mode and configured Host Engine readiness; changing mode requires restarting Sprout with a different startup argument. Restrictions on non-Project resources reachable through remote MCP remain deferred and are not claimed here.
+_Avoid_: Browser preference, runtime switch
+
+**Execution placement**:
+The durable facts describing where a run or begun Task executes: its immutable Execution mode and, after admission, the actual Engine host and non-secret host profile. The Work Environment is a separate workspace authority and does not change the Engine host. A Task keeps the placement chosen when it began for every later run and recovery decision.
+_Avoid_: Work Environment selection, Agent work option
+
+**Engine host**:
+The host that runs an engine process, owns its engine session storage, and holds its engine login. It is the Environment host in `environment-hosted` mode and the Sprout host in `host-run` mode. A Host-run Engine profile has one explicit model authority and a host-local session namespace, independent of any Work Environment.
+_Avoid_: Work Environment, Project workspace
+
+**Host Engine readiness**:
+An observation of whether a Host Engine profile has the installation, authentication, authorized model, and controls required for admission. It is independent of Work Environment readiness; a ready profile does not by itself show that a model turn used or respected those controls.
+_Avoid_: Environment readiness, engine installation alone, conformance proof
+
+**Host Pi readiness**:
+A Sprout-host-local, non-inference observation that the pinned Pi runtime, configured authentication, exact authorized model, and required isolated adapter controls are available for one Host-run profile. It does not contact an Environment Worker or perform a model turn.
+_Avoid_: Environment readiness, smoke run, hidden model call
+
+**Host Claude Code readiness**:
+A Sprout-host-local, non-inference observation that Claude Code CLI `2.1.294`, its read-only user-configured model and effort, configured authentication material, and required isolation controls match the Host profile. The accepted model value is `group/auto-mimo-v2-6-flash[1m]`; it is a configured gateway alias and is not claimed to name a Claude-native model. Readiness does not validate the gateway credential or model reachability, contact an Environment Worker, or perform a model turn.
+_Avoid_: Environment readiness, smoke run, hidden model call
+
 **Agent run**:
-One bounded activation of an agent in response to a message, task, or system event. A run executing inside a Task is a nested activation: it neither acquires nor releases that Task's environment lease.
+One bounded activation of an agent in response to a message, task, or system event. Its durable execution mode records where the engine ran; a Host-run record also names its opaque Engine host profile. A standalone activation may use a separately selected Work Environment for Project workspace tools. A run executing inside a Task is a nested activation: it neither changes nor releases that Task's Environment lease.
 _Avoid_: Agent, task
 
 **Agent run stop**:
@@ -117,11 +161,11 @@ An intentional request by a Human or Task lead to settle one active Task-linked 
 _Avoid_: Chat run interruption, Task pause, Task end
 
 **Chat run interruption**:
-A Human-authorized request from Chat to settle an active run outside a Task. Its outcome is interrupted with a Human-stop reason, and its run-held Environment lease is released before the conversation is reused.
+A Human-authorized request from Chat to settle an active run outside a Task. Its outcome is interrupted with a Human-stop reason. An Environment-hosted run releases its run-held Environment lease before the conversation is reused; a Host-run engine process is interrupted and closed, and any unresolved remote operation remains under its Environment recovery ownership.
 _Avoid_: Agent run stop, Task interruption, Task end
 
 **Usage activity**:
-One model-consuming activity observed by Sprout: either an Agent run using its work model or a Routing attempt using a wake model. A Routing attempt belongs to its Project but never to an Agent or Task.
+One model-consuming activity observed by Sprout: either an Agent run using its work model or a Routing attempt using a wake model. A run activity records its execution placement and Engine host profile when applicable. A Routing attempt belongs to its Project but never to an Agent or Task.
 _Avoid_: Billable run, Agent run
 
 **Usage observation**:
@@ -157,7 +201,7 @@ The Human escalation available while a Task pause request still has an active ag
 _Avoid_: Interruption, Task pause, Task end
 
 **Session key**:
-The opaque, engine-native identifier of the conversation an agent run continued or created, stored by Sprout so the next run in the same environment and working directory can continue it. Owned by the engine; Sprout chooses it for Pi and captures it for the others.
+The opaque, engine-native identifier of a conversation an Agent run continued or created, stored by Sprout so a later run can continue it only within the same Agent, engine, execution mode, Engine host and profile, Work Environment slot, working directory or controlled working area, and authorized Conversation, Routing batch, or Task scope. A Work Environment change therefore starts a fresh native session while Sprout supplies bounded prior-result facts and the current capability snapshot. Owned by the engine; Sprout chooses it for Pi and captures it for the others.
 _Avoid_: Session id, thread id, conversation id
 
 **Work model**:
@@ -185,8 +229,12 @@ One durable version of a Task's goal, constraints, and validation criteria. A Hu
 _Avoid_: Prompt, Agent memory
 
 **Task lead**:
-A Human or Agent Project member entrusted by a Human at Task begin to coordinate work within the Task's current content, Project permissions, and selected Environment instance. An Agent Task lead may initiate sequential agent runs, stop runs it initiated, report blockers, and make a Task completion claim, but cannot approve, pause, validate, end, or recover the Task. For an Agent-led Task, the authorized Human may submit a marked substitute claim if the lead has not filed one.
+A Human or Agent Project member entrusted by a Human at Task begin to coordinate work within the Task's current content, Project permissions, and selected Environment instance. An Agent Task lead may initiate sequential agent runs, stop runs it initiated, report blockers, and make a Task completion claim. A current Task lead may investigate the selected Environment's lease holder and acquisition time, and may authority-override release another Agent's recovering run lease after acknowledging risks and recording unresolved facts; the override does not establish the remote outcome or retry that work. A Task lead still cannot approve, pause, validate, or end the Task. For an Agent-led Task, the authorized Human may submit a marked substitute claim if the lead has not filed one.
 _Avoid_: Task owner, scheduler
+
+**Task lead authority-override release**:
+A current Task lead's explicit release of another Agent's recovering run lease on the Task's Environment after acknowledging risks and recording the unresolved facts. It releases the lease but leaves remote effects unknown until separately proved. It does not start or terminate Agent runs and is distinct from the Human-only emergency Force Release.
+_Avoid_: Force Release, ordinary Release, remote settlement
 
 **Task begin**:
 The Human-authorized act that selects one environment instance for a Task, acquires that instance's Task lease, and has the environment worker create the Task context directory.
@@ -272,20 +320,28 @@ _Avoid_: Session key, reconnect count
 A Worker-produced, non-inference observation of the Environment's local capability and engine readiness facts, scoped by the core's current engine-to-model requirements. A v3 complete envelope carries measured target evidence and a requirement revision; supported v2 complete observations remain inspectable but aggregate model availability alone cannot prove current targets. Unsupported model measurement stays unknown. It never starts a model turn or sends a prompt and is distinct from connectivity heartbeat and real Agent work.
 _Avoid_: Heartbeat, smoke run, hidden model call
 
+**Standalone Work Environment**:
+A Project-authorized Environment and workspace selected for one standalone Agent activation. It controls where remote workspace operations run, independently of the Engine host and process-wide Execution mode. Task runs keep the Environment selected by their Task lifecycle.
+_Avoid_: Engine host, runtime execution mode
+
+**Project workspace binding readiness**:
+The current, live status of one Project's authorized workspace on an enrolled Environment Worker, including its supported remote file operations and any reason those operations are blocked. It is independent of Environment engine and model readiness.
+_Avoid_: Environment readiness, engine login
+
 **Readiness observation receipt**:
 A core-issued opaque identity for one atomic, sanitized facts-and-probe commit. The durable receipt snapshots the verified connection identity, epoch, enrollment, lifecycle generation, and optional requirement scope. The scope is a validated plain object containing only optional `revision`, `requiredEngines`, `requiredModels`, and `modelsByEngine` fields; malformed or extra fields refuse the observation before persistence. Historical retrieval preserves that scope and facts but does not grant current authority: current status requires the live enrollment and connection fence. The connection identifier is an internal correlation identity, never a Worker credential. Issue-order precedence and identical redelivery are governed by #127.
 _Avoid_: Browser authority token, current-ready assertion, Worker-supplied identity
 
 **Environment lease**:
-A time-bounded right to use an environment instance's lease-requiring capabilities, held either by a durable Task or by a one-round agent run. Uncommitted working files remain with the lease until preserved or discarded.
-_Avoid_: Agent environment, lock
+A time-bounded right to use an environment instance's lease-requiring capabilities. A `read` lease admits read-only operations and may share the instance with other `read` leases. A `read-write` lease admits one holder and excludes every other lease. Task-held leases and Agent-run execution leases use `read-write`; a Remote workspace operation uses only the lease already held by its containing run or Task, including an admitted `read` lease for read-only work. Environment Operations and Project MCP borrow the containing lease and never acquire leases for themselves. A read lease does not include a stable snapshot or copy-on-write, so workspace files may change while readers hold leases.
+_Avoid_: Agent environment, lock, snapshot
 
 **Lease recovery**:
-The state an environment instance's lease enters after a timeout, holder loss, or interruption, during which the instance is not reassignable until recovery is explicitly resolved. An unfinished Task's lease stays reserved and only a Human may resume, discard, or Force Release it; one-round Agent run recovery retains its existing holder or Human controls.
+The state an environment instance's lease enters after a timeout, holder loss, or interruption, during which the instance is not reassignable until recovery is explicitly resolved. An unfinished Task's lease stays reserved. A Task lead may investigate a lease and authority-override release another Agent's recovering run lease after risk acknowledgement; this permanently records unresolved facts without proving remote work settled. Evidence-based Resume, Discard, ordinary Release, and Human-only Force Release keep their existing authorities.
 _Avoid_: Cleanup, lock timeout
 
 **Force Release**:
-The Human-only emergency recovery decision that makes an Environment instance reassignable despite unresolved proof or cleanup after ordinary recovery has been attempted. It permanently records the acknowledged risks and unresolved facts; for a Task-held lease it releases the lease and records active-intent status `stopped` while preserving work intent and the Project workspace.
+The Human-only emergency recovery decision that makes an Environment instance reassignable despite unresolved proof or cleanup after ordinary recovery has been attempted. It permanently records the acknowledged risks and unresolved facts; for a Task-held lease it releases the lease and records active-intent status `stopped` while preserving work intent and the Project workspace. A Task lead's authority-override release is a separate action for another Agent's recovering run lease and never uses or relabels Force Release.
 _Avoid_: Automatic expiry, normal release, lease steal
 
 **Operational event**:

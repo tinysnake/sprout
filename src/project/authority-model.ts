@@ -31,9 +31,30 @@
  * shared privacy boundary before it becomes durable.
  */
 
-import { sanitizeIdentifier, sanitizeOperatorText, redactSensitiveText } from '../environment/privacy.ts';
+import { redactProjectText, sanitizeIdentifier, sanitizeOperatorText } from '../environment/privacy.ts';
+
+/** The one Project MCP manifest format currently selected by Human authority. */
+export const PROJECT_MCP_CONFIGURATION_FORMAT = 'claude-code-mcp-json-v1' as const;
+
+/** A portable Project selection for one explicitly supported stdio manifest. */
+export interface ProjectMcpConfiguration {
+  readonly format: typeof PROJECT_MCP_CONFIGURATION_FORMAT;
+}
+
+/** Validate the portable Project-selected MCP manifest format. */
+export function sanitizeProjectMcpConfiguration(value: unknown): ProjectMcpConfiguration {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new ProjectAuthorityError('invalid-content', 'MCP configuration selection must name the supported format');
+  }
+  const input = value as Record<string, unknown>;
+  if (Object.keys(input).some((key) => key !== 'format') || input.format !== PROJECT_MCP_CONFIGURATION_FORMAT) {
+    throw new ProjectAuthorityError('invalid-content', 'MCP configuration selection must name the supported format');
+  }
+  return { format: PROJECT_MCP_CONFIGURATION_FORMAT };
+}
 
 /** The Project lifecycle. Archived is a status, never a delete (ADR-0008). */
+
 export type ProjectStatus = 'active' | 'archived';
 
 /**
@@ -96,7 +117,10 @@ export interface ProjectContentVersion {
   readonly rules: readonly string[];
   readonly wakePolicy: WakePolicy;
   readonly routingIntervalMs: number;
+  /** Human-selected supported MCP manifest; omitted means repository files are inert. */
+  readonly mcpConfiguration?: ProjectMcpConfiguration;
   /** Current memberships, including already-ended ones for history. */
+
   readonly memberships: readonly ProjectMembership[];
 }
 
@@ -198,7 +222,7 @@ export function sanitizeProjectDisplayName(value: string | undefined): string {
  * narrative must never become invalid identity).
  */
 export function sanitizeProjectGoal(value: string | undefined): string {
-  const text = redactSensitiveText((value ?? '').trim());
+  const text = redactProjectText((value ?? '').trim());
   return text.length <= MAX_TEXT ? text : `${text.slice(0, MAX_TEXT - 1).trimEnd()}\u2026`;
 }
 
@@ -210,7 +234,7 @@ export function sanitizeProjectRules(value: readonly string[] | undefined): read
   const rules: string[] = [];
   for (const entry of value ?? []) {
     if (typeof entry !== 'string') continue;
-    const text = redactSensitiveText(entry.trim());
+    const text = redactProjectText(entry.trim());
     if (text === '') continue;
     rules.push(text.length <= MAX_TEXT ? text : `${text.slice(0, MAX_TEXT - 1).trimEnd()}\u2026`);
   }

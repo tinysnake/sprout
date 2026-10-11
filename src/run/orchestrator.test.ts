@@ -102,6 +102,20 @@ const successEvents: readonly AgentRunEvent[] = [
 const completed = { status: 'completed', text: 'done' } as const;
 
 
+test('Task-bound activations cannot select a standalone Work Environment', async () => {
+  const { orchestrator, pool } = build({ taskContext: true });
+  const { id } = await orchestrator.submit({
+    agentId: 'agent-scout', taskId: 'task-fixed-environment', projectId: 'project-sprout',
+    workEnvironmentInstanceId: 'different-environment', prompt: 'attempt to switch a Task Environment',
+  });
+  const run = await orchestrator.waitFor(id);
+  assert.equal(run.status, 'failed');
+  assert.equal(run.failureClass, 'admission');
+  assert.match(run.result?.status === 'failed' ? run.result.message ?? '' : '',
+    /Task-bound activations cannot change their Work Environment binding/);
+  assert.deepEqual(pool.leases(), [], 'the refused selector never acquires an Environment lease');
+});
+
 test('a submitted run acquires its lease, streams progress, and completes', async () => {
   const { orchestrator, pool } = build({
     turns: [{ events: successEvents, result: completed }],
@@ -237,9 +251,14 @@ test('a Chat interruption settles with its product reason and releases the lease
 
   assert.equal(interrupted.status, 'interrupted');
   assert.equal(interrupted.interruptionReason, 'human-stop');
-  assert.equal(pool.leases().find((lease) => lease.runId === first.id)?.state, 'released');
+  const firstLease = pool.leases().find((lease) => lease.runId === first.id);
+  assert.equal(firstLease?.state, 'released');
   const next = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'next message', projectId: 'project-sprout' });
   assert.equal((await orchestrator.waitFor(next.id)).status, 'completed');
+  const nextLease = pool.leases().find((lease) => lease.runId === next.id);
+  assert.ok(nextLease, 'the later run acquires its own admission lease');
+  assert.notEqual(nextLease?.id, firstLease?.id, 'the later run does not resume or extend the prior lease');
+  assert.equal(pool.leases().find(lease => lease.id === firstLease?.id)?.state, 'released');
 });
 
 
@@ -251,7 +270,7 @@ test('Chat interruption refuses Task runs and leaves their Task-held lease to Ta
     turns: [{ events: [{ type: 'notice', text: 'task work' }], result: completed, settleAfterMs: 5_000 }],
   });
   const reserved = pool.acquireLease({
-    instanceId: 'mac-mini-1', capability: 'agent-run', holderId: 'task-1', taskId: 'task-1', ttlMs: 60_000,
+    instanceId: 'mac-mini-1', capability: 'agent-run', mode: 'read-write', holderId: 'task-1', taskId: 'task-1', ttlMs: 60_000,
   });
   assert.ok(reserved.ok);
   const { id } = await orchestrator.submit({

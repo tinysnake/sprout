@@ -95,12 +95,41 @@ test('run history totals accumulate terminal duration and provider usage without
   });
 });
 
+test('a standalone run request forwards its selected Work Environment to admission', async () => {
+  await withServer(async (base) => {
+    const submit = await fetch(`${base}/api/runs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        agentId: 'agent-scout', prompt: 'work only in the selected Environment',
+        workEnvironmentInstanceId: 'not-authorized-instance',
+      }),
+    });
+    assert.equal(submit.status, 202);
+    const { id } = (await submit.json()) as { id: string };
+    const run = await waitForTerminal(base, id);
+    assert.equal(run.status, 'failed');
+    assert.match(String(run.failure), /requested Work Environment is not authorized/);
+  });
+});
+
 test('a submission without an agent or prompt is rejected', async () => {
   await withServer(async (base) => {
     const response = await fetch(`${base}/api/runs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ prompt: 'no agent' }),
+    });
+    assert.equal(response.status, 400);
+  });
+});
+
+test('an empty selected Work Environment is rejected as malformed input', async () => {
+  await withServer(async (base) => {
+    const response = await fetch(`${base}/api/runs`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: 'agent-scout', prompt: 'say hi', workEnvironmentInstanceId: '  ' }),
     });
     assert.equal(response.status, 400);
   });
@@ -239,13 +268,14 @@ test('the API lists leases and allows releasing a lease', async () => {
   const definition: EnvironmentDefinition = {
     id: 'macos-workstation',
     platform: 'macos',
-    capabilities: [{ name: 'agent-run', requiresLease: true }],
+    capabilities: [{ name: 'agent-run', requiresLease: true, leaseMode: 'read-write' }],
   };
   const instance: EnvironmentInstance = { id: 'mac-mini-1', definitionId: 'macos-workstation' };
   const pool = new EnvironmentPool({ definitions: [definition], instances: [instance] });
   const acquired = pool.acquireLease({
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-scout',
     ttlMs: 60_000,
   });
@@ -267,10 +297,16 @@ test('the API lists leases and allows releasing a lease', async () => {
   // GET /api/leases
   const listResponse = await fetch(`http://127.0.0.1:${port}/api/leases`);
   assert.equal(listResponse.status, 200);
-  const { leases } = (await listResponse.json()) as { leases: { id: string; state: string }[] };
+  const { leases, readOnlyLeaseSemantics } = (await listResponse.json()) as {
+    leases: { id: string; state: string; mode: string }[];
+    readOnlyLeaseSemantics: string;
+  };
   assert.equal(leases.length, 1);
   assert.equal(leases[0]?.id, acquired.lease.id);
   assert.equal(leases[0]?.state, 'recovering');
+  assert.equal(leases[0]?.mode, 'read-write');
+  assert.equal(readOnlyLeaseSemantics,
+    'Read-only leases allow concurrent readers. Files may change while a lease is held; there is no snapshot or copy-on-write.');
 
   // POST /api/leases/:id/release
   const releaseResponse = await fetch(`http://127.0.0.1:${port}/api/leases/${acquired.lease.id}/release`, {

@@ -4,6 +4,7 @@ import type { TaskAdmissionService } from '../task/admission-service.ts';
 import { TaskAdvanceConflictError } from '../task/environment-lifecycle.ts';
 import { TaskProposalError } from '../task/proposal-model.ts';
 import { toTaskRunLinkView, toTaskView } from './views.ts';
+import type { ExecutionMode } from '../execution-mode.ts';
 
 function json(context: ApiRequestContext, status: number, body: unknown): boolean {
   context.response.writeHead(status, { 'content-type': 'application/json' });
@@ -12,7 +13,10 @@ function json(context: ApiRequestContext, status: number, body: unknown): boolea
 }
 
 /** Protected Human commands for proposal begin and attributed Task advances. */
-export function createTaskAdmissionRouter(options: { readonly admissions: TaskAdmissionService }): ApiRouter {
+export function createTaskAdmissionRouter(options: {
+  readonly admissions: TaskAdmissionService;
+  readonly processExecutionMode?: ExecutionMode;
+}): ApiRouter {
   const { admissions } = options;
   return {
     name: 'task-admission',
@@ -41,7 +45,7 @@ export function createTaskAdmissionRouter(options: { readonly admissions: TaskAd
             ...(typeof body.reason === 'string' ? { reason: body.reason } : {}),
           });
           return json(context, result.duplicate ? 200 : 201, {
-            task: toTaskView(result.task),
+            task: toTaskView(result.task, options.processExecutionMode),
             duplicate: result.duplicate,
             ...(result.initialRunId !== undefined ? { initialRunId: result.initialRunId } : {}),
             ...(result.initialRunFailed ? { initialRunFailed: true } : {}),
@@ -57,7 +61,7 @@ export function createTaskAdmissionRouter(options: { readonly admissions: TaskAd
           ...(typeof body.prompt === 'string' ? { prompt: body.prompt } : {}),
         });
         return json(context, 202, {
-          task: toTaskView(result.task),
+          task: toTaskView(result.task, options.processExecutionMode),
           runId: result.runId,
           advance: toTaskRunLinkView(result.audit),
         });

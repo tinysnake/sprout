@@ -375,6 +375,7 @@ test('only the environment-absence failure class is eligible for retry', async (
   const lease = h.pool.acquireLease({
     instanceId: 'env-a',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'other-agent',
     ttlMs: 60_000,
   });

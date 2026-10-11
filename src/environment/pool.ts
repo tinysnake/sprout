@@ -1,6 +1,7 @@
 import type {
   EnvironmentDefinition,
   EnvironmentInstance,
+  EnvironmentLeaseMode,
 } from './model.ts';
 import { randomUUID } from 'node:crypto';
 import { findCapability } from './model.ts';
@@ -19,11 +20,28 @@ import { findCapability } from './model.ts';
 
 export type LeaseState = 'active' | 'recovering' | 'expired' | 'released';
 export type LeaseHolderKind = 'run' | 'task';
+export type LeaseMode = EnvironmentLeaseMode;
+
+export const READ_ONLY_LEASE_SEMANTICS =
+  'Read-only leases allow concurrent readers. Files may change while a lease is held; there is no snapshot or copy-on-write.';
+
+export interface LeaseConflictHolder {
+  readonly leaseId: string;
+  readonly holderId: string;
+  readonly state: 'active' | 'recovering';
+}
+
+export type AcquireLeaseConflict =
+  | { readonly kind: 'reader-blocked-by-writer'; readonly writer: LeaseConflictHolder }
+  | { readonly kind: 'writer-blocked-by-writer'; readonly writer: LeaseConflictHolder }
+  | { readonly kind: 'writer-blocked-by-readers'; readonly readers: readonly LeaseConflictHolder[] }
+  | { readonly kind: 'recovery'; readonly holders: readonly LeaseConflictHolder[] };
 
 export interface EnvironmentLease {
   readonly id: string;
   readonly instanceId: string;
   readonly capability: string;
+  readonly mode: LeaseMode;
   readonly holderId: string;
   /** Task-held vs run-held; absent only on a legacy persisted run lease (run). */
   readonly holderKind?: LeaseHolderKind;
@@ -38,6 +56,7 @@ export type AcquireLeaseFailure =
   | 'unknown-instance'
   | 'unknown-capability'
   | 'lease-not-required'
+  | 'mode-not-supported'
   | 'conflict';
 
 export type AcquireLeaseResult =
@@ -48,11 +67,13 @@ export type AcquireLeaseResult =
       readonly heldBy?: string;
       readonly state?: LeaseState;
       readonly leaseId?: string;
+      readonly conflict?: AcquireLeaseConflict;
     };
 
 export interface AcquireLeaseRequest {
   readonly instanceId: string;
   readonly capability: string;
+  readonly mode: LeaseMode;
   readonly holderId: string;
   readonly runId?: string;
   readonly taskId?: string;
@@ -81,7 +102,7 @@ export interface LeaseStore {
  * ends a transaction of its own, so the shared boundary stays exact.
  */
 export interface TaskLeaseBinding {
-  /** Refuse a live lease on the instance, then insert the Task-held lease. */
+  /** Refuse incompatible live leases, then insert the Task-held lease. */
   insertTaskHeldLease(lease: EnvironmentLease): void;
   /** Refuse a lease that is not this Task's, then mark it released. */
   markTaskLeaseReleased(leaseId: string, taskId: string): void;
@@ -121,12 +142,15 @@ export interface EnvironmentPoolOptions {
    * tests and callers that never opted into the dynamic catalog.
    */
   readonly eligibleInstanceIds?: readonly string[];
+  /** Additional capability-specific eligibility for bounded non-inference services such as Project MCP. */
+  readonly capabilityEligibleInstanceIds?: Readonly<Record<string, readonly string[]>>;
 }
 
 export class EnvironmentPool {
   readonly #definitions = new Map<string, EnvironmentDefinition>();
   readonly #instances = new Map<string, EnvironmentInstance>();
   readonly #leases = new Map<string, EnvironmentLease>();
+  readonly #cleanupProtectedLeases = new Set<string>();
   readonly #store: LeaseStore | undefined;
   readonly #clock: Clock;
   readonly #idFactory: () => string;
@@ -136,6 +160,7 @@ export class EnvironmentPool {
    * is eligible; a set means exactly those instances are.
    */
   #eligibleInstanceIds: ReadonlySet<string> | undefined;
+  #capabilityEligibleInstanceIds = new Map<string, ReadonlySet<string>>();
 
   constructor(options: EnvironmentPoolOptions) {
     for (const definition of options.definitions) {
@@ -146,6 +171,8 @@ export class EnvironmentPool {
     }
     this.#eligibleInstanceIds =
       options.eligibleInstanceIds === undefined ? undefined : new Set(options.eligibleInstanceIds);
+    this.#capabilityEligibleInstanceIds = new Map(Object.entries(options.capabilityEligibleInstanceIds ?? {})
+      .map(([capability, ids]) => [capability, new Set(ids)]));
     this.#clock = options.clock ?? systemClock;
     // A lease is persisted, so a per-process counter would collide with a
     // released historical lease after Sprout restarts.  The default is durable
@@ -198,6 +225,7 @@ export class EnvironmentPool {
     readonly definitions: readonly EnvironmentDefinition[];
     readonly instances: readonly EnvironmentInstance[];
     readonly eligibleInstanceIds?: readonly string[];
+    readonly capabilityEligibleInstanceIds?: Readonly<Record<string, readonly string[]>>;
   }): void {
     for (const definition of input.definitions) this.#definitions.set(definition.id, definition);
     for (const instance of input.instances) this.#instances.set(instance.id, instance);
@@ -205,11 +233,18 @@ export class EnvironmentPool {
       input.eligibleInstanceIds === undefined
         ? undefined
         : new Set(input.eligibleInstanceIds);
+    this.#capabilityEligibleInstanceIds = new Map(Object.entries(input.capabilityEligibleInstanceIds ?? {})
+      .map(([capability, ids]) => [capability, new Set(ids)]));
   }
 
   /** Whether an instance is currently eligible to admit new work. */
   isEligible(instanceId: string): boolean {
     return this.#eligibleInstanceIds === undefined || this.#eligibleInstanceIds.has(instanceId);
+  }
+
+  definition(instanceId: string): EnvironmentDefinition | undefined {
+    const instance = this.#instances.get(instanceId);
+    return instance === undefined ? undefined : this.#definitions.get(instance.definitionId);
   }
 
   /**
@@ -222,6 +257,23 @@ export class EnvironmentPool {
     return this.#instances.get(instanceId);
   }
 
+  /** Whether a lease-bearing capability exists for an already-authorized bound operation. */
+  requiresLeaseForBoundOperation(instanceId: string, capability: string): boolean | undefined {
+    return this.#capability(instanceId, capability)?.requiresLease;
+  }
+
+  /**
+   * Acquire a lease for work already authorized by a live bound operation route.
+   * This deliberately bypasses model-admission eligibility only; callers must
+   * revalidate the Worker authority, Project binding, permission, and epoch.
+   */
+  async acquireBoundOperationLeaseRevalidated(request: AcquireLeaseRequest): Promise<AcquireLeaseResult> {
+    await this.revalidateTaskLease(request.instanceId);
+    const recovering = this.#liveLeases(request.instanceId).filter((lease) => lease.state === 'recovering');
+    if (recovering.length > 0) return this.#conflict(request.mode, recovering);
+    return this.#acquireLease(request, true, true);
+  }
+
   /** Whether a capability must be leased before it can be used. */
   requiresLease(instanceId: string, capability: string): boolean | undefined {
     const found = this.#lookup(instanceId, capability);
@@ -229,7 +281,7 @@ export class EnvironmentPool {
   }
 
   /**
-   * Acquire exclusive use of one instance for one capability.
+   * Acquire access according to the capability's declared lease mode.
    *
    * Failure is returned rather than thrown so callers can surface a precise
    * observable state; a conflicting request never silently queues.
@@ -245,8 +297,9 @@ export class EnvironmentPool {
 
   /** Revalidate an overdue Task holder before admitting competing production work. */
   async revalidateTaskLease(instanceId: string): Promise<void> {
-    const lease = this.#lease(instanceId);
-    if (lease?.holderKind === 'task' && lease.state === 'active' && lease.expiresAt <= this.#clock.now()) {
+    const live = this.#liveLeases(instanceId);
+    const lease = live.find((candidate) => candidate.holderKind === 'task' && candidate.state === 'active');
+    if (lease !== undefined && lease.expiresAt <= this.#clock.now()) {
       await this.#revalidateTaskLease?.(lease);
     }
   }
@@ -255,10 +308,8 @@ export class EnvironmentPool {
     await this.revalidateTaskLease(request.instanceId);
     // Opening recovery can remove the instance from the eligible catalog. Keep
     // its decisive conflict rather than degrading it to unknown-capability.
-    const held = this.#lease(request.instanceId);
-    if (held?.state === 'recovering') {
-      return { ok: false, reason: 'conflict', heldBy: held.holderId, state: held.state, leaseId: held.id };
-    }
+    const recovering = this.#liveLeases(request.instanceId).filter((lease) => lease.state === 'recovering');
+    if (recovering.length > 0) return this.#conflict(request.mode, recovering);
     return this.acquireLease(request);
   }
 
@@ -278,8 +329,8 @@ export class EnvironmentPool {
     this.#leases.delete(leaseId);
   }
 
-  #acquireLease(request: AcquireLeaseRequest, persist: boolean): AcquireLeaseResult {
-    const found = this.#lookup(request.instanceId, request.capability);
+  #acquireLease(request: AcquireLeaseRequest, persist: boolean, allowIneligible = false): AcquireLeaseResult {
+    const found = allowIneligible ? this.#capability(request.instanceId, request.capability) : this.#lookup(request.instanceId, request.capability);
     if (!found) {
       return {
         ok: false,
@@ -290,22 +341,23 @@ export class EnvironmentPool {
       return { ok: false, reason: 'lease-not-required' };
     }
 
-    const current = this.#lease(request.instanceId);
-    if (current) {
-      return {
-        ok: false,
-        reason: 'conflict',
-        heldBy: current.holderId,
-        state: current.state,
-        leaseId: current.id,
-      };
+    const declaredMode = found.leaseMode ?? 'read-write';
+    const requestedMode = request.mode ?? declaredMode;
+    if (requestedMode !== declaredMode) {
+      return { ok: false, reason: 'mode-not-supported' };
     }
+
+    const current = this.#liveLeases(request.instanceId);
+    const blockers = current.filter((lease) =>
+      lease.state === 'recovering' || requestedMode === 'read-write' || lease.mode === 'read-write');
+    if (blockers.length > 0) return this.#conflict(requestedMode, blockers);
 
     const now = this.#clock.now();
     const lease: EnvironmentLease = {
       id: this.#idFactory(),
       instanceId: request.instanceId,
       capability: request.capability,
+      mode: requestedMode,
       holderId: request.holderId,
       holderKind: request.taskId !== undefined ? 'task' : 'run',
       ...(request.runId !== undefined ? { runId: request.runId } : {}),
@@ -322,6 +374,29 @@ export class EnvironmentPool {
       this.#store?.save(lease);
     }
     return { ok: true, lease };
+  }
+
+  /** Attached process/workspace owners require cleanup proof even if renewal stops. */
+  protectLeaseUntilCleanup(leaseId: string): void {
+    const lease = this.#leases.get(leaseId);
+    if (!lease || lease.state !== 'active') throw new Error('Active lease required for cleanup protection');
+    this.#cleanupProtectedLeases.add(leaseId);
+  }
+
+  /** Renew a cleanup-protected owner using the same TTL-fraction policy at every attachment stage. */
+  keepLeaseUntilCleanup(leaseId: string, ttlMs: number, onRenewalLoss: () => void = () => undefined): () => void {
+    this.protectLeaseUntilCleanup(leaseId);
+    const interval = setInterval(() => {
+      if (this.extendLease(leaseId, ttlMs) !== undefined) return;
+      clearInterval(interval);
+      const lease = this.getLease(leaseId);
+      if (lease?.state === 'released') return;
+      this.markRecovering(leaseId);
+      onRenewalLoss();
+    }, Math.max(1, Math.floor(ttlMs / 3)));
+    interval.unref?.();
+    // Stopping renewal never removes cleanup protection. Only proven release does.
+    return () => clearInterval(interval);
   }
 
   /** Extend an active lease. Returns undefined when it is no longer active. */
@@ -342,6 +417,7 @@ export class EnvironmentPool {
     const lease = this.#byId(leaseId);
     if (!lease || lease.holderKind === 'task') return undefined;
     const released: EnvironmentLease = { ...lease, state: 'released' };
+    this.#cleanupProtectedLeases.delete(leaseId);
     this.#leases.set(released.id, released);
     this.#store?.save(released);
     return released;
@@ -400,9 +476,14 @@ export class EnvironmentPool {
     return this.#leases.get(leaseId);
   }
 
-  /** The active lease for an instance, if any. */
+  /** The active or recovering leases for an instance. */
+  activeLeases(instanceId: string): readonly EnvironmentLease[] {
+    return this.#liveLeases(instanceId);
+  }
+
+  /** The first active or recovering lease for legacy single-holder callers. */
   activeLease(instanceId: string): EnvironmentLease | undefined {
-    return this.#lease(instanceId);
+    return this.#liveLeases(instanceId)[0];
   }
 
   /** Every lease ever acquired, newest state first. */
@@ -415,7 +496,11 @@ export class EnvironmentPool {
     // cannot serve a capability for new work (E2). Returning `undefined` is the
     // same "cannot be used" signal the resolution seam already understands, so
     // lease acquisition and run resolution fail closed without a new branch.
-    if (!this.isEligible(instanceId)) return undefined;
+    if (!this.isEligible(instanceId) && !this.#capabilityEligibleInstanceIds.get(capability)?.has(instanceId)) return undefined;
+    return this.#capability(instanceId, capability);
+  }
+
+  #capability(instanceId: string, capability: string) {
     const instance = this.#instances.get(instanceId);
     if (!instance) return undefined;
     const definition = this.#definitions.get(instance.definitionId);
@@ -431,32 +516,71 @@ export class EnvironmentPool {
     if (lease.state === 'recovering') return lease;
     if (lease.state !== 'active') return undefined;
     if (lease.holderKind === 'task' || lease.expiresAt > this.#clock.now()) return lease;
+    if (this.#cleanupProtectedLeases.has(lease.id)) {
+      this.markRecovering(lease.id);
+      return undefined;
+    }
     const expired: EnvironmentLease = { ...lease, state: 'expired' };
     this.#leases.set(lease.id, expired);
     this.#store?.save(expired);
     return undefined;
   }
 
-  /**
-   * Resolve the live lease for an instance. Expiry is evaluated lazily against
-   * the clock so that a dead holder cannot block an instance forever.
-   * A lease in recovery blocks acquisition until explicitly resolved.
-   */
-  #lease(instanceId: string): EnvironmentLease | undefined {
+  #conflict(mode: LeaseMode, holders: readonly EnvironmentLease[]): AcquireLeaseResult {
+    const details: LeaseConflictHolder[] = holders.map((lease) => ({
+      leaseId: lease.id,
+      holderId: lease.holderId,
+      state: lease.state === 'recovering' ? 'recovering' : 'active',
+    }));
+    const recovering = details.filter((holder) => holder.state === 'recovering');
+    const conflict: AcquireLeaseConflict = recovering.length > 0
+      ? { kind: 'recovery', holders: recovering }
+      : mode === 'read-write'
+        ? details.every((holder) => holders.find((lease) => lease.id === holder.leaseId)?.mode === 'read')
+          ? { kind: 'writer-blocked-by-readers', readers: details }
+          : { kind: 'writer-blocked-by-writer', writer: details[0]! }
+        : { kind: 'reader-blocked-by-writer', writer: details[0]! };
+    const first = details[0];
+    return {
+      ok: false,
+      reason: 'conflict',
+      ...(first !== undefined ? { heldBy: first.holderId, state: first.state, leaseId: first.leaseId } : {}),
+      conflict,
+    };
+  }
+
+  /** Resolve active or recovering holders, expiring overdue ordinary run leases. */
+  #liveLeases(instanceId: string): EnvironmentLease[] {
+    const live: EnvironmentLease[] = [];
     for (const lease of this.#leases.values()) {
       if (lease.instanceId !== instanceId) continue;
-      if (lease.state === 'recovering') return lease;
+      if (lease.state === 'recovering') {
+        live.push(lease);
+        continue;
+      }
       if (lease.state !== 'active') continue;
-      if (lease.holderKind === 'task' || lease.expiresAt > this.#clock.now()) return lease;
+      if (lease.holderKind === 'task' || lease.expiresAt > this.#clock.now()) {
+        live.push(lease);
+        continue;
+      }
+      if (this.#cleanupProtectedLeases.has(lease.id)) {
+        const recovering = this.markRecovering(lease.id);
+        if (recovering !== undefined) live.push(recovering);
+        continue;
+      }
       const expired: EnvironmentLease = { ...lease, state: 'expired' };
-      this.#leases.set(lease.id, expired);
+      this.#leases.set(expired.id, expired);
       this.#store?.save(expired);
     }
-    return undefined;
+    return live.sort((a, b) => a.acquiredAt - b.acquiredAt);
   }
 }
 
-/** Legacy rows predate holder_kind and are explicitly one-round Run leases. */
+/** Legacy rows predate holder_kind and lease mode, and stay exclusive Run leases. */
 function normalizeLease(lease: EnvironmentLease): EnvironmentLease {
-  return lease.holderKind === undefined ? { ...lease, holderKind: 'run' } : lease;
+  return {
+    ...lease,
+    mode: lease.mode === 'read' ? 'read' : 'read-write',
+    ...(lease.holderKind === undefined ? { holderKind: 'run' as const } : {}),
+  };
 }

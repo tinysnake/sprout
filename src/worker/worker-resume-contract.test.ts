@@ -21,7 +21,7 @@ import { ProjectRegistry } from '../project/registry.ts';
 
 import { InMemoryRunStore } from '../run/store.ts';
 
-import { InMemorySessionKeyStore } from '../run/session-key-store.ts';
+import { InMemorySessionKeyStore as BaseSessionKeyStore } from '../run/session-key-store.ts';
 
 import { RunOrchestrator } from '../run/orchestrator.ts';
 
@@ -41,6 +41,23 @@ const definition: EnvironmentDefinition = {
 };
 
 const instance: EnvironmentInstance = { id: 'mac-mini-1', definitionId: 'macos-workstation' };
+const continuationSlot = {
+  executionPlacement: {
+    mode: 'environment-hosted' as const,
+    engineHost: { kind: 'environment' as const, id: 'mac-mini-1', profile: { platform: 'macos' as const, boundary: 'shared-host' as const } },
+  },
+  scope: { kind: 'conversation' as const, id: 'conversation-resume-contract' },
+};
+
+class InMemorySessionKeyStore extends BaseSessionKeyStore {
+  override get(identity: Parameters<BaseSessionKeyStore['get']>[0]) {
+    return super.get({ ...identity, ...continuationSlot });
+  }
+
+  override save(record: Parameters<BaseSessionKeyStore['save']>[0]) {
+    return super.save({ ...record, ...continuationSlot });
+  }
+}
 
 
 const successEvents: readonly AgentRunEvent[] = [
@@ -213,6 +230,8 @@ function buildOrchestrator(
     ...(sessionKeys !== undefined ? { sessionKeys } : {}),
     leaseTtlMs: 60_000,
   });
+  const submit = orchestrator.submit.bind(orchestrator);
+  orchestrator.submit = (request) => submit({ ...request, sessionKeyScope: continuationSlot.scope });
   return { orchestrator, pool };
 }
 

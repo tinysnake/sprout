@@ -1,4 +1,5 @@
 import type { AgentRun } from './model.ts';
+import { normalizeLegacyRunPlacement } from '../execution-placement.ts';
 
 /** The latest durable write position for one run snapshot. */
 export interface RunReplaySnapshot {
@@ -38,16 +39,17 @@ export class InMemoryRunStore implements RunStore {
   }
 
   async get(runId: string): Promise<AgentRun | undefined> {
-    return this.#runs.get(runId);
+    const run = this.#runs.get(runId);
+    return run === undefined ? undefined : normalizeLegacyRunPlacement(run);
   }
 
   async list(): Promise<readonly AgentRun[]> {
-    return [...this.#runs.values()];
+    return [...this.#runs.values()].map(normalizeLegacyRunPlacement);
   }
 
   async replaySnapshots(): Promise<readonly RunReplaySnapshot[]> {
     return [...this.#runs.values()]
-      .map((run) => ({ run, sequence: this.#replaySequences.get(run.id)! }))
+      .map((run) => ({ run: normalizeLegacyRunPlacement(run), sequence: this.#replaySequences.get(run.id)! }))
       .sort((left, right) => left.sequence - right.sequence);
   }
 }

@@ -1,17 +1,19 @@
 import { createIdFactory, type IdFactory } from '../ids.ts';
 import type { ProjectAgentAuthorityPort } from '../project/authority-service.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
-import { sanitizeOperatorText } from '../environment/privacy.ts';
+import { sanitizeOperatorText, sanitizeProjectText } from '../environment/privacy.ts';
 import type { TaskActor, Task, TaskRunLink } from './model.ts';
 import type { TaskService } from './service.ts';
 import { TaskEnvironmentLeaseRefusal, type TaskEnvironmentLifecycle } from './environment-lifecycle.ts';
 import type { TaskProposalService } from './proposal-service.ts';
 import type { TaskProposalStore } from './proposal-store.ts';
+import { createExecutionStrategy, taskExecutionModeAdmissionRefusal, type ExecutionStrategy } from '../execution-mode.ts';
 import { TaskProposalError, type TaskProposalBeginInput } from './proposal-model.ts';
+import { executionModeMismatchReason, legacyEnvironmentPlacement } from '../execution-placement.ts';
 
 export type TaskAdmissionErrorCode = 'invalid-command' | 'lead-ineligible' | 'environment-ineligible'
   | 'no-compatible-agent' | 'task-not-admitted' | 'advance-forbidden' | 'target-ineligible'
-  | 'environment-recovering' | 'environment-unavailable';
+  | 'environment-recovering' | 'environment-unavailable' | 'execution-mode-unavailable' | 'execution-mode-mismatch';
 
 export class TaskAdmissionError extends Error {
   readonly code: TaskAdmissionErrorCode;
@@ -42,6 +44,7 @@ export class TaskAdmissionService {
   readonly #agentAuthority: ProjectAgentAuthorityPort;
   readonly #ids: IdFactory;
   readonly #now: () => number;
+  readonly #executionStrategy: ExecutionStrategy;
 
   constructor(options: {
     readonly proposals: TaskProposalService;
@@ -52,6 +55,7 @@ export class TaskAdmissionService {
     readonly agentAuthority: ProjectAgentAuthorityPort;
     readonly ids?: IdFactory;
     readonly now?: () => number;
+    readonly executionStrategy?: ExecutionStrategy;
   }) {
     this.#proposals = options.proposals;
     this.#proposalStore = options.proposalStore;
@@ -61,6 +65,7 @@ export class TaskAdmissionService {
     this.#agentAuthority = options.agentAuthority;
     this.#ids = options.ids ?? createIdFactory();
     this.#now = options.now ?? Date.now;
+    this.#executionStrategy = options.executionStrategy ?? createExecutionStrategy('environment-hosted');
   }
 
   async beginForHuman(proposalId: string, input: BeginTaskProposalInput): Promise<BeginTaskProposalResult> {
@@ -75,6 +80,7 @@ export class TaskAdmissionService {
   }
 
   async beginProposal(proposalId: string, actor: TaskActor, input: BeginTaskProposalInput): Promise<BeginTaskProposalResult> {
+    this.#requireExecutionMode();
     actor = actorSnapshot(actor);
     const initial = await this.#proposals.get(proposalId);
     await this.#proposals.authorizeActor(initial.projectId, actor);
@@ -207,7 +213,15 @@ export class TaskAdmissionService {
   }): Promise<{ readonly task: Task; readonly runId: string; readonly audit: TaskRunLink }> {
     actor = actorSnapshot(actor);
     const task = await this.#tasks.get(taskId);
-    if (!task) throw new TaskAdmissionError('task-not-admitted', `unknown task: ${taskId}`);
+    if (!task) throw new TaskAdmissionError('task-not-admitted', `Task ${taskId} is unavailable`);
+    const mismatch = executionModeMismatchReason(
+      task.executionPlacement ?? (task.environmentInstanceId !== undefined
+        ? legacyEnvironmentPlacement(task.environmentInstanceId)
+        : undefined),
+      this.#executionStrategy.mode,
+    );
+    if (mismatch !== undefined) throw new TaskAdmissionError('execution-mode-mismatch', mismatch);
+    this.#requireExecutionMode();
     if (!task.admission) throw new TaskAdmissionError('task-not-admitted', 'Task advances require a Human-approved proposal');
     await this.#proposals.authorizeActor(task.projectId, actor);
     if (actor.memberKind === 'agent' && (task.admission.lead.memberKind !== 'agent' || task.admission.lead.memberId !== actor.memberId)) {
@@ -230,6 +244,11 @@ export class TaskAdmissionService {
     return { ...advanced, audit };
   }
 
+  #requireExecutionMode(): void {
+    const refusal = taskExecutionModeAdmissionRefusal(this.#executionStrategy);
+    if (refusal !== undefined) throw new TaskAdmissionError('execution-mode-unavailable', refusal);
+  }
+
   async #eligibleAgents(projectId: string, environmentInstanceId: string): Promise<readonly string[]> {
     const candidates = await this.#lifecycle.eligibleAgents(projectId, environmentInstanceId);
     const active: string[] = [];
@@ -248,7 +267,7 @@ function actorSnapshot(actor: TaskActor): TaskActor {
 
 function safePrompt(value: unknown): string {
   if (typeof value !== 'string' || value.length > 16_000) throw new TaskAdmissionError('invalid-command', 'prompt must be at most 16000 characters');
-  const sanitized = sanitizeOperatorText(value, { maxLength: 16_000, fallback: '' });
+  const sanitized = sanitizeProjectText(value, { maxLength: 16_000, fallback: '' });
   if (!sanitized.trim()) throw new TaskAdmissionError('invalid-command', 'prompt must contain usable text');
   return sanitized;
 }

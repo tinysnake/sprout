@@ -7,11 +7,13 @@ import type { RunReplaySnapshot, RunStore } from './store.ts';
 import {
   sessionKeyId,
   workingDirectoryId,
+  normalizedExecutionPlacement,
   type SessionKeyStore,
   type SessionKeyIdentity,
   type SessionKeyWrite,
   type StoredSessionKey,
 } from './session-key-store.ts';
+import { LEGACY_ENGINE_HOST_PROFILE, legacySessionScope } from '../execution-placement.ts';
 import { migrateOrInitializeDatabase } from '../store/schema.ts';
 import type {
   ProjectRetryGate,
@@ -21,6 +23,7 @@ import type {
   RunReconnectRetryStore,
   RunReconnectTrigger,
 } from './reconnect-retry-store.ts';
+import { normalizeLegacyRunPlacement, type EngineHostPlacement, type ExecutionPlacement, type SessionKeyScope } from '../execution-placement.ts';
 
 /**
  * SQLite-backed storage for the run domain (ADR-0002).
@@ -52,6 +55,8 @@ interface RunRow {
   readonly agent_id: string;
   readonly prompt: string;
   readonly environment_instance_id: string;
+  readonly execution_mode: string;
+  readonly engine_host_profile_id: string | null;
   readonly project_id: string | null;
   readonly task_id: string | null;
   readonly status: string;
@@ -68,9 +73,13 @@ interface RunRow {
   readonly work_option: string | null;
   readonly configuration_version: number | null;
   readonly workspace_binding: string | null;
+  readonly workspace_binding_status: AgentRun['workspaceBindingStatus'] | null;
+  readonly requested_work_environment_instance_id: string | null;
   readonly recovery_settlement: string | null;
   readonly recovered_events: string | null;
   readonly retry_of_run_id: string | null;
+  readonly execution_placement: string | null;
+  readonly session_key_scope: string | null;
 }
 
 export class SqliteRunStore implements RunStore {
@@ -101,6 +110,8 @@ export class SqliteRunStore implements RunStore {
         agent_id TEXT NOT NULL,
         prompt TEXT NOT NULL,
         environment_instance_id TEXT NOT NULL,
+        execution_mode TEXT NOT NULL DEFAULT 'environment-hosted',
+        engine_host_profile_id TEXT,
         project_id TEXT,
         status TEXT NOT NULL,
         events TEXT NOT NULL,
@@ -117,14 +128,21 @@ export class SqliteRunStore implements RunStore {
         work_option TEXT,
         configuration_version INTEGER,
         workspace_binding TEXT,
+        workspace_binding_status TEXT,
+        requested_work_environment_instance_id TEXT,
         recovery_settlement TEXT,
         recovered_events TEXT,
-        retry_of_run_id TEXT
+        retry_of_run_id TEXT,
+        execution_placement TEXT,
+        session_key_scope TEXT
       );
     `);
     // Added after the table shipped; a database from before this column still
     // has its runs, they simply carry no recorded hand-off.
     this.#addColumnIfMissing('agent_runs', 'project_id', 'TEXT');
+    this.#addColumnIfMissing('agent_runs', 'execution_mode', "TEXT NOT NULL DEFAULT 'environment-hosted'");
+    this.#addColumnIfMissing('agent_runs', 'engine_host_profile_id', 'TEXT');
+    this.#db.exec("UPDATE agent_runs SET engine_host_profile_id = environment_instance_id WHERE engine_host_profile_id IS NULL AND execution_mode = 'environment-hosted'");
     this.#addColumnIfMissing('agent_runs', 'hand_off', 'TEXT');
     this.#addColumnIfMissing('agent_runs', 'failure_class', "TEXT CHECK(failure_class IN ('admission', 'environment', 'restart', 'execution'))");
     this.#addColumnIfMissing('agent_runs', 'task_id', 'TEXT');
@@ -135,11 +153,15 @@ export class SqliteRunStore implements RunStore {
     // attribution), which the view layer presents as unspecified.
     this.#addColumnIfMissing('agent_runs', 'work_option', 'TEXT');
     this.#addColumnIfMissing('agent_runs', 'configuration_version', 'INTEGER');
+    this.#addColumnIfMissing('agent_runs', 'workspace_binding_status', 'TEXT');
+    this.#addColumnIfMissing('agent_runs', 'requested_work_environment_instance_id', 'TEXT');
     this.#addColumnIfMissing('agent_runs', 'recovery_settlement', 'TEXT');
     this.#addColumnIfMissing('agent_runs', 'recovered_events', 'TEXT');
     // The bounded reconnect retry link (#181). A database from before this
     // column still has its runs; they simply are nobody's retry.
     this.#addColumnIfMissing('agent_runs', 'retry_of_run_id', 'TEXT');
+    this.#addColumnIfMissing('agent_runs', 'execution_placement', 'TEXT');
+    this.#addColumnIfMissing('agent_runs', 'session_key_scope', 'TEXT');
     this.#backfillReplaySequences();
     this.#db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS agent_runs_replay_sequence_idx
@@ -168,14 +190,15 @@ export class SqliteRunStore implements RunStore {
   }
 
   async save(run: AgentRun): Promise<number> {
+    run = normalizeLegacyRunPlacement(run);
     const replaySequence = (this.#db.prepare(
       'SELECT COALESCE(MAX(replay_sequence), 0) + 1 AS sequence FROM agent_runs',
     ).get() as { sequence: number }).sequence;
     this.#db
       .prepare(
         `INSERT INTO agent_runs
-           (id, agent_id, prompt, environment_instance_id, project_id, task_id, status, events, lease_id, failure, failure_class, result, created_at, completed_at, hand_off, token_usage, replay_sequence, work_option, configuration_version, workspace_binding, recovery_settlement, recovered_events, retry_of_run_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           (id, agent_id, prompt, environment_instance_id, execution_mode, engine_host_profile_id, project_id, task_id, status, events, lease_id, failure, failure_class, result, created_at, completed_at, hand_off, token_usage, replay_sequence, work_option, configuration_version, workspace_binding, workspace_binding_status, requested_work_environment_instance_id, recovery_settlement, recovered_events, retry_of_run_id, execution_placement, session_key_scope)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            status = excluded.status,
            events = excluded.events,
@@ -191,15 +214,22 @@ export class SqliteRunStore implements RunStore {
            work_option = excluded.work_option,
            configuration_version = excluded.configuration_version,
            workspace_binding = excluded.workspace_binding,
+           workspace_binding_status = excluded.workspace_binding_status,
+           requested_work_environment_instance_id = excluded.requested_work_environment_instance_id,
            recovery_settlement = excluded.recovery_settlement,
            recovered_events = excluded.recovered_events,
-           retry_of_run_id = excluded.retry_of_run_id`,
+           retry_of_run_id = excluded.retry_of_run_id,
+           execution_placement = excluded.execution_placement,
+           session_key_scope = excluded.session_key_scope`,
       )
       .run(
         run.id,
         run.agentId,
         run.prompt,
         run.environmentInstanceId,
+        run.executionPlacement?.mode ?? run.executionMode ?? 'environment-hosted',
+        run.executionPlacement?.engineHost?.id ?? run.engineHostProfileId ??
+          (run.executionPlacement?.mode === 'host-run' ? null : run.environmentInstanceId),
         run.projectId ?? null,
         run.taskId ?? null,
         run.status,
@@ -216,9 +246,13 @@ export class SqliteRunStore implements RunStore {
         run.workOption ? JSON.stringify(run.workOption) : null,
         run.configurationVersion ?? null,
         run.workspaceBinding ? JSON.stringify(run.workspaceBinding) : null,
+        run.workspaceBindingStatus ?? null,
+        run.requestedWorkEnvironmentInstanceId ?? null,
         run.recoverySettlement ? JSON.stringify(run.recoverySettlement) : null,
         run.recoveredEvents ? JSON.stringify(run.recoveredEvents) : null,
         run.retryOfRunId ?? null,
+        run.executionPlacement ? JSON.stringify(run.executionPlacement) : null,
+        run.sessionKeyScope !== undefined ? JSON.stringify(run.sessionKeyScope) : null,
       );
     return replaySequence;
   }
@@ -286,7 +320,15 @@ export class SqliteSessionKeyStore implements SessionKeyStore {
         agent_id TEXT NOT NULL,
         engine TEXT NOT NULL,
         environment_instance_id TEXT NOT NULL,
+        execution_mode TEXT NOT NULL DEFAULT 'environment-hosted',
+        engine_host_profile_id TEXT NOT NULL DEFAULT '',
         working_directory_id TEXT NOT NULL,
+        engine_host_kind TEXT NOT NULL,
+        engine_host_id TEXT NOT NULL,
+        engine_host_platform TEXT NOT NULL,
+        engine_host_boundary TEXT NOT NULL,
+        scope_kind TEXT NOT NULL,
+        scope_id TEXT NOT NULL,
         session_key TEXT NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -295,9 +337,37 @@ export class SqliteSessionKeyStore implements SessionKeyStore {
       readonly name: string;
     }[];
     const names = new Set(columns.map((column) => column.name));
+    const legacySlots = names.has('working_directory_id') && !names.has('scope_kind');
     if (names.has('working_directory') && !names.has('working_directory_id')) {
       this.#migrateLegacySessionKeys();
+      return;
     }
+    this.#addColumnIfMissing('agent_session_keys', 'execution_mode', "TEXT NOT NULL DEFAULT 'environment-hosted'");
+    this.#addColumnIfMissing('agent_session_keys', 'engine_host_profile_id', "TEXT NOT NULL DEFAULT ''");
+    this.#addColumnIfMissing('agent_session_keys', 'engine_host_kind', "TEXT NOT NULL DEFAULT 'environment'");
+    this.#addColumnIfMissing('agent_session_keys', 'engine_host_id', 'TEXT');
+    this.#addColumnIfMissing('agent_session_keys', 'engine_host_platform', "TEXT NOT NULL DEFAULT 'unknown'");
+    this.#addColumnIfMissing('agent_session_keys', 'engine_host_boundary', "TEXT NOT NULL DEFAULT 'unknown'");
+    this.#addColumnIfMissing('agent_session_keys', 'scope_kind', "TEXT NOT NULL DEFAULT 'conversation'");
+    this.#addColumnIfMissing('agent_session_keys', 'scope_id', "TEXT NOT NULL DEFAULT 'legacy-unscoped'");
+    this.#db.exec(`
+      UPDATE agent_session_keys SET engine_host_profile_id = environment_instance_id
+        WHERE engine_host_profile_id = '' AND execution_mode = 'environment-hosted';
+      UPDATE agent_session_keys SET engine_host_kind = 'sprout', engine_host_id = engine_host_profile_id
+        WHERE execution_mode = 'host-run' AND engine_host_kind = 'environment' AND engine_host_profile_id != '';
+      UPDATE agent_session_keys SET engine_host_id = environment_instance_id WHERE engine_host_id IS NULL;
+    `);
+    // Rekey flat-profile slots as well as older Environment-only slots. Unknown
+    // historical scope remains quarantined from newly authorized conversations.
+    if (legacySlots || names.has('engine_host_profile_id')) this.#db.exec(`UPDATE agent_session_keys SET slot = json_array(
+      agent_id, engine, environment_instance_id, execution_mode, engine_host_kind,
+      engine_host_id, engine_host_platform, engine_host_boundary, working_directory_id,
+      scope_kind, scope_id)`);
+  }
+
+  #addColumnIfMissing(table: string, column: string, definition: string): void {
+    const columns = this.#db.prepare(`PRAGMA table_info(${table})`).all() as unknown as readonly { readonly name: string }[];
+    if (!columns.some((existing) => existing.name === column)) this.#db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 
   #migrateLegacySessionKeys(): void {
@@ -311,21 +381,38 @@ export class SqliteSessionKeyStore implements SessionKeyStore {
           agent_id TEXT NOT NULL,
           engine TEXT NOT NULL,
           environment_instance_id TEXT NOT NULL,
+          execution_mode TEXT NOT NULL DEFAULT 'environment-hosted',
+          engine_host_profile_id TEXT NOT NULL DEFAULT '',
           working_directory_id TEXT NOT NULL,
+          engine_host_kind TEXT NOT NULL,
+          engine_host_id TEXT NOT NULL,
+          engine_host_platform TEXT NOT NULL,
+          engine_host_boundary TEXT NOT NULL,
+          scope_kind TEXT NOT NULL,
+          scope_id TEXT NOT NULL,
           session_key TEXT NOT NULL,
           updated_at INTEGER NOT NULL
         );
       `);
       const insert = this.#db.prepare(`
         INSERT INTO agent_session_keys
-          (slot, agent_id, engine, environment_instance_id, working_directory_id, session_key, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+          (slot, agent_id, engine, environment_instance_id, engine_host_profile_id, working_directory_id, execution_mode, engine_host_kind, engine_host_id, engine_host_platform, engine_host_boundary, scope_kind, scope_id, session_key, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       for (const row of rows) {
         const identity: SessionKeyIdentity = {
           agentId: row.agent_id,
           engine: row.engine,
           environmentInstanceId: row.environment_instance_id,
+          executionPlacement: {
+            mode: 'environment-hosted',
+            engineHost: {
+              kind: 'environment',
+              id: row.environment_instance_id,
+              profile: LEGACY_ENGINE_HOST_PROFILE,
+            },
+          },
+          scope: legacySessionScope(),
           workingDirectory: row.working_directory,
         };
         const directoryId = workingDirectoryId(row.working_directory);
@@ -334,7 +421,15 @@ export class SqliteSessionKeyStore implements SessionKeyStore {
           row.agent_id,
           row.engine,
           row.environment_instance_id,
+          row.environment_instance_id,
           directoryId,
+          'environment-hosted',
+          'environment',
+          row.environment_instance_id,
+          LEGACY_ENGINE_HOST_PROFILE.platform,
+          LEGACY_ENGINE_HOST_PROFILE.boundary,
+          'conversation',
+          'legacy-unscoped',
           row.session_key,
           row.updated_at,
         );
@@ -355,11 +450,13 @@ export class SqliteSessionKeyStore implements SessionKeyStore {
 
   async save(record: SessionKeyWrite): Promise<void> {
     const directoryId = workingDirectoryId(record.workingDirectory);
+    const placement = normalizedExecutionPlacement(record);
+    const scope = record.scope ?? legacySessionScope();
     this.#db
       .prepare(
         `INSERT INTO agent_session_keys
-           (slot, agent_id, engine, environment_instance_id, working_directory_id, session_key, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+           (slot, agent_id, engine, environment_instance_id, engine_host_profile_id, working_directory_id, execution_mode, engine_host_kind, engine_host_id, engine_host_platform, engine_host_boundary, scope_kind, scope_id, session_key, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(slot) DO UPDATE SET
            session_key = excluded.session_key,
            updated_at = excluded.updated_at`,
@@ -369,7 +466,15 @@ export class SqliteSessionKeyStore implements SessionKeyStore {
         record.agentId,
         record.engine,
         record.environmentInstanceId,
+        placement.engineHost.id,
         directoryId,
+        placement.mode,
+        placement.engineHost.kind,
+        placement.engineHost.id,
+        placement.engineHost.profile.platform,
+        placement.engineHost.profile.boundary,
+        scope.kind,
+        scope.id,
         record.key,
         record.updatedAt,
       );
@@ -409,13 +514,18 @@ function toRun(row: RunRow): AgentRun {
     ? JSON.parse(row.recovery_settlement) as AgentRun['recoverySettlement'] : undefined;
   const recoveredEvents = row.recovered_events
     ? JSON.parse(row.recovered_events) as AgentRun['recoveredEvents'] : undefined;
-  return {
+  return normalizeLegacyRunPlacement({
     id: row.id,
     agentId: row.agent_id,
     prompt: row.prompt,
     environmentInstanceId: row.environment_instance_id,
+    ...(row.execution_mode === 'host-run' ? { executionMode: 'host-run' as const } : {}),
+    ...(row.engine_host_profile_id !== null && row.execution_mode === 'host-run'
+      ? { engineHostProfileId: row.engine_host_profile_id } : {}),
     ...(row.project_id !== null ? { projectId: row.project_id } : {}),
     ...(row.task_id !== null ? { taskId: row.task_id } : {}),
+    ...(row.session_key_scope !== null ? { sessionKeyScope: JSON.parse(row.session_key_scope) as SessionKeyScope } : {}),
+    ...(row.execution_placement !== null ? { executionPlacement: JSON.parse(row.execution_placement) as ExecutionPlacement } : {}),
     status: row.status as AgentRunStatus,
     events: JSON.parse(row.events) as AgentRunEvent[],
     ...(handOff !== undefined ? { handOff } : {}),
@@ -427,13 +537,18 @@ function toRun(row: RunRow): AgentRun {
     ...(tokenUsage !== undefined ? { tokenUsage } : {}),
     ...(workOption !== undefined ? { workOption } : {}),
     ...(workspaceBinding !== undefined ? { workspaceBinding } : {}),
+    ...(row.workspace_binding_status !== null && row.workspace_binding_status !== undefined &&
+        ['staging', 'active', 'detached', 'unavailable', 'recovering'].includes(row.workspace_binding_status)
+      ? { workspaceBindingStatus: row.workspace_binding_status } : {}),
+    ...(row.requested_work_environment_instance_id !== null && row.requested_work_environment_instance_id !== undefined
+      ? { requestedWorkEnvironmentInstanceId: row.requested_work_environment_instance_id } : {}),
     ...(recoverySettlement !== undefined ? { recoverySettlement } : {}),
     ...(recoveredEvents !== undefined ? { recoveredEvents } : {}),
     ...(row.retry_of_run_id !== null ? { retryOfRunId: row.retry_of_run_id } : {}),
     ...(row.configuration_version !== null ? { configurationVersion: row.configuration_version } : {}),
     createdAt: row.created_at,
     ...(row.completed_at !== null ? { completedAt: row.completed_at } : {}),
-  };
+  });
 }
 
 interface SessionKeyRow {
@@ -441,7 +556,15 @@ interface SessionKeyRow {
   readonly agent_id: string;
   readonly engine: string;
   readonly environment_instance_id: string;
+  readonly execution_mode: string;
+  readonly engine_host_profile_id: string;
   readonly working_directory_id: string;
+  readonly engine_host_kind: string;
+  readonly engine_host_id: string;
+  readonly engine_host_platform: string;
+  readonly engine_host_boundary: string;
+  readonly scope_kind: string;
+  readonly scope_id: string;
   readonly session_key: string;
   readonly updated_at: number;
 }
@@ -460,6 +583,18 @@ function toStoredSessionKey(row: SessionKeyRow): StoredSessionKey {
     agentId: row.agent_id,
     engine: row.engine,
     environmentInstanceId: row.environment_instance_id,
+    executionPlacement: {
+      mode: row.execution_mode as ExecutionPlacement['mode'],
+      engineHost: {
+        kind: row.engine_host_kind as EngineHostPlacement['kind'],
+        id: row.engine_host_id,
+        profile: {
+          platform: row.engine_host_platform as EngineHostPlacement['profile']['platform'],
+          boundary: row.engine_host_boundary as EngineHostPlacement['profile']['boundary'],
+        },
+      },
+    },
+    scope: { kind: row.scope_kind as SessionKeyScope['kind'], id: row.scope_id },
     workingDirectoryId: row.working_directory_id,
     key: row.session_key,
     updatedAt: row.updated_at,

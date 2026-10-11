@@ -51,6 +51,7 @@ export interface AgentConfigurationVersionRow {
 
 export interface AgentCompatibilitySummary {
   readonly environmentAvailable: boolean;
+  readonly executionMode?: 'environment-hosted' | 'host-run';
   /** The option run admission would take right now, when any is available. */
   readonly firstAvailableOptionId?: string;
   /** The projection's decisive reason the Agent is unavailable, when it is. */

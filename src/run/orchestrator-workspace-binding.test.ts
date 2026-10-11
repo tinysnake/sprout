@@ -321,7 +321,7 @@ test('a run records the durable workspace binding it was admitted under and uses
     workspaceBinding: async (projectId, instanceId) => {
       bindingReads.push(`${projectId}@${instanceId}`);
       return {
-        bindingId: 'binding-9',
+        bindingId: 'binding-abc',
         workspaceId: 'e'.repeat(24),
         kind: 'relative',
         path: 'repos/current-binding',
@@ -335,7 +335,7 @@ test('a run records the durable workspace binding it was admitted under and uses
 
   assert.equal(run.status, 'completed');
   assert.deepEqual(run.workspaceBinding, {
-    bindingId: 'binding-9',
+    bindingId: 'binding-abc',
     workspaceId: 'e'.repeat(24),
     kind: 'relative',
     path: 'repos/current-binding',

@@ -12,13 +12,16 @@ import { SqliteLeaseStore } from '../environment/sqlite-store.ts';
 import { SqliteStore } from '../store/db.ts';
 import { migrateOrInitializeDatabase } from '../store/schema.ts';
 import type { EnvironmentLease } from '../environment/pool.ts';
+import { legacyEnvironmentPlacement } from '../execution-placement.ts';
 
 function sampleRun(overrides: Partial<AgentRun> = {}): AgentRun {
+  const environmentInstanceId = overrides.environmentInstanceId ?? 'mac-mini-1';
   return {
     id: 'run-1',
     agentId: 'agent-scout',
     prompt: 'say hi',
-    environmentInstanceId: 'mac-mini-1',
+    environmentInstanceId,
+    executionPlacement: legacyEnvironmentPlacement(environmentInstanceId),
     status: 'completed',
     events: [
       { type: 'notice', text: 'starting' },
@@ -45,6 +48,54 @@ test('a run survives being written to disk and read back', async () => {
   reader.close();
 
   assert.deepEqual(restored, sampleRun());
+});
+
+test('standalone Work Environment selection and binding state survive SQLite reopen and updates', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-sqlite-binding-switch-'));
+  const dbPath = join(dir, 'sprout.db');
+  const writer = new SqliteRunStore({ filename: dbPath });
+  const run = sampleRun({
+    executionMode: 'host-run', engineHostProfileId: 'profile-local-a', environmentInstanceId: 'environment-b',
+    requestedWorkEnvironmentInstanceId: 'environment-b',
+    workspaceBindingStatus: 'active',
+    workspaceBinding: {
+      environmentInstanceId: 'environment-b', bindingId: 'binding-b', generation: 2,
+      catalogGeneration: 4, workspaceId: 'a'.repeat(40), kind: 'relative', path: 'repos/project',
+      operations: ['read', 'search'], projectMcpTools: ['lookup'],
+    },
+  });
+  await writer.save(run);
+  await writer.save({ ...run, status: 'failed', workspaceBindingStatus: 'recovering' });
+  writer.close();
+
+  const reader = new SqliteRunStore({ filename: dbPath });
+  const restored = await reader.get('run-1');
+  reader.close();
+  assert.equal(restored?.requestedWorkEnvironmentInstanceId, 'environment-b');
+  assert.equal(restored?.workspaceBindingStatus, 'recovering');
+  assert.deepEqual(restored?.workspaceBinding, run.workspaceBinding);
+});
+
+test('Host-run placement and its Engine profile survive SQLite reopen', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sprout-sqlite-host-run-'));
+  const dbPath = join(dir, 'sprout.db');
+  const writer = new SqliteRunStore({ filename: dbPath });
+  const { executionPlacement: _oldPlacement, ...flatHostRun } = sampleRun({
+    executionMode: 'host-run', engineHostProfileId: 'profile-local-a', environmentInstanceId: '',
+  });
+  await writer.save(flatHostRun);
+  writer.close();
+
+  const reader = new SqliteRunStore({ filename: dbPath });
+  const restored = await reader.get('run-1');
+  reader.close();
+  assert.equal(restored?.executionMode, 'host-run');
+  assert.equal(restored?.engineHostProfileId, 'profile-local-a');
+  assert.equal(restored?.environmentInstanceId, '');
+  assert.deepEqual(restored?.executionPlacement, {
+    mode: 'host-run',
+    engineHost: { kind: 'sprout', id: 'profile-local-a', profile: { platform: 'unknown', boundary: 'unknown' } },
+  });
 });
 
 test('trusted failure class survives SQLite reopen while legacy free text cannot classify an event', async () => {
@@ -113,7 +164,7 @@ test('saving the same run again updates it rather than duplicating it', async ()
   store.close();
 });
 
-test('a run with no optional fields round-trips without inventing them', async () => {
+test('a legacy run with no other optional fields reads with its Environment-hosted placement', async () => {
   const store = new SqliteRunStore({ filename: ':memory:' });
   const minimal: AgentRun = {
     id: 'run-2',
@@ -127,7 +178,10 @@ test('a run with no optional fields round-trips without inventing them', async (
   await store.save(minimal);
 
   const restored = await store.get('run-2');
-  assert.deepEqual(restored, minimal);
+  assert.deepEqual(restored, {
+    ...minimal,
+    executionPlacement: legacyEnvironmentPlacement('mac-mini-1'),
+  });
   assert.equal('result' in (restored ?? {}), false);
   assert.equal('leaseId' in (restored ?? {}), false);
   store.close();
@@ -210,6 +264,11 @@ test('a run written before the project and hand-off columns existed still reads 
   assert.equal('projectId' in (restored ?? {}), false);
   assert.equal('handOff' in (restored ?? {}), false);
   assert.equal('tokenUsage' in (restored ?? {}), false);
+  const legacyPlacement = db
+    .prepare('SELECT execution_mode, engine_host_profile_id FROM agent_runs WHERE id = ?')
+    .get('legacy-1') as { readonly execution_mode: string; readonly engine_host_profile_id: string };
+  assert.equal(legacyPlacement.execution_mode, 'environment-hosted');
+  assert.equal(legacyPlacement.engine_host_profile_id, 'mac-mini-1');
 
   // And a new run can still be written through the migrated schema.
   await store.save(sampleRun({ id: 'after-migration' }));
@@ -265,6 +324,7 @@ test('a lease survives being written to disk and read back', () => {
     id: 'lease-100',
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-scout',
     runId: 'run-1',
     acquiredAt: 1_000,
@@ -287,6 +347,7 @@ test('saving the same lease again updates state and expiry', () => {
     id: 'lease-1',
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-scout',
     acquiredAt: 1_000,
     expiresAt: 60_000,
@@ -313,6 +374,7 @@ test('SqliteStore manages runs, leases, and session keys over one SQLite connect
     id: 'lease-unified',
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-scout',
     runId: 'run-unified',
     acquiredAt: 1_000,

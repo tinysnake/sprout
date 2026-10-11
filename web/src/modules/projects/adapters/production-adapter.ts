@@ -26,11 +26,12 @@ export class ProductionProjectService implements ProjectManagementService {
   }
 
   async loadOverview(projectId: string): Promise<ProjectOverviewData> {
-    const [project, agents, environments, access] = await Promise.all([
+    const [project, agents, environments, access, bindingReadiness] = await Promise.all([
       this.#ports.projects.getProject(projectId),
       this.#ports.agents.listAgents(),
       this.#ports.environments.listEnvironments(),
       this.#ports.access.listProjectAccess(projectId),
+      Promise.resolve(this.#ports.access.listWorkspaceBindingReadiness?.(projectId)).then(value => value ?? []).catch(() => []),
     ]);
     const memberships = currentMemberships(project.content.versions, project.content.currentVersion);
     const activeAgentIdsInAuthority = new Set(
@@ -57,6 +58,7 @@ export class ProductionProjectService implements ProjectManagementService {
               agentId,
               environmentInstanceId: entry.environmentInstanceId,
               ...(result !== undefined ? { available: result.environmentAvailable } : {}),
+              ...(result?.executionMode !== undefined ? { executionMode: result.executionMode } : {}),
               ...(result?.unavailableReason !== undefined ? { unavailableReason: result.unavailableReason } : {}),
             };
           } catch {
@@ -68,7 +70,7 @@ export class ProductionProjectService implements ProjectManagementService {
       ),
     );
 
-    return { project, agents, environments, access, compatibility };
+    return { project, agents, environments, access, bindingReadiness, compatibility };
   }
 
   createProject(input: Parameters<ProjectManagementService['createProject']>[0]) {
@@ -118,6 +120,10 @@ export class ProductionProjectService implements ProjectManagementService {
     return this.#ports.access.endProjectAccess(id, environmentInstanceId, {
       reason: 'Project Environment access ended by the Human; workspace files are preserved.',
     });
+  }
+
+  inspectProjectMcpConfiguration(id: string, environmentInstanceId: string) {
+    return this.#ports.access.inspectProjectMcpConfiguration(id, environmentInstanceId);
   }
 
   archiveProject(id: string) {

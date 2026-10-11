@@ -65,6 +65,14 @@ function toggleResult() {
 }
 
 const eventCount = computed(() => auditEntries.value.length);
+const executionPlacementLabel = computed(() => {
+  const placement = run.value?.executionPlacement;
+  if (!placement) return 'Unknown';
+  const host = placement.engineHost;
+  return host
+    ? `${placement.mode} · ${host.kind} ${host.id} · ${host.profile.platform}/${host.profile.boundary}`
+    : `${placement.mode} · host unavailable`;
+});
 const duration = computed(() => {
   const value = run.value;
   if (!value || value.completedAt === undefined) return 'Duration unavailable';
@@ -163,6 +171,9 @@ const resultText = computed(() => {
             <p v-if="statusExpanded" class="mt-2 text-xs text-[var(--text-secondary)]">
               {{ run.status }} · {{ duration }} · {{ run.tokenUsage ? `${run.tokenUsage.totalTokens.toLocaleString('en-US')} tokens` : 'Tokens unavailable' }}
             </p>
+            <p v-if="statusExpanded" class="mt-1 text-xs text-[var(--text-secondary)]">Recorded placement · {{ executionPlacementLabel }}</p>
+            <p v-if="statusExpanded && run.processExecutionMode" class="mt-1 text-xs text-[var(--text-secondary)]">Current Sprout mode · {{ run.processExecutionMode }}</p>
+            <p v-if="statusExpanded && run.executionModeMismatchReason" role="status" class="mt-2 rounded border border-[var(--yellow-attention-border)] p-2 text-xs">{{ run.executionModeMismatchReason }}</p>
           </div>
         </section>
         <div class="flex flex-wrap items-center justify-between gap-2">

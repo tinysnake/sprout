@@ -61,6 +61,39 @@ test('command output deltas are surfaced as tool output', () => {
   assert.deepEqual(outcome.events, [{ type: 'tool-output', text: 'hello\n' }]);
 });
 
+test('Codex tool details and output redact credential, host path, and hostname markers at the protocol boundary', () => {
+  const s = state();
+  const sensitive = [
+    '/Users/fixture-user/.config/codex/auth.json',
+    'runnerbox-9',
+    'host=remote-fixture-3',
+    'port=43671',
+    'https://fixture-user:fixture-passphrase@service.example/api',
+    'token=tok_fixtureSecretValue',
+    '{"api_key":"JSON_SECRET_MATERIAL"}',
+  ].join(' ');
+  const outcomes = [
+    mapCodexNotification({
+      method: 'item/started',
+      params: { item: { type: 'commandExecution', command: sensitive, commandActions: [{ command: sensitive }] } },
+    }, s),
+    mapCodexNotification({ method: 'item/commandExecution/outputDelta', params: { delta: sensitive } }, s),
+    mapCodexNotification({
+      method: 'item/completed', params: { item: { type: 'commandExecution', aggregatedOutput: sensitive, exitCode: 0 } },
+    }, s),
+  ];
+  const emitted = JSON.stringify(outcomes.flatMap(outcome => outcome.events));
+  for (const marker of [
+    '/Users/fixture-user', 'runnerbox-9', 'remote-fixture-3', '43671',
+    'fixture-user:fixture-passphrase', 'tok_fixtureSecretValue', 'JSON_SECRET_MATERIAL',
+  ]) {
+    assert.equal(emitted.includes(marker), false, `Codex event omitted sensitive marker ${marker}`);
+  }
+  assert.match(emitted, /<redacted-path>/);
+  assert.match(emitted, /<redacted-host>/);
+  assert.match(emitted, /<redacted-credential>/);
+});
+
 test('a completed agent message is the final message', () => {
   const s = state();
   const outcome = mapCodexNotification(

@@ -215,6 +215,7 @@ test('an orphaned run has its lease transitioned to recovering on restart, block
     id: 'lease-orphaned',
     instanceId: 'mac-mini-1',
     capability: 'agent-run',
+    mode: 'read-write',
     holderId: 'agent-scout',
     runId: 'orphan-1',
     acquiredAt: 1_000,

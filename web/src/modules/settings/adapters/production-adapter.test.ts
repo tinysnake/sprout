@@ -45,6 +45,7 @@ test('ProductionSettingsService reads settings, sessions, diagnostics and respec
       worker: '0.2.0',
       workerProtocol: { minMajor: 2, maxMajor: 2 },
     },
+    executionMode: 'environment-hosted',
     session: { authenticated: true, activeCount: 2 },
     access: {
       boundary: 'private-network-and-authentication',

@@ -8,7 +8,10 @@ import type {
   ProjectAuthorityView,
   ProjectBrowserAdapter,
   ProjectEnvironmentAccessView,
+  ProjectWorkspaceBindingReadinessView,
   ProjectEnvironmentCreationInput,
+  ProjectMcpConfigurationSelection,
+  ProjectMcpInspectionView,
   WorkspaceSelectionInput,
 } from '../../adapters/project-api.js';
 
@@ -17,6 +20,7 @@ export interface ProjectAgentEnvironmentCompatibility {
   readonly agentId: string;
   readonly environmentInstanceId: string;
   readonly available?: boolean;
+  readonly executionMode?: 'environment-hosted' | 'host-run';
   readonly unavailableReason?: string;
 }
 
@@ -26,6 +30,7 @@ export interface ProjectOverviewData {
   readonly agents: readonly AgentInstance[];
   readonly environments: readonly EnvironmentInstance[];
   readonly access: readonly ProjectEnvironmentAccessView[];
+  readonly bindingReadiness: readonly ProjectWorkspaceBindingReadinessView[];
   readonly compatibility: readonly ProjectAgentEnvironmentCompatibility[];
 }
 
@@ -35,6 +40,7 @@ export interface CreateProjectInput {
   readonly rules?: readonly string[];
   readonly wakePolicy?: string;
   readonly routingIntervalMs?: number;
+  readonly mcpConfiguration?: ProjectMcpConfigurationSelection;
   readonly agentMemberships?: readonly AgentMembershipInput[];
   readonly environmentAssignments?: readonly ProjectEnvironmentCreationInput[];
 }
@@ -57,6 +63,7 @@ export interface ProjectManagementService {
     readonly rules: readonly string[];
     readonly wakePolicy: string;
     readonly routingIntervalMs: number;
+    readonly mcpConfiguration?: ProjectMcpConfigurationSelection | null;
   }): Promise<ProjectAuthorityView>;
   addProjectMembership(id: string, input: AgentMembershipInput): Promise<ProjectAuthorityView>;
   updateProjectMembership(id: string, memberId: string, input: {
@@ -67,6 +74,7 @@ export interface ProjectManagementService {
   grantProjectAccess(id: string, environmentInstanceId: string, workspace: WorkspaceSelectionInput): Promise<ProjectEnvironmentAccessView>;
   changeProjectWorkspace(id: string, environmentInstanceId: string, workspace: WorkspaceSelectionInput): Promise<ProjectEnvironmentAccessView>;
   endProjectAccess(id: string, environmentInstanceId: string): Promise<ProjectEnvironmentAccessView>;
+  inspectProjectMcpConfiguration(id: string, environmentInstanceId: string): Promise<ProjectMcpInspectionView>;
   archiveProject(id: string): Promise<ProjectAuthorityView>;
   restoreProject(id: string): Promise<ProjectAuthorityView>;
 }

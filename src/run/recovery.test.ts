@@ -29,6 +29,7 @@ test('the pool lease decisions are provably driven by persisted state across rea
       const res = pool.acquireLease({
         instanceId: 'mac-mini-1',
         capability: 'agent-run',
+        mode: 'read-write',
         holderId: 'agent-first',
         ttlMs: 600_000,
       });
@@ -96,6 +97,7 @@ test('the pool lease decisions are provably driven by persisted state across rea
       const conflict1 = pool.acquireLease({
         instanceId: 'mac-mini-1',
         capability: 'agent-run',
+        mode: 'read-write',
         holderId: 'agent-second',
         ttlMs: 60_000,
       });
@@ -115,6 +117,7 @@ test('the pool lease decisions are provably driven by persisted state across rea
       const conflict2 = pool.acquireLease({
         instanceId: 'mac-mini-1',
         capability: 'agent-run',
+        mode: 'read-write',
         holderId: 'agent-third',
         ttlMs: 60_000,
       });
@@ -134,6 +137,7 @@ test('the pool lease decisions are provably driven by persisted state across rea
       const success = pool.acquireLease({
         instanceId: 'mac-mini-1',
         capability: 'agent-run',
+        mode: 'read-write',
         holderId: 'agent-fourth',
         ttlMs: 60_000,
       });
@@ -365,6 +369,7 @@ test('an orphaned mid-flight run after restart has an explicit failed state with
       const conflict = pool.acquireLease({
         instanceId: 'mac-mini-1',
         capability: 'agent-run',
+        mode: 'read-write',
         holderId: 'agent-new',
         ttlMs: 60_000,
       });

@@ -6,6 +6,8 @@ import { WebSocketServer } from 'ws';
 import { createWebSocketStream } from 'ws';
 
 import type { RunOrchestrator } from '../run/orchestrator.ts';
+import type { AgentRun } from '../run/model.ts';
+import type { ExecutionMode } from '../execution-mode.ts';
 import { runFailureReason } from '../run/failure-reason.ts';
 import type { AgentRegistry } from '../agent/registry.ts';
 import type { CollaborationCoordinator } from '../collaboration/coordinator.ts';
@@ -21,9 +23,10 @@ import {
 import { ConversationScopeError } from '../conversation/model.ts';
 import type { ConversationScopeService } from '../conversation/service.ts';
 import { redactSensitiveText } from '../environment/privacy.ts';
+import { READ_ONLY_LEASE_SEMANTICS } from '../environment/pool.ts';
 import type { ProjectRegistry } from '../project/registry.ts';
 import type { TaskService } from '../task/service.ts';
-import type { TaskStatus } from '../task/model.ts';
+import type { TaskStatus, Task, TaskWithRuns } from '../task/model.ts';
 import { TaskRecoveryRefusal } from '../task/environment-lifecycle.ts';
 import type { OperatorSessionService, AuthenticatedBrowserSession } from '../auth/service.ts';
 import { composeApiRouters, type ApiRouter } from './router.ts';
@@ -75,6 +78,7 @@ export const WORKER_CONNECTION_SHUTDOWN_DEADLINE_MS = 5_000;
 
 export interface RunApiOptions {
   readonly orchestrator: RunOrchestrator;
+  readonly executionMode?: ExecutionMode;
   /** The agents a user can address; exposed read-only for the client. */
   readonly agents: AgentRegistry;
   /**
@@ -142,6 +146,9 @@ export interface RunApi {
 
 export function createRunApi(options: RunApiOptions): RunApi {
   const { orchestrator, agents, collaboration, conversationScopes, projects, tasks, auth } = options;
+  const projectRunView = (run: AgentRun) => toRunView(run, options.executionMode);
+  const projectTaskView = (task: Task) => toTaskView(task, options.executionMode);
+  const projectTaskDetailsView = (found: TaskWithRuns) => toTaskWithRunsView(found, options.executionMode);
   /** Open event streams, so `close` can end them instead of hanging. */
   const streams = new Set<ServerResponse>();
   const additiveRouters = composeApiRouters(options.routers ?? []);
@@ -150,7 +157,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
   // orchestrator subscription per browser and gives reconnects a stable replay
   // boundary without changing the durable Run/event contract.
   const unsubscribeRunEvents = orchestrator.subscribe((run, replaySequence) =>
-    eventLog.publish(toRunView(run), replaySequence),
+    eventLog.publish(projectRunView(run), replaySequence),
   );
   const server = createServer((request, response) => {
     void handle(request, response).catch((error: unknown) => {
@@ -711,7 +718,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
           : {}),
         ...(status !== undefined ? { status } : {}),
       });
-      sendJson(response, 201, { task: toTaskView(task) });
+      sendJson(response, 201, { task: projectTaskView(task) });
       return;
     }
 
@@ -727,7 +734,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         ...(projectId !== undefined ? { projectId } : {}),
         ...(status !== undefined ? { status } : {}),
       });
-      sendJson(response, 200, { tasks: list.map(toTaskView) });
+      sendJson(response, 200, { tasks: list.map(projectTaskView) });
       return;
     }
 
@@ -759,7 +766,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
           ...(prompt !== undefined ? { prompt } : {}),
         });
         sendJson(response, 202, {
-          task: toTaskView(advanced.task),
+          task: projectTaskView(advanced.task),
           runId: advanced.runId,
         });
       } catch (error) {
@@ -784,7 +791,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
       const selection = parseEnvironmentPreference(body.selection);
       if (selection === 'invalid' || selection === null) { sendJson(response, 400, { error: 'selection must be { kind: "definition" | "instance", id }' }); return; }
       try {
-        sendJson(response, 200, { task: toTaskView(await tasks.begin(taskId, {
+        sendJson(response, 200, { task: projectTaskView(await tasks.begin(taskId, {
           ...(typeof body.agentId === 'string' ? { agentId: body.agentId } : {}),
           ...(selection !== undefined ? { selection } : {}),
         })) });
@@ -796,7 +803,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
     if (request.method === 'POST' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'end' && tasks) {
       const taskId = segments[2] ?? '';
       if ((await tasks.get(taskId)) === undefined) { sendJson(response, 404, { error: `unknown task: ${taskId}` }); return; }
-      try { sendJson(response, 200, { task: toTaskView(await tasks.end(taskId)) }); }
+      try { sendJson(response, 200, { task: projectTaskView(await tasks.end(taskId)) }); }
       catch (error) { sendJson(response, 409, { error: responseError(error, auth !== undefined) }); }
       return;
     }
@@ -807,7 +814,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
       if ((await tasks.get(taskId)) === undefined) { sendJson(response, 404, { error: `unknown task: ${taskId}` }); return; }
       const body = await readBody();
       if (body.action !== 'resume' && body.action !== 'discard') { sendJson(response, 400, { error: 'action must be resume or discard' }); return; }
-      try { sendJson(response, 200, { task: toTaskView(await tasks.recover(taskId, body.action)) }); }
+      try { sendJson(response, 200, { task: projectTaskView(await tasks.recover(taskId, body.action)) }); }
       catch (error) {
         // #171: a recovery refusal is product-owned text and domain ids, so an
         // authenticated session sees the actionable reason rather than the
@@ -825,7 +832,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
     if (request.method === 'POST' && segments.length === 4 && segments[0] === 'api' && segments[1] === 'tasks' && segments[3] === 'validation' && tasks) {
       const taskId = segments[2] ?? '';
       if ((await tasks.get(taskId)) === undefined) { sendJson(response, 404, { error: `unknown task: ${taskId}` }); return; }
-      try { sendJson(response, 200, { task: toTaskView(await tasks.awaitHumanValidation(taskId)) }); }
+      try { sendJson(response, 200, { task: projectTaskView(await tasks.awaitHumanValidation(taskId)) }); }
       catch (error) { sendJson(response, 409, { error: responseError(error, auth !== undefined) }); }
       return;
     }
@@ -844,7 +851,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         sendJson(response, 404, { error: `unknown task: ${taskId}` });
         return;
       }
-      sendJson(response, 200, toTaskWithRunsView(found));
+      sendJson(response, 200, projectTaskDetailsView(found));
       return;
     }
 
@@ -901,7 +908,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
             ? { blockerReason: body.blockerReason }
             : {}),
       });
-      sendJson(response, 200, { task: toTaskView(updated) });
+      sendJson(response, 200, { task: projectTaskView(updated) });
       } catch (error) {
         sendJson(response, 409, { error: responseError(error, auth !== undefined) });
       }
@@ -913,11 +920,24 @@ export function createRunApi(options: RunApiOptions): RunApi {
       const body = await readBody();
       const agentId = typeof body.agentId === 'string' ? body.agentId : '';
       const prompt = typeof body.prompt === 'string' ? body.prompt : '';
+      const projectId = typeof body.projectId === 'string' ? body.projectId : undefined;
+      const workEnvironmentInstanceId = typeof body.workEnvironmentInstanceId === 'string'
+        ? body.workEnvironmentInstanceId
+        : undefined;
+      if (body.workEnvironmentInstanceId !== undefined &&
+          (workEnvironmentInstanceId === undefined || workEnvironmentInstanceId.trim() === '')) {
+        sendJson(response, 400, { error: 'workEnvironmentInstanceId must be a non-empty string' });
+        return;
+      }
       if (agentId === '' || prompt === '') {
         sendJson(response, 400, { error: 'agentId and prompt are required' });
         return;
       }
-      const { id } = await orchestrator.submit({ agentId, prompt });
+      const { id } = await orchestrator.submit({
+        agentId, prompt,
+        ...(projectId !== undefined ? { projectId } : {}),
+        ...(workEnvironmentInstanceId !== undefined ? { workEnvironmentInstanceId } : {}),
+      });
       sendJson(response, 202, { id });
       return;
     }
@@ -931,7 +951,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
       segments[3] === 'stop'
     ) {
       const run = await orchestrator.stop(segments[2] ?? '');
-      sendJson(response, 200, toRunView(run));
+      sendJson(response, 200, projectRunView(run));
       return;
     }
 
@@ -958,7 +978,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         sendJson(response, 409, { error: 'run lease is not recovering' });
         return;
       }
-      sendJson(response, 200, { run: toRunView(run), released: true });
+      sendJson(response, 200, { run: projectRunView(run), released: true });
       return;
     }
 
@@ -984,7 +1004,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
         sendJson(response, 404, { error: `unknown run: ${segments[2]}` });
         return;
       }
-      sendJson(response, 200, toRunView(run));
+      sendJson(response, 200, projectRunView(run));
       return;
     }
 
@@ -1002,14 +1022,17 @@ export function createRunApi(options: RunApiOptions): RunApi {
 
     // GET /api/runs — list runs.
     if (request.method === 'GET' && url.pathname === '/api/runs') {
-      const runs = (await orchestrator.list()).map(toRunView);
+      const runs = (await orchestrator.list()).map(projectRunView);
       sendJson(response, 200, { runs, totals: summarizeRunHistory(runs) });
       return;
     }
 
     // GET /api/leases — list leases for observability.
     if (request.method === 'GET' && url.pathname === '/api/leases') {
-      sendJson(response, 200, { leases: orchestrator.leases() });
+      sendJson(response, 200, {
+        leases: orchestrator.leases(),
+        readOnlyLeaseSemantics: READ_ONLY_LEASE_SEMANTICS,
+      });
       return;
     }
 
@@ -1067,7 +1090,7 @@ export function createRunApi(options: RunApiOptions): RunApi {
     // positions instead: observer arrival and restart hydration therefore share
     // one forward order even when timestamps tie or ids sort against arrival.
     for (const snapshot of await orchestrator.replaySnapshots()) {
-      eventLog.publish(toRunView(snapshot.run), snapshot.sequence);
+      eventLog.publish(projectRunView(snapshot.run), snapshot.sequence);
     }
     const cursor = parseEventCursor(headerValue(request, 'last-event-id'));
     const send = (record: SseRecord) => {

@@ -154,6 +154,8 @@ export interface EnvironmentRecoveryView {
     readonly taskContextPrepared?: boolean;
   };
   readonly unresolvedFacts: readonly string[];
+  /** Sanitized decision gate derived from remote operation and process evidence. */
+  readonly remoteWorkEvidence?: { readonly unresolved: boolean };
   readonly evidenceSynchronized: boolean;
   readonly decisions: readonly {
     readonly kind: string;

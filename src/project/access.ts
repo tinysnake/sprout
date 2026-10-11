@@ -53,6 +53,8 @@ export interface ValidatedWorkspace {
  */
 export interface WorkspaceBinding {
   readonly bindingId: string;
+  /** Monotonic per Project and Environment access relationship. Legacy rows may omit it. */
+  readonly generation?: number;
   readonly workspaceId: string;
   readonly kind: WorkspaceSelectionKind;
   /** Worker-root-relative location, when the workspace named one. */

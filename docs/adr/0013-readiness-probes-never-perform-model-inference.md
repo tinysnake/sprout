@@ -6,6 +6,8 @@ We decided that an Environment readiness probe is Worker-executed and strictly n
 
 Later quota collectors or other observation sources may add current facts with explicit provenance, and a real Human-requested Agent run remains real work rather than a disguised probe. Neither source rewrites the historical readiness fact used by an earlier admission decision.
 
+The Host Claude Code adapter follows the same non-inference boundary. It reads the exact model and configured effort from the read-only Claude Code user settings, checks CLI `2.1.294` and local isolation controls, and confirms configured authentication material is present without printing it. This establishes configuration readiness only: it does not validate the gateway token or the remote model route, and it never sends a prompt. The authorized resolved value is `group/auto-mimo-v2-6-flash[1m]`, a gateway alias that currently maps to a non-Claude model; no Claude-native model availability is claimed. A change to the accepted user configuration after readiness is refused.
+
 **Consequences**
 
 - Codex and Pi probe commands and outputs must be verified against pinned supported versions before implementation; a missing trustworthy operation is planning fog, not permission to weaken the boundary.

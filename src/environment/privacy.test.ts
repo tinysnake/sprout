@@ -1,8 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { IANA_HOST_SUFFIXES } from './iana-tlds.ts';
 
 import {
   redactSensitiveText,
+  redactProjectText,
   sanitizeIdentifier,
   sanitizeOperatorText,
   sanitizeProtocolVersion,
@@ -149,6 +151,13 @@ test('named credential assignments are removed whatever the secret characters ar
   }
 });
 
+test('credential material embedded in a JSON-like model payload is redacted', () => {
+  const payload = '{"model":"gpt-6","messages":[{"role":"user","content":"api_key={{API_KEY_TEST}}"}]}';
+  const redacted = redactSensitiveText(payload);
+  assert.ok(!redacted.includes('API_KEY_TEST'), 'credential material from the payload reached sanitized text');
+  assert.match(redacted, /<redacted-credential>/);
+});
+
 test('an ordinary decisive sentence is not eaten by the credential rules', () => {
   for (const reason of [
     'host retired after water damage',
@@ -159,6 +168,104 @@ test('an ordinary decisive sentence is not eaten by the credential rules', () =>
     'kept secret from the operator',
   ]) {
     assert.equal(sanitizeOperatorText(reason, { fallback: 'fallback' }), reason);
+  }
+});
+
+test('Project prose preserves clear relative filenames while general hostnames stay redacted', () => {
+  const content = 'Read README.md and notes/today.txt; connect to worker.node1.tailnet.example';
+  const projectText = redactProjectText(content);
+
+  assert.equal(projectText, 'Read README.md and notes/today.txt; connect to <redacted-host>');
+  assert.equal(redactSensitiveText('Read README.md'), 'Read <redacted-host>', 'the general sanitizer keeps its existing rule');
+  assert.equal(redactProjectText('example.md'), '<redacted-host>', 'an unqualified domain-shaped token is still treated as a host');
+  assert.equal(redactProjectText('Read example.md'), 'Read example.md', 'file-reference context distinguishes a bare filename');
+  assert.equal(redactProjectText('Read worker.example.md'), 'Read worker.example.md', 'explicit file context takes precedence for host-shaped names');
+  assert.equal(redactProjectText('worker.example.md'), '<redacted-host>', 'the same host-shaped token without file context is redacted');
+
+  const sensitive = redactProjectText(
+    'Read README.md; host=worker-7 port=41001; path /srv/project/private.txt; URL https://internal.example/data; api_key={{API_KEY_TEST}}',
+  );
+  assert.ok(sensitive.includes('README.md'));
+  assert.ok(!/worker-7|41001|\/srv\/project|internal\.example|API_KEY_TEST/.test(sensitive));
+  assert.ok(sensitive.includes('<redacted-host>'));
+  assert.ok(sensitive.includes('<redacted-path>'));
+  assert.ok(sensitive.includes('<redacted-url>'));
+  assert.ok(sensitive.includes('<redacted-credential>'));
+});
+
+test('file context preserves two-label common-TLD tokens but redacts longer hosts', () => {
+  const cases = [
+    ['Read report.final.pdf', 'Read report.final.pdf'],
+    ['Read README.md', 'Read README.md'],
+    ['Read notes/today.txt; Read logs/app.log', 'Read notes/today.txt; Read logs/app.log'],
+    ['Read notes.2024.10.md', 'Read notes.2024.10.md'],
+    ['Read spec.v2.xlsx', 'Read spec.v2.xlsx'],
+    ['Read data.tar.gz', 'Read data.tar.gz'],
+    ['Read a.b.c; Read README.', 'Read a.b.c; Read README.'],
+    ['Read some.unknown.qqq', 'Read some.unknown.qqq'],
+    ['Read worker.node1.tailnet.com', 'Read <redacted-host>'],
+    ['Read installer.com', 'Read installer.com'],
+    ['Read github.com', 'Read github.com'],
+    ['Read files/installer.com', 'Read files/installer.com'],
+    ['Read parser.pl; Read config.in', 'Read parser.pl; Read config.in'],
+    ['Read worker.node1.tailnet.fail', 'Read <redacted-host>'],
+    ['Read worker.node1.tailnet.example', 'Read <redacted-host>'],
+    ['worker.node1.tailnet.example', '<redacted-host>'],
+    ['Connect to worker.node1.tailnet.example', 'Connect to <redacted-host>'],
+    ['Open the file at worker.node1.tailnet.example', 'Open the file at <redacted-host>'],
+  ] as const;
+  for (const [input, expected] of cases) {
+    assert.equal(redactProjectText(input), expected, input);
+  }
+
+  for (const hostname of [
+    'worker.node1.tailnet.example', 'worker.node1.tailnet.com', 'worker.node1.tailnet.fail',
+    'api.github.com', 'installer.v2.com', 'api.example.net', 'api.example.org', 'api.example.io', 'api.example.test',
+  ]) {
+    for (const prefix of ['Read ', '', 'Connect to ', 'Open the file at ']) {
+      assert.equal(redactProjectText(prefix + hostname), prefix + '<redacted-host>', prefix + hostname);
+    }
+  }
+
+  for (const suffix of ['com', 'net', 'org', 'io']) {
+    assert.equal(redactProjectText(`Read installer.${suffix}`), `Read installer.${suffix}`);
+    assert.equal(redactProjectText(`Read installer.v2.${suffix}`), 'Read <redacted-host>');
+    for (const prefix of ['', 'Connect to ', 'Open the file at ']) {
+      assert.equal(redactProjectText(`${prefix}installer.${suffix}`), `${prefix}<redacted-host>`);
+    }
+    assert.equal(redactSensitiveText(`Read installer.${suffix}`), 'Read <redacted-host>');
+  }
+  assert.equal(redactProjectText('Read github.com:41020'), 'Read <redacted-host>:41020', 'a host:port is not a bare file token');
+  assert.equal(redactProjectText('Read worker.internal'), 'Read <redacted-host>', 'private suffix redaction runs before file classification');
+  assert.equal(redactProjectText('Read host=github.com; port=41020'), 'Read <redacted-host>; <redacted-host>');
+  assert.equal(redactProjectText('Read worker.fail'), 'Read <redacted-host>', 'other IANA suffixes do not gain the two-label exception');
+
+  assert.equal(IANA_HOST_SUFFIXES.has('md'), true, '.md is in the IANA root-zone list');
+  assert.equal(IANA_HOST_SUFFIXES.has('pl'), true, '.pl is in the IANA root-zone list');
+  assert.equal(IANA_HOST_SUFFIXES.has('in'), true, '.in is in the IANA root-zone list');
+  assert.equal(IANA_HOST_SUFFIXES.has('example'), true, '.example is included through IANA special-use names');
+  assert.equal(IANA_HOST_SUFFIXES.has('qqq'), false, '.qqq is not an authoritative host suffix');
+  assert.equal(
+    redactProjectText('Connect to gateway.internal:41020'),
+    'Connect to <redacted-host>:41020',
+  );
+  assert.equal(redactProjectText('host=worker-7; port=41020'), '<redacted-host>; <redacted-host>');
+
+  const sensitive = redactProjectText(
+    'gateway.internal:41020; worker-7; host=worker-7; port=41020; path=/Users/example/private; ' +
+      'api_key={{API_KEY_TEST}}; URL https://user:pass@internal.example/data; ' +
+      'email ops@example.com; payload {"model":"gpt-6","messages":[{"content":"api_key={{API_KEY_TEST}}"}]}',
+  );
+  assert.ok(sensitive.includes('<redacted-host>:41020'));
+  assert.ok(sensitive.includes('<redacted-path>'));
+  assert.ok(sensitive.includes('<redacted-credential>'));
+  assert.ok(sensitive.includes('<redacted-url>'));
+  assert.ok(sensitive.includes('<redacted-identity>'));
+  for (const privateValue of [
+    'gateway.internal', 'worker-7', 'host=worker-7', 'port=41020', '/Users/example/private',
+    'API_KEY_TEST', 'https://user:pass@', 'ops@example.com',
+  ]) {
+    assert.equal(sensitive.includes(privateValue), false, `${privateValue} survived Project sanitization`);
   }
 });
 

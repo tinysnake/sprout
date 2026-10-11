@@ -20,6 +20,7 @@ import type { Task, TaskRunLink } from '../task/model.ts';
 import {
   summarizeRunHistory,
   toEnvironmentReadinessView,
+  toEnvironmentRecoveryView,
   toMessageView,
   toProjectView,
   toProbeResultView,
@@ -35,6 +36,7 @@ import {
   type RunView,
 } from './views.ts';
 import type { EnvironmentReadiness } from '../environment/readiness.ts';
+import type { EnvironmentRecoveryRecord, RemoteWorkRecoveryEvidence } from '../environment/recovery.ts';
 
 function run(overrides: Partial<AgentRun> = {}): AgentRun {
   return {
@@ -53,6 +55,10 @@ test('a run view exposes progress and the terminal result without server interna
   const view = toRunView(
     run({
       taskId: 'task-1',
+      executionPlacement: {
+        mode: 'environment-hosted',
+        engineHost: { kind: 'environment', id: 'mac-mini-1', profile: { platform: 'macos', boundary: 'shared-host' } },
+      },
       leaseId: 'lease-secret',
       handOff: {
         previousEnvironmentInstanceId: 'windows-1',
@@ -68,6 +74,10 @@ test('a run view exposes progress and the terminal result without server interna
   assert.equal(view.id, 'run-1');
   assert.equal(view.status, 'completed');
   assert.equal(view.taskId, 'task-1');
+  assert.deepEqual(view.executionPlacement, {
+    mode: 'environment-hosted',
+    engineHost: { kind: 'environment', id: 'mac-mini-1', profile: { platform: 'macos', boundary: 'shared-host' } },
+  });
   assert.equal(view.handOffAttached, true, 'a hand-off becomes a boolean fact');
   assert.deepEqual(view.tokenUsage, { promptTokens: 1, completionTokens: 2, totalTokens: 3 });
   assert.equal(view.createdAt, 1_000);
@@ -81,6 +91,51 @@ test('a run view exposes progress and the terminal result without server interna
     false,
     'the hand-off text never reaches the payload',
   );
+});
+
+test('Web Run projection exposes remote progress and every terminal operation status', () => {
+  const statuses = ['completed', 'failed', 'cancelled', 'recovery-required'] as const;
+  const events: AgentRun['events'] = [
+    { type: 'tool-call', name: 'remote_command', detail: 'Remote operation requested.' },
+    { type: 'tool-output', text: 'remote test progress' },
+    ...statuses.map(status => ({ type: 'notice' as const, text: `Remote command ${status}.` })),
+  ];
+  const view = toRunView(run({ events }));
+
+  assert.deepEqual(view.events, events);
+  for (const status of statuses) assert.ok(view.events.some(event => event.type === 'notice' && event.text === `Remote command ${status}.`));
+  assert.ok(view.events.some(event => event.type === 'tool-output' && event.text === 'remote test progress'));
+});
+
+test('run projections expose placement while keeping the local host profile identity private', () => {
+  const view = toRunView(run({
+    environmentInstanceId: '', executionMode: 'host-run', engineHostProfileId: 'opaque-local-profile',
+    executionPlacement: {
+      mode: 'host-run',
+      engineHost: { kind: 'sprout', id: 'opaque-local-profile', profile: { platform: 'macos', boundary: 'shared-host' } },
+    },
+  }));
+  assert.equal(view.executionMode, 'host-run');
+  assert.equal('environmentInstanceId' in view, false);
+  assert.equal('engineHostProfileId' in view, false);
+  assert.equal(JSON.stringify(view).includes('opaque-local-profile'), false);
+});
+
+test('a standalone historical run mismatch reports its placement without implying Task continuation', () => {
+  const view = toRunView(run({
+    status: 'interrupted',
+    executionPlacement: {
+      mode: 'environment-hosted',
+      engineHost: { kind: 'environment', id: 'mac-mini-1', profile: { platform: 'macos', boundary: 'shared-host' } },
+    },
+  }), 'host-run');
+
+  assert.equal(view.taskId, undefined);
+  assert.equal(view.executionPlacement?.mode, 'environment-hosted');
+  assert.equal(view.processExecutionMode, 'host-run');
+  assert.match(view.executionModeMismatchReason ?? '', /Run was recorded under environment-hosted.*process is host-run/);
+  assert.match(view.executionModeMismatchReason ?? '', /Historical Runs are not replayed or relocated after restart/);
+  assert.doesNotMatch(view.executionModeMismatchReason ?? '', /Task|lease|continue/i);
 });
 
 test('optional run fields are absent rather than null when the run has none', () => {
@@ -264,6 +319,10 @@ test('a task view projects the whole record and its derived context state', () =
     environmentPreference: { kind: 'definition', id: 'macos-workstation' },
     blockerReason: 'waiting on a review',
     environmentInstanceId: 'mac-mini-1',
+    executionPlacement: {
+      mode: 'environment-hosted',
+      engineHost: { kind: 'environment', id: 'mac-mini-1', profile: { platform: 'macos', boundary: 'shared-host' } },
+    },
     environmentLeaseId: 'lease-1',
     environmentLifecycleState: 'blocked',
     activeRunId: 'run-1',
@@ -276,8 +335,18 @@ test('a task view projects the whole record and its derived context state', () =
   assert.equal(view.blockerReason, 'waiting on a review');
   assert.deepEqual(view.environmentPreference, { kind: 'definition', id: 'macos-workstation' });
   assert.equal(view.environmentLeaseId, 'lease-1');
+  assert.deepEqual(view.executionPlacement?.engineHost?.profile, { platform: 'macos', boundary: 'shared-host' });
   assert.equal('recoveryState' in view, false);
   assert.equal('completedAt' in view, false);
+  const endedMismatch = toTaskView({
+    ...task,
+    status: 'done',
+    environmentLifecycleState: 'ended',
+    executionPlacement: { mode: 'host-run', engineHost: { kind: 'sprout', id: 'sprout-test', profile: { platform: 'macos', boundary: 'shared-host' } } },
+  }, 'environment-hosted');
+  assert.match(endedMismatch.executionModeMismatchReason ?? '', /recorded under host-run.*this Sprout process is environment-hosted/);
+  assert.match(endedMismatch.executionModeMismatchReason ?? '', /Restart Sprout with --execution-mode host-run to continue it/);
+  assert.match(endedMismatch.executionModeMismatchReason ?? '', /Environment, workspace, and lease remain bound to the recorded Task/);
 });
 
 test('a task-with-runs view keeps run links ordered and hides an unsettled summary', () => {
@@ -466,6 +535,23 @@ test('a run view exposes the workspace binding it was admitted under, sanitized'
   assert.ok(!JSON.stringify(corrupt).includes('/Users/'));
 });
 
+test('a run view reports current binding state and capability names with sanitized identity', () => {
+  const view = toRunView(run({
+    workspaceBindingStatus: 'recovering',
+    workspaceBinding: {
+      environmentInstanceId: 'environment-b', bindingId: 'binding-b', generation: 7,
+      catalogGeneration: 3, workspaceId: 'b'.repeat(40), kind: 'default',
+      operations: ['read', 'command'], projectMcpTools: ['lookup', '../private'],
+    },
+  }));
+  assert.equal(view.workspaceBindingStatus, 'recovering');
+  assert.deepEqual(view.workspaceBinding, {
+    environmentInstanceId: 'environment-b', bindingId: 'binding-b', generation: 7,
+    catalogGeneration: 3, workspaceId: 'b'.repeat(40), kind: 'default',
+    operations: ['read', 'command'], projectMcpTools: ['lookup'],
+  });
+});
+
 test('a run with no workspace binding reports none rather than inventing one', () => {
   const view = toRunView(run({ projectId: 'project-sprout' }));
   assert.equal('workspaceBinding' in view, false);
@@ -610,6 +696,68 @@ test('the scope read projection re-applies the privacy boundary before anything 
   assert.ok(!serialized.includes('sk-abcdefghijklmnopqrstuvwx'), 'no credential in a reason');
   assert.ok(!serialized.includes('worker.internal.corp'), 'no hostname in a rule');
   assert.ok(!serialized.includes('192.168.1.10'), 'no address in an end reason');
+});
+
+test('recovery wire projection exposes only the sanitized remote outcome gate', () => {
+  const project = (remoteWorkEvidence: RemoteWorkRecoveryEvidence) => toEnvironmentRecoveryView({
+    id: 'recovery-1',
+    environmentInstanceId: 'instance-1',
+    leaseId: 'lease-1',
+    holderKind: 'task',
+    holderId: 'task-1',
+    taskId: 'task-1',
+    cause: 'worker-channel-lost',
+    phase: 'recovery',
+    startedAt: 1,
+    updatedAt: 2,
+    evidence: {
+      retainedEventCount: 1,
+      turnSettlementObserved: true,
+      terminalStatus: 'interrupted',
+      engineSessionStopped: true,
+      taskContextRecycled: false,
+      taskContextPrepared: true,
+    },
+    remoteWorkEvidence,
+    unresolvedFacts: [],
+    decisions: [],
+  } satisfies EnvironmentRecoveryRecord);
+
+  const uncertain = project({
+    journalAvailable: true,
+    workspaceOperations: { running: 0, unknown: 0, cancelRequested: 0, recoveryRequired: 0 },
+    projectMcpOperations: { running: 0, uncertain: 0 },
+    projectMcpProcesses: { starting: 0, running: 0, stopping: 0, uncertain: 1 },
+    endpoint: 'ENDPOINT_TEST_SENTINEL',
+    headers: 'HEADER_TEST_SENTINEL',
+    credentials: 'CREDENTIAL_TEST_SENTINEL',
+    sessionIdentifier: 'SESSION_TEST_SENTINEL',
+    homePath: 'HOME_PATH_TEST_SENTINEL',
+  } as unknown as RemoteWorkRecoveryEvidence);
+  assert.deepEqual(uncertain.remoteWorkEvidence, { unresolved: true });
+  for (const sentinel of [
+    'ENDPOINT_TEST_SENTINEL', 'HEADER_TEST_SENTINEL', 'CREDENTIAL_TEST_SENTINEL',
+    'SESSION_TEST_SENTINEL', 'HOME_PATH_TEST_SENTINEL',
+  ]) {
+    assert.equal(JSON.stringify(uncertain).includes(sentinel), false, `${sentinel} is not projected`);
+  }
+
+  const callOnly = project({
+    journalAvailable: true,
+    workspaceOperations: { running: 0, unknown: 0, cancelRequested: 0, recoveryRequired: 0 },
+    projectMcpOperations: { running: 0, uncertain: 1 },
+    projectMcpProcesses: { starting: 0, running: 0, stopping: 0, uncertain: 0 },
+  });
+  assert.equal(callOnly.evidenceSynchronized, true, 'terminal Worker evidence is independently synchronized');
+  assert.deepEqual(callOnly.remoteWorkEvidence, { unresolved: true }, 'one uncertain call blocks even with no open processes');
+
+  const confirmed = project({
+    journalAvailable: true,
+    workspaceOperations: { running: 0, unknown: 0, cancelRequested: 0, recoveryRequired: 0 },
+    projectMcpOperations: { running: 0, uncertain: 0 },
+    projectMcpProcesses: { starting: 0, running: 0, stopping: 0, uncertain: 0 },
+  });
+  assert.deepEqual(confirmed.remoteWorkEvidence, { unresolved: false });
 });
 
 test('scope state and context views keep the two governing halves separate and redacted', () => {

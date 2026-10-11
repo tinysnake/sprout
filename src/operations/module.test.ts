@@ -9,6 +9,7 @@ import { OperatorDiagnostics } from './module.ts';
 import { MemoryOperationalStore, diagnosticSubject } from './service.ts';
 import { OperatorSessionService } from '../auth/service.ts';
 import { InMemoryOperatorSessionStore } from '../auth/store.ts';
+import { createExecutionStrategy } from '../execution-mode.ts';
 
 test('diagnostic recovery rows retain correlation and validated owners across journal reopen', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'diagnostic-correlation-'));
@@ -22,6 +23,7 @@ test('diagnostic recovery rows retain correlation and validated owners across jo
     { id: 'recovery-holder', holderKind: 'task', holderId: 'task-1', decisions: [{ kind: 'released', at: 4000 }] },
   ] };
   const options = { schema: 22, auth: new OperatorSessionService({ store: new InMemoryOperatorSessionStore() }),
+    executionStrategy: createExecutionStrategy('environment-hosted'),
     enrollments: { list: async () => [] } as never, recovery: recovery as never,
     task: async (id: string) => id === 'task-1' ? { id, projectId: 'project-1', goal: 'PRIVATE_GOAL' } : undefined,
     run: async (id: string) => id === 'run-2' ? { id, projectId: 'project-1', agentId: 'agent-1', prompt: 'PRIVATE_PROMPT' } : undefined,
@@ -60,6 +62,7 @@ test('export selects typed facts from enrollment, readiness and recovery without
   assert.ok(session.authenticated);
   const enrollment = { id: privateText, status: 'approved', displayName: privateText, worker: { identityDigest: privateText }, decisions: [{ kind: 'approved', at: 1, actor: privateText, reason: privateText }] };
   const operations = new OperatorDiagnostics({ store: new MemoryOperationalStore(), schema: 22, auth,
+    executionStrategy: createExecutionStrategy('environment-hosted'),
     enrollments: { list: async () => [enrollment], readiness: async () => ({ readiness: { connection: { state: 'online', address: privateText }, compatibility: { state: 'compatible', detail: privateText }, engines: [{ engine: 'pi', readiness: 'ready', models: [privateText], authMode: privateText, version: privateText }], workSafety: { state: 'recovery' } } }) } as never,
     recovery: { list: async () => [{ id: privateText, decisions: [{ kind: 'interrupted', at: 2, reason: privateText }, { kind: 'force-released', at: 3, reason: privateText }], unresolvedFacts: [privateText] }] } as never,
   });
@@ -73,8 +76,89 @@ test('export selects typed facts from enrollment, readiness and recovery without
   assert.equal(JSON.stringify(first).includes(login.bearerToken), false);
   const settings = await operations.settings(session.session.id);
   assert.equal(settings.session.activeCount, 1);
+  assert.equal(settings.executionMode, 'environment-hosted');
   assert.equal(settings.access.publicInternetSupported, false);
   assert.equal(JSON.stringify(settings).includes(privateText), false);
   await auth.revokeSession(session.session.id);
   await assert.rejects(operations.settings(session.session.id));
+});
+
+test('Host Pi and Codex Settings project local readiness facts without exposing profile identities', async () => {
+  const secretProfileId = 'opaque-local-profile-id';
+  const secretCodexProfileId = 'opaque-codex-profile-id';
+  const auth = new OperatorSessionService({ store: new InMemoryOperatorSessionStore() });
+  await auth.initializeOrRecover('synthetic-credential');
+  const login = (await auth.signIn('synthetic-credential'))!;
+  const session = await auth.authenticate(login.bearerToken);
+  assert.ok(session.authenticated);
+  const operations = new OperatorDiagnostics({
+    store: new MemoryOperationalStore(), schema: 22, auth,
+    executionStrategy: createExecutionStrategy('host-run', true),
+    hostPiReadiness: async () => ({
+      profileId: secretProfileId, engine: 'pi', status: 'ready', installation: 'ready',
+      authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready',
+      version: '1.0.4', observedAt: 1_000,
+    }),
+    hostCodexReadiness: async () => ({
+      profileId: secretCodexProfileId, engine: 'codex', status: 'ready', installation: 'ready',
+      authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready',
+      version: '0.159.3', supportedEfforts: ['medium'], observedAt: 1_000,
+    }),
+    enrollments: { list: async () => [] } as never,
+    recovery: { list: async () => [] } as never,
+  });
+  const settings = await operations.settings(session.session.id);
+  assert.equal(settings.executionMode, 'host-run');
+  assert.deepEqual(settings.hostPi, {
+    status: 'ready', installation: 'ready', authentication: 'ready',
+    modelAvailability: 'available', adapterControls: 'ready', version: '1.0.4',
+  });
+  assert.deepEqual(settings.hostCodex, {
+    status: 'ready', installation: 'ready', authentication: 'ready',
+    modelAvailability: 'available', adapterControls: 'ready', version: '0.159.3',
+  });
+  assert.equal(JSON.stringify(settings).includes(secretProfileId), false);
+  assert.equal(JSON.stringify(settings).includes(secretCodexProfileId), false);
+});
+
+test('Settings projects a bounded Host Codex readiness failure', async () => {
+  const auth = new OperatorSessionService({ store: new InMemoryOperatorSessionStore() });
+  await auth.initializeOrRecover('synthetic-credential');
+  const login = (await auth.signIn('synthetic-credential'))!;
+  const session = await auth.authenticate(login.bearerToken);
+  assert.ok(session.authenticated);
+  const operations = new OperatorDiagnostics({
+    store: new MemoryOperationalStore(), schema: 22, auth,
+    executionStrategy: createExecutionStrategy('host-run', true),
+    hostCodexReadiness: async () => ({
+      profileId: 'private-profile', engine: 'codex', status: 'unknown', installation: 'ready',
+      authentication: 'unknown', modelAvailability: 'unknown', adapterControls: 'unknown', observedAt: 1_000,
+      probeFailure: { step: 'model/list', reason: 'transport closed' },
+    }),
+    enrollments: { list: async () => [] } as never,
+    recovery: { list: async () => [] } as never,
+  });
+  assert.deepEqual((await operations.settings(session.session.id)).hostCodex, {
+    status: 'unknown', installation: 'ready', authentication: 'unknown', modelAvailability: 'unknown',
+    adapterControls: 'unknown', probeFailure: { step: 'model/list', reason: 'transport closed' },
+  });
+});
+
+test('Settings reports the unresolved production Host Codex prerequisite as blocked', async () => {
+  const auth = new OperatorSessionService({ store: new InMemoryOperatorSessionStore() });
+  await auth.initializeOrRecover('synthetic-credential');
+  const login = (await auth.signIn('synthetic-credential'))!;
+  const session = await auth.authenticate(login.bearerToken);
+  assert.ok(session.authenticated);
+  const operations = new OperatorDiagnostics({
+    store: new MemoryOperationalStore(), schema: 22, auth,
+    executionStrategy: createExecutionStrategy('host-run', true),
+    hostCodexProductionBlockReason: 'Production Host-run Codex is blocked while the #248 host-authority-exclusion prerequisite remains unresolved.',
+    enrollments: { list: async () => [] } as never,
+    recovery: { list: async () => [] } as never,
+  });
+  assert.deepEqual((await operations.settings(session.session.id)).hostCodex, {
+    status: 'blocked',
+    reason: 'Production Host-run Codex is blocked while the #248 host-authority-exclusion prerequisite remains unresolved.',
+  });
 });

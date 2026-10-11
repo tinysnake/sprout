@@ -8,6 +8,7 @@ import { workerReadinessProbeFixture } from './worker/readiness-fixture.ts';
 
 import type { AgentDefinition } from './agent/registry.ts';
 import { InMemoryCollaborationStore } from './collaboration/store.ts';
+import { MemoryRemoteOperationIdentityStore } from './operations/remote-operation-store.ts';
 import type { EngineAdapter } from './engine/port.ts';
 import { ScriptedEngineAdapter, type ScriptedTurn } from './engine/scripted.ts';
 import { ADMISSION_CAPABILITY } from './environment/catalog.ts';
@@ -15,6 +16,7 @@ import { readinessRequirements } from './environment/readiness.ts';
 import type { ReadinessObservationAuthority } from './environment/readiness-authority.ts';
 import { InMemoryLeaseStore } from './environment/pool.ts';
 import type { HostConfiguration } from './host-config.ts';
+import type { HostPiEngineAdapter } from './engine/pi-host.ts';
 import type { Project } from './project/model.ts';
 import {
   WORKER_PROTOCOL_VERSION,
@@ -23,6 +25,7 @@ import {
   type WorkerReadinessProbeResult,
 } from './worker/protocol.ts';
 import { EnvironmentWorker } from './worker/server.ts';
+import type { ProjectMcpClientLauncher } from './worker/project-mcp.ts';
 import type { WorkerRecoveryJournal } from './worker/recovery-journal.ts';
 import {
   connectWorkerEnrollment,
@@ -128,6 +131,8 @@ export async function connectRuntimeWorker(
   enrollmentId: string,
   identityKeyPath: string,
   readiness: () => WorkerReadinessFacts = scriptedStartupReadiness,
+  workspaceRoot?: string,
+  projectMcpClientLauncher?: ProjectMcpClientLauncher,
 ): Promise<WorkerEnrollmentConnection> {
   const port = await runtimePort(runtime);
   const connection = await connectWorkerEnrollment({
@@ -141,6 +146,8 @@ export async function connectRuntimeWorker(
     environmentInstanceId: enrollment.environmentInstanceId,
     engines: new Map(),
     readiness,
+    ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
+    ...(projectMcpClientLauncher !== undefined ? { projectMcpClientLauncher } : {}),
     input: connection.stream,
     output: connection.stream,
   });
@@ -157,6 +164,7 @@ export async function connectRuntimeWorker(
 /** A complete typed host configuration for one synthetic local environment. */
 export function hostConfiguration(overrides: Partial<HostConfiguration> = {}): HostConfiguration {
   const configuration: HostConfiguration = {
+    executionMode: 'environment-hosted',
     databasePath: ':memory:',
     workingDirectory: '/synthetic/work',
     port: 0,
@@ -240,6 +248,7 @@ export function inMemoryStores(): MemoryStores {
     agentIdentities: new InMemoryAgentStore(),
     projectAuthorities: new InMemoryProjectAuthorityStore(),
     projectAccess: new InMemoryProjectAccessStore(),
+    remoteWorkspaceOperations: new MemoryRemoteOperationIdentityStore(),
     conversationScopes: new InMemoryConversationScopeStore(),
     taskProposals: new InMemoryTaskProposalStore(),
     runsStore: runs,
@@ -317,6 +326,7 @@ export async function build(
     readonly turns?: readonly ScriptedTurn[];
     readonly configuration?: Partial<HostConfiguration>;
     readonly environment?: RuntimeEnvironment;
+    readonly hostPi?: HostPiEngineAdapter;
     /** Start the Web surface, as the host entrypoint does before reconciling. */
     readonly listen?: boolean;
   } = {},
@@ -333,6 +343,7 @@ export async function build(
     configuration: hostConfiguration(options.configuration),
     projectRoot: '/synthetic/project-root',
     environment,
+    ...(options.hostPi !== undefined ? { hostPi: options.hostPi } : {}),
     stores,
   });
   // The host entrypoint listens before reconciling and before installing

@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 
 import { parseRuntimeConfiguration, type RuntimeConfiguration } from './runtime-config.ts';
+import type { ExecutionMode } from './execution-mode.ts';
 
 /**
  * The typed host configuration of one Sprout instance.
@@ -15,6 +16,8 @@ import { parseRuntimeConfiguration, type RuntimeConfiguration } from './runtime-
  * conversion: this Module does not invent the validation the runtime never had.
  */
 export interface HostConfiguration {
+  /** Immutable execution placement selected for this Sprout process. */
+  readonly executionMode: ExecutionMode;
   /** Durable SQLite database file. */
   readonly databasePath: string;
   /** Host working directory that a local environment serves. */
@@ -160,6 +163,8 @@ export type HostEnvironment = Readonly<Record<string, string | undefined>>;
 export interface HostConfigurationDefaults {
   /** The repository root, used for path defaults when the host names none. */
   readonly projectRoot: string;
+  /** Process mode parsed from argv before host configuration is read. */
+  readonly executionMode?: ExecutionMode;
 }
 
 /** Host facts the Worker entry point cannot discover from the environment alone. */
@@ -181,6 +186,7 @@ export function parseHostConfiguration(
 ): HostConfiguration {
   const environmentInstanceId = environment['SPROUT_ENV_INSTANCE'] ?? 'local-macos';
   return {
+    executionMode: defaults.executionMode ?? 'environment-hosted',
     databasePath: environment['SPROUT_DATABASE'] ?? join(defaults.projectRoot, 'sprout.db'),
     workingDirectory: environment['SPROUT_WORKDIR'] ?? defaults.projectRoot,
     port: numberValue(environment['SPROUT_PORT'], 5174),

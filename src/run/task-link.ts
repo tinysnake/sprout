@@ -20,6 +20,7 @@
  */
 
 import type { AgentRun } from './model.ts';
+import type { ExecutionPlacement } from '../execution-placement.ts';
 
 /** How the run seam assembles and records a Task run. */
 export interface TaskContextProvider {
@@ -32,6 +33,8 @@ export interface TaskContextProvider {
    * rather than a run with no Task context.
    */
   prompt(input: { readonly taskId: string; readonly prompt: string }): Promise<string>;
+
+  executionPlacement?(input: { readonly taskId: string }): Promise<ExecutionPlacement | undefined>;
 
   /** Link an admitted run into its Task's run sequence. Idempotent per run id. */
   link(input: {

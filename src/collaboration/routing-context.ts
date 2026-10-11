@@ -47,7 +47,7 @@ import {
   type RoutingWindow,
 } from './routing.ts';
 import { ROUTING_JUDGEMENT_CONTRACT } from './routing-judgement.ts';
-import { redactSensitiveText } from '../environment/privacy.ts';
+import { redactProjectText } from '../environment/privacy.ts';
 
 /** One eligible unaddressed input, resolved from durable records. */
 export interface RoutingInputFact {
@@ -152,13 +152,13 @@ function renderSharedPrefix(
     ROUTING_JUDGEMENT_CONTRACT,
     '',
     'Project goal:',
-    redactSensitiveText(contract.goal),
+    redactProjectText(contract.goal),
     'Project rules:',
-    ...(contract.rules.length > 0 ? contract.rules.map((rule) => `- ${redactSensitiveText(rule)}`) : ['- (none)']),
+    ...(contract.rules.length > 0 ? contract.rules.map((rule) => `- ${redactProjectText(rule)}`) : ['- (none)']),
     '',
     'Candidate Agents (Project responsibilities and collaboration instructions):',
     ...contract.candidates.flatMap((candidate) => [
-      `- ${candidate.agentId}: responsibilities: ${candidate.responsibilities.length > 0 ? candidate.responsibilities.map(redactSensitiveText).join('; ') : '(none declared)'} | collaboration instructions: ${candidate.collaborationInstructions === '' ? '(none)' : redactSensitiveText(candidate.collaborationInstructions)}`,
+      `- ${candidate.agentId}: responsibilities: ${candidate.responsibilities.length > 0 ? candidate.responsibilities.map(redactProjectText).join('; ') : '(none declared)'} | collaboration instructions: ${candidate.collaborationInstructions === '' ? '(none)' : redactProjectText(candidate.collaborationInstructions)}`,
     ]),
     '',
     'Open Tasks (curated public state, lead, and blocker summary; no Environment, lease, or run facts):',
@@ -201,7 +201,7 @@ export function freezeRoutingBatches(
     : rawPrefix.slice(0, Math.max(0, prefixCap - 24)) + '\n[shared facts truncated]';
 
   const excerpts = input.inputs.map((fact) =>
-    truncateRoutingContent(redactSensitiveText(fact.content), Math.max(0, Math.min(
+    truncateRoutingContent(redactProjectText(fact.content), Math.max(0, Math.min(
       bounds.inputContentChars,
       budget - sharedPrefix.length - inputHeader(fact, 0).length - 110,
     )), fact.content.length),
@@ -257,7 +257,7 @@ export function freezeRoutingBatches(
         const parent = input.messageById(parentId);
         if (parent === undefined) break;
         seen.add(parentId);
-        const size = redactSensitiveText(parent.body).slice(0, bounds.contextMessageChars).length + 120;
+        const size = redactProjectText(parent.body).slice(0, bounds.contextMessageChars).length + 120;
         if (contextSize + size > budget) {
           parentId = undefined;
           break;
@@ -277,7 +277,7 @@ export function freezeRoutingBatches(
       .slice(0, bounds.recentContextMessages)
       .reverse();
     for (const message of recentPool) {
-      const size = redactSensitiveText(message.body).slice(0, bounds.contextMessageChars).length + 120;
+      const size = redactProjectText(message.body).slice(0, bounds.contextMessageChars).length + 120;
       if (contextSize + size > budget) break;
       recent.push(message);
       recentIds.push(message.id);
@@ -314,7 +314,7 @@ export function freezeRoutingBatches(
         sections.push(
           `[ancestor | id=${ancestor.id} | author=${ancestor.authorId} | at=${ancestor.createdAt}]`,
         );
-        sections.push(redactSensitiveText(ancestor.body).slice(0, bounds.contextMessageChars));
+        sections.push(redactProjectText(ancestor.body).slice(0, bounds.contextMessageChars));
         sections.push('');
       }
     }
@@ -324,7 +324,7 @@ export function freezeRoutingBatches(
         sections.push(
           `[channel | id=${message.id} | author=${message.authorKind}:${message.authorId} | at=${message.createdAt}]`,
         );
-        sections.push(redactSensitiveText(message.body).slice(0, bounds.contextMessageChars));
+        sections.push(redactProjectText(message.body).slice(0, bounds.contextMessageChars));
         sections.push('');
       }
     }
@@ -340,8 +340,8 @@ export function freezeRoutingBatches(
       inputs: manifestInputs,
       candidates: input.contract.candidates.map((candidate) => ({
         agentId: candidate.agentId,
-        responsibilities: candidate.responsibilities.map(redactSensitiveText),
-        collaborationInstructions: redactSensitiveText(candidate.collaborationInstructions),
+        responsibilities: candidate.responsibilities.map(redactProjectText),
+        collaborationInstructions: redactProjectText(candidate.collaborationInstructions),
       })),
       tasks: [],
       recentContextIds: recentIds,

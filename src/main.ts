@@ -1,6 +1,7 @@
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { parseExecutionModeArguments, type ExecutionMode } from './execution-mode.ts';
 import { parseHostConfiguration } from './host-config.ts';
 import { createSproutRuntime, MissingEnvironmentEngineError } from './runtime.ts';
 import { SchemaError } from './store/schema.ts';
@@ -23,10 +24,18 @@ import { SchemaError } from './store/schema.ts';
  * host-configuration Module and consumed as a typed result here.
  */
 
+let executionMode: ExecutionMode;
+try {
+  executionMode = parseExecutionModeArguments(process.argv.slice(2));
+} catch (error) {
+  process.stderr.write(`${error instanceof Error ? error.message : 'invalid Sprout startup arguments'}\n`);
+  process.exit(2);
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(here, '..');
 
-const configuration = parseHostConfiguration(process.env, { projectRoot });
+const configuration = parseHostConfiguration(process.env, { projectRoot, executionMode });
 
 if (configuration.allowInsecureWorkerConnections) {
   process.stderr.write(

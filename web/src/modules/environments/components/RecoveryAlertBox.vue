@@ -28,7 +28,8 @@ const isRunHolder = computed(() => holder.value?.holderKind === 'run');
  */
 const evidenceReady = computed(() => recovery.value?.evidenceSynchronized === true &&
   recovery.value.reconciledEvidence?.engineStoppedProof === true &&
-  recovery.value.reconciledEvidence.turnSettlementObserved === true);
+  recovery.value.reconciledEvidence.turnSettlementObserved === true &&
+  recovery.value.remoteWorkEvidence?.unresolved !== true);
 const hasHolder = computed(() => taskId.value !== '');
 
 const unresolvedFacts = computed(() => recovery.value?.unresolvedFacts ?? []);
@@ -62,6 +63,16 @@ const unresolvedFacts = computed(() => recovery.value?.unresolvedFacts ?? []);
       <div v-for="fact in unresolvedFacts" :key="fact" class="text-[var(--text-secondary)] text-[11px]">
         • {{ fact }}
       </div>
+    </div>
+
+    <div
+      v-if="recovery?.remoteWorkEvidence"
+      class="remote-work-evidence text-[11px] text-[var(--text-secondary)] p-2 rounded-[var(--radius-xs)] bg-[var(--bg-surface)] border border-[var(--border-subtle)]"
+    >
+      <strong>Remote Work Evidence:</strong>
+      {{ recovery.remoteWorkEvidence.unresolved
+        ? 'Remote operation outcomes or Project MCP process stops remain unconfirmed.'
+        : 'Remote operation outcomes and Project MCP process stops are confirmed.' }}
     </div>
 
     <!-- Reconciled Evidence Proof if present -->

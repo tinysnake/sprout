@@ -1,0 +1,1015 @@
+import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { test } from 'node:test';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { ScriptedEngineAdapter } from './engine/scripted.ts';
+import { createSessionEventProgressState, sessionEventDisposition } from './engine/pi-runner-events.ts';
+import { mapPiEvent, newPiTurnState } from './engine/pi-protocol.ts';
+import type { HostPiEngineAdapter } from './engine/pi-host.ts';
+import type { HostCodexEngineAdapter } from './engine/codex-host.ts';
+import type { AgentRunEvent, RemoteWorkspaceOperationResult, StartSessionRequest } from './engine/port.ts';
+import { toRunView } from './web/views.ts';
+import { privateInput, signIn } from './web/api-harness.ts';
+import type { ProjectMcpClientLauncher } from './worker/project-mcp.ts';
+import { loadOrCreateWorkerIdentity, workerPublicKey } from './worker/enrollment-connector.ts';
+import {
+  connectRuntimeWorker,
+  createRuntime,
+  hostConfiguration,
+  INSTANCE_ID,
+  project,
+  scriptedTurn,
+  waitFor,
+} from './runtime-test-harness.ts';
+
+for (const hostEngine of ['pi', 'codex'] as const) test(`a selected Host-run ${hostEngine} Work Environment borrows admitted shared read leases`, async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-remote-read-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const workerRoot = join(directory, 'worker-workspaces');
+  const keyPath = join(directory, 'worker-key.pem');
+  const credential = privateInput();
+  const model = 'provider/model-host';
+  const runtimeProject = { ...project(), memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }] };
+  const profileId = `profile-runtime-remote-read-${hostEngine}`;
+  const localEngine = new ScriptedEngineAdapter({ turns: [scriptedTurn('I read the remote sentinel.')] });
+  const observed: RemoteWorkspaceOperationResult[] = [];
+  const host = {
+    id: hostEngine, profileId, authorizedModel: model,
+    capabilities: localEngine.capabilities,
+    supportsEffort: () => true,
+    async readiness() {
+      return { profileId, engine: hostEngine, status: 'ready', installation: 'ready',
+        authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready',
+        ...(hostEngine === 'codex' ? { version: '0.159.3', supportedEfforts: ['medium'] } : { version: '1.0.4' }),
+        observedAt: 1 };
+    },
+    async startSession(request: StartSessionRequest) {
+      assert.ok(request.remoteWorkspace, 'Runtime supplies its pinned workspace boundary');
+      const session = await localEngine.startSession(request);
+      const tools = request.remoteWorkspace;
+      return {
+        sessionId: session.sessionId,
+        engineSessionKey: session.engineSessionKey,
+        run(prompt: string) {
+          const turn = session.run(prompt);
+          const read = tools!.read('sentinel.txt');
+          return {
+            events: turn.events,
+            completion: Promise.all([turn.completion, read]).then(([result, operation]) => {
+              observed.push(operation);
+              return result;
+            }),
+          };
+        },
+        interrupt: () => session.interrupt(),
+        close: () => session.close(),
+      };
+    },
+  } as unknown as HostPiEngineAdapter | HostCodexEngineAdapter;
+  const runtime = await createRuntime({
+    configuration: hostConfiguration({
+      executionMode: 'host-run', environmentSource: 'enrollment',
+      runtimeConfiguration: {
+        agents: [{
+          id: 'scout', name: 'scout', engine: hostEngine, capability: 'agent-run', model, effort: 'medium',
+          workOptions: [{ id: `host-${hostEngine}`, engine: hostEngine, workModel: model, effort: 'medium' }],
+        }],
+        project: runtimeProject,
+      },
+      databasePath: join(directory, 'state.db'),
+      operatorCredential: credential,
+    }),
+    projectRoot: '/synthetic/project-root',
+    ...(hostEngine === 'pi' ? { hostPi: host as HostPiEngineAdapter } : { hostCodex: host as HostCodexEngineAdapter }),
+  });
+
+  try {
+    const identity = loadOrCreateWorkerIdentity(keyPath);
+    const enrollment = await runtime.enrollments.requestEnrollment({
+      environmentInstanceId: INSTANCE_ID,
+      displayName: 'Remote file Worker',
+      publicKey: workerPublicKey(identity.privateKey),
+      platform: 'macos',
+      protocolVersion: '3.0',
+      capabilityRequests: ['agent-run', 'read-only-investigation'],
+      engineFacts: [],
+    });
+    await runtime.enrollments.approve(enrollment.enrollment.id, {
+      capabilityPermissions: { 'agent-run': true, 'read-only-investigation': true },
+    });
+    await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, workerRoot);
+    const info = await runtime.enrollmentEnvironment.info?.(INSTANCE_ID);
+    assert.deepEqual(info?.engines, [], 'the remote Worker has no model engine or remote login');
+    assert.ok(info?.workspaceOperations, 'the Worker independently advertises its remote file capability');
+
+    await runtime.projectService.create({ id: 'remote-read-project', displayName: 'Remote read Project' });
+    await runtime.projectService.addMembership('remote-read-project', { agentId: 'scout' });
+    const access = await runtime.projectAccess.grant({
+      projectId: 'remote-read-project', environmentInstanceId: INSTANCE_ID,
+      selection: { kind: 'relative', path: 'repos/remote-read' },
+    });
+    assert.ok(access.current?.generation);
+    writeFileSync(join(workerRoot, 'repos', 'remote-read', 'sentinel.txt'), 'REMOTE_WORKER_SENTINEL');
+    const bindingReadiness = await runtime.environmentOperations.bindingReadiness('remote-read-project');
+    assert.equal(bindingReadiness[0]?.status, 'ready', 'remote binding readiness does not depend on an engine login');
+    const authorized = await runtime.environmentOperations.attach('remote-read-project', 'scout');
+    assert.equal(authorized.binding.bindingId, access.current?.bindingId);
+    assert.deepEqual(authorized.operations, [], 'a read-only capability with no lease receives no bound operations');
+    const direct = await authorized.read('sentinel.txt');
+    assert.equal(direct.failure, 'lease-required');
+    assert.equal(readFileSync(join(workerRoot, 'repos', 'remote-read', 'sentinel.txt'), 'utf8'), 'REMOTE_WORKER_SENTINEL');
+
+    const admitReadLease = async (runId: string) => {
+      // Seed the containing run leases before attaching Environment Operations.
+      const admission = await runtime.pool.acquireBoundOperationLeaseRevalidated({
+        instanceId: INSTANCE_ID, capability: 'read-only-investigation', mode: 'read',
+        holderId: 'scout', runId, ttlMs: 60_000,
+      });
+      assert.equal(admission.ok, true);
+      if (!admission.ok) throw new Error('read lease admission failed');
+      return {
+        lease: admission.lease,
+        containingLease: {
+          environmentInstanceId: admission.lease.instanceId, leaseId: admission.lease.id, runId,
+          holderKind: 'run' as const, holderId: admission.lease.holderId,
+          leaseCapability: 'read-only-investigation' as const, canRelease: () => true,
+        },
+      };
+    };
+    const admittedA = await admitReadLease('read-only-run-a');
+    const admittedB = await admitReadLease('read-only-run-b');
+    const readerA = await runtime.environmentOperations.attach('remote-read-project', 'scout', 'read-only-run-a', admittedA.containingLease);
+    const readerB = await runtime.environmentOperations.attach('remote-read-project', 'scout', 'read-only-run-b', admittedB.containingLease);
+    assert.equal(readerA.leaseMode, 'read');
+    assert.deepEqual(readerA.operations, ['read', 'search']);
+    const [readA, readB] = await Promise.all([
+      readerA.read('sentinel.txt', 'read-only-operation-a'),
+      readerB.read('sentinel.txt', 'read-only-operation-b'),
+    ]);
+    assert.equal(readA.status, 'completed', readA.failure ?? '');
+    assert.equal(readB.status, 'completed', readB.failure ?? '');
+    const readLeases = runtime.pool.activeLeases(INSTANCE_ID);
+    assert.equal(readLeases.length, 2);
+    assert.ok(readLeases.every((lease) => lease.mode === 'read'));
+
+    const address = runtime.api.server.address();
+    const port = address !== null && typeof address === 'object' ? address.port : (await runtime.api.listen(0, '127.0.0.1')).port;
+    const base = `http://127.0.0.1:${port}`;
+    const browser = await signIn(base, credential);
+    const leaseResponse = await fetch(`${base}/api/leases`, { headers: { cookie: browser.cookie } });
+    assert.equal(leaseResponse.status, 200);
+    const leaseProjection = await leaseResponse.json() as {
+      leases: { id: string; mode: string; state: string; runId?: string }[];
+      readOnlyLeaseSemantics: string;
+    };
+    assert.equal(leaseProjection.leases.filter((lease) => lease.state === 'active' && lease.mode === 'read').length, 2);
+    assert.match(leaseProjection.readOnlyLeaseSemantics, /concurrent readers/);
+    assert.match(leaseProjection.readOnlyLeaseSemantics, /Files may change/);
+    assert.match(leaseProjection.readOnlyLeaseSemantics, /no snapshot or copy-on-write/);
+
+    const blockedWriter = await runtime.orchestrator.submit({
+      agentId: 'scout', projectId: 'remote-read-project', workEnvironmentInstanceId: INSTANCE_ID, prompt: 'Try to read while readers hold leases.',
+    });
+    const blockedRun = await runtime.orchestrator.waitFor(blockedWriter.id);
+    assert.equal(blockedRun.status, 'failed');
+    await readerA.settle?.('settled');
+    await readerB.settle?.('settled');
+    assert.deepEqual(runtime.pool.activeLeases(INSTANCE_ID), []);
+
+    const { id } = await runtime.orchestrator.submit({
+      agentId: 'scout', projectId: 'remote-read-project', workEnvironmentInstanceId: INSTANCE_ID, prompt: 'Read sentinel.txt.',
+    });
+    const run = await runtime.orchestrator.waitFor(id);
+    if (run.status !== 'completed') throw new Error(`Host-run failed: ${run.failure ?? 'no failure detail'}`);
+    assert.equal(run.workspaceBinding?.leaseMode, 'read-write');
+    assert.equal(toRunView(run).workspaceBinding?.leaseMode, 'read-write');
+    assert.equal(run.executionMode, 'host-run');
+    assert.equal(run.engineHostProfileId, profileId);
+    assert.equal(observed.length, 1);
+    assert.equal(observed[0]?.status, 'completed');
+    assert.equal(observed[0]?.content, 'REMOTE_WORKER_SENTINEL');
+    assert.ok(runtime.pool.leases().every(row => row.state === 'released'), 'all settled remote read and write leases release');
+    assert.equal(runtime.pool.getLease(run.leaseId!)?.mode, 'read-write', 'the Host-run writer enters through the real run acquisition path');
+  } finally {
+    await runtime.close();
+  }
+});
+
+test('selected Host-run keeps scoped Environment history while independent conversations stay detached', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-binding-switch-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const model = 'provider/model-binding-switch';
+  const environmentA = INSTANCE_ID;
+  const environmentB = 'z-binding-switch-instance-b';
+  const workers = [
+    [environmentA, join(directory, 'worker-a')],
+    [environmentB, join(directory, 'worker-b')],
+  ] as const;
+  for (const [environment, root] of workers) {
+    mkdirSync(join(root, 'repos', 'switch-work'), { recursive: true });
+    writeFileSync(join(root, 'repos', 'switch-work', 'origin.txt'), environment);
+  }
+  const runtimeProject = { ...project(), memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }] };
+  const localEngine = new ScriptedEngineAdapter({ turns: [
+    scriptedTurn('Completed work in Environment A.'),
+    scriptedTurn('Continued work in Environment B.'),
+    scriptedTurn('Continued with the current Environment B session.'),
+  ] });
+  const starts: StartSessionRequest[] = [];
+  const reads: RemoteWorkspaceOperationResult[] = [];
+  const hostPi = {
+    id: 'pi', profileId: 'profile-binding-switch', authorizedModel: model,
+    capabilities: localEngine.capabilities,
+    async readiness() {
+      return { profileId: 'profile-binding-switch', engine: 'pi', status: 'ready', installation: 'ready',
+        authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready', version: '1.0.4', observedAt: 1 };
+    },
+    async startSession(request: StartSessionRequest) {
+      starts.push(request);
+      const session = await localEngine.startSession(request);
+      return {
+        sessionId: session.sessionId,
+        get engineSessionKey() { return session.engineSessionKey; },
+        run(prompt: string) {
+          const turn = session.run(prompt);
+          const shouldRead = starts.length <= 3;
+          const operation = shouldRead ? request.remoteWorkspace?.read('origin.txt') : undefined;
+          if (shouldRead && operation === undefined) throw new Error('the selected Environment did not publish workspace tools');
+          return {
+            events: turn.events,
+            completion: operation === undefined
+              ? turn.completion
+              : Promise.all([turn.completion, operation]).then(([result, read]) => {
+                reads.push(read);
+                return result;
+              }),
+          };
+        },
+        interrupt: () => session.interrupt(),
+        close: () => session.close(),
+      };
+    },
+  } as unknown as HostPiEngineAdapter;
+  const runtime = await createRuntime({
+    configuration: hostConfiguration({
+      executionMode: 'host-run', environmentSource: 'enrollment',
+      runtimeConfiguration: {
+        agents: [{ id: 'scout', name: 'scout', engine: 'pi', capability: 'agent-run', model, effort: 'medium',
+          workOptions: [{ id: 'host-pi', engine: 'pi', workModel: model, effort: 'medium' }] }],
+        project: runtimeProject,
+      },
+      databasePath: join(directory, 'state.db'),
+    }),
+    projectRoot: '/synthetic/project-root', hostPi,
+  });
+
+  try {
+    for (const [index, [environment, root]] of workers.entries()) {
+      const keyPath = join(directory, `worker-${index}.pem`);
+      const identity = loadOrCreateWorkerIdentity(keyPath);
+      const enrollment = await runtime.enrollments.requestEnrollment({
+        environmentInstanceId: environment, displayName: `Binding switch Worker ${index}`,
+        publicKey: workerPublicKey(identity.privateKey), platform: 'macos', protocolVersion: '3.0',
+        capabilityRequests: ['agent-run', 'read-only-investigation'], engineFacts: [],
+      });
+      await runtime.enrollments.approve(enrollment.enrollment.id, {
+        capabilityPermissions: { 'agent-run': true, 'read-only-investigation': true },
+      });
+      await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, root);
+    }
+    await runtime.projectService.create({ id: 'binding-switch-project', displayName: 'Binding switch Project' });
+    await runtime.projectService.addMembership('binding-switch-project', {
+      agentId: 'scout', responsibilities: [], collaborationInstructions: '',
+    });
+    for (const environment of [environmentA, environmentB]) {
+      await runtime.projectAccess.grant({
+        projectId: 'binding-switch-project', environmentInstanceId: environment,
+        selection: { kind: 'relative', path: 'repos/switch-work' },
+      });
+    }
+
+    const submit = async (
+      workEnvironmentInstanceId: string | undefined,
+      prompt: string,
+      scope = 'binding-switch-conversation',
+    ) => {
+      const { id } = await runtime.orchestrator.submit({
+        agentId: 'scout', projectId: 'binding-switch-project',
+        ...(workEnvironmentInstanceId !== undefined ? { workEnvironmentInstanceId } : {}),
+        sessionKeyScope: { kind: 'conversation', id: scope }, prompt,
+      });
+      return runtime.orchestrator.waitFor(id);
+    };
+    const runA = await submit(environmentA, 'Read the current Environment origin.');
+    const runB = await submit(environmentB, 'Continue the work in the selected Environment.');
+    const runBResume = await submit(undefined, 'Continue with the current grant.');
+    const isolatedScope = await submit(undefined, 'Start an independent conversation.', 'other-conversation');
+    await runtime.projectAccess.end({ projectId: 'binding-switch-project', environmentInstanceId: environmentB });
+    const unavailable = await submit('binding-switch-unauthorized', 'Use only the requested Environment.');
+    const retainedBindingUnavailable = await submit(undefined, 'Keep the last selected Environment; fail closed.');
+
+    if (runA.status !== 'completed') throw new Error(`Environment A run failed: ${runA.failure ?? 'no failure detail'}`);
+    if (runB.status !== 'completed') throw new Error(`Environment B run failed: ${runB.failure ?? 'no failure detail'}`);
+    if (runBResume.status !== 'completed') throw new Error(`Environment B resume failed: ${runBResume.failure ?? 'no failure detail'}`);
+    if (isolatedScope.status !== 'completed') throw new Error(`Independent conversation failed: ${isolatedScope.failure ?? 'no failure detail'}`);
+    assert.equal(isolatedScope.requestedWorkEnvironmentInstanceId, undefined);
+    assert.equal(isolatedScope.workspaceBinding, undefined,
+      'a new conversation does not inherit another conversation’s Work Environment');
+    assert.equal(unavailable.status, 'failed');
+    assert.equal(unavailable.workspaceBindingStatus, 'unavailable');
+    assert.equal(retainedBindingUnavailable.status, 'failed', 'a revoked retained binding cannot fall back to Environment A');
+    assert.equal(retainedBindingUnavailable.workspaceBindingStatus, 'unavailable');
+    assert.equal(starts.length, 4, 'an unavailable requested or retained Environment does not start a local fallback session');
+    assert.equal(runA.workspaceBindingStatus, 'active');
+    assert.equal(runB.workspaceBindingStatus, 'active');
+    assert.equal(runA.workspaceBinding?.environmentInstanceId, environmentA);
+    assert.equal(runB.workspaceBinding?.environmentInstanceId, environmentB);
+    assert.equal(runA.workspaceBinding?.generation, 1);
+    assert.equal(runB.workspaceBinding?.generation, 1);
+    assert.equal(runBResume.requestedWorkEnvironmentInstanceId, environmentB,
+      'the latest authorized binding stays selected when the next activation omits a selector');
+    assert.equal(retainedBindingUnavailable.requestedWorkEnvironmentInstanceId, environmentB,
+      'an unavailable retained binding stays the attempted binding instead of selecting another grant');
+    if (reads[0]?.status !== 'completed') throw new Error(`Environment A read failed: ${JSON.stringify(reads[0])}`);
+    assert.equal(reads[0]?.content, environmentA);
+    if (reads[1]?.status !== 'completed') throw new Error(`Environment B read failed: ${JSON.stringify(reads[1])}`);
+    assert.equal(reads[1]?.content, environmentB);
+    if (reads[2]?.status !== 'completed') throw new Error(`Environment B resumed read failed: ${JSON.stringify(reads[2])}`);
+    assert.equal(reads[2]?.content, environmentB);
+    assert.equal(starts[0]?.resumeSessionKey, undefined);
+    assert.equal(starts[1]?.resumeSessionKey, undefined, 'Environment B cannot resume Environment A native history');
+    assert.equal(starts[2]?.resumeSessionKey, 'scripted-key-2', 'same current grant resumes its native session');
+    const promptB = localEngine.sessions[1]?.prompts[0] ?? '';
+    assert.match(promptB, /Sprout switched the current Work Environment from composition-instance to z-binding-switch-instance-b/);
+    assert.match(starts[1]?.instructions ?? '', /Sprout current workspace and capability snapshot/);
+    assert.match(starts[1]?.instructions ?? '', /Environment: z-binding-switch-instance-b/);
+    assert.match(starts[1]?.instructions ?? '', /Remote workspace operations: read, search, edit, patch, command/);
+    assert.match(starts[1]?.instructions ?? '', /Binding change: Sprout switched the current Work Environment from composition-instance to z-binding-switch-instance-b/);
+    assert.match(promptB, /Environment composition-instance, relative workspace at binding generation 1: Completed work in Environment A\./);
+    assert.match(starts[2]?.instructions ?? '', /Sprout current workspace and capability snapshot/,
+      'native resume reconstructs the current state in the session system prompt');
+    assert.match(starts[2]?.instructions ?? '', /Environment: z-binding-switch-instance-b/);
+    assert.match(starts[3]?.instructions ?? '', /Status: detached/);
+    assert.equal(starts[3]?.remoteWorkspace, undefined,
+      'an independent ordinary conversation does not contact the default Worker');
+    const staleRead = await starts[0]?.remoteWorkspace?.read('origin.txt');
+    if (staleRead?.status !== 'failed') throw new Error(`Prior binding read was not rejected: ${JSON.stringify(staleRead)}`);
+    assert.equal(reads.length, 3, 'the stale call never executes against either Worker');
+    assert.ok(runtime.pool.leases().every(row => row.state === 'released'), 'selected read-only Work Environment leases release after the run');
+  } finally {
+    await runtime.close();
+  }
+});
+test('Worker channel loss protects every concurrent read lease with Environment recovery', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-read-recovery-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const keyPath = join(directory, 'worker-key.pem');
+  const runtime = await createRuntime({
+    configuration: hostConfiguration({
+      executionMode: 'host-run', environmentSource: 'enrollment',
+      databasePath: join(directory, 'state.db'),
+    }),
+    projectRoot: '/synthetic/project-root',
+  });
+  try {
+    const identity = loadOrCreateWorkerIdentity(keyPath);
+    const enrollment = await runtime.enrollments.requestEnrollment({
+      environmentInstanceId: INSTANCE_ID, displayName: 'Concurrent reader Worker',
+      publicKey: workerPublicKey(identity.privateKey), platform: 'macos', protocolVersion: '3.0',
+      capabilityRequests: ['read-only-investigation'], engineFacts: [],
+    });
+    await runtime.enrollments.approve(enrollment.enrollment.id, {
+      capabilityPermissions: { 'read-only-investigation': true },
+    });
+    const connection = await connectRuntimeWorker(
+      runtime, enrollment.enrollment.id, keyPath, undefined, join(directory, 'worker-workspaces'),
+    );
+    const acquireRead = (holderId: string) => runtime.pool.acquireBoundOperationLeaseRevalidated({
+      instanceId: INSTANCE_ID, capability: 'read-only-investigation', mode: 'read',
+      holderId, runId: holderId, ttlMs: 60_000,
+    });
+    const first = await acquireRead('reader-one');
+    const second = await acquireRead('reader-two');
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    if (!first.ok || !second.ok) throw new Error('both read leases should be admitted');
+
+    connection.close();
+    await waitFor(() => runtime.workerGateway.liveFor(INSTANCE_ID) === undefined, 'Worker disconnection');
+    assert.deepEqual(
+      [runtime.pool.getLease(first.lease.id)?.state, runtime.pool.getLease(second.lease.id)?.state],
+      ['recovering', 'recovering'],
+      'loss of one Worker channel fences every reader that depended on it',
+    );
+    await waitFor(async () =>
+      Boolean(await runtime.recovery.forLease(first.lease.id)) &&
+      Boolean(await runtime.recovery.forLease(second.lease.id)),
+    'recovery records for both read leases');
+
+    const blocked = await acquireRead('reader-three');
+    assert.equal(blocked.ok, false);
+    if (blocked.ok) throw new Error('recovery must block a new reader');
+    assert.equal(blocked.conflict?.kind, 'recovery');
+    assert.equal(blocked.conflict?.kind === 'recovery' ? blocked.conflict.holders.length : 0, 2);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test('composed Runtime fails an attached remote read after Worker disconnection without local fallback', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-remote-disconnected-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const workerRoot = join(directory, 'worker-workspaces');
+  const keyPath = join(directory, 'worker-key.pem');
+  const localRoot = join(directory, 'local-files');
+  const localSentinel = join(localRoot, 'sentinel.txt');
+  mkdirSync(localRoot, { recursive: true });
+  writeFileSync(localSentinel, 'LOCAL_HOST_SENTINEL');
+  const runtime = await createRuntime({
+    configuration: hostConfiguration({
+      executionMode: 'host-run', environmentSource: 'enrollment',
+      databasePath: join(directory, 'state.db'),
+    }),
+    projectRoot: '/synthetic/project-root',
+  });
+  try {
+    const identity = loadOrCreateWorkerIdentity(keyPath);
+    const enrollment = await runtime.enrollments.requestEnrollment({
+      environmentInstanceId: INSTANCE_ID, displayName: 'Disconnecting file Worker',
+      publicKey: workerPublicKey(identity.privateKey), platform: 'macos', protocolVersion: '3.0',
+      capabilityRequests: ['read-only-investigation'], engineFacts: [],
+    });
+    await runtime.enrollments.approve(enrollment.enrollment.id, {
+      capabilityPermissions: { 'read-only-investigation': true },
+    });
+    const connection = await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, workerRoot);
+    await runtime.projectService.create({ id: 'disconnected-read-project', displayName: 'Disconnected read Project' });
+    await runtime.projectService.addMembership('disconnected-read-project', { agentId: 'scout' });
+    const access = await runtime.projectAccess.grant({
+      projectId: 'disconnected-read-project', environmentInstanceId: INSTANCE_ID,
+      selection: { kind: 'relative', path: 'repos/disconnected' },
+    });
+    writeFileSync(join(workerRoot, 'repos', 'disconnected', 'sentinel.txt'), 'REMOTE_WORKER_SENTINEL');
+    const tools = await runtime.environmentOperations.attach('disconnected-read-project', 'scout');
+    assert.equal(tools.binding.bindingId, access.current?.bindingId);
+
+    connection.close();
+    await waitFor(() => runtime.workerGateway.liveFor(INSTANCE_ID) === undefined, 'Worker disconnection');
+    const readiness = await runtime.environmentOperations.bindingReadiness('disconnected-read-project');
+    assert.equal(readiness[0]?.status, 'blocked');
+    assert.equal(readiness[0]?.reason, 'worker-offline');
+    const refused = await tools.read('sentinel.txt');
+    assert.equal(refused.status, 'failed');
+    assert.equal(refused.failure, 'lease-required', 'without a lease, the disconnected Worker is never contacted');
+    assert.equal(runtime.workerGateway.liveFor(INSTANCE_ID), undefined);
+  } finally {
+    await runtime.close();
+  }
+});
+
+
+test('composed Runtime blocks remote reads when the enrolled Worker lacks the file capability permission', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-remote-denied-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const keyPath = join(directory, 'worker-key.pem');
+  const runtime = await createRuntime({
+    configuration: hostConfiguration({
+      executionMode: 'host-run', environmentSource: 'enrollment',
+      databasePath: join(directory, 'state.db'),
+    }),
+    projectRoot: '/synthetic/project-root',
+  });
+  try {
+    const identity = loadOrCreateWorkerIdentity(keyPath);
+    const enrollment = await runtime.enrollments.requestEnrollment({
+      environmentInstanceId: INSTANCE_ID, displayName: 'Denied file Worker',
+      publicKey: workerPublicKey(identity.privateKey), platform: 'macos', protocolVersion: '3.0',
+      capabilityRequests: ['read-only-investigation'], engineFacts: [],
+    });
+    await runtime.enrollments.approve(enrollment.enrollment.id, {
+      capabilityPermissions: { 'read-only-investigation': false },
+    });
+    await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, join(directory, 'worker-workspaces'));
+    await runtime.projectService.create({ id: 'denied-read-project', displayName: 'Denied read Project' });
+    await runtime.projectService.addMembership('denied-read-project', { agentId: 'scout' });
+    await runtime.projectAccess.grant({
+      projectId: 'denied-read-project', environmentInstanceId: INSTANCE_ID,
+      selection: { kind: 'relative', path: 'repos/denied' },
+    });
+
+    const readiness = await runtime.environmentOperations.bindingReadiness('denied-read-project');
+    assert.equal(readiness[0]?.status, 'blocked');
+    assert.equal(readiness[0]?.reason, 'capability-denied');
+    await assert.rejects(
+      runtime.environmentOperations.attach('denied-read-project', 'scout'),
+      (error: unknown) => error instanceof Error && 'reason' in error && error.reason === 'capability-denied',
+    );
+  } finally {
+    await runtime.close();
+  }
+});
+
+test('Project MCP discovery failure keeps the Task lease recovering until child termination is confirmed', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-project-mcp-discovery-failure-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const workerRoot = join(directory, 'worker-workspaces');
+  const keyPath = join(directory, 'worker-key.pem');
+  const model = 'provider/model-host';
+  const runtimeProject = { ...project(), memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }] };
+  const localEngine = new ScriptedEngineAdapter({ turns: [scriptedTurn('MCP discovery should block startup.')] });
+  let closeCalls = 0;
+  // Channel synchronization may retry cleanup before the assertions under load.
+  // Only explicit termination evidence, not a retry count, ends uncertainty.
+  let terminationConfirmed = false;
+  const launcher: ProjectMcpClientLauncher = async (_server, _cwd, onCreated) => {
+    const client = {
+      async discoverTools() { throw new Error('fixture discovery failed'); },
+      async callTool() { return {}; },
+      async close() { closeCalls += 1; return terminationConfirmed; },
+    };
+    onCreated(client);
+    return client;
+  };
+  const hostPi = {
+    id: 'pi', profileId: 'profile-runtime-project-mcp-discovery-failure', authorizedModel: model,
+    capabilities: localEngine.capabilities,
+    async readiness() {
+      return { profileId: 'profile-runtime-project-mcp-discovery-failure', engine: 'pi', status: 'ready', installation: 'ready',
+        authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready', version: '1.0.4', observedAt: 1 };
+    },
+    async startSession() { throw new Error('Host Pi must not start after MCP discovery fails'); },
+  } as unknown as HostPiEngineAdapter;
+  const runtime = await createRuntime({
+    configuration: hostConfiguration({
+      executionMode: 'host-run', environmentSource: 'enrollment',
+      runtimeConfiguration: {
+        agents: [{
+          id: 'scout', name: 'scout', engine: 'pi', capability: 'agent-run', model, effort: 'medium',
+          workOptions: [{ id: 'host-pi', engine: 'pi', workModel: model, effort: 'medium' }],
+        }],
+        project: runtimeProject,
+      },
+      databasePath: join(directory, 'state.db'),
+    }),
+    projectRoot: '/synthetic/project-root',
+    hostPi,
+  });
+  try {
+    const identity = loadOrCreateWorkerIdentity(keyPath);
+    const enrollment = await runtime.enrollments.requestEnrollment({
+      environmentInstanceId: INSTANCE_ID, displayName: 'Uncertain MCP Worker', publicKey: workerPublicKey(identity.privateKey),
+      platform: 'macos', protocolVersion: '3.0', capabilityRequests: ['agent-run', 'project-mcp'], engineFacts: [],
+    });
+    await runtime.enrollments.approve(enrollment.enrollment.id, { capabilityPermissions: { 'agent-run': true, 'project-mcp': true } });
+    await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, workerRoot, launcher);
+    const projectId = 'remote-mcp-discovery-failure';
+    await runtime.projectService.create({ id: projectId, displayName: 'Discovery Failure Project' });
+    await runtime.projectService.addMembership(projectId, { agentId: 'scout' });
+    await runtime.projectService.updateContent(projectId, { mcpConfiguration: { format: 'claude-code-mcp-json-v1' } });
+    await runtime.projectAccess.grant({
+      projectId, environmentInstanceId: INSTANCE_ID, selection: { kind: 'relative', path: 'repos/discovery-failure' },
+    });
+    mkdirSync(join(workerRoot, 'repos', 'discovery-failure'), { recursive: true });
+    writeFileSync(join(workerRoot, 'repos', 'discovery-failure', '.mcp.json'), JSON.stringify({ mcpServers: { fixture: { command: 'unused' } } }));
+    const task = await runtime.tasks.create({ projectId, title: 'MCP discovery failure', goal: 'Prove uncertain cleanup keeps the Task lease', assignedAgentId: 'scout' });
+    const begun = await runtime.tasks.begin(task.id);
+    const advanced = await runtime.tasks.advance(task.id, { prompt: 'Start the Project MCP tool.' });
+    const run = await runtime.orchestrator.waitFor(advanced.runId);
+    assert.equal(run.status, 'failed');
+    assert.ok(closeCalls >= 2, 'discovery failure and Worker stop both attempt cleanup without confirming termination');
+    // Exercise another failed stop explicitly; retries are not termination evidence.
+    await runtime.environmentOperations.reconcileProjectMcpProcesses(INSTANCE_ID);
+    const leaseId = begun.environmentLeaseId;
+    assert.ok(leaseId);
+    assert.equal(runtime.pool.getLease(leaseId)?.state, 'recovering');
+    assert.ok(await runtime.recovery.forLease(leaseId), 'shared Environment recovery retains the Task lease');
+    const openProcess = new DatabaseSync(join(directory, 'state.db'));
+    try {
+      const row = openProcess.prepare('SELECT process_id, state, holder_kind, holder_id, run_id FROM remote_project_mcp_processes LIMIT 1').get() as Record<string, unknown> | undefined;
+      assert.equal(row?.state, 'uncertain');
+      assert.equal(row?.holder_kind, 'task');
+      assert.equal(row?.holder_id, task.id);
+      assert.equal(row?.run_id, advanced.runId);
+    } finally {
+      openProcess.close();
+    }
+
+    const callsBeforeConfirmation = closeCalls;
+    terminationConfirmed = true;
+    await runtime.environmentOperations.reconcileProjectMcpProcesses(INSTANCE_ID);
+    assert.ok(closeCalls > callsBeforeConfirmation, 'reconciliation reaches the retained child identity and confirms termination');
+    assert.equal(runtime.pool.getLease(leaseId)?.state, 'recovering');
+  } finally {
+    await runtime.close();
+  }
+  const database = new DatabaseSync(join(directory, 'state.db'));
+  try {
+    const row = database.prepare('SELECT state FROM remote_project_mcp_processes LIMIT 1').get() as Record<string, unknown> | undefined;
+    assert.equal(row?.state, 'stopped');
+  } finally {
+    database.close();
+  }
+});
+
+test('Host-run Task calls typed Project MCP tools under its Task-held Environment lease and protects uncertainty', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-project-mcp-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const workerRoot = join(directory, 'worker-workspaces');
+  const keyPath = join(directory, 'worker-key.pem');
+  const model = 'provider/model-host';
+  const runtimeProject = { ...project(), memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }] };
+  const localEngine = new ScriptedEngineAdapter({ turns: [scriptedTurn('Project MCP tool completed.')] });
+  const observed: unknown[] = [];
+  let closeWorkerConnection: (() => void) | undefined;
+  let taskId: string | undefined;
+  let taskLeaseId: string | undefined;
+  let taskRunId: string | undefined;
+  const hostPi = {
+    id: 'pi', profileId: 'profile-runtime-project-mcp', authorizedModel: model,
+    capabilities: localEngine.capabilities,
+    async readiness() {
+      return { profileId: 'profile-runtime-project-mcp', engine: 'pi', status: 'ready', installation: 'ready',
+        authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready', version: '1.0.4', observedAt: 1 };
+    },
+    async startSession(request: StartSessionRequest) {
+      const mcp = request.remoteProjectMcp;
+      assert.ok(mcp, 'Runtime supplies its lease-bound Project MCP tools');
+      assert.equal(mcp.tools.length, 1);
+      assert.equal(mcp.tools[0]?.inputSchema.type, 'object');
+      const lease = runtime.pool.leases().find(row => row.capability === 'agent-run');
+      assert.ok(lease);
+      assert.equal(lease.state, 'active');
+      assert.equal(lease.holderKind, 'task');
+      observed.push(await mcp.call(mcp.tools[0]!.name, { text: 'hello from Pi' }));
+      assert.deepEqual(await mcp.call('mcp_unrelated_tool', { text: 'wrong origin' }), { status: 'failed', reason: 'unknown-tool' });
+      observed.push(await mcp.call(mcp.tools[0]!.name, { text: 12 } as unknown as Record<string, unknown>));
+      closeWorkerConnection?.();
+      await waitFor(() => runtime.workerGateway.liveFor(INSTANCE_ID) === undefined, 'Worker disconnection before MCP stop');
+      assert.deepEqual(await mcp.call(mcp.tools[0]!.name, { text: 'stale call' }), { status: 'failed', reason: 'worker-refused' });
+      return localEngine.startSession(request);
+    },
+  } as unknown as HostPiEngineAdapter;
+  const runtime = await createRuntime({
+    configuration: hostConfiguration({
+      executionMode: 'host-run', environmentSource: 'enrollment',
+      runtimeConfiguration: {
+        agents: [{
+          id: 'scout', name: 'scout', engine: 'pi', capability: 'agent-run', model, effort: 'medium',
+          workOptions: [{ id: 'host-pi', engine: 'pi', workModel: model, effort: 'medium' }],
+        }],
+        project: runtimeProject,
+      },
+      databasePath: join(directory, 'state.db'),
+    }),
+    projectRoot: '/synthetic/project-root',
+    hostPi,
+  });
+  try {
+    const identity = loadOrCreateWorkerIdentity(keyPath);
+    const enrollment = await runtime.enrollments.requestEnrollment({
+      environmentInstanceId: INSTANCE_ID, displayName: 'Project MCP Worker', publicKey: workerPublicKey(identity.privateKey),
+      platform: 'macos', protocolVersion: '3.0', capabilityRequests: ['agent-run', 'project-mcp'], engineFacts: [],
+    });
+    await runtime.enrollments.approve(enrollment.enrollment.id, { capabilityPermissions: { 'agent-run': true, 'project-mcp': true } });
+    const connection = await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, workerRoot);
+    closeWorkerConnection = () => connection.close();
+    const projectId = 'remote-mcp-project';
+    await runtime.projectService.create({ id: projectId, displayName: 'Remote MCP Project' });
+    await runtime.projectService.addMembership(projectId, { agentId: 'scout' });
+    await runtime.projectService.updateContent(projectId, { mcpConfiguration: { format: 'claude-code-mcp-json-v1' } });
+    const access = await runtime.projectAccess.grant({
+      projectId, environmentInstanceId: INSTANCE_ID, selection: { kind: 'relative', path: 'repos/remote-mcp' },
+    });
+    assert.ok(access.current);
+    assert.equal(runtime.pool.requiresLease(INSTANCE_ID, 'project-mcp'), true, 'the enrolled catalog requires the MCP lease');
+    assert.deepEqual(runtime.projects.get(projectId)?.availableEnvironmentInstanceIds, [INSTANCE_ID], 'the active Project access grants the enrolled instance');
+    const serverScript = `
+      import { createInterface } from 'node:readline';
+      const tools = [{ name: 'echo', description: 'Echo supplied text.', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false } }];
+      const input = createInterface({ input: process.stdin });
+      const send = value => process.stdout.write(JSON.stringify(value) + '\\n');
+      input.on('line', line => {
+        const request = JSON.parse(line);
+        if (request.method === 'initialize') send({ jsonrpc: '2.0', id: request.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'fixture', version: '1' } } });
+        else if (request.method === 'tools/list') send({ jsonrpc: '2.0', id: request.id, result: { tools } });
+        else if (request.method === 'tools/call') send({ jsonrpc: '2.0', id: request.id, result: { content: [{ type: 'text', text: request.params.arguments.text }] } });
+      });
+    `;
+    writeFileSync(join(workerRoot, 'repos', 'remote-mcp', '.mcp.json'), JSON.stringify({ mcpServers: {
+      'fixture-server': { command: process.execPath, args: ['--input-type=module', '-e', serverScript] },
+    } }));
+    const task = await runtime.tasks.create({ projectId, title: 'Remote MCP Task', goal: 'Use the remote Project MCP tool', assignedAgentId: 'scout' });
+    taskId = task.id;
+    const begun = await runtime.tasks.begin(task.id);
+    taskLeaseId = begun.environmentLeaseId;
+    assert.equal(begun.environmentInstanceId, INSTANCE_ID);
+    const advanced = await runtime.tasks.advance(task.id, { prompt: 'Use the Project MCP echo tool.' });
+    taskRunId = advanced.runId;
+    const run = await runtime.orchestrator.waitFor(advanced.runId);
+    assert.equal(run.status, 'completed', run.failure ?? 'run did not complete');
+    assert.deepEqual(observed, [
+      { status: 'completed', text: 'hello from Pi' },
+      { status: 'failed', reason: 'invalid-arguments' },
+    ], `observed MCP results: ${JSON.stringify(observed)}`);
+    assert.equal(runtime.pool.leases().some(row => row.capability === 'project-mcp'), false, 'MCP reuses the Task-held lease instead of acquiring another lease');
+    assert.equal(runtime.pool.leases().find(row => row.capability === 'agent-run')?.state, 'recovering');
+    assert.ok(taskLeaseId);
+    assert.ok(await runtime.recovery.forLease(taskLeaseId), 'uncertain MCP stop opens shared Environment recovery');
+  } finally {
+    await runtime.close();
+  }
+  if (taskId && taskLeaseId && taskRunId) {
+    const database = new DatabaseSync(join(directory, 'state.db'));
+    try {
+      const processRow = database.prepare('SELECT process_id, state, holder_kind, holder_id, task_id, run_id FROM remote_project_mcp_processes LIMIT 1').get() as Record<string, unknown> | undefined;
+      const operationRow = database.prepare('SELECT state, process_id, tool_id FROM remote_project_mcp_operations LIMIT 1').get() as Record<string, unknown> | undefined;
+      assert.equal(processRow?.state, 'uncertain');
+      assert.equal(processRow?.holder_kind, 'task');
+      assert.equal(processRow?.holder_id, taskId);
+      assert.equal(processRow?.task_id, taskId);
+      assert.equal(processRow?.run_id, taskRunId);
+      assert.equal(operationRow?.state, 'completed');
+      assert.equal(operationRow?.process_id, processRow?.process_id);
+      assert.equal(typeof operationRow?.tool_id, 'string');
+    } finally {
+      database.close();
+    }
+  }
+});
+
+test('selected Host-run performs remote edits and commands under an Agent-run lease', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-remote-mutation-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const workerRoot = join(directory, 'worker-workspaces');
+  const hostRoot = join(directory, 'host-project');
+  const keyPath = join(directory, 'worker-key.pem');
+  const model = 'provider/model-host';
+  const localFile = join(hostRoot, 'repos', 'remote-mutation', 'src', 'target.txt');
+  mkdirSync(join(hostRoot, 'repos', 'remote-mutation', 'src'), { recursive: true });
+  writeFileSync(localFile, 'LOCAL_SENTINEL');
+  const localEngine = new ScriptedEngineAdapter({ turns: [scriptedTurn('Remote changes completed.')] });
+  const observed: RemoteWorkspaceOperationResult[] = [];
+  let inspection: { readonly status: string; readonly operation?: RemoteWorkspaceOperationResult } | undefined;
+  let conflictingReplay: RemoteWorkspaceOperationResult | undefined;
+  let matchingReplay: RemoteWorkspaceOperationResult | undefined;
+  let workerDispatches = 0;
+  let leasesDuringRun: readonly { readonly capability: string }[] = [];
+  const commandProgress: { readonly sequence: number; readonly stream: string; readonly text: string }[] = [];
+  const pathSentinel = '/srv/synthetic-host/private/remote-sentinel.txt';
+  const credentialSentinel = 'api_key=ghp_abcdefghijklmnopqrstuvwx';
+  let runContext: import('./worker/protocol.ts').RunContextParams | undefined;
+  let leaseStateWhenRunContextPrepared: string | undefined;
+  let runContextRecycled = false;
+  let runtime: Awaited<ReturnType<typeof createRuntime>> | undefined;
+  const hostPi = {
+    id: 'pi', profileId: 'profile-runtime-remote-mutation', authorizedModel: model,
+    capabilities: localEngine.capabilities,
+    async readiness() {
+      return { profileId: 'profile-runtime-remote-mutation', engine: 'pi', status: 'ready', installation: 'ready',
+        authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready', version: '1.0.4', observedAt: 1 };
+    },
+    async startSession(request: StartSessionRequest) {
+      assert.ok(request.remoteWorkspace, 'a selected Work Environment provides its bound workspace tools');
+      assert.ok((request.remoteWorkspace.operations?.length ?? 0) > 0);
+      const tools = request.remoteWorkspace;
+      const runEvents: AgentRunEvent[] = [];
+      const turnState = newPiTurnState();
+      const eventState = {
+        settled: false,
+        remoteToolNames: ['remote_read', 'remote_search', 'remote_edit', 'remote_patch', 'remote_command', 'remote_inspect'],
+        progress: createSessionEventProgressState(),
+      };
+      const emitPiEvent = (event: Record<string, unknown>): void => {
+        const disposition = sessionEventDisposition(event, eventState);
+        if (disposition.action === 'pi-event') runEvents.push(...mapPiEvent(disposition.event, turnState).events);
+      };
+      const startTool = (toolName: string, args: unknown, toolCallId: string): void => {
+        emitPiEvent({ type: 'tool_execution_start', toolName, args, toolCallId });
+      };
+      const endTool = (toolName: string, result: RemoteWorkspaceOperationResult | { readonly status: string; readonly operation?: RemoteWorkspaceOperationResult }, toolCallId: string): void => {
+        emitPiEvent({ type: 'tool_execution_end', toolName, toolCallId, result: { content: [], details: result }, isError: result.status !== 'completed' });
+      };
+      const executeRemoteTools = async (): Promise<void> => {
+        const editArgs = { path: 'src/target.txt', oldText: pathSentinel, newText: credentialSentinel };
+      startTool('remote_edit', editArgs, 'call-edit-1');
+      observed.push(await tools.edit!('src/target.txt', pathSentinel, credentialSentinel, 'sdk-edit-1'));
+      endTool('remote_edit', observed[0]!, 'call-edit-1');
+      startTool('remote_inspect', { operationId: observed[0]!.operationId }, 'call-inspect-1');
+      inspection = await tools.inspect(observed[0]!.operationId);
+      endTool('remote_inspect', inspection, 'call-inspect-1');
+      const conflictingArgs = { path: 'src/target.txt', oldText: pathSentinel, newText: 'CHANGED_PAYLOAD' };
+      startTool('remote_edit', conflictingArgs, 'call-edit-2');
+      conflictingReplay = await tools.edit!('src/target.txt', pathSentinel, 'CHANGED_PAYLOAD', 'sdk-edit-1');
+      endTool('remote_edit', conflictingReplay, 'call-edit-2');
+      startTool('remote_edit', editArgs, 'call-edit-3');
+      matchingReplay = await tools.edit!('src/target.txt', pathSentinel, credentialSentinel, 'sdk-edit-1');
+      endTool('remote_edit', matchingReplay, 'call-edit-3');
+      const patchArgs = { path: 'src/target.txt', hunks: [{ before: credentialSentinel, after: 'REMOTE_PATCHED' }] };
+      startTool('remote_patch', patchArgs, 'call-patch-1');
+      observed.push(await tools.patch!('src/target.txt', [{ before: credentialSentinel, after: 'REMOTE_PATCHED' }], 'sdk-patch-1'));
+      endTool('remote_patch', observed[1]!, 'call-patch-1');
+      const commandArgs = ['-e', "process.stdout.write('REMOTE_COMMAND_OK\\n')", pathSentinel];
+      startTool('remote_command', { executable: 'node', args: commandArgs, cwd: 'src', timeoutMs: 5_000 }, 'sdk-command-1');
+      let commandOutput = '';
+      observed.push(await tools.command!('node', commandArgs, { cwd: 'src', timeoutMs: 5_000 }, 'sdk-command-1', progress => {
+        commandProgress.push(progress);
+        commandOutput += progress.text;
+        emitPiEvent({ type: 'tool_execution_update', toolName: 'remote_command', toolCallId: 'sdk-command-1',
+          partialResult: { content: [{ type: 'text', text: commandOutput }], details: { sequence: progress.sequence, stream: progress.stream } } });
+      }));
+      endTool('remote_command', observed[2]!, 'sdk-command-1');
+      leasesDuringRun = runtime!.pool.leases();
+      };
+      const session = await localEngine.startSession(request);
+      return {
+        sessionId: session.sessionId,
+        engineSessionKey: session.engineSessionKey,
+        run(prompt: string) {
+          const turn = session.run(prompt);
+          const operations = executeRemoteTools();
+          return {
+            events: (async function* () {
+              await operations;
+              yield* runEvents;
+              for await (const event of turn.events) yield event;
+            })(),
+            completion: Promise.all([turn.completion, operations]).then(([result]) => result),
+          };
+        },
+        interrupt: session.interrupt.bind(session),
+        close: session.close.bind(session),
+      };
+    },
+  } as unknown as HostPiEngineAdapter;
+  runtime = await createRuntime({
+    configuration: hostConfiguration({
+      executionMode: 'host-run', environmentSource: 'enrollment',
+      runtimeConfiguration: {
+        agents: [{ id: 'scout', name: 'scout', engine: 'pi', capability: 'agent-run', model, effort: 'medium',
+          workOptions: [{ id: 'host-pi', engine: 'pi', workModel: model, effort: 'medium' }] }],
+        project: { ...project(), memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }] },
+      },
+      databasePath: join(directory, 'state.db'),
+    }),
+    projectRoot: hostRoot,
+    hostPi,
+  });
+
+  try {
+    const identity = loadOrCreateWorkerIdentity(keyPath);
+    const enrollment = await runtime.enrollments.requestEnrollment({
+      environmentInstanceId: INSTANCE_ID, displayName: 'Remote mutation Worker',
+      publicKey: workerPublicKey(identity.privateKey), platform: 'macos', protocolVersion: '3.0',
+      capabilityRequests: ['agent-run', 'read-only-investigation'], engineFacts: [],
+    });
+    await runtime.enrollments.approve(enrollment.enrollment.id, {
+      capabilityPermissions: { 'agent-run': true, 'read-only-investigation': true },
+    });
+    await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, workerRoot);
+    assert.equal(runtime.pool.requiresLeaseForBoundOperation(INSTANCE_ID, 'agent-run'), true);
+    const prepareRunContext = runtime.enrollmentEnvironment.prepareRunContext.bind(runtime.enrollmentEnvironment);
+    runtime.enrollmentEnvironment.prepareRunContext = async (environmentInstanceId, input) => {
+      runContext = input;
+      leaseStateWhenRunContextPrepared = runtime!.pool.leases().find(lease => lease.runId === input.runId)?.state;
+      return prepareRunContext(environmentInstanceId, input);
+    };
+    const recycleRunContext = runtime.enrollmentEnvironment.recycleRunContext.bind(runtime.enrollmentEnvironment);
+    runtime.enrollmentEnvironment.recycleRunContext = async (environmentInstanceId, input) => {
+      await recycleRunContext(environmentInstanceId, input);
+      runContextRecycled = true;
+    };
+    const execute = runtime.enrollmentEnvironment.executeWorkspaceFileOperation.bind(runtime.enrollmentEnvironment);
+    runtime.enrollmentEnvironment.executeWorkspaceFileOperation = async (environmentInstanceId, input, onProgress) => {
+      workerDispatches++;
+      return await execute(environmentInstanceId, input, onProgress);
+    };
+    await runtime.projectService.create({ id: 'remote-mutation-project', displayName: 'Remote mutation Project' });
+    await runtime.projectService.addMembership('remote-mutation-project', { agentId: 'scout' });
+    const access = await runtime.projectAccess.grant({
+      projectId: 'remote-mutation-project', environmentInstanceId: INSTANCE_ID,
+      selection: { kind: 'relative', path: 'repos/remote-mutation' },
+    });
+    mkdirSync(join(workerRoot, 'repos', 'remote-mutation', 'src'), { recursive: true });
+    writeFileSync(join(workerRoot, 'repos', 'remote-mutation', 'src', 'target.txt'), pathSentinel);
+
+    const submitted = await runtime.orchestrator.submit({ agentId: 'scout', projectId: 'remote-mutation-project',
+      workEnvironmentInstanceId: INSTANCE_ID, prompt: 'Edit and patch the remote file.' });
+    const run = await runtime.orchestrator.waitFor(submitted.id);
+    if (run.status !== 'completed') throw new Error(`Host-run failed: ${run.failure ?? 'no failure detail'}`);
+    const projection = toRunView(run);
+    const persistedEvents = JSON.stringify(run.events);
+    const projectedEvents = JSON.stringify(projection.events);
+    for (const sentinel of [pathSentinel, credentialSentinel]) {
+      assert.ok(!persistedEvents.includes(sentinel), `persisted Run events omit ${sentinel.startsWith('/') ? 'the host path' : 'the credential'}`);
+      assert.ok(!projectedEvents.includes(sentinel), `Web Run projection omits ${sentinel.startsWith('/') ? 'the host path' : 'the credential'}`);
+    }
+    assert.match(persistedEvents, /Remote edit completed\./, 'remote edit status is visible independently of the model summary');
+    assert.match(persistedEvents, /REMOTE_COMMAND_OK/, 'sanitized remote command progress is visible during the selected run');
+    assert.deepEqual(projection.events, run.events, 'the Web Run projection carries the sanitized persisted events');
+    const commandOutcomeIndex = run.events.findIndex(event => event.type === 'notice' && event.text === 'Remote command completed.');
+    const summaryIndex = run.events.findIndex(event => event.type === 'message' && event.final);
+    assert.ok(commandOutcomeIndex >= 0 && summaryIndex > commandOutcomeIndex, 'the result is visible before the model summary');
+    assert.deepEqual(observed.map(result => result.status), ['completed', 'completed', 'completed']);
+    assert.equal(inspection?.status, 'completed');
+    assert.equal(conflictingReplay?.failure, 'operation-identity-conflict');
+    assert.equal(matchingReplay?.status, 'failed');
+    assert.equal(matchingReplay?.failure, 'operation-outcome-inspection-required');
+    assert.equal(workerDispatches, 3, 'edit, patch, and command run under the selected Agent-run lease');
+    assert.ok(commandProgress.some(progress => progress.text.includes('REMOTE_COMMAND_OK')));
+    assert.equal(observed[2]?.operation, 'command');
+    assert.ok(observed.every(result => result.environmentInstanceId === INSTANCE_ID && result.bindingId === access.current?.bindingId));
+    assert.equal(readFileSync(join(workerRoot, 'repos', 'remote-mutation', 'src', 'target.txt'), 'utf8'), 'REMOTE_PATCHED');
+    assert.equal(readFileSync(localFile, 'utf8'), 'LOCAL_SENTINEL');
+    assert.ok(leasesDuringRun.some(lease => lease.capability === 'agent-run'), 'remote calls share the Orchestrator Agent-run lease');
+    assert.equal(leaseStateWhenRunContextPrepared, 'active');
+    assert.ok(runContext);
+    assert.equal(runContextRecycled, true);
+    assert.ok(runtime.pool.leases().every(row => row.state === 'released'), 'the Agent-run lease releases after settled remote work');
+
+    const replay = conflictingReplay!;
+    assert.equal(replay.failure, 'operation-identity-conflict');
+    assert.equal(readFileSync(join(workerRoot, 'repos', 'remote-mutation', 'src', 'target.txt'), 'utf8'), 'REMOTE_PATCHED');
+    const sameIdentity = matchingReplay!;
+    assert.equal(sameIdentity.failure, 'operation-outcome-inspection-required');
+
+    const holder = await runtime.pool.acquireBoundOperationLeaseRevalidated({
+      instanceId: INSTANCE_ID, capability: 'agent-run', mode: 'read-write', holderId: 'other-agent', runId: 'other-run', ttlMs: 60_000,
+    });
+    assert.equal(holder.ok, true);
+    const blockedTools = await runtime.environmentOperations.attach('remote-mutation-project', 'scout', 'blocked-run');
+    const blocked = await blockedTools.edit!('src/target.txt', 'REMOTE_PATCHED', 'SHOULD_NOT_APPLY', 'blocked-edit-1');
+    assert.equal(blocked.failure, 'lease-required', 'a run without its containing lease cannot use another run\'s lease');
+    assert.equal(readFileSync(join(workerRoot, 'repos', 'remote-mutation', 'src', 'target.txt'), 'utf8'), 'REMOTE_PATCHED');
+    assert.equal(runtime.pool.getLease(holder.lease.id)?.state, 'active', 'refused workspace tools do not alter the competing lease');
+    runtime.pool.releaseLease(holder.lease.id);
+  } finally {
+    await runtime.close();
+  }
+});
+
+test('an ordinary Host-run Message stays detached from a bound Worker and acquires no lease', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-runtime-remote-command-cancel-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const workerRoot = join(directory, 'worker-workspaces');
+  const hostRoot = join(directory, 'host-project');
+  const keyPath = join(directory, 'worker-key.pem');
+  const model = 'provider/model-host';
+  const localEngine = new ScriptedEngineAdapter({ turns: [scriptedTurn('A normal Host-run reply.')] });
+  let remoteWorkspaceAttached = false;
+  let workerDispatches = 0;
+  const hostPi = {
+    id: 'pi', profileId: 'profile-runtime-remote-command-cancel', authorizedModel: model,
+    capabilities: localEngine.capabilities,
+    async readiness() {
+      return { profileId: 'profile-runtime-remote-command-cancel', engine: 'pi', status: 'ready', installation: 'ready',
+        authentication: 'ready', modelAvailability: 'available', adapterControls: 'ready', version: '1.0.4', observedAt: 1 };
+    },
+    async startSession(request: StartSessionRequest) {
+      remoteWorkspaceAttached = request.remoteWorkspace !== undefined;
+      return localEngine.startSession(request);
+    },
+  } as unknown as HostPiEngineAdapter;
+  const runtime = await createRuntime({
+    configuration: hostConfiguration({
+      executionMode: 'host-run', environmentSource: 'enrollment',
+      runtimeConfiguration: {
+        agents: [{ id: 'scout', name: 'scout', engine: 'pi', capability: 'agent-run', model, effort: 'medium',
+          workOptions: [{ id: 'host-pi', engine: 'pi', workModel: model, effort: 'medium' }] }],
+        project: { ...project(), memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }] },
+      },
+      databasePath: join(directory, 'state.db'),
+      leaseTtlMs: 1_000,
+    }), projectRoot: hostRoot, hostPi,
+  });
+  try {
+    const identity = loadOrCreateWorkerIdentity(keyPath);
+    const enrollment = await runtime.enrollments.requestEnrollment({
+      environmentInstanceId: INSTANCE_ID, displayName: 'Remote command cancellation Worker',
+      publicKey: workerPublicKey(identity.privateKey), platform: 'macos', protocolVersion: '3.0',
+      capabilityRequests: ['agent-run', 'read-only-investigation'], engineFacts: [],
+    });
+    await runtime.enrollments.approve(enrollment.enrollment.id, {
+      capabilityPermissions: { 'agent-run': true, 'read-only-investigation': true },
+    });
+    await connectRuntimeWorker(runtime, enrollment.enrollment.id, keyPath, undefined, workerRoot);
+    const execute = runtime.enrollmentEnvironment.executeWorkspaceFileOperation.bind(runtime.enrollmentEnvironment);
+    runtime.enrollmentEnvironment.executeWorkspaceFileOperation = async (...args) => {
+      workerDispatches++;
+      return await execute(...args);
+    };
+    await runtime.projectService.create({ id: 'remote-command-cancel-project', displayName: 'Remote command cancellation Project' });
+    await runtime.projectService.addMembership('remote-command-cancel-project', { agentId: 'scout' });
+    await runtime.projectAccess.grant({ projectId: 'remote-command-cancel-project', environmentInstanceId: INSTANCE_ID,
+      selection: { kind: 'relative', path: 'repos/remote-command-cancel' } });
+    const submitted = await runtime.orchestrator.submit({ agentId: 'scout', projectId: 'remote-command-cancel-project', prompt: 'Reply without touching the workspace.' });
+    const run = await runtime.orchestrator.waitFor(submitted.id);
+    assert.equal(run.status, 'completed');
+    assert.equal(remoteWorkspaceAttached, false, 'the ordinary Message receives no remote workspace catalog');
+    assert.equal(workerDispatches, 0, 'the ordinary Message issues no Worker operation');
+    assert.equal(runtime.pool.leases().length, 0, 'the ordinary Message acquires no Environment lease');
+  } finally {
+    await runtime.close();
+  }
+});

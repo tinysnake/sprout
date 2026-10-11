@@ -9,14 +9,20 @@
  * Usage:  node scripts/test-summary.ts [--bench] [glob ...]
  */
 import { spawn } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { appendFileSync, existsSync, globSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 
 const DEFAULT_GLOBS = ['src/**/*.test.ts', 'web/src/**/*.test.ts'];
 const bench = process.argv.includes('--bench');
 const globs = process.argv.slice(2).filter((arg) => arg !== '--bench');
-const targets = globs.length > 0 ? globs : DEFAULT_GLOBS;
+const patterns = globs.length > 0 ? globs : DEFAULT_GLOBS;
+const targets = patterns.flatMap((pattern) => {
+  if (!pattern.includes('*')) return [pattern];
+  const matches = globSync(pattern);
+  if (matches.length === 0) throw new Error(`test pattern matched no files: ${pattern}`);
+  return matches;
+});
 const timeoutMs = Number(process.env.SPROUT_TEST_TIMEOUT_MS ?? 180_000);
 // Diagnostics live in the repository but must not record local home paths.
 const displayPath = (file: string): string => {

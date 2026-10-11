@@ -2,8 +2,8 @@
  * Environment vocabulary shared by the core and every environment adapter.
  *
  * Mirrors the model settled in #4: a definition declares capabilities, each of
- * which states whether it requires an environment lease; instances are concrete
- * systems that satisfy a definition.
+ * which states whether it requires an environment lease and, when it does, the
+ * access mode the lease must carry; instances are concrete systems that satisfy a definition.
  */
 
 /**
@@ -15,9 +15,13 @@
  */
 export type EnvironmentPlatform = 'macos' | 'container' | 'windows' | 'unknown';
 
+export type EnvironmentLeaseMode = 'read' | 'read-write';
+
 export interface EnvironmentCapability {
   readonly name: string;
   readonly requiresLease: boolean;
+  /** Missing mode preserves the historical exclusive read/write lease. */
+  readonly leaseMode?: EnvironmentLeaseMode;
 }
 
 export interface EnvironmentDefinition {

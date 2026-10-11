@@ -24,7 +24,7 @@
  * shared privacy boundary before it becomes durable.
  */
 
-import { redactSensitiveText, sanitizeIdentifier } from '../environment/privacy.ts';
+import { redactProjectText, sanitizeIdentifier } from '../environment/privacy.ts';
 
 /**
  * Who produced one Project event.
@@ -209,7 +209,7 @@ export function sanitizeProjectEventKind(value: string | undefined): string {
 
 /** The sanitized event summary: free text through the shared privacy boundary. */
 export function sanitizeProjectEventSummary(value: string | undefined): string {
-  const text = redactSensitiveText((value ?? '').trim());
+  const text = redactProjectText((value ?? '').trim());
   if (text === '') {
     throw new ProjectEventError('invalid-event', 'a Project event requires a summary');
   }
@@ -218,7 +218,7 @@ export function sanitizeProjectEventSummary(value: string | undefined): string {
 
 /** The sanitized optional event detail; an empty value stays absent. */
 export function sanitizeProjectEventDetail(value: string | undefined): string | undefined {
-  const text = redactSensitiveText((value ?? '').trim());
+  const text = redactProjectText((value ?? '').trim());
   if (text === '') return undefined;
   return text.length <= MAX_TEXT ? text : `${text.slice(0, MAX_TEXT - 1).trimEnd()}\u2026`;
 }

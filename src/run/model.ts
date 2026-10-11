@@ -1,6 +1,8 @@
 import type { AgentRunEvent, EngineTurnResult, TokenUsage, DetailedTokenDimensions } from '../engine/port.ts';
 import type { AgentWorkOption } from '../agent/model.ts';
 import type { WorkspaceSelectionKind } from '../project/access.ts';
+import type { EnvironmentLeaseMode } from '../environment/model.ts';
+import type { ExecutionPlacement, SessionKeyScope } from '../execution-placement.ts';
 
 export type { TokenUsage, DetailedTokenDimensions } from '../engine/port.ts';
 
@@ -14,11 +16,22 @@ export type { TokenUsage, DetailedTokenDimensions } from '../engine/port.ts';
  * has no binding identity) projects only its kind and relative location.
  */
 export interface RunWorkspaceBinding {
+  readonly environmentInstanceId?: string;
   readonly bindingId?: string;
+  /** Monotonic Project access generation for this Environment. */
+  readonly generation?: number;
+  /** Monotonic Host-run tool catalog publication generation. */
+  readonly catalogGeneration?: number;
+  /** One-way identity of the immutable Worker catalog, independent of publication generation. */
+  readonly catalogIdentity?: string;
+  /** Permission mode held for this Environment workspace surface. */
+  readonly leaseMode?: EnvironmentLeaseMode;
   readonly workspaceId?: string;
   readonly kind: WorkspaceSelectionKind;
   /** Worker-root-relative location, when the workspace named one. */
   readonly path?: string;
+  readonly operations?: readonly ('read' | 'search' | 'edit' | 'patch' | 'command')[];
+  readonly projectMcpTools?: readonly string[];
 }
 
 /** The observable lifecycle of one agent run. */
@@ -41,6 +54,10 @@ export interface AgentRun {
   readonly id: string;
   readonly agentId: string;
   readonly prompt: string;
+  /** Immutable placement selected when this run was admitted. Legacy rows are Environment-hosted. */
+  readonly executionMode?: import('../execution-mode.ts').ExecutionMode;
+  /** Opaque local Engine host profile identity for Host-run attribution and continuation partitioning. */
+  readonly engineHostProfileId?: string;
   /**
    * The environment instance this run actually used, resolved from the agent's
    * project at submission. Persisted so the choice survives a restart.
@@ -62,6 +79,12 @@ export interface AgentRun {
    * makes one wrap the other.
    */
   readonly taskId?: string;
+  /** Authorized continuation scope for a standalone run, when one exists. */
+  readonly sessionKeyScope?: SessionKeyScope;
+  /** Selected Work Environment carried across bounded standalone activations. */
+  readonly requestedWorkEnvironmentInstanceId?: string;
+  /** The process mode and actual engine host/profile recorded at admission. */
+  readonly executionPlacement?: ExecutionPlacement;
   readonly status: AgentRunStatus;
   readonly events: readonly AgentRunEvent[];
   /**
@@ -90,6 +113,8 @@ export interface AgentRun {
    * future runs; it cannot rewrite what this run used.
    */
   readonly workspaceBinding?: RunWorkspaceBinding;
+  /** Current remote-workspace availability for this Host-run activation. */
+  readonly workspaceBindingStatus?: 'staging' | 'active' | 'detached' | 'unavailable' | 'recovering';
   /**
    * The hand-off context attached to this run's input, when there was one.
    *
@@ -144,6 +169,8 @@ export interface RunHandOff {
   readonly previousEnvironmentInstanceId: string;
   /** The bounded, fact-form summary attached to this run's input. */
   readonly text: string;
+  /** Sprout-produced summary of the current binding or catalog transition. */
+  readonly bindingChange?: string;
   /** Which prior runs contributed a fact, so the hand-off is auditable. */
   readonly sourceRunIds: readonly string[];
 }

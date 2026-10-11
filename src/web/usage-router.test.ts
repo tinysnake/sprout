@@ -82,6 +82,30 @@ test('GET /api/usage/activities lists activities with filters', async () => {
   }
 });
 
+test('Host-run usage attribution names placement and model without exposing the local profile id', async () => {
+  const h = await openUsageHarness();
+  try {
+    await h.usage.recordRunActivity({
+      id: 'run-host-1', agentId: 'agent-1', projectId: 'project-1', prompt: 'hello',
+      environmentInstanceId: '', executionMode: 'host-run', engineHostProfileId: 'opaque-local-profile',
+      status: 'completed', events: [], createdAt: 1_000, completedAt: 2_000,
+      workOption: { id: 'host-pi', engine: 'pi', workModel: 'provider/model-a', effort: 'medium' },
+      result: { status: 'completed', text: 'hello', tokenUsage: { promptTokens: 4, completionTokens: 2, totalTokens: 6 } },
+    });
+    const response = await fetch(`${h.base}/api/usage/activities/ua_run_run-host-1`);
+    assert.equal(response.status, 200);
+    const body = await response.json() as { activity: UsageActivity };
+    assert.equal(body.activity.engine, 'pi');
+    assert.equal(body.activity.model, 'provider/model-a');
+    if (body.activity.kind !== 'agent_run') throw new Error('expected agent run usage');
+    assert.equal(body.activity.correlation.executionMode, 'host-run');
+    assert.equal('engineHostProfileId' in body.activity.correlation, false);
+    assert.equal(JSON.stringify(body).includes('opaque-local-profile'), false);
+  } finally {
+    await h.api.close();
+  }
+});
+
 test('GET /api/usage/activities/:id returns activity detail with observations and history', async () => {
   const h = await openUsageHarness();
   try {

@@ -77,6 +77,7 @@ const overview = {
   agents: [{ id: 'agent-a', displayName: 'Project Agent', status: 'active' }, { id: 'agent-b', displayName: 'Other Project Agent', status: 'active' }],
   environments: [{ id: 'env-a', environmentInstanceId: 'instance-a', displayName: 'Ready Environment', enrollmentStatus: 'approved', trafficLight: 'green', workSafety: 'clear', connectionState: 'online', protocolCompatibility: 'compatible', capabilityPermissions: { 'agent-run': true } }],
   access: [{ projectId, environmentInstanceId: 'instance-a', status: 'active', startedAt: time, updatedAt: time, current: { bindingId: 'binding-a', workspaceId: 'workspace-a', kind: 'default', boundAt: time }, history: [] }],
+  bindingReadiness: [],
   compatibility: [{ agentId: 'agent-a', environmentInstanceId: 'instance-a', available: true }, { agentId: 'agent-b', environmentInstanceId: 'instance-a', available: true }],
 } as unknown as ProjectOverviewData;
 
@@ -122,6 +123,28 @@ function appServices(conflictCodes: readonly string[] = [], snapshot = overview)
   });
   const allTasks = [
     task('agent-led-idle', 'idle'),
+    task('host-run-task', 'idle', {
+      executionPlacement: { mode: 'host-run', engineHost: { kind: 'sprout', id: 'sprout-test', profile: { platform: 'macos', boundary: 'shared-host' } } },
+      processExecutionMode: 'host-run',
+    }),
+    task('mode-mismatch', 'idle', {
+      executionPlacement: { mode: 'host-run', engineHost: { kind: 'sprout', id: 'sprout-test', profile: { platform: 'macos', boundary: 'shared-host' } } },
+      processExecutionMode: 'environment-hosted',
+      executionModeMismatchReason: 'Task was recorded under host-run; this Sprout process is environment-hosted. Restart Sprout with --execution-mode host-run to continue it.',
+    }),
+    task('awaiting-mode-mismatch', 'awaiting-validation', {
+      pendingCompletionClaimId: 'claim-mode-mismatch',
+      completionClaims: [{ id: 'claim-mode-mismatch', contentVersion: 1, actor: { memberId: 'agent-a', memberKind: 'agent' }, at: time, outcomeSummary: 'The work is ready for validation.', validationEvidence: ['Acceptance evidence is available.'], durableChanges: [], limitations: [], recommendedDisposition: 'continue' }],
+      executionPlacement: { mode: 'host-run', engineHost: { kind: 'sprout', id: 'sprout-test', profile: { platform: 'macos', boundary: 'shared-host' } } },
+      processExecutionMode: 'environment-hosted',
+      executionModeMismatchReason: 'Task was recorded under host-run; this Sprout process is environment-hosted. Restart Sprout with --execution-mode host-run to continue it.',
+    }),
+    task('ended-mode-mismatch', 'ended', {
+      status: 'done', endDisposition: 'completed',
+      executionPlacement: { mode: 'host-run', engineHost: { kind: 'sprout', id: 'sprout-test', profile: { platform: 'macos', boundary: 'shared-host' } } },
+      processExecutionMode: 'environment-hosted',
+      executionModeMismatchReason: 'Task was recorded under host-run; this Sprout process is environment-hosted. Restart Sprout with --execution-mode host-run to continue it.',
+    }),
     agentLedAwaiting,
     humanLedRunningWithLead,
     humanLedIdle,
@@ -303,6 +326,41 @@ test('Project Tasks renders distinct production lifecycle states and keeps activ
     assert.ok(calls.includes('content-version:proposal-a:1'), 'proposal detail loads the current content through the version endpoint');
     app.unmount();
   } finally {
+    await cleanup();
+  }
+});
+
+test('Host-run Task approval shows engine placement and does not require Environment model readiness', async () => {
+  const { doc, vite, cleanup } = await setupHarness();
+  let app: { unmount(): void } | undefined;
+  try {
+    const hostRunOverview: ProjectOverviewData = {
+      ...overview,
+      environments: overview.environments.map((environment) => ({ ...environment, trafficLight: 'red' as const,
+        trafficLightReason: 'No Environment engine model is ready.' })),
+      compatibility: overview.compatibility.map((row) => ({ ...row, executionMode: 'host-run' as const })),
+    };
+    const mounted = await mountTasks(vite, doc, [], hostRunOverview);
+    app = mounted.app;
+    await mounted.router.push({ name: 'project-task-proposal', params: { proposalId: 'proposal-a' }, query: { project: projectId } });
+    await settle();
+    clickButton(doc, 'Approve & Begin');
+    await settle();
+    const environment = doc.querySelector<HTMLSelectElement>('#begin-environment');
+    assert.ok(environment);
+    assert.equal(environment.selectedOptions[0]?.disabled, false);
+    assert.match(doc.querySelector('[data-execution-placement]')?.textContent ?? '', /Pi engine runs on Sprout/);
+    assert.match(doc.querySelector('[data-execution-placement]')?.textContent ?? '', /Task-held lease/);
+    assert.equal(doc.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled, false);
+
+    await mounted.router.push({ name: 'project-tasks', query: { project: projectId } });
+    await settle();
+    await mounted.router.push({ name: 'project-task-detail', params: { taskId: 'host-run-task' }, query: { project: projectId } });
+    await settle();
+    assert.match(doc.querySelector('[data-task-engine-placement]')?.textContent ?? '', /Sprout-host Pi/);
+    assert.match(doc.body.textContent ?? '', /Task context and Project workspace operations on the selected Environment Worker/);
+  } finally {
+    app?.unmount();
     await cleanup();
   }
 });
@@ -497,7 +555,9 @@ test('Task run audit explains absent events, result, duration and usage when dis
   let app: { unmount(): void } | undefined;
   try {
     ({ app } = await mountTasks(vite, doc, [], overview, { async getRun() {
-      return auditRun({ events: [], result: undefined, completedAt: undefined, tokenUsage: undefined, status: 'running' });
+      return auditRun({ events: [], result: undefined, completedAt: undefined, tokenUsage: undefined, status: 'running',
+        executionPlacement: { mode: 'environment-hosted', engineHost: { kind: 'environment', id: 'instance-a', profile: { platform: 'macos', boundary: 'shared-host' } } },
+        processExecutionMode: 'host-run', executionModeMismatchReason: 'Run was recorded under environment-hosted; this Sprout process is host-run. Historical Runs are not replayed or relocated after restart.' });
     } }));
     const audit = await openCompletedAudit(doc);
     expandSummaryRows(audit);
@@ -506,6 +566,10 @@ test('Task run audit explains absent events, result, duration and usage when dis
     assert.match(audit.textContent ?? '', /No final result recorded/);
     assert.match(audit.textContent ?? '', /Duration unavailable/);
     assert.match(audit.textContent ?? '', /Tokens unavailable/);
+    assert.match(audit.textContent ?? '', /Recorded placement · environment-hosted · environment instance-a · macos\/shared-host/);
+    assert.match(audit.textContent ?? '', /Current Sprout mode · host-run/);
+    assert.match(audit.textContent ?? '', /Run was recorded under environment-hosted/);
+    assert.match(audit.textContent ?? '', /Historical Runs are not replayed or relocated after restart/);
   } finally { app?.unmount(); await cleanup(); }
 });
 
@@ -928,6 +992,38 @@ test('Project Tasks filters with a dropdown and keeps task switching inside Chat
       assert.equal(split.className, splitClasses, 'different detail lengths never change the bounded pane contract');
       assert.equal(doc.querySelector('[data-task-layout="split"]'), split);
     }
+    app.unmount();
+  } finally { await cleanup(); }
+});
+
+test('Project Tasks exposes placement mismatch and keeps validation acceptance while blocking continuation', async () => {
+  const { doc, vite, cleanup } = await setupHarness();
+  try {
+    const { app } = await mountTasks(vite, doc);
+    doc.querySelector<HTMLButtonElement>('[data-record-kind="task"][data-record-id="mode-mismatch"]')?.click();
+    await settle();
+    const idleDetails = doc.querySelector<HTMLElement>('[aria-label="Selected Task details"]');
+    assert.ok(idleDetails);
+    assert.match(idleDetails.textContent ?? '', /Recorded mode: host-run/);
+    assert.match(idleDetails.textContent ?? '', /Current Sprout mode: environment-hosted/);
+    assert.match(idleDetails.textContent ?? '', /Restart Sprout with --execution-mode host-run/);
+    assert.equal(idleDetails.querySelector('#advance-target-agent'), null, 'mismatched Tasks cannot admit a continuation run');
+    assert.ok([...idleDetails.querySelectorAll('button')].some((button) => button.textContent?.includes('Discard Task')), 'cleanup remains available');
+
+    doc.querySelector<HTMLButtonElement>('[data-record-kind="task"][data-record-id="awaiting-mode-mismatch"]')?.click();
+    await settle();
+    const validationDetails = doc.querySelector<HTMLElement>('[aria-label="Selected Task details"]');
+    assert.ok(validationDetails);
+    const accept = [...validationDetails.querySelectorAll<HTMLButtonElement>('button')].find((button) => button.textContent?.includes('Accept and safely end Task'));
+    assert.ok(accept, 'validation acceptance remains available');
+    assert.equal([...validationDetails.querySelectorAll('button')].some((button) => button.textContent?.includes('Request correction')), false, 'correction cannot continue work under a mismatched mode');
+
+    doc.querySelector<HTMLButtonElement>('[data-record-kind="task"][data-record-id="ended-mode-mismatch"]')?.click();
+    await settle();
+    const endedDetails = doc.querySelector<HTMLElement>('[aria-label="Selected Task details"]');
+    assert.ok(endedDetails);
+    assert.match(endedDetails.textContent ?? '', /Recorded mode: host-run/);
+    assert.equal([...endedDetails.querySelectorAll('button')].some((button) => button.textContent?.includes('Reopen Task')), false, 'mismatched ended Tasks cannot be reopened');
     app.unmount();
   } finally { await cleanup(); }
 });

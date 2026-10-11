@@ -43,6 +43,7 @@ const compatible: AgentCompatibilityView = {
   agentId: 'programmer',
   environmentInstanceId: 'inst-1',
   available: true,
+  executionMode: 'host-run',
   firstAvailable: { id: 'opt-2', engine: 'pi', workModel: 'glm-5', effort: 'medium' },
   options: [
     {
@@ -127,6 +128,7 @@ test('Project prerequisites can request the Agent verdict for a specific assigne
   const service = new ProductionAgentService(wire.adapter, runHistory([]));
   const result = await service.compatibilityForEnvironment('programmer', 'inst-1');
   assert.equal(result?.environmentAvailable, true);
+  assert.equal(result?.executionMode, 'host-run');
   assert.equal(wire.calls.includes('compatibility:programmer:inst-1'), true);
 });
 
@@ -146,6 +148,7 @@ test('the bridge projects the compatibility verdict into every composed row', as
   assert.equal(row.trafficLight, 'green');
   assert.match(row.trafficLightReason, /Ready: Priority 1 option \(PI · glm-5 · medium\)/);
   assert.equal(row.compatibility?.environmentAvailable, true);
+  assert.equal(row.compatibility?.executionMode, 'host-run');
   assert.equal(row.workOptions[0]!.compatibility, 'available');
   assert.equal(row.workOptions[0]!.compatibilityReason, 'Engine "pi" is ready with the option\'s work model.');
   // The current instructions ride the latest version's record.

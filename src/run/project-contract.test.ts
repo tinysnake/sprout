@@ -166,9 +166,15 @@ test('a same-environment continuation does not duplicate context into the prompt
   const store = new InMemoryRunStore();
   const { orchestrator, adapter } = build({ store, sessionKeys });
 
-  const first = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'first task' });
+  const first = await orchestrator.submit({
+    agentId: 'agent-scout', prompt: 'first task',
+    sessionKeyScope: { kind: 'conversation', id: 'test-project-conversation' },
+  });
   await orchestrator.waitFor(first.id);
-  const second = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'second task' });
+  const second = await orchestrator.submit({
+    agentId: 'agent-scout', prompt: 'second task',
+    sessionKeyScope: { kind: 'conversation', id: 'test-project-conversation' },
+  });
   const run = await orchestrator.waitFor(second.id);
 
   // Same instance, and the session key continued, so no hand-off is attached.

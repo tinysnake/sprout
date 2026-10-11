@@ -106,6 +106,9 @@ function leaseRecoveryOf(recovery: readonly EnvironmentRecoveryView[]): LeaseRec
     cause: open.cause,
     leaseId: open.leaseId,
     unresolvedFacts: [...open.unresolvedFacts],
+    ...(open.remoteWorkEvidence !== undefined
+      ? { remoteWorkEvidence: { unresolved: open.remoteWorkEvidence.unresolved === true } }
+      : {}),
     // The wire's synchronized bit means only that facts arrived. Ordinary
     // decisions require terminal and fence proof as well; unresolved evidence
     // is for Force Release, never an enabled Resume/Discard/Release control.

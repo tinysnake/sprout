@@ -1,17 +1,19 @@
-# Engine session keys are stored per agent, engine, environment instance, and working directory
+# Engine session keys are scoped by placement, work area, and authorization
 
 Cross-run context continuation means handing a later run the engine session key
 of an earlier one. That key is engine-native and opaque, but where it is valid is
 not: research (#19) established that a key is issued by one engine, recorded in
-one environment's engine store, and — for Pi and `opencode` — coupled to the
-working directory it was created in. A key reused outside those bounds either
-resumes the wrong conversation or fails.
+one engine host's session store, and — for Pi and `opencode` — coupled to the
+working directory it was created in. A key reused outside those bounds can
+resume the wrong conversation or fail.
 
-We decided the durable record's identity is the tuple
-`(agent, engine, environment instance, working directory)`, and that a run may
-only reuse a key whose entire tuple matches. The identifying string is the JSON
-encoding of that tuple rather than a delimiter-joined string, so a working
-directory containing the delimiter cannot collide with another slot.
+We decided the durable record's identity includes the Agent, engine, execution
+mode, actual engine host and profile, Environment instance, working directory,
+and the authorized Conversation, Routing batch, or Task that owns the continuation.
+This prevents a mode change, host/profile change, different work area, or unrelated
+conversation from receiving a prior native key. The identifying string is the
+JSON encoding of that tuple, so delimiters in an identifier cannot collide with
+another slot.
 
 **Sprout never assumes resumption succeeded.** It persists the key the run
 *actually used*, not the key it was handed, and it reads that key after the turn
@@ -48,9 +50,10 @@ the engine has already refused.
 
 **Consequences**
 
-- A run that moves to a different environment instance or working directory
-  simply starts a fresh session; there is no cross-environment hand-off here
-  (that is a separate ticket).
+- A run that moves to a different Environment instance, engine host/profile,
+  working directory, or authorized Conversation, Routing batch, or Task starts a
+  fresh session; there is no cross-environment hand-off here (that is a separate ticket).
+- A run without an authorized scope receives no stored session key.
 - The worker protocol carries the same two neutral fields, so the resume seam
   crosses the worker boundary without exposing any engine concept (ADR-0003).
 - Verification of resumption (detecting a changed `agy` id or a fresh Pi session)

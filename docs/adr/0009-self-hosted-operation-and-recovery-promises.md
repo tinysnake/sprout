@@ -138,6 +138,25 @@ proves there is no leftover engine session and its Task context and lease agree
 with the Sprout instance. When a run was active, or those facts cannot be
 established, the Environment remains in reconciliation or recovery.
 
+## Lease modes and shared readers
+
+Environment capabilities declare a lease mode. `read` leases allow several
+read-only Remote workspace operations to use the same Environment at once. A
+`read-write` lease admits one holder and blocks both readers and other writers.
+An active writer blocks readers, and active readers block a writer; recovery
+continues to block every new lease until each recovering lease is resolved.
+
+A read lease protects access authority and recovery ownership only. It does not
+freeze the Project workspace, provide a snapshot, or use copy-on-write. Files
+may change while a read lease is active, so readers observe the workspace as it
+exists when each operation runs. Task-held leases remain exclusive `read-write`
+leases. Lease observability reports each holder's mode, and acquisition conflicts
+identify the writer or all readers that block the request.
+
+Recovery and release remain holder-specific. If a reader's outcome becomes
+uncertain, that read lease enters recovery and blocks new leases; resolving or
+releasing it does not release another reader's lease.
+
 ## Normal recovery and safe release
 
 A reconnecting socket is not proof that an Environment is safe to reassign.
@@ -161,6 +180,23 @@ and the Human confirms Release after the evidence above is available.
 An inaccessible Environment may be archived without pretending that uncertain
 work was safely released. Its history and recovery state remain visible, and
 that Environment identity admits no new work.
+
+## Task lead authority override for a recovering Agent run
+
+A current Task lead may release another Agent's run-held lease after that Agent's
+work has ended or been interrupted and the recovering instance blocks further
+work. The lease must already be recovering; this authority cannot preempt an
+active run. Before release the Task lead acknowledges the risks and records the
+unresolved facts. The release is an authority decision, not settlement evidence:
+unknown workspace operations, MCP effects, engine state, or other facts remain
+unknown in the permanent recovery history after the lease is released. The record
+names the Task lead, authority Task, originating Agent and run, lease, instance,
+and action, separately from Force Release history.
+
+This authority applies only to another Agent's run-held lease. It does not give
+the Task lead authority to start or terminate another Agent's run, and it does not
+resume, discard, or end a Task. Investigation reports the current holder and the
+lease acquisition time without acquiring or extending a lease.
 
 ## Human-only emergency Force Release
 

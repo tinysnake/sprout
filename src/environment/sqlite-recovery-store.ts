@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 
-import type { EnvironmentRecoveryRecord, ForceReleaseRecord } from './recovery.ts';
+import type { EnvironmentRecoveryRecord, ForceReleaseRecord, TaskLeadAuthorityOverrideReleaseRecord } from './recovery.ts';
 import type { RecoveryStore } from './recovery-store.ts';
 import type { RecoveryReceipt, RecoveredRunReceipt } from './recovery-store.ts';
 import type { JournalTurn } from '../worker/recovery-journal.ts';
@@ -90,6 +90,18 @@ export class SqliteRecoveryStore implements RecoveryStore {
       );
       CREATE INDEX IF NOT EXISTS environment_force_releases_instance_idx
         ON environment_force_releases (environment_instance_id, at);
+      CREATE TABLE IF NOT EXISTS environment_authority_override_releases (
+        id TEXT PRIMARY KEY,
+        environment_instance_id TEXT NOT NULL,
+        lease_id TEXT NOT NULL,
+        origin_agent_id TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        document TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS environment_authority_override_instance_idx
+        ON environment_authority_override_releases (environment_instance_id, at);
+      CREATE INDEX IF NOT EXISTS environment_authority_override_agent_idx
+        ON environment_authority_override_releases (origin_agent_id, at);
     `);
   }
 
@@ -313,6 +325,25 @@ export class SqliteRecoveryStore implements RecoveryStore {
       )
       .all(environmentInstanceId) as unknown as readonly { readonly document: string }[];
     return rows.map((row) => JSON.parse(row.document) as ForceReleaseRecord);
+  }
+
+  async appendAuthorityOverrideRelease(record: TaskLeadAuthorityOverrideReleaseRecord): Promise<void> {
+    this.#db.prepare(`INSERT INTO environment_authority_override_releases
+      (id, environment_instance_id, lease_id, origin_agent_id, at, document)
+      VALUES (?, ?, ?, ?, ?, ?)`).run(record.id, record.environmentInstanceId, record.leaseId,
+        record.holderId, record.at, JSON.stringify(record));
+  }
+
+  async listAuthorityOverrideReleases(environmentInstanceId: string): Promise<readonly TaskLeadAuthorityOverrideReleaseRecord[]> {
+    const rows = this.#db.prepare(`SELECT document FROM environment_authority_override_releases
+      WHERE environment_instance_id = ? ORDER BY at DESC`).all(environmentInstanceId) as unknown as readonly { readonly document: string }[];
+    return rows.map(row => JSON.parse(row.document) as TaskLeadAuthorityOverrideReleaseRecord);
+  }
+
+  async listAuthorityOverrideReleasesForAgent(agentId: string): Promise<readonly TaskLeadAuthorityOverrideReleaseRecord[]> {
+    const rows = this.#db.prepare(`SELECT document FROM environment_authority_override_releases
+      WHERE origin_agent_id = ? ORDER BY at DESC`).all(agentId) as unknown as readonly { readonly document: string }[];
+    return rows.map(row => JSON.parse(row.document) as TaskLeadAuthorityOverrideReleaseRecord);
   }
 
   close(): void {

@@ -106,6 +106,8 @@ export interface AgentRunUsageCorrelation {
   readonly taskId?: string | undefined;
   readonly agentId: string;
   readonly environmentInstanceId?: string | undefined;
+  readonly executionMode?: import('../execution-mode.ts').ExecutionMode | undefined;
+  readonly engineHostProfileId?: string | undefined;
 }
 
 /** Structural attribution boundary: Routing attempts have no Agent or Task fields. */
@@ -142,8 +144,11 @@ export type UsageActivity = UsageActivityFields & (
 
 export function assertUsageActivityAttribution(activity: UsageActivity): void {
   const correlation = activity.correlation as unknown as Record<string, unknown>;
+  const hostPlacementValid = activity.kind !== 'agent_run' || correlation.executionMode !== 'host-run' ||
+    (typeof correlation.engineHostProfileId === 'string' && correlation.engineHostProfileId.length > 0);
   const valid = activity.kind === 'agent_run'
     ? typeof correlation.runId === 'string' && correlation.runId.length > 0 &&
+      hostPlacementValid &&
       correlation.attemptId === undefined && correlation.batchId === undefined &&
       typeof correlation.agentId === 'string' && correlation.agentId.length > 0
     : activity.kind === 'routing_attempt' &&

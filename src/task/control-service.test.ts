@@ -13,6 +13,7 @@ import { TaskService } from './service.ts';
 import { TaskControlService } from './control-service.ts';
 import { isEndedTaskStatus, TASK_STATUSES, type Task, type TaskActor } from './model.ts';
 import { toTaskView } from '../web/views.ts';
+import { createExecutionStrategy, type ExecutionStrategy } from '../execution-mode.ts';
 
 const definition: EnvironmentDefinition = { id: 'local', platform: 'macos', capabilities: [{ name: 'agent-run', requiresLease: true }] };
 const instance: EnvironmentInstance = { id: 'local-1', definitionId: 'local' };
@@ -25,7 +26,7 @@ function run(id: string, status: AgentRun['status']): AgentRun {
     ...(status !== 'queued' && status !== 'running' ? { completedAt: 2 } : {}) };
 }
 
-async function scenario(options: { readonly worker?: TaskContextWorker; readonly forceRelease?: boolean; readonly taskLead?: TaskActor; readonly taskGroupSnapshots?: Task[]; readonly taskGroupEvents?: string[]; readonly taskId?: string } = {}) {
+async function scenario(options: { readonly worker?: TaskContextWorker; readonly forceRelease?: boolean; readonly taskLead?: TaskActor; readonly taskGroupSnapshots?: Task[]; readonly taskGroupEvents?: string[]; readonly taskId?: string; readonly executionStrategy?: ExecutionStrategy; readonly leaseRecovery?: ConstructorParameters<typeof TaskControlService>[0]['leaseRecovery'] } = {}) {
   const taskId = options.taskId ?? 'task-1';
   const store = new InMemoryTaskStore();
   let nextLease = 0;
@@ -69,12 +70,41 @@ async function scenario(options: { readonly worker?: TaskContextWorker; readonly
   const controls = new TaskControlService({
     tasks, lifecycle, proposals,
     runs: { stop: async runId => { const stopped = run(runId, 'stopped'); await tasks.onRunSettled({ taskId, run: { ...stopped, taskId } }); return stopped; } },
+    ...(options.executionStrategy !== undefined ? { executionStrategy: options.executionStrategy } : {}),
+    ...(options.leaseRecovery !== undefined ? { leaseRecovery: options.leaseRecovery } : {}),
     now: () => 50, id: () => 'claim-1',
   });
   await store.create(task());
   const begun = await lifecycle.begin(taskId);
   return { store, pool, lifecycle, tasks, controls, begun, taskId, submittedRuns };
 }
+
+test('Host-run refuses Task resume and recovery resume without releasing its Environment lease', async () => {
+  const strategy = createExecutionStrategy('host-run');
+  const s = await scenario({ executionStrategy: strategy });
+  const admitted = await s.tasks.get(s.taskId);
+  assert.ok(admitted);
+  await s.store.save({
+    ...admitted,
+    executionPlacement: {
+      mode: 'host-run',
+      engineHost: { kind: 'sprout', id: 'sprout-test', profile: { platform: 'macos', boundary: 'shared-host' } },
+    },
+  });
+  const before = s.pool.leases();
+  assert.equal(before.length, 1);
+  assert.equal(before[0]?.state, 'active');
+
+  for (const command of [
+    () => s.controls.resumeForHuman(s.taskId, { reason: 'continue' }),
+    () => s.controls.recoverForHuman(s.taskId, { action: 'resume', reason: 'recover' }),
+  ]) {
+    await assert.rejects(command, error =>
+      error instanceof Error && 'code' in error && error.code === 'execution-mode-unavailable');
+  }
+  assert.deepEqual(s.pool.leases(), before, 'refusal preserves protected lease state');
+  assert.equal((await s.tasks.get(s.taskId))?.status, 'in-progress');
+});
 
 test('admitted Task groups synchronize at start and freeze after terminal persistence', async () => {
   const taskGroupEvents: string[] = [];
@@ -546,7 +576,7 @@ test('stopped Resume rejects Agent authority and refuses a busy original Environ
   assert.equal(s.pool.getLease(oldLeaseId)?.state, 'released');
 
   const competing = s.pool.reserveTaskLease({
-    instanceId: stopped.environmentInstanceId!, capability: 'agent-run', holderId: 'other-task',
+    instanceId: stopped.environmentInstanceId!, capability: 'agent-run', mode: 'read-write', holderId: 'other-task',
     taskId: 'other-task', ttlMs: 60_000,
   });
   assert.ok(competing.ok);
@@ -754,7 +784,7 @@ test('reopening refuses an original Environment held by another Task without cha
   const ended = await s.controls.discardForHuman(s.taskId, { reason: 'End before testing Environment contention.' });
   const oldLeaseId = ended.environmentLeaseId!;
   const competing = s.pool.reserveTaskLease({
-    instanceId: ended.environmentInstanceId!, capability: 'agent-run', holderId: 'other-task', taskId: 'other-task', ttlMs: 60_000,
+    instanceId: ended.environmentInstanceId!, capability: 'agent-run', mode: 'read-write', holderId: 'other-task', taskId: 'other-task', ttlMs: 60_000,
   });
   assert.ok(competing.ok);
   s.pool.adoptLease(competing.lease);
@@ -830,4 +860,46 @@ test('reopen cycles append separate control-history events', async () => {
   const reopenEvents = second.controlHistory?.filter((event) => event.action === 'reopened') ?? [];
   assert.deepEqual(reopenEvents.map((event) => event.reason), ['First reopen.', 'Second reopen.']);
   assert.equal(reopenEvents.length, 2, 'each reopen cycle appends a separate event');
+});
+
+test('an authorized Task lead can investigate and override another Agent lease without changing the run', async () => {
+  let inspectedInstance = '';
+  const released: { leaseId: string; input: unknown }[] = [];
+  const leaseRecovery = {
+    inspectInstanceLease(instanceId: string) {
+      inspectedInstance = instanceId;
+      return { instanceId, leaseId: 'run-lease', state: 'recovering' as const, holderKind: 'run' as const,
+        holderId: 'other-agent', runId: 'other-run', acquiredAt: 12 };
+    },
+    async authorityOverrideRelease(leaseId: string, input: unknown) {
+      released.push({ leaseId, input });
+      return { action: 'task-lead-authority-override-release' } as never;
+    },
+  };
+  const s = await scenario({ leaseRecovery });
+  const beforeLease = s.pool.getLease(s.begun.environmentLeaseId!);
+  const investigation = await s.controls.investigateEnvironmentLeaseForLead(s.taskId, lead);
+  assert.equal(inspectedInstance, 'local-1');
+  assert.equal(investigation?.holderId, 'other-agent');
+  assert.equal(investigation?.acquiredAt, 12);
+  assert.deepEqual(s.pool.getLease(s.begun.environmentLeaseId!), beforeLease, 'investigation does not change or acquire a lease');
+
+  await assert.rejects(
+    s.controls.authorityOverrideReleaseForLead(s.taskId, { memberId: 'other-agent', memberKind: 'agent' }, {
+      leaseId: 'run-lease', acknowledgedRisks: true, reason: 'Release the blocked instance.',
+    }),
+    /only the current Task lead may submit this action/,
+  );
+  assert.equal(released.length, 0, 'another Agent cannot borrow Task lead authority');
+
+  const outcome = await s.controls.authorityOverrideReleaseForLead(s.taskId, lead, {
+    leaseId: 'run-lease', acknowledgedRisks: true, reason: 'The Agent work ended and a successor is blocked.',
+  });
+  assert.equal(outcome.action, 'task-lead-authority-override-release');
+  assert.equal(released[0]?.leaseId, 'run-lease');
+  assert.deepEqual(released[0]?.input, {
+    authorityTaskId: s.taskId, environmentInstanceId: 'local-1', actorId: 'pi', actorKind: 'agent',
+    acknowledgedRisks: true, reason: 'The Agent work ended and a successor is blocked.',
+  });
+  assert.equal(s.submittedRuns.length, 0, 'the override neither starts nor terminates another Agent run');
 });

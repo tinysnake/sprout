@@ -33,6 +33,19 @@ test('E2: the catalog, its records, and Project access survive a SQLite reopen',
   const enrollmentId = await enrollEligibleInstance(first, 'host-a', keyPath);
   const firstEpoch = first.workerGateway.currentConnectionEpoch(enrollmentId)!;
   const firstAuthority = testComposition(first).workerGateway.authorizeObservation('host-a')!;
+  const legacyCatalog = await first.stores.environmentCatalog.get('host-a');
+  assert.ok(legacyCatalog);
+  await first.stores.environmentCatalog.save({
+    ...legacyCatalog,
+    definition: {
+      id: legacyCatalog.definition.id,
+      platform: legacyCatalog.definition.platform,
+      capabilities: legacyCatalog.definition.capabilities.map((capability) => ({
+        name: capability.name,
+        requiresLease: capability.name === 'read-only-investigation' ? false : true,
+      })),
+    },
+  });
   await first.close();
 
   // Reopen exactly as a restart would: no in-memory epoch survives, but the
@@ -44,6 +57,8 @@ test('E2: the catalog, its records, and Project access survive a SQLite reopen',
   try {
     const record = await second.stores.environmentCatalog.get('host-a');
     assert.equal(record?.definition.platform, 'macos');
+    assert.equal(record?.definition.capabilities.find((capability) => capability.name === 'read-only-investigation')?.requiresLease, true);
+    assert.equal(record?.definition.capabilities.find((capability) => capability.name === 'read-only-investigation')?.leaseMode, 'read');
     assert.ok(second.environmentCatalog.entry('host-a') !== undefined, 'entry survives reopen');
     assert.equal(second.environmentCatalog.entry('host-a')?.eligible, false, 'no epoch after a restart');
 

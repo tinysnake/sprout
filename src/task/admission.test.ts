@@ -18,6 +18,7 @@ import { SqliteStore } from '../store/db.ts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createExecutionStrategy, type ExecutionStrategy } from '../execution-mode.ts';
 
 const content = {
   title: 'Snapshot task',
@@ -34,6 +35,7 @@ function fixture(options: {
   readonly taskStore?: TaskStore;
   readonly proposalStore?: TaskProposalStore;
   readonly leaseStore?: LeaseStore;
+  readonly executionStrategy?: ExecutionStrategy;
 } = {}) {
   const memberIds = options.agents ?? ['scout', 'scribe'];
   const taskStore = options.taskStore ?? new InMemoryTaskStore();
@@ -60,9 +62,11 @@ function fixture(options: {
     async recycle() {},
   };
   const submissions: { runId?: string; agentId: string; taskId?: string; environmentInstanceId?: string }[] = [];
+  const prompts: string[] = [];
   const runner = {
     async submit(request: { runId?: string; agentId: string; taskId?: string; environmentInstanceId?: string; prompt: string; projectId: string }) {
       submissions.push({ agentId: request.agentId, ...(request.runId !== undefined ? { runId: request.runId } : {}), ...(request.taskId !== undefined ? { taskId: request.taskId } : {}), ...(request.environmentInstanceId !== undefined ? { environmentInstanceId: request.environmentInstanceId } : {}) });
+      prompts.push(request.prompt);
       if (options.submitFailure) throw new Error('run submission failed');
       return { id: request.runId ?? `unlinked-${submissions.length}` };
     },
@@ -70,8 +74,9 @@ function fixture(options: {
       return { ok: options.compatible?.(agentId, environmentInstanceId) ?? true };
     },
   };
+  const executionStrategy = options.executionStrategy ?? createExecutionStrategy('environment-hosted');
   const lifecycle = new TaskEnvironmentLifecycle({
-    store: taskStore, pool, agents, projects, runs: runner, worker,
+    store: taskStore, pool, agents, projects, runs: runner, worker, executionStrategy,
     ids: { task: () => 'unused-task', lease: () => 'unused-lease', run: (() => { let n = 0; return () => `run-${++n};` })(), message: () => 'unused-message', projectEvent: () => 'unused-event' },
     clock: { now: () => 100 },
     taskGroups: {
@@ -98,10 +103,11 @@ function fixture(options: {
   const admissions = new TaskAdmissionService({
     proposals, proposalStore, tasks, lifecycle, projects,
     agentAuthority: { agentIsActive: async id => memberIds.includes(id) },
+    ...(options.executionStrategy !== undefined ? { executionStrategy } : {}),
     ids: { task: () => 'task-1', lease: () => 'unused-lease', run: () => 'unused-run', message: () => 'unused-message', projectEvent: () => 'unused-event' },
     now: () => 100,
   });
-  return { taskStore, proposalStore, pool, worker, materializations, taskGroupSnapshots, submissions, tasks, proposals, admissions };
+  return { taskStore, proposalStore, pool, worker, materializations, taskGroupSnapshots, submissions, prompts, tasks, proposals, admissions };
 }
 
 async function propose(context: ReturnType<typeof fixture>) {
@@ -113,6 +119,19 @@ const beginInput = (lead: { memberId: string; memberKind: 'human' | 'agent' }, e
   environmentInstanceId,
   lead,
   reason: 'Approved for the Project milestone.',
+});
+
+test('Host-run Task begin reports unavailable before consuming a proposal, preparing context, or acquiring a lease', async () => {
+  const context = fixture({ executionStrategy: createExecutionStrategy('host-run') });
+  const proposal = await propose(context);
+  await assert.rejects(
+    context.admissions.beginProposal(proposal.id, { memberId: 'operator', memberKind: 'human' }, beginInput({ memberId: 'operator', memberKind: 'human' })),
+    error => error instanceof TaskAdmissionError && error.code === 'execution-mode-unavailable',
+  );
+  assert.equal((await context.proposals.get(proposal.id)).status, 'proposed');
+  assert.deepEqual(context.pool.leases(), []);
+  assert.deepEqual(context.materializations, []);
+  assert.deepEqual(context.submissions, []);
 });
 
 test('a Human lead begins one frozen proposal snapshot without waking an Agent', async () => {
@@ -139,6 +158,27 @@ test('a Human lead begins one frozen proposal snapshot without waking an Agent',
   assert.equal((await context.tasks.get(result.task.id))?.goal, content.goal);
   assert.equal((await context.proposals.get(proposal.id)).status, 'begun');
   assert.equal(context.pool.activeLease('env-a')?.taskId, result.task.id);
+});
+
+test('Task advancement preserves file references and redacts a hostname in the actual composed prompt', async () => {
+  const context = fixture();
+  const proposal = await propose(context);
+  const begun = await context.admissions.beginProposal(
+    proposal.id, { memberId: 'operator', memberKind: 'human' }, beginInput({ memberId: 'operator', memberKind: 'human' }),
+  );
+  const rawPrompt = 'Read report.final.pdf and worker.node1.tailnet.example; Also Read worker.example.md; Read README.md; Read notes/today.txt.';
+  await context.admissions.advance(begun.task.id, { memberId: 'operator', memberKind: 'human' }, {
+    targetAgentId: 'scout', reason: 'Continue the approved Task.', prompt: rawPrompt,
+  });
+  const prompt = context.prompts[0] ?? '';
+
+  assert.ok(prompt.includes('report.final.pdf'), 'the unsupported-extension filename reaches the actual composed prompt unchanged');
+  assert.ok(prompt.includes('Read report.final.pdf'), 'the explicit file instruction survives prompt composition');
+  assert.ok(prompt.includes('README.md'));
+  assert.ok(prompt.includes('notes/today.txt'));
+  assert.ok(prompt.includes('Read worker.example.md'), 'explicit context preserves an ambiguous host-shaped filename');
+  assert.ok(!prompt.includes('worker.node1.tailnet.example'), `hostname leaked in prompt: ${prompt}`);
+  assert.ok(prompt.includes('<redacted-host>'));
 });
 
 test('approve-and-begin accepts an omitted reason and records no substitute', async () => {
@@ -180,7 +220,7 @@ test('failure before lease acquisition leaves the proposal open and creates no T
 
   const conflicted = fixture();
   const waiting = await propose(conflicted);
-  const held = conflicted.pool.acquireLease({ instanceId: 'env-a', capability: 'agent-run', holderId: 'other-work', ttlMs: 1000 });
+  const held = conflicted.pool.acquireLease({ instanceId: 'env-a', capability: 'agent-run', mode: 'read-write', holderId: 'other-work', ttlMs: 1000 });
   assert.equal(held.ok, true);
   await assert.rejects(
     conflicted.admissions.beginProposal(waiting.id, { memberId: 'operator', memberKind: 'human' }, beginInput({ memberId: 'operator', memberKind: 'human' })),
@@ -192,11 +232,29 @@ test('failure before lease acquisition leaves the proposal open and creates no T
   assert.deepEqual(conflicted.materializations, []);
 });
 
+test('Host-run Task admission pins Host-run placement and holds one Task lease across runs', async () => {
+  const context = fixture({ executionStrategy: createExecutionStrategy('host-run', true) });
+  const proposal = await propose(context);
+  const result = await context.admissions.beginProposal(proposal.id, { memberId: 'operator', memberKind: 'human' }, beginInput({ memberId: 'operator', memberKind: 'human' }));
+  assert.equal(result.task.executionPlacement?.mode, 'host-run');
+  assert.equal(result.task.environmentInstanceId, 'env-a');
+  assert.equal(context.pool.leases().length, 1);
+  assert.equal(context.pool.getLease(result.task.environmentLeaseId!)?.holderKind, 'task');
+  assert.equal(context.submissions.length, 0, 'a Human Task lead does not start a run on approval');
+  const advanced = await context.admissions.advance(result.task.id, { memberId: 'operator', memberKind: 'human' }, {
+    targetAgentId: 'scout', reason: 'Start the authorized Host-run work.',
+  });
+  assert.equal(advanced.runId, 'run-1;');
+  assert.equal(context.submissions.length, 1);
+  assert.equal(context.pool.leases().length, 1, 'nested admission reuses the Task lease');
+  assert.equal(context.pool.getLease(result.task.environmentLeaseId!)?.holderKind, 'task');
+});
+
 test('begin reports a typed conflict when a Task-held lease is recovering', async () => {
   const context = fixture();
   const proposal = await propose(context);
   const held = context.pool.acquireLease({
-    instanceId: 'env-a', capability: 'agent-run', holderId: 'recovering-task', taskId: 'recovering-task', ttlMs: 1000,
+    instanceId: 'env-a', capability: 'agent-run', mode: 'read-write', holderId: 'recovering-task', taskId: 'recovering-task', ttlMs: 1000,
   });
   assert.ok(held.ok);
   assert.equal(context.pool.markRecovering(held.lease.id)?.state, 'recovering');
@@ -214,7 +272,7 @@ test('legacy begin also exposes typed Task lease reservation refusals', async ()
   const context = fixture();
   const task = await context.tasks.create({ projectId: 'project', title: 'Legacy Task', goal: 'Begin safely.', assignedAgentId: 'scout' });
   const held = context.pool.acquireLease({
-    instanceId: 'env-a', capability: 'agent-run', holderId: 'recovering-task', taskId: 'recovering-task', ttlMs: 1000,
+    instanceId: 'env-a', capability: 'agent-run', mode: 'read-write', holderId: 'recovering-task', taskId: 'recovering-task', ttlMs: 1000,
   });
   assert.ok(held.ok);
   assert.equal(context.pool.markRecovering(held.lease.id)?.state, 'recovering');
@@ -380,7 +438,7 @@ test('SQLite restart preserves the consumed proposal snapshot and rolls back a p
       createdAt: 101, updatedAt: 101,
     };
     const rollbackLease: EnvironmentLease = {
-      id: 'rollback-lease', instanceId: 'env-b', capability: 'agent-run', holderId: rollbackTask.id,
+      id: 'rollback-lease', instanceId: 'env-b', capability: 'agent-run', mode: 'read-write', holderId: rollbackTask.id,
       holderKind: 'task', taskId: rollbackTask.id, acquiredAt: 101, expiresAt: 1000, state: 'active',
     };
     await assert.rejects(store.tasks.createBeginningWithLease(rollbackTask, rollbackLease, () => {

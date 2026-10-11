@@ -160,3 +160,51 @@ test('Task control HTTP commands reject caller-selected actor authority', async 
   assert.equal(await router.handle(context), true);
   assert.equal(status, 400);
 });
+
+test('Task lease investigation and authority override accept no caller-selected actor', async () => {
+  let status = 0;
+  let responseBody = '';
+  const response = {
+    writeHead(code: number) { status = code; return this; },
+    end(body?: string) { responseBody = body ?? ''; return this; },
+  } as unknown as ServerResponse;
+  let investigations = 0;
+  let overrides = 0;
+  const controls = {
+    investigateEnvironmentLeaseForHumanLead: async (taskId: string) => {
+      investigations++;
+      assert.equal(taskId, 'task-1');
+      return { instanceId: 'env-a', leaseId: 'lease-a', state: 'recovering', holderKind: 'run', holderId: 'agent-a', runId: 'run-a', acquiredAt: 10 };
+    },
+    authorityOverrideReleaseForHumanLead: async (taskId: string, input: { leaseId: string; acknowledgedRisks: boolean; reason: string }) => {
+      overrides++;
+      assert.equal(taskId, 'task-1');
+      assert.deepEqual(input, { leaseId: 'lease-a', acknowledgedRisks: true, reason: 'Agent work ended.' });
+      return { action: 'task-lead-authority-override-release', leaseId: input.leaseId };
+    },
+  } as unknown as TaskControlService;
+  const router = createTaskControlRouter({ controls });
+  const invoke = async (method: 'GET' | 'POST', action: string, body: unknown): Promise<boolean> => router.handle({
+    method, response, pathname: `/api/tasks/task-1/${action}`, searchParams: new URLSearchParams(),
+    segments: ['api', 'tasks', 'task-1', action], operatorSessionId: 'authenticated-session',
+    readBody: async () => body as Record<string, unknown>,
+  });
+  assert.equal(await invoke('GET', 'environment-lease', {}), true);
+  assert.equal(status, 200);
+  assert.equal(investigations, 1);
+  assert.equal(JSON.parse(responseBody).lease.holderId, 'agent-a');
+  assert.equal(JSON.parse(responseBody).lease.acquiredAt, 10);
+
+  assert.equal(await invoke('POST', 'authority-override-release', {
+    leaseId: 'lease-a', acknowledgedRisks: true, reason: 'Agent work ended.', actor: { memberId: 'agent-a', memberKind: 'agent' },
+  }), true);
+  assert.equal(status, 400);
+  assert.equal(overrides, 0, 'caller-supplied identity cannot impersonate the Task lead');
+
+  assert.equal(await invoke('POST', 'authority-override-release', {
+    leaseId: 'lease-a', acknowledgedRisks: true, reason: 'Agent work ended.',
+  }), true);
+  assert.equal(status, 201);
+  assert.equal(overrides, 1);
+  assert.equal(JSON.parse(responseBody).release.action, 'task-lead-authority-override-release');
+});

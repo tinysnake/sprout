@@ -419,9 +419,9 @@ test('a resume key crosses the worker boundary and continues the run', async (t)
   const sessionKeys = new InMemorySessionKeyStore();
   const { orchestrator } = buildOrchestrator(worker.adapters, sessionKeys);
 
-  const first = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'one' });
+  const first = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'one', sessionKeyScope: { kind: 'conversation', id: 'resume-boundary-test' } });
   await orchestrator.waitFor(first.id);
-  const second = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'two' });
+  const second = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'two', sessionKeyScope: { kind: 'conversation', id: 'resume-boundary-test' } });
   await orchestrator.waitFor(second.id);
 
   const firstKey = worker.engine.sessions[0]?.engineSessionKey;

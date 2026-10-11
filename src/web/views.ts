@@ -38,8 +38,10 @@ import { sanitizeObservedReadiness } from '../environment/readiness-observation.
 import type { AgentRun, TokenUsage } from '../run/model.ts';
 import type { Agent, AgentWorkOption } from '../agent/model.ts';
 import type { Task, TaskRunLink, TaskStatus, TaskWithRuns } from '../task/model.ts';
+import type { ExecutionMode } from '../execution-mode.ts';
+import { executionModeMismatchReason, legacyEnvironmentPlacement, runExecutionModeMismatchReason } from '../execution-placement.ts';
 import { normalizeEnrollment, type EnvironmentEnrollment } from '../environment/enrollment.ts';
-import type { EnvironmentRecoveryRecord, ForceReleaseRecord } from '../environment/recovery.ts';
+import { remoteWorkHasUnresolvedFacts, type EnvironmentRecoveryRecord, type ForceReleaseRecord } from '../environment/recovery.ts';
 import {
   sanitizeIdentifier,
   sanitizeOperatorText,
@@ -63,7 +65,8 @@ import {
   READINESS_AUTH_TYPES,
   READINESS_SOURCES,
 } from '../environment/readiness.ts';
-import type { ProjectAuthority } from '../project/authority-model.ts';
+import type { ProjectAuthority, ProjectMcpConfiguration } from '../project/authority-model.ts';
+import { sanitizeProjectMcpConfiguration } from '../project/authority-model.ts';
 import { currentTaskGroupContent, taskGroupStatus, workingGroupStatus } from '../conversation/model.ts';
 import type {
   ConversationScope,
@@ -77,6 +80,12 @@ import {
   type ProjectEnvironmentAccess,
   type WorkspaceBinding,
 } from '../project/access.ts';
+
+function safeProjectMcpConfiguration(value: ProjectMcpConfiguration | undefined): { readonly mcpConfiguration?: ProjectMcpConfiguration } {
+  if (value === undefined) return {};
+  try { return { mcpConfiguration: sanitizeProjectMcpConfiguration(value) }; }
+  catch { return {}; }
+}
 
 /** Bound and redact one free-text Project field for the wire. */
 function sanitizeProjectText(value: string): string {
@@ -96,6 +105,8 @@ export interface RunView {
   readonly agentId: string;
   readonly prompt: string;
   readonly status: string;
+  /** Durable placement chosen at admission; absent only on older server responses. */
+  readonly executionMode?: import('../execution-mode.ts').ExecutionMode;
   readonly events: readonly { readonly type: string; readonly [key: string]: unknown }[];
   /**
    * The durable Task this run advances, when it is a Task run (#28).
@@ -104,6 +115,9 @@ export interface RunView {
    * its Task without giving the client any Task domain logic.
    */
   readonly taskId?: string;
+  readonly executionPlacement?: AgentRun['executionPlacement'];
+  readonly processExecutionMode?: ExecutionMode;
+  readonly executionModeMismatchReason?: string;
   /**
    * Whether a cross-environment hand-off was attached to this run's input.
    *
@@ -126,6 +140,8 @@ export interface RunView {
    * run or a run with no Project access, reported as unspecified.
    */
   readonly workspaceBinding?: RunWorkspaceBindingAttributionView;
+  /** Current Host-run attachment and recovery state, when applicable. */
+  readonly workspaceBindingStatus?: AgentRun['workspaceBindingStatus'];
   readonly failure?: string;
   readonly result?: unknown;
   readonly recoverySettlement?: AgentRun['recoverySettlement'];
@@ -172,18 +188,35 @@ export function summarizeRunHistory(runs: readonly RunView[]): RunHistoryTotals 
   };
 }
 
-export function toRunView(run: AgentRun): RunView {
+export function toRunView(run: AgentRun, processExecutionMode?: ExecutionMode): RunView {
   const workspaceBinding = toRunWorkspaceBindingAttribution(run);
+  const modeMismatch = processExecutionMode !== undefined
+    ? runExecutionModeMismatchReason(run.executionPlacement, processExecutionMode)
+    : undefined;
   return {
     id: run.id,
     agentId: run.agentId,
     prompt: run.prompt,
     status: run.status,
+    executionMode: run.executionPlacement?.mode ?? run.executionMode ?? 'environment-hosted',
     events: run.events,
     ...(run.taskId !== undefined ? { taskId: run.taskId } : {}),
+    ...(run.executionPlacement !== undefined ? {
+      executionPlacement: run.executionPlacement.engineHost?.kind === 'sprout'
+        ? {
+            ...run.executionPlacement,
+            // Public placement reports the host kind and non-secret controls,
+            // never the host-local session namespace used for continuation.
+            engineHost: { ...run.executionPlacement.engineHost, id: 'sprout' },
+          }
+        : run.executionPlacement,
+    } : {}),
+    ...(processExecutionMode !== undefined ? { processExecutionMode } : {}),
+    ...(modeMismatch !== undefined ? { executionModeMismatchReason: modeMismatch } : {}),
     handOffAttached: run.handOff !== undefined,
     ...(toRunWorkOptionAttribution(run) !== undefined ? { workOption: toRunWorkOptionAttribution(run)! } : {}),
     ...(workspaceBinding !== undefined ? { workspaceBinding } : {}),
+    ...(run.workspaceBindingStatus !== undefined ? { workspaceBindingStatus: run.workspaceBindingStatus } : {}),
     ...(run.failure !== undefined ? { failure: run.failure } : {}),
     ...(run.result !== undefined ? { result: run.result } : {}),
     ...(run.recoverySettlement !== undefined ? { recoverySettlement: run.recoverySettlement } : {}),
@@ -549,6 +582,9 @@ export interface TaskView {
   readonly endDisposition?: Task['endDisposition'];
   readonly forcedRelease?: Task['forcedRelease'];
   readonly environmentInstanceId?: string;
+  readonly executionPlacement?: Task['executionPlacement'];
+  readonly processExecutionMode?: ExecutionMode;
+  readonly executionModeMismatchReason?: string;
   readonly environmentLeaseId?: string;
   readonly environmentLifecycleState?: string;
   /** A safe, operator-facing projection of the Worker-owned Task context. */
@@ -560,7 +596,13 @@ export interface TaskView {
   readonly completedAt?: number;
 }
 
-export function toTaskView(task: Task): TaskView {
+export function toTaskView(task: Task, processExecutionMode?: ExecutionMode): TaskView {
+  const placement = task.executionPlacement ?? (task.environmentInstanceId !== undefined
+    ? legacyEnvironmentPlacement(task.environmentInstanceId)
+    : undefined);
+  const modeMismatch = processExecutionMode !== undefined
+    ? executionModeMismatchReason(placement, processExecutionMode)
+    : undefined;
   return {
     id: task.id,
     projectId: task.projectId,
@@ -582,6 +624,9 @@ export function toTaskView(task: Task): TaskView {
     ...(task.endDisposition !== undefined ? { endDisposition: task.endDisposition } : {}),
     ...(task.forcedRelease !== undefined ? { forcedRelease: task.forcedRelease } : {}),
     ...(task.environmentInstanceId !== undefined ? { environmentInstanceId: task.environmentInstanceId } : {}),
+    ...(task.executionPlacement !== undefined ? { executionPlacement: task.executionPlacement } : {}),
+    ...(processExecutionMode !== undefined ? { processExecutionMode } : {}),
+    ...(modeMismatch !== undefined ? { executionModeMismatchReason: modeMismatch } : {}),
     ...(task.environmentLeaseId !== undefined ? { environmentLeaseId: task.environmentLeaseId } : {}),
     ...(task.environmentLifecycleState !== undefined ? { environmentLifecycleState: task.environmentLifecycleState } : {}),
     taskContextState: toTaskContextState(task),
@@ -637,8 +682,8 @@ export interface TaskRunLinkView {
   };
 }
 
-export function toTaskWithRunsView(found: TaskWithRuns): TaskWithRunsView {
-  return { task: toTaskView(found.task), runs: found.runs.map(toTaskRunLinkView) };
+export function toTaskWithRunsView(found: TaskWithRuns, processExecutionMode?: ExecutionMode): TaskWithRunsView {
+  return { task: toTaskView(found.task, processExecutionMode), runs: found.runs.map(toTaskRunLinkView) };
 }
 
 export function toTaskRunLinkView(link: TaskRunLink): TaskRunLinkView {
@@ -972,6 +1017,8 @@ export interface EnvironmentRecoveryView {
     readonly taskContextPrepared?: boolean;
   };
   readonly unresolvedFacts: readonly string[];
+  /** Sanitized decision gate derived from remote operation and process evidence. */
+  readonly remoteWorkEvidence?: { readonly unresolved: boolean };
   /** Whether the ordinary decision requires synchronized evidence first. */
   readonly evidenceSynchronized: boolean;
   readonly decisions: readonly {
@@ -1012,6 +1059,9 @@ export function toEnvironmentRecoveryView(record: EnvironmentRecoveryRecord): En
     unresolvedFacts: record.unresolvedFacts.map((fact) =>
       sanitizeOperatorText(fact, { fallback: DEFAULT_RECOVERY_REASON }),
     ),
+    ...(record.remoteWorkEvidence !== undefined
+      ? { remoteWorkEvidence: { unresolved: remoteWorkHasUnresolvedFacts(record.remoteWorkEvidence) } }
+      : {}),
     evidenceSynchronized: record.evidence !== undefined,
     decisions: record.decisions.map((decision) => ({
       kind: decision.kind,
@@ -1202,10 +1252,16 @@ export function toRunWorkOptionAttribution(run: AgentRun): RunWorkOptionAttribut
  * record's current binding, so history stays historical.
  */
 export interface RunWorkspaceBindingAttributionView {
+  readonly environmentInstanceId?: string;
   readonly bindingId?: string;
+  readonly generation?: number;
+  readonly catalogGeneration?: number;
+  readonly leaseMode?: 'read' | 'read-write';
   readonly workspaceId: string;
   readonly kind: string;
   readonly path?: string;
+  readonly operations?: readonly string[];
+  readonly projectMcpTools?: readonly string[];
 }
 
 function toRunWorkspaceBindingAttribution(run: AgentRun): RunWorkspaceBindingAttributionView | undefined {
@@ -1213,12 +1269,23 @@ function toRunWorkspaceBindingAttribution(run: AgentRun): RunWorkspaceBindingAtt
   if (binding === undefined) return undefined;
   const path = binding.path !== undefined ? sanitizeWorkspacePath(binding.path) : undefined;
   return {
+    ...(binding.environmentInstanceId !== undefined ? {
+      environmentInstanceId: sanitizeIdentifier(binding.environmentInstanceId, { fallback: 'unknown-environment', kind: 'generic' }),
+    } : {}),
     ...(binding.bindingId !== undefined
       ? { bindingId: sanitizeIdentifier(binding.bindingId, { fallback: 'unknown-binding', kind: 'generic' }) }
       : {}),
+    ...(Number.isSafeInteger(binding.generation) && binding.generation! > 0 ? { generation: binding.generation } : {}),
+    ...(Number.isSafeInteger(binding.catalogGeneration) && binding.catalogGeneration! > 0
+      ? { catalogGeneration: binding.catalogGeneration } : {}),
+    ...(binding.leaseMode === 'read' || binding.leaseMode === 'read-write' ? { leaseMode: binding.leaseMode } : {}),
     workspaceId: sanitizeIdentifier(binding.workspaceId ?? '', { fallback: 'unknown-workspace', kind: 'digest' }),
     kind: binding.kind === 'relative' ? 'relative' : 'default',
     ...(path !== undefined ? { path } : {}),
+    ...(binding.operations !== undefined ? { operations: binding.operations.filter((value) =>
+      ['read', 'search', 'edit', 'patch', 'command'].includes(value)) } : {}),
+    ...(binding.projectMcpTools !== undefined ? { projectMcpTools: binding.projectMcpTools.filter((name) =>
+      /^[A-Za-z][A-Za-z0-9_-]{0,127}$/.test(name)).slice(0, 128) } : {}),
   };
 }
 
@@ -1252,6 +1319,7 @@ export interface ProjectContentVersionView {
   readonly rules: readonly string[];
   readonly wakePolicy: string;
   readonly routingIntervalMs: number;
+  readonly mcpConfiguration?: ProjectMcpConfiguration;
   readonly memberships: readonly ProjectMembershipView[];
 }
 
@@ -1343,6 +1411,7 @@ export function toProjectAuthorityView(project: ProjectAuthority): ProjectAuthor
         rules: version.rules.map((rule) => sanitizeProjectText(rule)),
         wakePolicy: version.wakePolicy === 'wake-model-assisted' ? 'wake-model-assisted' : 'explicit-only',
         routingIntervalMs: version.routingIntervalMs,
+        ...safeProjectMcpConfiguration(version.mcpConfiguration),
         memberships: version.memberships.map((membership) => ({
           memberId: sanitizeIdentifier(membership.memberId, { fallback: 'unknown-member', kind: 'generic' }),
           memberKind: membership.memberKind === 'human' ? 'human' : 'agent',
@@ -1388,6 +1457,8 @@ export function toProjectAuthorityView(project: ProjectAuthority): ProjectAuthor
  */
 export interface WorkspaceBindingView {
   readonly bindingId: string;
+  /** Monotonic per Project and Environment access relationship. */
+  readonly generation?: number;
   readonly workspaceId: string;
   readonly kind: string;
   /** Worker-root-relative location, when the workspace named one. */
@@ -1419,6 +1490,7 @@ function toWorkspaceBindingView(binding: WorkspaceBinding): WorkspaceBindingView
   const path = binding.path !== undefined ? sanitizeWorkspacePath(binding.path) : undefined;
   return {
     bindingId: sanitizeIdentifier(binding.bindingId, { fallback: 'unknown-binding', kind: 'generic' }),
+    ...(Number.isSafeInteger(binding.generation) && binding.generation! > 0 ? { generation: binding.generation } : {}),
     workspaceId: sanitizeIdentifier(binding.workspaceId, { fallback: 'unknown-workspace', kind: 'digest' }),
     kind: binding.kind === 'relative' ? 'relative' : 'default',
     ...(path !== undefined

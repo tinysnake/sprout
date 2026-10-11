@@ -15,6 +15,8 @@ import type {
   BillingBasis,
 } from '../usage/model.ts';
 
+import type { BindingGenerationFence } from '../environment/binding-generation-fence.ts';
+
 export type {
   DetailedTokenDimensions,
   ApiEquivalentCostEstimate,
@@ -159,7 +161,100 @@ export interface AgentTaskGroupMessageResult {
   readonly wakes: readonly { readonly agentId: string; readonly reason: string; readonly status: string; readonly detail?: string }[];
 }
 
+export type RemoteWorkspaceOperationKind = 'read' | 'search' | 'edit' | 'patch' | 'command';
+
+export interface RemoteWorkspaceOperationResult {
+  readonly operationId: string;
+  readonly projectId: string;
+  readonly environmentInstanceId: string;
+  readonly bindingId: string;
+  readonly generation: number;
+  readonly connectionEpoch: number;
+  readonly workspaceId: string;
+  readonly operation: RemoteWorkspaceOperationKind;
+  readonly status: 'completed' | 'failed' | 'cancelled' | 'recovery-required';
+  readonly path?: string;
+  readonly content?: string;
+  readonly output?: string;
+  readonly outputChunks?: readonly { readonly sequence: number; readonly stream: 'stdout' | 'stderr'; readonly text: string }[];
+  readonly exitCode?: number | null;
+  readonly matches?: readonly { readonly path: string; readonly line: number; readonly text: string }[];
+  readonly changedPaths?: readonly string[];
+  readonly truncated?: boolean;
+  readonly failure?: string;
+  readonly leaseConflict?: { readonly leaseId: string; readonly holderId: string; readonly state: 'active' | 'recovering' };
+}
+
+
+export interface RemoteWorkspaceProgress {
+  readonly operationId: string;
+  readonly projectId: string;
+  readonly environmentInstanceId: string;
+  readonly bindingId: string;
+  readonly generation: number;
+  readonly connectionEpoch: number;
+  readonly workspaceId: string;
+  readonly sequence: number;
+  readonly stream: 'stdout' | 'stderr';
+  readonly text: string;
+}
+
+export interface ProjectMcpToolDeclaration {
+  readonly name: string;
+  readonly description: string;
+  readonly inputSchema: Readonly<Record<string, unknown>>;
+}
+
+/** Core-authorized Project MCP bridge. Tool names map to fixed Worker origins. */
+export interface RemoteProjectMcpTools {
+  readonly binding: RemoteWorkspaceTools['binding'];
+  readonly bindingFence?: BindingGenerationFence;
+  readonly tools: readonly ProjectMcpToolDeclaration[];
+  call(name: string, arguments_: Readonly<Record<string, unknown>>): Promise<{ readonly status: 'completed' | 'failed' | 'unsupported'; readonly text?: string; readonly reason?: string }>;
+  close(): Promise<'stopped' | 'uncertain'>;
+}
+
+export class RemoteProjectMcpStartupError extends Error {
+  readonly reason: 'missing-dependency' | 'invalid-configuration' | 'unsupported-configuration' | 'remote-unavailable' | 'no-tools' | 'worker-refused';
+  constructor(reason: 'missing-dependency' | 'invalid-configuration' | 'unsupported-configuration' | 'remote-unavailable' | 'no-tools' | 'worker-refused') {
+    super(`Project MCP startup failed (${reason})`);
+    this.name = 'RemoteProjectMcpStartupError';
+    this.reason = reason;
+  }
+}
+
+/** Engine-facing typed operations. Authorization and target selection live above the Engine port. */
+export interface RemoteWorkspaceTools {
+  readonly binding: {
+    readonly projectId: string;
+    readonly environmentInstanceId: string;
+    readonly bindingId: string;
+    readonly generation: number;
+    readonly connectionEpoch: number;
+    readonly workspaceId: string;
+    readonly kind?: 'default' | 'relative';
+    readonly path?: string;
+  };
+  readonly leaseMode?: import('../environment/model.ts').EnvironmentLeaseMode;
+  readonly bindingFence?: BindingGenerationFence;
+  readonly operations?: readonly ('read' | 'search' | 'edit' | 'patch' | 'command')[];
+  read(path: string, operationId?: string): Promise<RemoteWorkspaceOperationResult>;
+  search(query: string, path?: string, operationId?: string): Promise<RemoteWorkspaceOperationResult>;
+  edit?(path: string, oldText: string, newText: string, operationId?: string): Promise<RemoteWorkspaceOperationResult>;
+  command?(executable: string, args: readonly string[], options: { readonly cwd?: string; readonly timeoutMs?: number }, operationId: string,
+    onProgress?: (progress: RemoteWorkspaceProgress) => void): Promise<RemoteWorkspaceOperationResult>;
+  patch?(path: string, hunks: readonly { readonly before: string; readonly after: string }[], operationId?: string): Promise<RemoteWorkspaceOperationResult>;
+  /** Release or protect the attached Environment lease after run settlement. */
+  settle?(outcome: 'settled' | 'unknown'): Promise<void>;
+  inspect(operationId: string): Promise<{ readonly status: string; readonly operation?: RemoteWorkspaceOperationResult }>;
+  cancel(operationId: string): Promise<{ readonly accepted: boolean; readonly status: string }>;
+}
+
 export interface StartSessionRequest {
+  /** An opaque Project workspace capability. Read leases allow concurrent readers; files may change while held, with no snapshot or copy-on-write. */
+  readonly remoteWorkspace?: RemoteWorkspaceTools;
+  /** Origin-bound MCP tools backed by the containing run's active Environment lease. */
+  readonly remoteProjectMcp?: RemoteProjectMcpTools;
   /** Worker-local process environment overlay. Never serialize into instructions or files. */
   readonly sessionEnvironment?: Readonly<Record<string, string>>;
   /** Session-bound capability for the current Task group; identity and scope are Core-resolved. */
