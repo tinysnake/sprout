@@ -135,14 +135,10 @@ export const routes: RouteRecordRaw[] = [
 ];
 
 export function createAppRouter(basePath?: string) {
-  const base =
-    basePath ??
-    (typeof window !== 'undefined' && window.location.pathname.startsWith('/app')
-      ? '/app/'
-      : '/');
-
+  // The Sprout app owns the root mount; `/prototype` and `/console` are
+  // separate static pages, never router bases.
   return createRouter({
-    history: createWebHistory(base),
+    history: createWebHistory(basePath ?? '/'),
     routes,
   });
 }

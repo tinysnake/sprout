@@ -4,9 +4,9 @@ import { test } from 'node:test';
 import { JSDOM } from 'jsdom';
 
 // Initialize JSDOM and globals before importing Vue or Vite modules.
-const initialHtml = await readFile(new URL('../../../app/index.html', import.meta.url), 'utf8');
+const initialHtml = await readFile(new URL('../../../index.html', import.meta.url), 'utf8');
 const initialDom = new JSDOM(initialHtml, {
-  url: 'http://sprout-operator.test/app/manage/environments',
+  url: 'http://sprout-operator.test/manage/environments',
   pretendToBeVisual: true,
 });
 

@@ -22,7 +22,7 @@ const transport = createBrowserTransport({
   },
   eventSource: () => ({ onopen: null, onmessage: null, onerror: null, addEventListener() {}, close() {} }),
 });
-const { app, router } = createSproutApp({ ...createProductionAppOptions(transport), routerBase: '/app/' });
+const { app, router } = createSproutApp({ ...createProductionAppOptions(transport), routerBase: '/' });
 await router.push('/project/tasks?project=project-a');
 await router.isReady();
 app.mount('#app');

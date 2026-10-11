@@ -28,7 +28,7 @@ export type DomStage = {
 };
 
 export async function createSharedDomStage(url: string): Promise<DomStage> {
-  const html = await readFile(`${process.cwd()}/web/app/index.html`, 'utf8');
+  const html = await readFile(`${process.cwd()}/web/index.html`, 'utf8');
   const dom = new JSDOM(html, { url, pretendToBeVisual: true });
   (dom.window as unknown as Record<string, unknown>)['__SPROUT_TEST_MANUAL_MOUNT__'] = true;
 

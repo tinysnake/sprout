@@ -35,11 +35,11 @@ interface Harness {
 let sharedPromise: Promise<DomStage> | undefined;
 
 function sharedStage(): Promise<DomStage> {
-  sharedPromise ??= createSharedDomStage('http://sprout-operator.test/app/feed');
+  sharedPromise ??= createSharedDomStage('http://sprout-operator.test/feed');
   return sharedPromise;
 }
 
-async function setupHarness(url = 'http://sprout-operator.test/app/feed'): Promise<Harness> {
+async function setupHarness(url = 'http://sprout-operator.test/feed'): Promise<Harness> {
   const { dom, vite, mount } = await sharedStage();
   // Reset everything a previous case may have left behind on the shared stage.
   unmountQuietly(mount);
@@ -84,7 +84,7 @@ async function deterministicAppOptions(vite: ViteDevServer) {
   const environmentService = new module.FixtureEnvironmentService();
   const agentService = new agentsModule.FixtureAgentService();
   return {
-    routerBase: '/app/',
+    routerBase: '/',
     environmentService,
     agentService,
     projectService: new projectsModule.FixtureProjectService(agentService, environmentService),

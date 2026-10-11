@@ -23,7 +23,7 @@ let mountedApp: { unmount(): void } | undefined;
 
 function sharedHarness(): Promise<SharedHarness> {
   sharedPromise ??= (async () => {
-    const stage = await createSharedDomStage('http://sprout-operator.test/app/project/tasks');
+    const stage = await createSharedDomStage('http://sprout-operator.test/project/tasks');
     const { createSproutApp } = await stage.vite.ssrLoadModule('/src/app/main.ts') as typeof import('../../app/main.ts');
     return { ...stage, createSproutApp };
   })();
@@ -37,7 +37,7 @@ async function setupHarness() {
   mountedApp = undefined;
   mountPoint.innerHTML = '';
   dom.window.localStorage.clear();
-  dom.window.history.replaceState({}, '', 'http://sprout-operator.test/app/project/tasks');
+  dom.window.history.replaceState({}, '', 'http://sprout-operator.test/project/tasks');
   return {
     dom,
     doc: dom.window.document,
@@ -270,7 +270,7 @@ async function mountTasks(vite: { ssrLoadModule: (path: string) => Promise<unkno
   const { createSproutApp } = await sharedHarness();
   const { api, projects, calls, controlInputs, blockerCalls, beginInputs } = appServices(codes, snapshot);
   const connectionSource = createShellConnectionController({ status: 'online', connection: 'online', loading: false });
-  const { app, router } = createSproutApp({ routerBase: '/app/', taskService: api, projectService: projects, connectionSource, runService });
+  const { app, router } = createSproutApp({ routerBase: '/', taskService: api, projectService: projects, connectionSource, runService });
   await router.push(`/project/tasks?project=${projectId}`);
   await router.isReady();
   app.mount(doc.querySelector('#app')!);

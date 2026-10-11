@@ -19,7 +19,7 @@ import type { ViteDevServer } from 'vite';
 
 const repoRoot = process.cwd();
 
-const html = await readFile(`${repoRoot}/web/app/index.html`, 'utf8');
+const html = await readFile(`${repoRoot}/web/index.html`, 'utf8');
 
 
 const GLOBALS = [
@@ -47,7 +47,7 @@ interface Harness {
 
 
 async function setupHarness(): Promise<Harness> {
-  const dom = new JSDOM(html, { url: 'http://sprout-operator.test/app/feed', pretendToBeVisual: true });
+  const dom = new JSDOM(html, { url: 'http://sprout-operator.test/feed', pretendToBeVisual: true });
   (dom.window as unknown as Record<string, unknown>)['__SPROUT_TEST_MANUAL_MOUNT__'] = true;
 
   const values: Record<string, unknown> = {

@@ -19,7 +19,7 @@ import type { ViteDevServer } from 'vite';
 
 const repoRoot = process.cwd();
 
-const html = await readFile(`${repoRoot}/web/app/index.html`, 'utf8');
+const html = await readFile(`${repoRoot}/web/index.html`, 'utf8');
 
 
 const GLOBALS = [
@@ -47,7 +47,7 @@ interface Harness {
 
 
 async function setupHarness(): Promise<Harness> {
-  const dom = new JSDOM(html, { url: 'http://sprout-operator.test/app/feed', pretendToBeVisual: true });
+  const dom = new JSDOM(html, { url: 'http://sprout-operator.test/feed', pretendToBeVisual: true });
   (dom.window as unknown as Record<string, unknown>)['__SPROUT_TEST_MANUAL_MOUNT__'] = true;
 
   const values: Record<string, unknown> = {
@@ -116,7 +116,7 @@ test('the Shell composes a desktop sidebar and a phone bottom navigation from on
   const { vite, doc, mountInto, cleanup } = await setupHarness();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp({ routerBase: '/' });
     await router.push('/project/tasks');
     await router.isReady();
     mountInto(app);
@@ -154,7 +154,7 @@ test('the Shell reserves the same safe-area inset as the fixed phone navigation'
     style.textContent = source.match(/<style>([\s\S]*?)<\/style>/)?.[1] ?? '';
     doc.head.append(style);
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp({ routerBase: '/' });
     await router.push('/project/tasks');
     await router.isReady();
     mountInto(app);
@@ -184,7 +184,7 @@ test('the Settings session tail uses shell clearance without a second mobile nav
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
     const { FixtureSettingsService } = (await vite.ssrLoadModule('/src/modules/settings/adapters/fixture-adapter.ts')) as typeof import('../modules/settings/adapters/fixture-adapter.ts');
-    const { app, router } = createSproutApp({ routerBase: '/app/', settingsService: new FixtureSettingsService() });
+    const { app, router } = createSproutApp({ routerBase: '/', settingsService: new FixtureSettingsService() });
     await router.push('/manage/settings');
     await router.isReady();
     mountInto(app);
@@ -211,7 +211,7 @@ test('the phone header states connection status in text and offers the theme con
       createSproutApp: typeof import('../app/main.ts').createSproutApp;
     };
     void createConnectionController;
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp({ routerBase: '/' });
     await router.push('/feed');
     await router.isReady();
     mountInto(app);
@@ -239,7 +239,7 @@ test('the Shell ignores read loading and reports offline and reconnecting truthf
     const { createShellConnectionController } = (await vite.ssrLoadModule('/src/shell/connection.ts')) as typeof import('../shell/connection.ts');
 
     const controller = createShellConnectionController({ status: 'online', connection: 'online', loading: false });
-    const { app, router } = createSproutApp({ routerBase: '/app/', connectionSource: controller });
+    const { app, router } = createSproutApp({ routerBase: '/', connectionSource: controller });
     await router.push('/feed');
     await router.isReady();
     mountInto(app);
@@ -285,7 +285,7 @@ test('transient connection refreshes preserve shell geometry and prolonged stall
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
     const { createShellConnectionController } = (await vite.ssrLoadModule('/src/shell/connection.ts')) as typeof import('../shell/connection.ts');
     const controller = createShellConnectionController({ status: 'online', connection: 'online', loading: false });
-    const { app, router } = createSproutApp({ routerBase: '/app/', connectionSource: controller });
+    const { app, router } = createSproutApp({ routerBase: '/', connectionSource: controller });
     await router.push('/feed');
     await router.isReady();
     mountInto(app);
@@ -340,7 +340,7 @@ test('the Shell has exactly one live announcement region, and a page can announc
   const { vite, doc, mountInto, cleanup } = await setupHarness();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp({ routerBase: '/' });
     await router.push('/feed');
     await router.isReady();
     mountInto(app);
@@ -373,7 +373,7 @@ test('the Shell offers a keyboard-only skip control that moves focus to the main
   const { vite, doc, mountInto, cleanup } = await setupHarness();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp({ routerBase: '/' });
     await router.push('/feed');
     await router.isReady();
     mountInto(app);
@@ -399,7 +399,7 @@ test('the main content region is a focusable landmark reachable by assistive tec
   const { vite, doc, mountInto, cleanup } = await setupHarness();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp({ routerBase: '/' });
     await router.push('/manage/agents');
     await router.isReady();
     mountInto(app);
@@ -427,7 +427,7 @@ test('every navigation target and interactive control in the shell is a real lin
   const { vite, doc, mountInto, cleanup } = await setupHarness();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp({ routerBase: '/' });
     await router.push('/manage/usage');
     await router.isReady();
     mountInto(app);

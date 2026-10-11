@@ -4,9 +4,9 @@ import { test } from 'node:test';
 import { JSDOM } from 'jsdom';
 
 // 1. Initialize JSDOM and globals BEFORE importing any Vue or Vite modules
-const initialHtml = await readFile(new URL('../../../app/index.html', import.meta.url), 'utf8');
+const initialHtml = await readFile(new URL('../../../index.html', import.meta.url), 'utf8');
 const initialDom = new JSDOM(initialHtml, {
-  url: 'http://sprout-operator.test/app/manage/environments',
+  url: 'http://sprout-operator.test/manage/environments',
   pretendToBeVisual: true,
 });
 
@@ -735,9 +735,9 @@ test('Ticket #147: closing a newly-created pending ceremony reloads the environm
     };
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/app/manage/environments', name: 'environments', component: EnvironmentsView }],
+      routes: [{ path: '/manage/environments', name: 'environments', component: EnvironmentsView }],
     });
-    await router.push('/app/manage/environments');
+    await router.push('/manage/environments');
     await router.isReady();
     const container = dom.window.document.createElement('div');
     dom.window.document.body.appendChild(container);
@@ -815,9 +815,9 @@ test('Ticket #150 rework: background refresh keeps a complete selected snapshot 
     };
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/app/manage/environments', name: 'environments', component: EnvironmentsView }],
+      routes: [{ path: '/manage/environments', name: 'environments', component: EnvironmentsView }],
     });
-    await router.push('/app/manage/environments');
+    await router.push('/manage/environments');
     await router.isReady();
     const container = dom.window.document.createElement('div');
     dom.window.document.body.appendChild(container);

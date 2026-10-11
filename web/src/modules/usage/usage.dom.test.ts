@@ -22,7 +22,7 @@ import { JSDOM } from 'jsdom';
 import { createServer, type ViteDevServer } from 'vite';
 
 const repoRoot = process.cwd();
-const html = await readFile(`${repoRoot}/web/app/index.html`, 'utf8');
+const html = await readFile(`${repoRoot}/web/index.html`, 'utf8');
 
 const GLOBALS = [
   'HTMLElement', 'HTMLButtonElement', 'HTMLFormElement', 'HTMLInputElement', 'HTMLSelectElement',
@@ -40,7 +40,7 @@ interface Harness {
 }
 
 const sharedDom = new JSDOM(html, {
-  url: 'http://sprout-operator.test/app/manage/usage',
+  url: 'http://sprout-operator.test/manage/usage',
   pretendToBeVisual: true,
 });
 
@@ -64,10 +64,10 @@ for (const [key, value] of Object.entries(persistentValues)) {
   Object.defineProperty(globalThis, key, { configurable: true, writable: true, value });
 }
 
-async function setupHarness(_url = 'http://sprout-operator.test/app/manage/usage'): Promise<Harness> {
+async function setupHarness(_url = 'http://sprout-operator.test/manage/usage'): Promise<Harness> {
   const dom = sharedDom;
   dom.window.document.body.innerHTML = '<div id="app"></div>';
-  dom.window.history.replaceState(null, '', '/app/manage/usage');
+  dom.window.history.replaceState(null, '', '/manage/usage');
 
   const [{ createServer }, { default: vuePlugin }] = await Promise.all([
     import('vite'),
@@ -120,7 +120,7 @@ async function mountedPage(
   ]);
   const fixture = fixtureOverride ?? new usageModule.FixtureUsageService();
   const { app, router } = createSproutApp({
-    routerBase: '/app/',
+    routerBase: '/',
     usageService: fixture,
   });
   configureApp?.(app);
@@ -135,7 +135,7 @@ test('Usage: the page requires a typed Usage authority and never falls back to f
   const { vite, doc, mount, cleanup } = await setupHarness();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../../app/main.ts');
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp({ routerBase: '/' });
     await router.push('/manage/usage');
     await router.isReady();
     app.mount(mount);

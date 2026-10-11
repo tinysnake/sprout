@@ -5,9 +5,9 @@ import { JSDOM } from 'jsdom';
 import { feedTarget } from '../../../../src/web/feed.ts';
 
 // Initialize JSDOM and globals before importing Vite/Vue modules
-const initialHtml = await readFile(new URL('../../../app/index.html', import.meta.url), 'utf8');
+const initialHtml = await readFile(new URL('../../../index.html', import.meta.url), 'utf8');
 const initialDom = new JSDOM(initialHtml, {
-  url: 'http://sprout-operator.test/app/manage/settings',
+  url: 'http://sprout-operator.test/manage/settings',
   pretendToBeVisual: true,
 });
 
@@ -115,7 +115,7 @@ async function withSettings(run: (context: {
     const { FixtureSettingsService } = await vite.ssrLoadModule('/src/modules/settings/adapters/fixture-adapter.ts');
     const service = new FixtureSettingsService();
     configure?.(service);
-    const mounted = createSproutApp({ routerBase: '/app/', settingsService: service });
+    const mounted = createSproutApp({ routerBase: '/', settingsService: service });
     app = mounted.app;
     app!.mount(dom.window.document.getElementById('app')!);
     await mounted.router.push('/manage/settings');
@@ -150,7 +150,7 @@ test('Settings diagnostics: correlated row links to its owning Task with Project
     assert.match(rows[0]!.textContent!, /Task task-1/);
     const link = rows[0]!.querySelector<HTMLAnchorElement>('a')!;
     assert.ok(link);
-    assert.equal(link.getAttribute('href'), '/app/project/tasks/task-1?project=project-1');
+    assert.equal(link.getAttribute('href'), '/project/tasks/task-1?project=project-1');
     assert.equal(rows[1]!.querySelector('a'), null);
     assert.equal(rows[2]!.querySelector('a'), null);
     link.dispatchEvent(new initialDom.window.MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
@@ -384,7 +384,7 @@ test('Settings: renders normal state with prototype IA, status strip, tabs, and 
 
     const settingsService = new FixtureSettingsService();
     const { app, router } = createSproutApp({
-      routerBase: '/app/',
+      routerBase: '/',
       settingsService,
     });
     app.mount(appMount);
@@ -467,7 +467,7 @@ test('Settings: distinct risk-bearing session-revocation states (revoke-one and 
     });
 
     const { app, router } = createSproutApp({
-      routerBase: '/app/',
+      routerBase: '/',
       settingsService,
     });
     app.mount(appMount);
@@ -534,7 +534,7 @@ test('Settings: distinct risk-bearing session-revocation states (revoke-one and 
       },
     });
     const { app: app2, router: router2 } = createSproutApp({
-      routerBase: '/app/',
+      routerBase: '/',
       settingsService: settingsService2,
     });
     app.unmount();
@@ -593,7 +593,7 @@ test('Settings: diagnostic export downloads ONLY the sanitized contract', async 
     });
 
     const { app, router } = createSproutApp({
-      routerBase: '/app/',
+      routerBase: '/',
       settingsService,
     });
     app.mount(appMount);
@@ -650,7 +650,7 @@ test('Settings: distinct unavailable, stale, and failure states', async () => {
     assert.ok(appMount);
 
     // 1. Test UNAVAILABLE state: no service provided
-    const { app: app1, router: router1 } = createSproutApp({ routerBase: '/app/' });
+    const { app: app1, router: router1 } = createSproutApp({ routerBase: '/' });
     app1.mount(appMount);
     const doc = dom.window.document;
 
@@ -668,7 +668,7 @@ test('Settings: distinct unavailable, stale, and failure states', async () => {
       state: { status: 'stale', connection: 'stale', loading: false },
     });
     const { app: app2, router: router2 } = createSproutApp({
-      routerBase: '/app/',
+      routerBase: '/',
       settingsService: staleService,
     });
     app2.mount(appMount);
@@ -692,7 +692,7 @@ test('Settings: distinct unavailable, stale, and failure states', async () => {
       },
     });
     const { app: app3, router: router3 } = createSproutApp({
-      routerBase: '/app/',
+      routerBase: '/',
       settingsService: failService,
     });
     app3.mount(appMount);
@@ -727,7 +727,7 @@ test('Settings: touch targets (min 44px) and keyboard navigation', async () => {
 
     const settingsService = new FixtureSettingsService();
     const { app, router } = createSproutApp({
-      routerBase: '/app/',
+      routerBase: '/',
       settingsService,
     });
     app.mount(appMount);

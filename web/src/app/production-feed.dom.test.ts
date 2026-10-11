@@ -6,7 +6,7 @@ import type { BrowserTransportState } from '../transport/browser-transport.js';
 import type { FeedBrowserAdapter } from '../adapters/feed-api.js';
 
 const dom = new JSDOM('<!doctype html><html><body><div id="app"></div></body></html>', {
-  url: 'http://sprout-test.invalid/app/feed',
+  url: 'http://sprout-test.invalid/feed',
   pretendToBeVisual: true,
 });
 (dom.window as unknown as Record<string, unknown>).__SPROUT_TEST_MANUAL_MOUNT__ = true;
@@ -170,7 +170,7 @@ function createFeedService(options: { readonly fail?: boolean } = {}) {
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 40));
 
-async function routeToFeed(url = '/app/feed'): Promise<void> {
+async function routeToFeed(url = '/feed'): Promise<void> {
   dom.window.history.replaceState(null, '', url);
   dom.window.document.body.innerHTML = '<div id="app"></div>';
 }
@@ -180,8 +180,8 @@ test('production Feed wires its read adapter, restores namespaced scope context,
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
     const { FEED_CLOCK } = (await vite.ssrLoadModule('/src/views/feed-port.ts')) as typeof import('../views/feed-port.ts');
     const feed = createFeedService();
-    await routeToFeed('/app/feed?scope=all&urgency=action_required&activity=all');
-    const { app, router } = createSproutApp({ routerBase: '/app/', feedService: feed.service, connectionSource: feed.service });
+    await routeToFeed('/feed?scope=all&urgency=action_required&activity=all');
+    const { app, router } = createSproutApp({ routerBase: '/', feedService: feed.service, connectionSource: feed.service });
     app.provide(FEED_CLOCK, () => 1_700_000_120_003);
     await router.isReady();
     app.mount(dom.window.document.getElementById('app')!);
@@ -302,7 +302,7 @@ test('production Feed wires its read adapter, restores namespaced scope context,
     app.unmount();
 
     await routeToFeed();
-    const missing = createSproutApp({ routerBase: '/app/' });
+    const missing = createSproutApp({ routerBase: '/' });
     await missing.router.isReady();
     missing.app.mount(dom.window.document.getElementById('app')!);
     await settle();
@@ -311,7 +311,7 @@ test('production Feed wires its read adapter, restores namespaced scope context,
 
     await routeToFeed();
     const failed = createFeedService({ fail: true });
-    const offline = createSproutApp({ routerBase: '/app/', feedService: failed.service, connectionSource: failed.service });
+    const offline = createSproutApp({ routerBase: '/', feedService: failed.service, connectionSource: failed.service });
     await offline.router.isReady();
     offline.app.mount(dom.window.document.getElementById('app')!);
     await settle();

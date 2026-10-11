@@ -6,7 +6,7 @@ import { journeyWire } from './production-journey-wire.ts';
 // Exercise local midnight and the 23-hour DST day, independently of the host timezone.
 process.env['TZ'] = 'America/New_York';
 const dom = new JSDOM('<!doctype html><html><body><div id="app"></div></body></html>', {
-  url: 'http://sprout-test.invalid/app/project/chat/channel-a?project=project-a',
+  url: 'http://sprout-test.invalid/project/chat/channel-a?project=project-a',
   pretendToBeVisual: true,
 });
 (dom.window as unknown as Record<string, unknown>)['__SPROUT_TEST_MANUAL_MOUNT__'] = true;
@@ -67,7 +67,7 @@ function assertBefore(id: string, label: string, kind: 'message' | 'event' = 'me
   assert.equal(row.previousElementSibling.textContent?.trim(), label);
 }
 async function harness(initial: ReturnType<typeof message>[], includeEvents = false) {
-  dom.window.history.replaceState(null, '', '/app/project/chat/channel-a?project=project-a');
+  dom.window.history.replaceState(null, '', '/project/chat/channel-a?project=project-a');
   doc.body.innerHTML = '<div id="app"></div>';
   const wire = journeyWire();
   wire.messages.splice(0, wire.messages.length, ...initial);
@@ -84,7 +84,7 @@ async function harness(initial: ReturnType<typeof message>[], includeEvents = fa
       return source;
     },
   });
-  const mounted = createSproutApp({ ...createProductionAppOptions(transport), routerBase: '/app/' });
+  const mounted = createSproutApp({ ...createProductionAppOptions(transport), routerBase: '/' });
   await mounted.router.isReady();
   mounted.app.mount(doc.getElementById('app')!);
   await waitFor(() => !!doc.querySelector('.chat-messages-body') && !doc.querySelector('.chat-detail-loading')

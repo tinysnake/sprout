@@ -1447,8 +1447,25 @@ function hasAssetExtension(pathname: string): boolean {
   return ASSET_EXTENSIONS.has(ext) || /^\.[a-z0-9]{1,8}$/i.test(ext);
 }
 
-function isAppPath(pathname: string): boolean {
-  return pathname === '/app' || pathname.startsWith('/app/');
+/**
+ * URL mounts in the static tree: the Sprout app is the root SPA mount and the
+ * design prototype is the `/prototype` SPA mount. Each mount falls back to its
+ * own index for deep links so history-mode routes survive refresh.
+ */
+function isPrototypePath(pathname: string): boolean {
+  return pathname === '/prototype' || pathname.startsWith('/prototype/');
+}
+
+function spaIndexRelativePath(pathname: string): string {
+  return isPrototypePath(pathname) ? 'prototype/index.html' : 'index.html';
+}
+
+/**
+ * No static content may live under the API prefix: an unmatched `/api/...`
+ * request must stay a JSON 404 and never fall back to a SPA HTML page.
+ */
+function isApiPath(pathname: string): boolean {
+  return pathname === '/api' || pathname.startsWith('/api/');
 }
 
 function containsTraversal(path: string): boolean {
@@ -1482,11 +1499,12 @@ export async function serveStatic(
 ): Promise<{ body: Buffer; contentType: string } | undefined> {
   if (!readFile) return undefined;
   if (containsTraversal(pathname)) return undefined;
+  if (isApiPath(pathname)) return undefined;
 
   const rawRelative = pathname.replace(/^\/+/, '');
   if (containsTraversal(rawRelative)) return undefined;
 
-  // 1. Directory path with trailing slash (e.g. `/`, `/app/`, `/prototype/`): resolve to `${dir}index.html`.
+  // 1. Directory path with trailing slash (e.g. `/`, `/prototype/`): resolve to `${dir}index.html`.
   if (pathname.endsWith('/')) {
     const normalized = rawRelative.replace(/\/+$/, '');
     const indexPath = normalized === '' ? 'index.html' : `${normalized}/index.html`;
@@ -1494,12 +1512,12 @@ export async function serveStatic(
     if (body) {
       return { body, contentType: contentTypeFor(indexPath) };
     }
-    // If a directory index was not found, check if it is under the app mount for SPA fallback.
-    // E.g. `/app/manage/environments/` (with trailing slash).
-    if (isAppPath(pathname) && !hasAssetExtension(pathname)) {
-      const appIndexBody = await safeRead(readFile, joinPath(root, 'app/index.html'));
-      if (appIndexBody) {
-        return { body: appIndexBody, contentType: CONTENT_TYPES['.html'] ?? 'text/html; charset=utf-8' };
+    // If a directory index was not found, fall back to the mount's SPA index.
+    // E.g. `/manage/environments/` (with trailing slash).
+    if (!hasAssetExtension(pathname)) {
+      const spaIndexBody = await safeRead(readFile, joinPath(root, spaIndexRelativePath(pathname)));
+      if (spaIndexBody) {
+        return { body: spaIndexBody, contentType: CONTENT_TYPES['.html'] ?? 'text/html; charset=utf-8' };
       }
     }
     return undefined;
@@ -1511,19 +1529,20 @@ export async function serveStatic(
     return { body, contentType: contentTypeFor(rawRelative) };
   }
 
-  // 3. Directory path without trailing slash (e.g. `/app`, `/prototype`): try `${relative}/index.html`.
+  // 3. Directory path without trailing slash (e.g. `/prototype`): try `${relative}/index.html`.
   const dirIndexBody = await safeRead(readFile, joinPath(root, `${rawRelative}/index.html`));
   if (dirIndexBody) {
     return { body: dirIndexBody, contentType: CONTENT_TYPES['.html'] ?? 'text/html; charset=utf-8' };
   }
 
-  // 4. SPA fallback: paths under the app mount without a matching file and without an asset extension
-  // resolve to the app index so history-mode routes work on refresh and direct entry.
-  // Missing asset extensions (.js/.css/etc.) stay 404 (return undefined).
-  if (isAppPath(pathname) && !hasAssetExtension(pathname)) {
-    const appIndexBody = await safeRead(readFile, joinPath(root, 'app/index.html'));
-    if (appIndexBody) {
-      return { body: appIndexBody, contentType: CONTENT_TYPES['.html'] ?? 'text/html; charset=utf-8' };
+  // 4. SPA fallback: a path without a matching file and without an asset
+  // extension resolves to its mount's index so history-mode routes work on
+  // refresh and direct entry (`/` mount = the app, `/prototype` mount = the
+  // prototype). Missing asset extensions (.js/.css/etc.) stay 404.
+  if (!hasAssetExtension(pathname)) {
+    const spaIndexBody = await safeRead(readFile, joinPath(root, spaIndexRelativePath(pathname)));
+    if (spaIndexBody) {
+      return { body: spaIndexBody, contentType: CONTENT_TYPES['.html'] ?? 'text/html; charset=utf-8' };
     }
   }
 

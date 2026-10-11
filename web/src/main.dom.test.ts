@@ -107,7 +107,7 @@ function button(scope: ParentNode, label: string): HTMLButtonElement {
 }
 
 test('the rendered client drives Task lifecycle controls through the fetch boundary', async () => {
-  const dom = new JSDOM(await readFile(new URL('../index.html', import.meta.url), 'utf8'), {
+  const dom = new JSDOM(await readFile(new URL('./legacy/console.html', import.meta.url), 'utf8'), {
     url: 'http://sprout.test/',
   });
   const { document } = dom.window;

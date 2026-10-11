@@ -6,9 +6,9 @@ import { JSDOM } from 'jsdom';
 import type { BrowserEventSource } from '../transport/browser-transport.ts';
 
 // 1. Initialize JSDOM and globals BEFORE importing any Vue or Vite modules
-const initialHtml = await readFile(new URL('../../app/index.html', import.meta.url), 'utf8');
+const initialHtml = await readFile(new URL('../../index.html', import.meta.url), 'utf8');
 const initialDom = new JSDOM(initialHtml, {
-  url: 'http://sprout-operator.test/app/manage/environments',
+  url: 'http://sprout-operator.test/manage/environments',
   pretendToBeVisual: true,
 });
 
@@ -112,7 +112,7 @@ async function deterministicAppOptions(vite: { ssrLoadModule: (id: string) => Pr
   const environmentService = new module.FixtureEnvironmentService();
   const agentService = new agentsModule.FixtureAgentService();
   return {
-    routerBase: '/app/',
+    routerBase: '/',
     environmentService,
     agentService,
     projectService: new projectsModule.FixtureProjectService(agentService, environmentService),
@@ -189,7 +189,7 @@ async function productionReconcilingAppOptions(vite: { ssrLoadModule: (id: strin
     forceReleases: [],
   };
   return {
-    routerBase: '/app/' as const,
+    routerBase: '/' as const,
     environmentService: new adapterModule.ProductionEnvironmentService(wire),
     synchronizeCalls,
   };
@@ -261,7 +261,7 @@ test('M77-SCOPE-001: production requires a typed environment adapter and never f
     assert.ok(appMount);
 
     // No adapter is injected: exactly the auto-mounted production bootstrap.
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp({ routerBase: '/' });
     await router.push('/manage/environments');
     await router.isReady();
     app.mount(appMount);

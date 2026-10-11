@@ -5,9 +5,9 @@ import { createFeedTestAdapter, pendingEnrollmentSnapshot, EMPTY_FEED_SNAPSHOT, 
 import { JSDOM } from 'jsdom';
 
 // 1. Initialize JSDOM and globals BEFORE importing any Vue or Vite modules
-const initialHtml = await readFile(new URL('../../app/index.html', import.meta.url), 'utf8');
+const initialHtml = await readFile(new URL('../../index.html', import.meta.url), 'utf8');
 const initialDom = new JSDOM(initialHtml, {
-  url: 'http://sprout-operator.test/app/manage/environments',
+  url: 'http://sprout-operator.test/manage/environments',
   pretendToBeVisual: true,
 });
 
@@ -109,7 +109,7 @@ async function deterministicAppOptions(vite: { ssrLoadModule: (id: string) => Pr
   const environmentService = new module.FixtureEnvironmentService();
   const agentService = new agentsModule.FixtureAgentService();
   return {
-    routerBase: '/app/',
+    routerBase: '/',
     environmentService,
     agentService,
     projectService: new projectsModule.FixtureProjectService(agentService, environmentService),
@@ -184,7 +184,7 @@ async function productionReconcilingAppOptions(vite: { ssrLoadModule: (id: strin
     forceReleases: [],
   };
   return {
-    routerBase: '/app/' as const,
+    routerBase: '/' as const,
     environmentService: new adapterModule.ProductionEnvironmentService(wire),
     synchronizeCalls,
   };
@@ -428,7 +428,7 @@ test('Production Web: deterministic loading state and empty state rendered in En
     }
 
     const { app: loadingApp, router: loadingRouter } = createSproutApp({
-      routerBase: '/app/',
+      routerBase: '/',
       environmentService: new LoadingEnvironmentService(),
     });
     await loadingRouter.push('/manage/environments');
@@ -455,7 +455,7 @@ test('Production Web: deterministic loading state and empty state rendered in En
     }
 
     const { app: emptyApp, router: emptyRouter } = createSproutApp({
-      routerBase: '/app/',
+      routerBase: '/',
       environmentService: new EmptyEnvironmentService(),
     });
     await emptyRouter.push('/manage/environments');

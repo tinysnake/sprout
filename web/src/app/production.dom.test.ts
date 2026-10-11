@@ -6,9 +6,9 @@ import { JSDOM } from 'jsdom';
 import type { ProjectEnvironmentAccessView } from '../adapters/project-api.js';
 
 // 1. Initialize JSDOM and globals BEFORE importing any Vue or Vite modules
-const initialHtml = await readFile(new URL('../../app/index.html', import.meta.url), 'utf8');
+const initialHtml = await readFile(new URL('../../index.html', import.meta.url), 'utf8');
 const initialDom = new JSDOM(initialHtml, {
-  url: 'http://sprout-operator.test/app/manage/environments',
+  url: 'http://sprout-operator.test/manage/environments',
   pretendToBeVisual: true,
 });
 
@@ -111,7 +111,7 @@ async function deterministicAppOptions(vite: { ssrLoadModule: (id: string) => Pr
   const environmentService = new module.FixtureEnvironmentService();
   const agentService = new agentsModule.FixtureAgentService();
   return {
-    routerBase: '/app/',
+    routerBase: '/',
     environmentService,
     agentService,
     projectService: new projectsModule.FixtureProjectService(agentService, environmentService),
@@ -187,7 +187,7 @@ async function productionReconcilingAppOptions(vite: { ssrLoadModule: (id: strin
     forceReleases: [],
   };
   return {
-    routerBase: '/app/' as const,
+    routerBase: '/' as const,
     environmentService: new adapterModule.ProductionEnvironmentService(wire),
     synchronizeCalls,
   };
@@ -721,8 +721,8 @@ test('Project Overview hides project identity details in the zero-Project header
     const projectService = new projectsModule.FixtureProjectService(options.agentService, options.environmentService, []);
     const doc = dom.window.document;
     doc.body.innerHTML = '<div id="app"></div>';
-    dom.window.history.replaceState(null, '', '/app/project/overview');
-    const mounted = createSproutApp({ routerBase: '/app/', projectService });
+    dom.window.history.replaceState(null, '', '/project/overview');
+    const mounted = createSproutApp({ routerBase: '/', projectService });
     app = mounted.app;
     await mounted.router.push('/project/overview');
     await mounted.router.isReady();
@@ -755,8 +755,8 @@ test('Add Agent explains the exhausted choice set without rendering an empty sel
     }
     const doc = dom.window.document;
     doc.body.innerHTML = '<div id="app"></div>';
-    dom.window.history.replaceState(null, '', '/app/project/overview');
-    const mounted = createSproutApp({ routerBase: '/app/', projectService });
+    dom.window.history.replaceState(null, '', '/project/overview');
+    const mounted = createSproutApp({ routerBase: '/', projectService });
     app = mounted.app;
     await mounted.router.push('/project/overview');
     await mounted.router.isReady();
@@ -810,8 +810,8 @@ test('Add Environment refreshes access and omits an already-assigned instance fr
     });
     const doc = dom.window.document;
     doc.body.innerHTML = '<div id="app"></div>';
-    dom.window.history.replaceState(null, '', '/app/project/overview');
-    const mounted = createSproutApp({ routerBase: '/app/', projectService });
+    dom.window.history.replaceState(null, '', '/project/overview');
+    const mounted = createSproutApp({ routerBase: '/', projectService });
     app = mounted.app;
     await mounted.router.push('/project/overview');
     await mounted.router.isReady();
@@ -870,8 +870,8 @@ test('Project Overview degrades an unlistable access row, ends it by its stored 
     });
     const doc = dom.window.document;
     doc.body.innerHTML = '<div id="app"></div>';
-    dom.window.history.replaceState(null, '', '/app/project/overview');
-    const mounted = createSproutApp({ routerBase: '/app/', projectService });
+    dom.window.history.replaceState(null, '', '/project/overview');
+    const mounted = createSproutApp({ routerBase: '/', projectService });
     app = mounted.app;
     await mounted.router.push('/project/overview');
     await mounted.router.isReady();
@@ -961,8 +961,8 @@ test('Project creation submits selected memberships and default workspaces as on
     });
     const doc = dom.window.document;
     doc.body.innerHTML = '<div id="app"></div>';
-    dom.window.history.replaceState(null, '', '/app/project/overview');
-    const mounted = createSproutApp({ routerBase: '/app/', projectService: service });
+    dom.window.history.replaceState(null, '', '/project/overview');
+    const mounted = createSproutApp({ routerBase: '/', projectService: service });
     app = mounted.app;
     await mounted.router.push('/project/overview');
     await mounted.router.isReady();
@@ -1031,8 +1031,8 @@ test('Project Overview distinguishes unavailable, empty, failed, and unconfirmed
     const settle = () => new Promise((resolve) => setTimeout(resolve, 80));
     const mountAtProject = async (options: Parameters<typeof createSproutApp>[0] = {}) => {
       doc.body.innerHTML = '<div id="app"></div>';
-      dom.window.history.replaceState(null, '', '/app/project/overview');
-      const { app, router } = createSproutApp({ routerBase: '/app/', ...options });
+      dom.window.history.replaceState(null, '', '/project/overview');
+      const { app, router } = createSproutApp({ routerBase: '/', ...options });
       await router.push('/project/overview');
       await router.isReady();
       app.mount(doc.getElementById('app')!);
@@ -1112,7 +1112,7 @@ test('Project Environment notices use the same severity treatment as Environment
 
     for (const { severity, reason, variantClass } of cases) {
       doc.body.innerHTML = '<div id="app"></div>';
-      dom.window.history.replaceState(null, '', '/app/project/overview');
+      dom.window.history.replaceState(null, '', '/project/overview');
       const environmentService = new environmentModule.FixtureEnvironmentService(environments.map((environment) =>
         environment.id === readyEnvironment.id
           ? { ...environment, trafficLight: severity, trafficLightReason: reason }
@@ -1121,7 +1121,7 @@ test('Project Environment notices use the same severity treatment as Environment
       const agentService = new agentsModule.FixtureAgentService();
       const projectService = new projectsModule.FixtureProjectService(agentService, environmentService);
       const { app, router } = createSproutApp({
-        routerBase: '/app/',
+        routerBase: '/',
         environmentService,
         agentService,
         projectService,
@@ -1156,7 +1156,7 @@ test('sign-in distinguishes unreachable backend from rejected credentials', asyn
 
     for (const outcome of ['unreachable', 'rejected'] as const) {
       doc.body.innerHTML = '<div id="app"></div>';
-      dom.window.history.replaceState(null, '', '/app/');
+      dom.window.history.replaceState(null, '', '/');
       const transport = createBrowserTransport({
         fetch: async () => {
           if (outcome === 'unreachable') throw new Error('connection refused');
@@ -1166,7 +1166,7 @@ test('sign-in distinguishes unreachable backend from rejected credentials', asyn
         },
       });
       const operatorSession = createOperatorSessionBrowserAdapter(transport);
-      const { app, router } = createSproutApp({ routerBase: '/app/', operatorSession });
+      const { app, router } = createSproutApp({ routerBase: '/', operatorSession });
       await router.isReady();
       app.mount(doc.getElementById('app')!);
       try {

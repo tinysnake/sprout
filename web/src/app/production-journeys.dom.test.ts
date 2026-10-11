@@ -4,7 +4,7 @@ import { JSDOM } from 'jsdom';
 import type { FeedTarget } from '../../../src/web/feed.ts';
 
 const dom = new JSDOM('<!doctype html><html><body><div id="app"></div></body></html>', {
-  url: 'http://sprout-test.invalid/app/feed',
+  url: 'http://sprout-test.invalid/feed',
   pretendToBeVisual: true,
 });
 (dom.window as unknown as Record<string, unknown>).__SPROUT_TEST_MANUAL_MOUNT__ = true;
@@ -85,7 +85,7 @@ async function waitFor(predicate: () => boolean, failure: string) {
 async function harness(width: number, initial = '/project/overview?project=project-a') {
   Object.defineProperty(dom.window, 'innerWidth', { configurable: true, value: width });
   Object.defineProperty(dom.window, 'innerHeight', { configurable: true, value: width < 768 ? 844 : 900 });
-  dom.window.history.replaceState(null, '', '/app' + initial);
+  dom.window.history.replaceState(null, '', initial);
   doc.body.innerHTML = '<div id="app"></div>';
   const wire = journeyWire();
   const announcements: string[] = [];
@@ -113,7 +113,7 @@ async function harness(width: number, initial = '/project/overview?project=proje
     setTimeout: ((callback: TimerHandler) => { const id = ++timer; if (typeof callback === 'function') timers.set(id, callback as () => void); return id; }) as typeof globalThis.setTimeout,
     clearTimeout: ((id: ReturnType<typeof globalThis.setTimeout>) => { timers.delete(Number(id)); }) as typeof globalThis.clearTimeout,
   });
-  const options = { ...createProductionAppOptions(transport), routerBase: '/app/' };
+  const options = { ...createProductionAppOptions(transport), routerBase: '/' };
   let mounted = createSproutApp(options);
   await mounted.router.isReady();
   mounted.app.mount(doc.getElementById('app')!);
@@ -136,7 +136,7 @@ async function harness(width: number, initial = '/project/overview?project=proje
       mounted.app.unmount();
       mounted.router.options.history.destroy();
       doc.body.innerHTML = '<div id="app"></div>';
-      mounted = createSproutApp({ ...createProductionAppOptions(transport), routerBase: '/app/' });
+      mounted = createSproutApp({ ...createProductionAppOptions(transport), routerBase: '/' });
       await mounted.router.isReady(); mounted.app.mount(doc.getElementById('app')!); await settle();
     },
     close() { observer.disconnect(); mounted.app.unmount(); mounted.router.options.history.destroy(); stopEvents(); },

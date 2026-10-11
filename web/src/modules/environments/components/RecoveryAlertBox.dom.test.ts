@@ -10,9 +10,9 @@ import type {
 import type { EnvironmentInstance } from '../types.js';
 import { ProductionEnvironmentService } from '../adapters/production-adapter.ts';
 
-const initialHtml = await readFile(new URL('../../../../app/index.html', import.meta.url), 'utf8');
+const initialHtml = await readFile(new URL('../../../../index.html', import.meta.url), 'utf8');
 const initialDom = new JSDOM(initialHtml, {
-  url: 'http://sprout-operator.test/app/manage/environments',
+  url: 'http://sprout-operator.test/manage/environments',
   pretendToBeVisual: true,
 });
 

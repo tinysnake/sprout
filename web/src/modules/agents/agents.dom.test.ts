@@ -23,7 +23,7 @@ import { createServer, type ViteDevServer } from 'vite';
 
 const repoRoot = process.cwd();
 
-const html = await readFile(`${repoRoot}/web/app/index.html`, 'utf8');
+const html = await readFile(`${repoRoot}/web/index.html`, 'utf8');
 
 
 const GLOBALS = [
@@ -49,7 +49,7 @@ interface Harness {
 // document. Each harness resets the shared document instead (the same rule the
 // production DOM suite follows).
 const sharedDom = new JSDOM(html, {
-  url: 'http://sprout-operator.test/app/manage/agents',
+  url: 'http://sprout-operator.test/manage/agents',
   pretendToBeVisual: true,
 });
 
@@ -75,11 +75,11 @@ for (const [key, value] of Object.entries(persistentValues)) {
 }
 
 
-async function setupHarness(_url = 'http://sprout-operator.test/app/manage/agents'): Promise<Harness> {
+async function setupHarness(_url = 'http://sprout-operator.test/manage/agents'): Promise<Harness> {
   const dom = sharedDom;
   // Reset the shared document so one test's navigation cannot leak into the next.
   dom.window.document.body.innerHTML = '<div id="app"></div>';
-  dom.window.history.replaceState(null, '', '/app/manage/agents');
+  dom.window.history.replaceState(null, '', '/manage/agents');
 
   const [{ createServer }, { default: vuePlugin }] = await Promise.all([
     import('vite'),
@@ -118,7 +118,7 @@ async function mountedPage(vite: ViteDevServer, mount: HTMLElement) {
   ]);
   const fixture = new agentsModule.FixtureAgentService();
   const { app, router } = createSproutApp({
-    routerBase: '/app/',
+    routerBase: '/',
     agentService: fixture,
   });
   await router.push('/manage/agents');
@@ -138,7 +138,7 @@ test('the page requires a typed Agent authority and never falls back to fixture 
   const { vite, doc, mount, cleanup } = await setupHarness();
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
-    const { app, router } = createSproutApp({ routerBase: '/app/' });
+    const { app, router } = createSproutApp({ routerBase: '/' });
     await router.push('/manage/agents');
     await router.isReady();
     app.mount(mount);
@@ -402,12 +402,12 @@ test('master cards and option controls are keyboard-reachable with focusable rea
 
 
 test('an unknown Agent deep link renders not-found and never substitutes another record', async () => {
-  const { doc, mount, vite, cleanup } = await setupHarness('http://sprout-operator.test/app/manage/agents');
+  const { doc, mount, vite, cleanup } = await setupHarness('http://sprout-operator.test/manage/agents');
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
     const agentsModule = (await vite.ssrLoadModule('/src/modules/agents/adapters/fixture-adapter.ts')) as typeof import('./adapters/fixture-adapter.ts');
     const { app, router } = createSproutApp({
-      routerBase: '/app/',
+      routerBase: '/',
       agentService: new agentsModule.FixtureAgentService(),
     });
     const hostileId = '<script>hostile</script>';

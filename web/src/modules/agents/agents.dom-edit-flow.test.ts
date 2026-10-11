@@ -26,7 +26,7 @@ import type { RunView } from '../../../../../src/web/views.ts';
 
 const repoRoot = process.cwd();
 
-const html = await readFile(`${repoRoot}/web/app/index.html`, 'utf8');
+const html = await readFile(`${repoRoot}/web/index.html`, 'utf8');
 
 
 const GLOBALS = [
@@ -52,7 +52,7 @@ interface Harness {
 // document. Each harness resets the shared document instead (the same rule the
 // production DOM suite follows).
 const sharedDom = new JSDOM(html, {
-  url: 'http://sprout-operator.test/app/manage/agents',
+  url: 'http://sprout-operator.test/manage/agents',
   pretendToBeVisual: true,
 });
 
@@ -78,11 +78,11 @@ for (const [key, value] of Object.entries(persistentValues)) {
 }
 
 
-async function setupHarness(_url = 'http://sprout-operator.test/app/manage/agents'): Promise<Harness> {
+async function setupHarness(_url = 'http://sprout-operator.test/manage/agents'): Promise<Harness> {
   const dom = sharedDom;
   // Reset the shared document so one test's navigation cannot leak into the next.
   dom.window.document.body.innerHTML = '<div id="app"></div>';
-  dom.window.history.replaceState(null, '', '/app/manage/agents');
+  dom.window.history.replaceState(null, '', '/manage/agents');
 
   const [{ createServer }, { default: vuePlugin }] = await Promise.all([
     import('vite'),
@@ -121,7 +121,7 @@ async function mountedPage(vite: ViteDevServer, mount: HTMLElement) {
   ]);
   const fixture = new agentsModule.FixtureAgentService();
   const { app, router } = createSproutApp({
-    routerBase: '/app/',
+    routerBase: '/',
     agentService: fixture,
   });
   await router.push('/manage/agents');
@@ -138,12 +138,12 @@ function settle(ms = 60): Promise<void> {
 
 
 test('selecting a card drives URL-addressable phone drill-down and browser history', async () => {
-  const { dom, doc, mount, vite, cleanup } = await setupHarness('http://sprout-operator.test/app/app');
+  const { dom, doc, mount, vite, cleanup } = await setupHarness('http://sprout-operator.test/');
   try {
     const { createSproutApp } = (await vite.ssrLoadModule('/src/app/main.ts')) as typeof import('../app/main.ts');
     const agentsModule = (await vite.ssrLoadModule('/src/modules/agents/adapters/fixture-adapter.ts')) as typeof import('./adapters/fixture-adapter.ts');
     const { app, router } = createSproutApp({
-      routerBase: '/app/',
+      routerBase: '/',
       agentService: new agentsModule.FixtureAgentService(),
     });
     await router.push('/manage/agents');
@@ -306,7 +306,7 @@ test('a refused instructions save renders an inline validation-error and appends
       throw new Error('an Agent requires a valid work model identifier');
     };
 
-    const { app, router } = createSproutApp({ routerBase: '/app/', agentService: refusing });
+    const { app, router } = createSproutApp({ routerBase: '/', agentService: refusing });
     await router.push('/manage/agents');
     await router.isReady();
     app.mount(mount);
@@ -644,7 +644,7 @@ test('the edit persists through the production adapter with option identity pres
       >,
     ]);
     const service = new ProductionAgentService(adapter, async () => ({ runs: [priorRun] }));
-    const { app, router } = createSproutApp({ routerBase: '/app/', agentService: service });
+    const { app, router } = createSproutApp({ routerBase: '/', agentService: service });
     await router.push('/manage/agents');
     await router.isReady();
     app.mount(mount);
