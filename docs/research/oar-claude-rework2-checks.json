@@ -1,0 +1,233 @@
+{
+  "quick": {
+    "command": [
+      "npm",
+      "run",
+      "test:quick"
+    ],
+    "explicitTimeoutSeconds": 180,
+    "exitCode": 0,
+    "outerTimeout": false,
+    "durationSeconds": 68.26,
+    "loadStart": [
+      2.84,
+      3.05,
+      3.09
+    ],
+    "loadEnd": [
+      4.42,
+      3.59,
+      3.29
+    ],
+    "logicalCpus": 10,
+    "counters": {
+      "tests": 2131,
+      "pass": 2131,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    },
+    "diagnostics": [],
+    "diagnosticCount": 0,
+    "outputTail": [
+      "",
+      "> sprout@0.0.0 test:quick",
+      "> node scripts/test-select.ts --run quick",
+      "",
+      "quick: 279 files",
+      "\u2139 tests 2131",
+      "\u2139 suites 0",
+      "\u2139 pass 2131",
+      "\u2139 fail 0",
+      "\u2139 cancelled 0",
+      "\u2139 skipped 0",
+      "\u2139 todo 0",
+      "\u2139 duration_ms 67634.32925"
+    ]
+  },
+  "affected": {
+    "command": [
+      "npm",
+      "run",
+      "test:affected"
+    ],
+    "explicitTimeoutSeconds": 180,
+    "exitCode": 0,
+    "outerTimeout": false,
+    "durationSeconds": 68.43,
+    "loadStart": [
+      4.04,
+      3.54,
+      3.28
+    ],
+    "loadEnd": [
+      5.02,
+      4.04,
+      3.49
+    ],
+    "logicalCpus": 10,
+    "counters": {
+      "tests": 2131,
+      "pass": 2131,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    },
+    "diagnostics": [],
+    "diagnosticCount": 0,
+    "outputTail": [
+      "",
+      "> sprout@0.0.0 test:affected",
+      "> node scripts/test-select.ts --run affected",
+      "",
+      "affected: 279 files",
+      "\u2139 tests 2131",
+      "\u2139 suites 0",
+      "\u2139 pass 2131",
+      "\u2139 fail 0",
+      "\u2139 cancelled 0",
+      "\u2139 skipped 0",
+      "\u2139 todo 0",
+      "\u2139 duration_ms 67840.88675"
+    ]
+  },
+  "full": {
+    "command": [
+      "npm",
+      "test"
+    ],
+    "explicitTimeoutSeconds": 180,
+    "exitCode": 0,
+    "outerTimeout": false,
+    "durationSeconds": 160.46,
+    "loadStart": [
+      4.86,
+      4.02,
+      3.49
+    ],
+    "loadEnd": [
+      4.28,
+      4.45,
+      3.78
+    ],
+    "logicalCpus": 10,
+    "counters": {
+      "tests": 2397,
+      "pass": 2397,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    },
+    "diagnostics": [],
+    "diagnosticCount": 0,
+    "outputTail": [
+      "",
+      "> sprout@0.0.0 test",
+      "> node scripts/test-summary.ts",
+      "",
+      "\u2139 tests 2397",
+      "\u2139 suites 0",
+      "\u2139 pass 2397",
+      "\u2139 fail 0",
+      "\u2139 cancelled 0",
+      "\u2139 skipped 0",
+      "\u2139 todo 0",
+      "\u2139 duration_ms 159973.714458"
+    ]
+  },
+  "typecheck": {
+    "command": [
+      "npm",
+      "run",
+      "typecheck"
+    ],
+    "explicitTimeoutSeconds": 180,
+    "exitCode": 2,
+    "outerTimeout": false,
+    "durationSeconds": 4.09,
+    "loadStart": [
+      4.27,
+      4.44,
+      3.79
+    ],
+    "loadEnd": [
+      4.27,
+      4.44,
+      3.79
+    ],
+    "logicalCpus": 10,
+    "counters": null,
+    "diagnostics": [
+      "scripts/scratch/post-project-test-message.ts(24,3): error TS2741: Property 'scopeId' is missing in type '{ id: string; projectId: string; channel: \"project\"; author: { id: string; kind: \"agent\"; }; body: string; recipients: never[]; deliveryKey: string; createdAt: number; }' but required in type 'Message'.",
+      "scripts/scratch/post-project-test-message.ts(34,11): error TS2353: Object literal may only specify known properties, and 'messageId' does not exist in type 'WakePlan'.",
+      "scripts/tasks-layout.browser.test.ts(5,51): error TS2307: Cannot find module 'playwright' or its corresponding type declarations.",
+      "scripts/tasks-layout.browser.test.ts(72,33): error TS7006: Parameter 'route' implicitly has an 'any' type.",
+      "scripts/tasks-layout.browser.test.ts(75,63): error TS7006: Parameter 'shell' implicitly has an 'any' type.",
+      "scripts/tasks-layout.browser.test.ts(75,70): error TS7006: Parameter 'safe' implicitly has an 'any' type.",
+      "scripts/tasks-layout.browser.test.ts(88,27): error TS7031: Binding element 'selector' implicitly has an 'any' type."
+    ],
+    "diagnosticCount": 7,
+    "outputTail": [
+      "",
+      "> sprout@0.0.0 typecheck",
+      "> tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
+      "",
+      "scripts/scratch/post-project-test-message.ts(24,3): error TS2741: Property 'scopeId' is missing in type '{ id: string; projectId: string; channel: \"project\"; author: { id: string; kind: \"agent\"; }; body: string; recipients: never[]; deliveryKey: string; createdAt: number; }' but required in type 'Message'.",
+      "scripts/scratch/post-project-test-message.ts(34,11): error TS2353: Object literal may only specify known properties, and 'messageId' does not exist in type 'WakePlan'.",
+      "scripts/tasks-layout.browser.test.ts(5,51): error TS2307: Cannot find module 'playwright' or its corresponding type declarations.",
+      "scripts/tasks-layout.browser.test.ts(72,33): error TS7006: Parameter 'route' implicitly has an 'any' type.",
+      "scripts/tasks-layout.browser.test.ts(75,63): error TS7006: Parameter 'shell' implicitly has an 'any' type.",
+      "scripts/tasks-layout.browser.test.ts(75,70): error TS7006: Parameter 'safe' implicitly has an 'any' type.",
+      "scripts/tasks-layout.browser.test.ts(88,27): error TS7031: Binding element 'selector' implicitly has an 'any' type."
+    ]
+  },
+  "base-typecheck": {
+    "command": [
+      "npm",
+      "run",
+      "typecheck"
+    ],
+    "explicitTimeoutSeconds": 180,
+    "exitCode": 2,
+    "outerTimeout": false,
+    "durationSeconds": 3.65,
+    "loadStart": [
+      3.75,
+      4.32,
+      3.75
+    ],
+    "loadEnd": [
+      3.93,
+      4.35,
+      3.77
+    ],
+    "logicalCpus": 10,
+    "counters": null,
+    "diagnostics": [
+      "scripts/scratch/post-project-test-message.ts(24,3): error TS2741: Property 'scopeId' is missing in type '{ id: string; projectId: string; channel: \"project\"; author: { id: string; kind: \"agent\"; }; body: string; recipients: never[]; deliveryKey: string; createdAt: number; }' but required in type 'Message'.",
+      "scripts/scratch/post-project-test-message.ts(34,11): error TS2353: Object literal may only specify known properties, and 'messageId' does not exist in type 'WakePlan'.",
+      "scripts/tasks-layout.browser.test.ts(5,51): error TS2307: Cannot find module 'playwright' or its corresponding type declarations.",
+      "scripts/tasks-layout.browser.test.ts(72,33): error TS7006: Parameter 'route' implicitly has an 'any' type.",
+      "scripts/tasks-layout.browser.test.ts(75,63): error TS7006: Parameter 'shell' implicitly has an 'any' type.",
+      "scripts/tasks-layout.browser.test.ts(75,70): error TS7006: Parameter 'safe' implicitly has an 'any' type.",
+      "scripts/tasks-layout.browser.test.ts(88,27): error TS7031: Binding element 'selector' implicitly has an 'any' type."
+    ],
+    "diagnosticCount": 7,
+    "outputTail": [
+      "",
+      "> sprout@0.0.0 typecheck",
+      "> tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
+      "",
+      "scripts/scratch/post-project-test-message.ts(24,3): error TS2741: Property 'scopeId' is missing in type '{ id: string; projectId: string; channel: \"project\"; author: { id: string; kind: \"agent\"; }; body: string; recipients: never[]; deliveryKey: string; createdAt: number; }' but required in type 'Message'.",
+      "scripts/scratch/post-project-test-message.ts(34,11): error TS2353: Object literal may only specify known properties, and 'messageId' does not exist in type 'WakePlan'.",
+      "scripts/tasks-layout.browser.test.ts(5,51): error TS2307: Cannot find module 'playwright' or its corresponding type declarations.",
+      "scripts/tasks-layout.browser.test.ts(72,33): error TS7006: Parameter 'route' implicitly has an 'any' type.",
+      "scripts/tasks-layout.browser.test.ts(75,63): error TS7006: Parameter 'shell' implicitly has an 'any' type.",
+      "scripts/tasks-layout.browser.test.ts(75,70): error TS7006: Parameter 'safe' implicitly has an 'any' type.",
+      "scripts/tasks-layout.browser.test.ts(88,27): error TS7031: Binding element 'selector' implicitly has an 'any' type."
+    ]
+  }
+}

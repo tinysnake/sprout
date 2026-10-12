@@ -1,0 +1,43 @@
+{
+  "evidenceClasses": {
+    "modelIssued": [
+      {
+        "tool": "Agent",
+        "attempted": true
+      }
+    ],
+    "protocolOnly": {
+      "catalog": [
+        "mcp__origin__remote_command",
+        "mcp__origin__remote_read",
+        "mcp__origin__remote_write"
+      ],
+      "toolResults": [
+        {
+          "isError": true,
+          "unknownTool": true
+        }
+      ],
+      "effort": "high"
+    },
+    "sourceOnly": {
+      "launchSha256": "02c4a039c1ae0a1af333f29740d510e61667773e9dbfa8f750d46e5bb66df8ed",
+      "argumentBuilderInspected": true,
+      "explicitResourceFlagsAbsent": true,
+      "noSubagentControl": true
+    }
+  },
+  "bridgeCallbacks": 0,
+  "turnKind": "ended",
+  "turnOutcome": "completed",
+  "turnCompleted": true,
+  "sentinelUnchanged": true,
+  "pins": {
+    "oar": "0.35.0",
+    "source": "8adde16fe2d12ae54af7d4dff86c3f224380a5c7",
+    "claude": "2.1.294",
+    "model": "group/auto-mimo-v2-6-flash[1m]",
+    "node": "26.11.1",
+    "macOS": "27.0.1"
+  }
+}

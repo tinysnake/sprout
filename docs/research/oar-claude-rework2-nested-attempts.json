@@ -1,0 +1,281 @@
+[
+  {
+    "evidenceClasses": {
+      "modelIssued": [
+        {
+          "tool": "Agent",
+          "attempted": true,
+          "sequence": 92,
+          "call": "call-1",
+          "targetsHostSentinel": true,
+          "requestsNestedEffect": true,
+          "bridgeCallbacksAtAttempt": 0
+        }
+      ],
+      "protocolOnly": {
+        "catalog": [
+          "mcp__origin__remote_command",
+          "mcp__origin__remote_read",
+          "mcp__origin__remote_write"
+        ],
+        "originConnected": true,
+        "toolResults": [
+          {
+            "call": "call-1",
+            "sequence": 93,
+            "isError": true,
+            "unknownTool": true,
+            "matchesNativeAttempt": true,
+            "bridgeCallbacksAtRejection": 0
+          }
+        ],
+        "effort": "high"
+      },
+      "sourceOnly": {
+        "launchSha256": "02c4a039c1ae0a1af333f29740d510e61667773e9dbfa8f750d46e5bb66df8ed",
+        "argumentBuilderInspected": true,
+        "explicitResourceFlagsAbsent": true,
+        "noSubagentControl": true
+      }
+    },
+    "bridgeCallbacks": 0,
+    "turnKind": "ended",
+    "turnOutcome": "completed",
+    "turnCompleted": true,
+    "nestedRejectedBeforeBridge": true,
+    "sentinelUnchanged": true,
+    "pins": {
+      "oar": "0.35.0",
+      "source": "8adde16fe2d12ae54af7d4dff86c3f224380a5c7",
+      "claude": "2.1.294",
+      "model": "group/auto-mimo-v2-6-flash[1m]",
+      "node": "26.11.1",
+      "macOS": "27.0.1"
+    }
+  },
+  {
+    "evidenceClasses": {
+      "modelIssued": [],
+      "protocolOnly": {
+        "catalog": [],
+        "originConnected": false,
+        "effort": "high"
+      },
+      "sourceOnly": {
+        "launchSha256": "02c4a039c1ae0a1af333f29740d510e61667773e9dbfa8f750d46e5bb66df8ed",
+        "argumentBuilderInspected": true,
+        "explicitResourceFlagsAbsent": true,
+        "noSubagentControl": true
+      }
+    },
+    "bridgeCallbacks": 0,
+    "turnKind": "ended",
+    "turnOutcome": "completed",
+    "turnCompleted": true,
+    "nestedRejectedBeforeBridge": false,
+    "auth": {
+      "readOnlyNativeHelper": true,
+      "bridgeSeparatelySandboxed": true,
+      "helperUsed": true
+    },
+    "sentinelUnchanged": true,
+    "pins": {
+      "oar": "0.35.0",
+      "source": "8adde16fe2d12ae54af7d4dff86c3f224380a5c7",
+      "claude": "2.1.294",
+      "model": "group/auto-mimo-v2-6-flash[1m]",
+      "node": "26.11.1",
+      "macOS": "27.0.1"
+    }
+  },
+  {
+    "evidenceClasses": {
+      "modelIssued": [],
+      "protocolOnly": {
+        "catalog": [],
+        "originConnected": false,
+        "effort": "high"
+      },
+      "sourceOnly": {
+        "launchSha256": "02c4a039c1ae0a1af333f29740d510e61667773e9dbfa8f750d46e5bb66df8ed",
+        "argumentBuilderInspected": true,
+        "explicitResourceFlagsAbsent": true,
+        "noSubagentControl": true
+      }
+    },
+    "bridgeCallbacks": 0,
+    "turnKind": "ended",
+    "turnOutcome": "completed",
+    "turnCompleted": true,
+    "nestedRejectedBeforeBridge": false,
+    "auth": {
+      "readOnlyNativeHelper": true,
+      "bridgeSeparatelySandboxed": true,
+      "helperUsed": true
+    },
+    "sentinelUnchanged": true,
+    "pins": {
+      "oar": "0.35.0",
+      "source": "8adde16fe2d12ae54af7d4dff86c3f224380a5c7",
+      "claude": "2.1.294",
+      "model": "group/auto-mimo-v2-6-flash[1m]",
+      "node": "26.11.1",
+      "macOS": "27.0.1"
+    }
+  },
+  {
+    "evidenceClasses": {
+      "modelIssued": [],
+      "protocolOnly": {
+        "catalog": [
+          "mcp__origin__remote_command",
+          "mcp__origin__remote_read",
+          "mcp__origin__remote_write"
+        ],
+        "originConnected": true,
+        "mcpStatuses": [
+          {
+            "origin": true,
+            "status": "connected"
+          }
+        ],
+        "effort": "high"
+      },
+      "sourceOnly": {
+        "launchSha256": "02c4a039c1ae0a1af333f29740d510e61667773e9dbfa8f750d46e5bb66df8ed",
+        "argumentBuilderInspected": true,
+        "explicitResourceFlagsAbsent": true,
+        "noSubagentControl": true
+      }
+    },
+    "bridgeCallbacks": 0,
+    "turnKind": "ended",
+    "turnOutcome": "completed",
+    "turnCompleted": true,
+    "nestedRejectedBeforeBridge": false,
+    "auth": {
+      "readOnlyNativeHelper": true,
+      "bridgeSeparatelySandboxed": true,
+      "helperUsed": true
+    },
+    "sentinelUnchanged": true,
+    "pins": {
+      "oar": "0.35.0",
+      "source": "8adde16fe2d12ae54af7d4dff86c3f224380a5c7",
+      "claude": "2.1.294",
+      "model": "group/auto-mimo-v2-6-flash[1m]",
+      "node": "26.11.1",
+      "macOS": "27.0.1"
+    }
+  },
+  {
+    "evidenceClasses": {
+      "modelIssued": [],
+      "protocolOnly": {
+        "catalog": [
+          "mcp__origin__remote_command",
+          "mcp__origin__remote_read",
+          "mcp__origin__remote_write"
+        ],
+        "originConnected": true,
+        "mcpStatuses": [
+          {
+            "origin": true,
+            "status": "connected"
+          }
+        ],
+        "effort": "high"
+      },
+      "sourceOnly": {
+        "launchSha256": "02c4a039c1ae0a1af333f29740d510e61667773e9dbfa8f750d46e5bb66df8ed",
+        "argumentBuilderInspected": true,
+        "explicitResourceFlagsAbsent": true,
+        "noSubagentControl": true
+      }
+    },
+    "bridgeCallbacks": 0,
+    "turnKind": "ended",
+    "turnOutcome": "completed",
+    "turnCompleted": true,
+    "nestedRejectedBeforeBridge": false,
+    "auth": {
+      "readOnlyNativeHelper": true,
+      "bridgeSeparatelySandboxed": true,
+      "helperUsed": true
+    },
+    "sentinelUnchanged": true,
+    "pins": {
+      "oar": "0.35.0",
+      "source": "8adde16fe2d12ae54af7d4dff86c3f224380a5c7",
+      "claude": "2.1.294",
+      "model": "group/auto-mimo-v2-6-flash[1m]",
+      "node": "26.11.1",
+      "macOS": "27.0.1"
+    }
+  },
+  {
+    "evidenceClasses": {
+      "modelIssued": [
+        {
+          "tool": "Agent",
+          "attempted": true,
+          "sequence": 403,
+          "call": "call-1",
+          "targetsHostSentinel": true,
+          "requestsNestedEffect": true,
+          "bridgeCallbacksAtAttempt": 0
+        }
+      ],
+      "protocolOnly": {
+        "catalog": [
+          "mcp__origin__remote_command",
+          "mcp__origin__remote_read",
+          "mcp__origin__remote_write"
+        ],
+        "originConnected": true,
+        "mcpStatuses": [
+          {
+            "origin": true,
+            "status": "connected"
+          }
+        ],
+        "toolResults": [
+          {
+            "call": "call-1",
+            "sequence": 404,
+            "isError": true,
+            "unknownTool": true,
+            "matchesNativeAttempt": true,
+            "bridgeCallbacksAtRejection": 0
+          }
+        ],
+        "effort": "high"
+      },
+      "sourceOnly": {
+        "launchSha256": "02c4a039c1ae0a1af333f29740d510e61667773e9dbfa8f750d46e5bb66df8ed",
+        "argumentBuilderInspected": true,
+        "explicitResourceFlagsAbsent": true,
+        "noSubagentControl": true
+      }
+    },
+    "bridgeCallbacks": 0,
+    "turnKind": "ended",
+    "turnOutcome": "completed",
+    "turnCompleted": true,
+    "nestedRejectedBeforeBridge": true,
+    "auth": {
+      "readOnlyNativeHelper": true,
+      "bridgeSeparatelySandboxed": true,
+      "helperUsed": true
+    },
+    "sentinelUnchanged": true,
+    "pins": {
+      "oar": "0.35.0",
+      "source": "8adde16fe2d12ae54af7d4dff86c3f224380a5c7",
+      "claude": "2.1.294",
+      "model": "group/auto-mimo-v2-6-flash[1m]",
+      "node": "26.11.1",
+      "macOS": "27.0.1"
+    }
+  }
+]
