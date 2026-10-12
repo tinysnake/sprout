@@ -1,0 +1,204 @@
+{
+  "oar": "0.35.0",
+  "pi": "1.0.4",
+  "node": "v26.11.1",
+  "platform": "darwin",
+  "selectedModel": "magpie/codex/gpt-6.1-sol",
+  "modelIssued": true,
+  "osVersion": "27.0.1",
+  "piAi": "1.0.4",
+  "piMcp": "1.0.4",
+  "scripted": {
+    "originRead": true,
+    "remoteWrite": true,
+    "pathDenied": true,
+    "originOs": {
+      "id": 4,
+      "ok": true,
+      "readDenied": true,
+      "writeDenied": true
+    }
+  },
+  "live": {
+    "opened": true,
+    "modelTurnAttempted": true,
+    "modelIssued": true,
+    "extensionStarts": 3,
+    "hostReadDenied": true,
+    "hostWriteDenied": true,
+    "directOriginReadDenied": true,
+    "authReadable": true,
+    "authWriteDenied": true,
+    "catalogExact": true,
+    "modelIdentityExact": true,
+    "turnEnded": true,
+    "turnKind": "ended",
+    "turnOutcome": "completed",
+    "mcpRegistered": true,
+    "originRead": true,
+    "remoteEffect": true,
+    "sentinelReadDenied": true,
+    "sentinelWriteDenied": true,
+    "mcpShutdownStopped": true,
+    "resumedSameId": true,
+    "resumeCatalogExact": true,
+    "resumeModelExact": true,
+    "resumeTurnEnded": true,
+    "resumeTurnKind": "ended",
+    "resumeTurnOutcome": "completed",
+    "resumeOriginRead": true,
+    "resumeMcpRegistered": true,
+    "toolCalls": 5,
+    "remoteFailureNoFallback": true,
+    "freshSessionDifferentId": true,
+    "freshCatalogExact": true,
+    "freshMcpWithdrawn": true
+  },
+  "final": {
+    "hostOriginUnchanged": true,
+    "hostEffectUnchanged": true,
+    "sentinelUnchanged": true,
+    "remoteModelEffect": true
+  },
+  "rework": {
+    "finding": "F1",
+    "disposition": "fixed",
+    "acceptanceCriterion": 2,
+    "acceptanceCheck": true,
+    "oarSourceCommit": "8adde16fe2d12ae54af7d4dff86c3f224380a5c7",
+    "evidenceClasses": {
+      "modelIssued": [
+        "originRead",
+        "remoteEffect",
+        "commandOriginRead",
+        "modelCommandCalls",
+        "sentinelReadDenied",
+        "sentinelWriteDenied",
+        "resumeOriginRead"
+      ],
+      "protocolOnly": [
+        "catalogExact",
+        "resumeCatalogExact",
+        "freshCatalogExact",
+        "mcpRegistered",
+        "resumeMcpRegistered",
+        "mcpShutdownStopped",
+        "freshMcpWithdrawn",
+        "resumedSameId",
+        "freshSessionDifferentId"
+      ],
+      "scripted": [
+        "originOs",
+        "hostReadDenied",
+        "hostWriteDenied",
+        "directOriginReadDenied",
+        "authReadable",
+        "authWriteDenied",
+        "commandAllowlistDenied",
+        "commandEffectUntouchedBeforeModel",
+        "remoteFailureNoFallback",
+        "commandFailureNoFallback"
+      ],
+      "sourceOnly": [
+        "native-tool guard",
+        "absence of standard OAR tool-policy option",
+        "bounded fixed command dispatcher"
+      ]
+    },
+    "observation": {
+      "oar": "0.35.0",
+      "pi": "1.0.4",
+      "node": "v26.11.1",
+      "platform": "darwin",
+      "selectedModel": "magpie/codex/gpt-6.1-sol",
+      "modelIssued": true,
+      "osVersion": "27.0.1",
+      "piAi": "1.0.4",
+      "piMcp": "1.0.4",
+      "scripted": {
+        "originRead": true,
+        "remoteWrite": true,
+        "pathDenied": true,
+        "originOs": {
+          "id": 4,
+          "ok": true,
+          "readDenied": true,
+          "writeDenied": true
+        },
+        "commandAllowlistDenied": true,
+        "commandEffectUntouchedBeforeModel": true
+      },
+      "live": {
+        "opened": true,
+        "modelTurnAttempted": true,
+        "modelIssued": true,
+        "extensionStarts": 3,
+        "hostReadDenied": true,
+        "hostWriteDenied": true,
+        "directOriginReadDenied": true,
+        "authReadable": true,
+        "authWriteDenied": true,
+        "catalogExact": true,
+        "modelIdentityExact": true,
+        "turnEnded": true,
+        "turnKind": "ended",
+        "turnOutcome": "completed",
+        "mcpRegistered": true,
+        "originRead": true,
+        "remoteEffect": true,
+        "commandOriginRead": true,
+        "modelCommandCalls": 1,
+        "sentinelReadDenied": true,
+        "sentinelWriteDenied": true,
+        "mcpShutdownStopped": true,
+        "resumedSameId": true,
+        "resumeCatalogExact": true,
+        "resumeModelExact": true,
+        "resumeTurnEnded": true,
+        "resumeTurnKind": "ended",
+        "resumeTurnOutcome": "completed",
+        "resumeOriginRead": true,
+        "resumeMcpRegistered": true,
+        "toolCalls": 6,
+        "remoteFailureNoFallback": true,
+        "commandFailureNoFallback": true,
+        "freshSessionDifferentId": true,
+        "freshCatalogExact": true,
+        "freshMcpWithdrawn": true
+      },
+      "final": {
+        "hostOriginUnchanged": true,
+        "hostEffectUnchanged": true,
+        "sentinelUnchanged": true,
+        "remoteModelEffect": true,
+        "hostCommandUnchanged": true,
+        "remoteCommandEffect": true
+      }
+    },
+    "repositoryChecks": {
+      "quick": {
+        "tests": 2131,
+        "pass": 2131,
+        "fail": 0,
+        "exitCode": 0
+      },
+      "affected": {
+        "tests": 2131,
+        "pass": 2131,
+        "fail": 0,
+        "exitCode": 0
+      },
+      "full": {
+        "disposition": "timed_out",
+        "timeoutMs": 175000,
+        "finalCounters": null
+      },
+      "typecheck": {
+        "exitCode": 2,
+        "diagnostics": 2,
+        "baselineScratchErrors": true
+      },
+      "commandTimeoutSeconds": 180
+    }
+  }
+}

@@ -2,7 +2,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, rmSync, lstatSync, openSync, closeSync, constants } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep, dirname } from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
@@ -16,6 +16,9 @@ export function makeOriginFixture() {
   writeFileSync(join(remote, 'origin.txt'), 'REMOTE_ORIGIN');
   writeFileSync(join(host, 'effect.txt'), 'HOST_UNCHANGED');
   writeFileSync(join(remote, 'effect.txt'), 'REMOTE_UNCHANGED');
+  // Additive command scenario: existing paths and marker values remain unchanged.
+  writeFileSync(join(host, 'command-effect.txt'), 'HOST_COMMAND_UNCHANGED');
+  writeFileSync(join(remote, 'command-effect.txt'), 'REMOTE_COMMAND_UNCHANGED');
   writeFileSync(join(outside, 'sentinel.txt'), 'HOST_SENTINEL_UNCHANGED');
   writeFileSync(join(outside, 'credential-sibling.txt'), 'SYNTHETIC_CREDENTIAL_SENTINEL');
   return { root, host, remote, outside, cleanup: () => rmSync(root, { recursive: true, force: true }) };
@@ -88,6 +91,19 @@ export function operate(root, op, args) {
       writeFileSync(permitted(root, args.path, true), args.content, { flag: constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW });
       return { ok: true, value: 'remote-write-observed' };
     }
+    if (op === 'command') {
+      // One fixed executable token; no caller-selected shell, code, argv or cwd.
+      if (args.executable !== 'fixture-origin-command' || !Array.isArray(args.args) || args.args.length !== 0
+        || args.cwd !== '.' || args.timeoutMs !== 5000) throw new Error('command-denied');
+      permitted(root, 'origin.txt', false);
+      permitted(root, 'command-effect.txt', true);
+      const result = spawnSync(process.execPath, [fileURLToPath(import.meta.url), '--fixture-command'], {
+        cwd: root, env: { PATH: '/usr/bin:/bin', HOME: root }, encoding: 'utf8', timeout: 5000, maxBuffer: 4096,
+      });
+      return result.status === 0 && !result.error
+        ? { ok: true, value: result.stdout, exitCode: 0 }
+        : { ok: false, reason: 'command-failed' };
+    }
     if (op === 'os-negative') {
       // Bypasses path policy deliberately, testing the OS boundary itself. No contents returned.
       let readDenied = false, writeDenied = false;
@@ -99,7 +115,12 @@ export function operate(root, op, args) {
   } catch { return { ok: false, reason: 'path-or-content-denied' }; }
 }
 
-if (process.argv[2] === '--origin') {
+if (process.argv[2] === '--fixture-command') {
+  // Executed only by the origin's fixed command dispatch, under its inherited sandbox.
+  const marker = readFileSync('origin.txt', 'utf8');
+  writeFileSync('command-effect.txt', 'ORIGIN_COMMAND:' + marker, { flag: constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW });
+  process.stdout.write(marker);
+} else if (process.argv[2] === '--origin') {
   const root = realpathSync(process.argv[3]);
   const deadline = setTimeout(() => process.exit(2), 150_000);
   const lines = createInterface({ input: process.stdin });
