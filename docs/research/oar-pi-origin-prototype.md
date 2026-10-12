@@ -137,3 +137,49 @@ The script checks package versions, not these fingerprints; immutable admission 
 - Probe syntax and `git diff --check`: clean. Shared fixture and established production execution remain byte-identical to the fixed base.
 
 Typecheck is not claimed green. Ticket acceptance and production integration remain Orchestrator decisions.
+
+## Bounded F1 rework after the independent FAIL
+
+This section appends the rework result to the original attempt. The preceding matrix, original observations and incomplete-turn artifact are historical; their unavailable-command classification describes the first attempt. The top-level evidence JSON is retained, with new observations under `rework`.
+
+### Triage
+
+F1 was an incomplete acceptance experiment: criterion 2 explicitly required a model-issued command, but the original authority and extension admitted only read/edit. Reporting command as unavailable and proposing a remedy did not supply that required observation. The reopen preserved acceptance, and the independent review correctly failed that omission while preserving the demonstrated controls. No observed command routing failure needed repair; the missing capability and observation needed to be added.
+
+### Next attempt
+
+- Unmet criterion: #227 acceptance criterion 2, model-issued read/edit/command on the work fixture with execution-controlled host-sentinel denial.
+- Current explanation: no command was admitted in the first experiment, so the model could not exercise one.
+- Change or experiment: add one fixed origin command and invoke it through injected authority and the actual pinned OAR route in a real model turn.
+- Expected observation: a command callback returns the work marker and creates a work-only command effect while read/edit, sentinel denials and the other preserved observations remain true.
+
+### Result and evidence classes
+
+**F1 fixed for acceptance criterion 2 in this bounded local macOS scenario.** The final rework run observed exactly one `remote_command` callback in the first real model turn, alongside the original work read/edit and forbidden sentinel read/write calls. The command returned `REMOTE_ORIGIN`. Both turns ended/completed; the resumed turn performed another work read, for six callbacks total. The acceptance check requires these observed callbacks and final resource effects together, not assistant claims or a scripted command success.
+
+- **Model-issued:** work read, edit to `OAR_MODEL_EFFECT`, command returning `REMOTE_ORIGIN`, explicit sentinel read/write requests denied by the origin execution path, and resumed work read. After the turn, work `command-effect.txt` equals `ORIGIN_COMMAND:REMOTE_ORIGIN`; host `command-effect.txt` remains `HOST_COMMAND_UNCHANGED`. Host origin/effect and sentinel markers remain unchanged.
+- **Protocol-only:** exact three-tool active catalog (`remote_command`, `remote_read`, `remote_write`) on open/resume/fresh; same native ID on resume; synthetic typed MCP registration/re-registration, shutdown observation and absence after fresh open without the attachment. This still supplies no model-issued or remote Worker MCP proof.
+- **Scripted:** original direct OS denials and auth ownership checks; four rejected command variants (executable, argv, cwd and timeout); untouched work command marker before the model; origin stopped followed by failed read and command capability calls without local fallback. These failure and allowlist checks are not model-issued evidence.
+- **Source-only:** the fixed command dispatcher, native-tool guard and previously inspected OAR limitations. Reading their implementation supplies no additional model-issued claim.
+
+Versions remain OAR **0.35.0**, source **8adde16fe2d12ae54af7d4dff86c3f224380a5c7**, Pi SDK/AI/MCP **1.0.4/1.0.4/1.0.4**, Node **26.11.1**, macOS **27.0.1**, model **magpie/codex/gpt-6.1-sol**, supported effort **low**. No installation/login or floating upgrade was performed.
+
+### Additive fixture contract and limits
+
+The shared fixture is extended **only additively**: all existing operations, paths and marker values are preserved. Two new same-name `command-effect.txt` files start at `HOST_COMMAND_UNCHANGED` and `REMOTE_COMMAND_UNCHANGED`. The new operation accepts only `fixture-origin-command`, empty argv, cwd `.` and timeout 5000 ms. It launches a fixed Node child in the work origin's cwd, inherits the origin sandbox and network denial, reads relative `origin.txt` and writes the separate relative command effect. It exposes no caller-selected shell code. Existing host/work edit markers are untouched by this command. This is one allowlisted command proof; arbitrary shell remains unavailable.
+
+The injected `RemoteWorkspaceTools.command` follows the existing port shape; the extension and supervisor forward it to the same origin process. Existing production paths, manifests, EngineAdapter/EngineSession definitions, Environment placement and synthetic MCP contract are unchanged. Credentials remain referenced locally and read-only. Scratch prompts, process identifiers and host paths are not published.
+
+### Rework repository checks and remaining uncertainty
+
+Locked repository dependencies were restored with `npm ci --ignore-scripts` in this checkout, without changing manifests or lockfile. Each required check used an explicit 180-second command bound:
+
+| Check | Rework result |
+|---|---|
+| `npm run test:quick` | tests 2131, pass 2131, fail 0; exit 0 |
+| `npm run test:affected` | tests 2131, pass 2131, fail 0; exit 0 |
+| `npm test` | internal 175000 ms timeout; no final counters; incomplete, not green |
+| `npm run typecheck` | exit 2; same two previously baseline-reproduced scratch errors: missing `Message.scopeId` and unknown `WakePlan.messageId` |
+| Probe syntax / JSON / diff whitespace | pass |
+
+The live probe retained its 60-second turn, 140-second engine and 170-second supervisor bounds; the added command has its own 5-second subprocess bound. The final repeat completed the model scenario and all original true boolean observations remained true. Repository checks remain unresolved for independent acceptance; F1's evidence disposition does not turn those checks green. The original intermediate terminal uncertainty and all previously named gaps outside the fixed command remain. In particular, general shell, model-issued remote-failure/MCP paths, hostile-extension exclusion, Windows, enrolled cross-host execution and remote cancellation settlement are still unproved/unavailable. No production compatibility claim is added.
