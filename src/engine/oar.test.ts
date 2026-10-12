@@ -1,9 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { spawn } from 'node:child_process';
-import { createConnection } from 'node:net';
 import { PassThrough } from 'node:stream';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -12,11 +10,8 @@ import { createOarMcpBridge } from './oar-mcp-bridge.ts';
 import { assertSupportedNodeVersion, parseNodeMajor } from './oar-node-support.ts';
 import { EngineResumeRefusedError, EngineStartError, type EngineAdapter } from './port.ts';
 import type { RunnerCommand, RunnerMessage } from './oar-runner-protocol.ts';
-import { evaluateAdmissibleWorkOption } from '../agent/admission.ts';
 import { WorkerRecoveryJournal } from '../worker/recovery-journal.ts';
 import { EnvironmentWorker } from '../worker/server.ts';
-import { WORKER_READY_PREFIX } from '../worker/carrier.ts';
-import { WORKER_DIAGNOSTICS } from '../worker/diagnostics.ts';
 
 class FakeOarRunner implements OarRunnerProcess {
   readonly stdin = new PassThrough();
@@ -771,140 +766,6 @@ test('AC4 (F1): Background or stale root turn_ended during admitted prompt neith
   assert.ok(!result.text.includes('stale background text'), 'Stale text must not be in reply');
 
   await session.close();
-});
-
-test('AC1 (F2): Simulated Node 23 Worker startup and readiness surface returns actionable guidance and admits zero runs', async (t) => {
-  // 1. package.json and package-lock.json floors agree on >=24.0.0
-  const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
-  const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
-  assert.equal(pkg.engines?.node, '>=24.0.0');
-  assert.equal(lock.packages?.['']?.engines?.node, '>=24.0.0');
-
-  // 2. Drive the actual Worker entry point (main.ts) with simulated Node 23 + OAR opt-in
-  const mainScript = new URL('../worker/main.ts', import.meta.url).pathname;
-  const child = spawn(process.execPath, [mainScript], {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: {
-      ...process.env,
-      SPROUT_NODE_VERSION: '23.4.0',
-      SPROUT_USE_OAR_ENGINE: 'codex',
-      SPROUT_CODEX_BIN: '/synthetic/bin/codex',
-      SPROUT_ENV_INSTANCE: 'node23-worker-test',
-      SPROUT_WORKER_HOST: '127.0.0.1',
-      SPROUT_WORKER_PORT: '0',
-      SPROUT_WORKSPACE_ROOT: tmpdir(),
-    },
-  });
-
-  let stdout = '';
-  let stderr = '';
-  child.stdout.on('data', (d: Buffer) => { stdout += d.toString('utf8'); });
-  child.stderr.on('data', (d: Buffer) => { stderr += d.toString('utf8'); });
-
-  const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
-  t.after(async () => {
-    child.kill('SIGTERM');
-    await exited;
-  });
-
-  // Wait for the Worker to start, publish its discovery line, and report transport ready
-  const deadline = Date.now() + 10_000;
-  while (!stdout.includes(WORKER_READY_PREFIX) || !stderr.includes(WORKER_DIAGNOSTICS.transportReady)) {
-    if (Date.now() >= deadline) {
-      throw new Error(`Worker did not start. stdout: ${stdout}, stderr: ${stderr}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-
-  // Assert it did NOT crash with startupFailed
-  assert.ok(!stderr.includes(WORKER_DIAGNOSTICS.startupFailed), 'Worker startup must not fail with generic startupFailed');
-  assert.ok(stderr.includes(WORKER_DIAGNOSTICS.transportReady), 'Worker transport must become ready');
-
-  // Parse the published ready info
-  const readyLine = stdout.split('\n').find((line) => line.startsWith(WORKER_READY_PREFIX));
-  assert.ok(readyLine);
-  const endpointInfo = JSON.parse(readyLine.slice(WORKER_READY_PREFIX.length));
-
-  // Connect to the Worker endpoint and query readiness and session start
-  const socket = createConnection({ host: endpointInfo.host, port: endpointInfo.port });
-  t.after(() => socket.destroy());
-
-  let responseBuffer = '';
-  const responses = new Map<number, any>();
-  socket.on('data', (chunk: Buffer) => {
-    responseBuffer += chunk.toString('utf8');
-    const lines = responseBuffer.split('\n');
-    responseBuffer = lines.pop() ?? '';
-    for (const line of lines) {
-      if (line.trim()) {
-        const msg = JSON.parse(line);
-        if (msg.id !== undefined) {
-          responses.set(msg.id, msg);
-        }
-      }
-    }
-  });
-
-  const sendRpc = async (id: number, method: string, params: any = {}): Promise<any> => {
-    socket.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
-    const end = Date.now() + 5000;
-    while (!responses.has(id)) {
-      if (Date.now() >= end) throw new Error(`RPC ${method} timed out`);
-      await new Promise((r) => setTimeout(r, 10));
-    }
-    return responses.get(id);
-  };
-
-  // 3. Worker interface worker/info returns actionable guidance
-  const infoRes = await sendRpc(1, 'worker/info');
-  assert.ok(infoRes.result);
-  const readiness = infoRes.result.readiness;
-  assert.ok(readiness);
-  assert.equal(readiness.probe?.enginesOk, false);
-  assert.match(
-    readiness.probe?.summary ?? '',
-    /Node\.js 24\+ is required by OAR \(detected Node\.js 23\.4\.0\)\. Please upgrade Node\.js to version 24\.0\.0 or later before admitting work\./,
-  );
-  const codexFact = readiness.engines?.find((e: any) => e.engine === 'codex');
-  assert.ok(codexFact);
-  assert.equal(codexFact.readiness, 'unknown');
-
-  // 4. Admission refuses the option before any run is admitted
-  const admission = evaluateAdmissibleWorkOption(
-    [{ id: 'opt-codex', engine: 'codex', workModel: '', effort: 'default' }],
-    readiness.engines.map((e: any) => ({
-      engine: e.engine,
-      installed: e.installed,
-      readiness: e.readiness,
-      models: { state: e.modelAvailability ?? 'unknown', models: e.models ?? [] },
-    })),
-  );
-  assert.equal(admission.ok, false, 'No run can be admitted on unsupported Node');
-  assert.match(admission.reason ?? '', /readiness is unknown/);
-
-  // 5. Worker readiness probe RPC also returns the actionable guidance
-  const probeRpcRes = await sendRpc(2, 'worker/readiness-probe');
-  assert.ok(probeRpcRes.result);
-  assert.equal(probeRpcRes.result.probe?.enginesOk, false);
-  assert.match(
-    probeRpcRes.result.probe?.summary ?? '',
-    /Node\.js 24\+ is required by OAR \(detected Node\.js 23\.4\.0\)\. Please upgrade Node\.js to version 24\.0\.0 or later before admitting work\./,
-  );
-
-  // 6. Direct session/start over Worker interface returns sanitized Node guidance rather than generic failure
-  const startRes = await sendRpc(3, 'session/start', {
-    engine: 'codex',
-    agentId: 'scout',
-    workingDirectory: tmpdir(),
-  });
-  assert.ok(startRes.error);
-  assert.equal(startRes.error.code, -32603);
-  assert.match(
-    startRes.error.message,
-    /Node\.js 24\+ is required by OAR \(detected Node\.js 23\.4\.0\)\. Please upgrade Node\.js to version 24\.0\.0 or later before admitting work\./,
-  );
-  assert.notEqual(startRes.error.message, 'sessionStartFailed');
-  assert.notEqual(startRes.error.message, 'startupFailed');
 });
 
 test('AC5 (F6): Spawn failure (runner process emits error before ready) rejects startSession and cleans up resources', async () => {

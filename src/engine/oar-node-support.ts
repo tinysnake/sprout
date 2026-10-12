@@ -7,26 +7,38 @@
 
 export const MINIMUM_NODE_MAJOR = 24;
 
-export function parseNodeMajor(version = process.env['SPROUT_NODE_VERSION'] ?? process.versions.node): number {
-  const clean = version.startsWith('v') ? version.slice(1) : version;
-  const major = Number.parseInt(clean.split('.')[0] ?? '', 10);
-  return Number.isSafeInteger(major) ? major : 0;
+export function normalizeNodeVersion(version: string): string | undefined {
+  const match = /^v?((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$/.exec(version);
+  if (!match || match[0] !== version) return undefined;
+  const normalized = match[1]!;
+  return normalized.split('.').every((part) => Number.isSafeInteger(Number(part))) ? normalized : undefined;
 }
 
-export function formatNodeUpgradeGuidance(currentVersion = process.env['SPROUT_NODE_VERSION'] ?? process.versions.node): string {
+export function parseNodeMajor(version = process.versions.node): number {
+  return Number(normalizeNodeVersion(version)?.split('.')[0] ?? 0);
+}
+
+export function formatNodeUpgradeGuidance(currentVersion = process.versions.node): string {
+  const version = normalizeNodeVersion(currentVersion) ?? 'unknown';
   return (
-    `Node.js 24+ is required by OAR (detected Node.js ${currentVersion}). ` +
+    `Node.js 24+ is required by OAR (detected Node.js ${version}). ` +
     `Please upgrade Node.js to version 24.0.0 or later before admitting work.`
   );
 }
 
-export function isSupportedNodeVersion(currentVersion = process.env['SPROUT_NODE_VERSION'] ?? process.versions.node): boolean {
+export class UnsupportedOarNodeVersionError extends Error {
+  constructor(currentVersion = process.versions.node) {
+    super(formatNodeUpgradeGuidance(currentVersion));
+    this.name = 'UnsupportedOarNodeVersionError';
+  }
+}
+
+export function isSupportedNodeVersion(currentVersion = process.versions.node): boolean {
   return parseNodeMajor(currentVersion) >= MINIMUM_NODE_MAJOR;
 }
 
-export function assertSupportedNodeVersion(currentVersion = process.env['SPROUT_NODE_VERSION'] ?? process.versions.node): void {
-  const major = parseNodeMajor(currentVersion);
-  if (major < MINIMUM_NODE_MAJOR) {
-    throw new Error(formatNodeUpgradeGuidance(currentVersion));
+export function assertSupportedNodeVersion(currentVersion = process.versions.node): void {
+  if (!isSupportedNodeVersion(currentVersion)) {
+    throw new UnsupportedOarNodeVersionError(currentVersion);
   }
 }
