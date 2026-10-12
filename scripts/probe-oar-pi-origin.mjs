@@ -1,6 +1,6 @@
 /** DISPOSABLE #227: actual, unmodified OAR 0.35.0 + existing Pi 1.0.4.
  * Run with OAR_PROBE_ROOT pointing to an unpacked pinned package. No installs/login.
- * Only allowlisted facts leave the engine; shared #239 fixture stays unchanged.
+ * Only allowlisted facts leave the engine; shared #239 fixture is extended additively.
  */
 import { readFileSync, writeFileSync, mkdirSync, realpathSync, existsSync, symlinkSync, openSync, closeSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -19,22 +19,24 @@ const extension = `export default function(pi) {
   const state = globalThis.__oarOriginProbe;
   state.pi = pi;
   pi.registerProvider(state.provider);
-  for (const op of ['read', 'write']) pi.registerTool({
+  for (const op of ['read', 'write', 'command']) pi.registerTool({
     name: 'remote_' + op, label: 'Fixture ' + op, description: 'Typed operation on the pinned separate fixture origin.',
-    parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: op === 'read' ? ['path'] : ['path', 'content'], additionalProperties: false },
+    parameters: op === 'command'
+      ? { type: 'object', properties: { executable: { type: 'string', enum: ['fixture-origin-command'] } }, required: ['executable'], additionalProperties: false }
+      : { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: op === 'read' ? ['path'] : ['path', 'content'], additionalProperties: false },
     execute: async (_id, args) => {
       const result = await state.call(op, args);
-      state.calls.push({ op, read: op === 'read' && result.value === 'REMOTE_ORIGIN', effect: op === 'write' && args.path === 'effect.txt' && args.content === 'OAR_MODEL_EFFECT' && result.ok, sentinel: args.path === state.sentinel, denied: !result.ok });
+      state.calls.push({ op, read: op === 'read' && result.value === 'REMOTE_ORIGIN', effect: op === 'write' && args.path === 'effect.txt' && args.content === 'OAR_MODEL_EFFECT' && result.ok, command: op === 'command' && result.ok && result.value === 'REMOTE_ORIGIN', sentinel: args.path === state.sentinel, denied: !result.ok });
       return { content: [{ type: 'text', text: result.ok ? result.value : 'DENIED_BY_EXECUTION_POLICY' }], details: {} };
     }
   });
   pi.on('session_start', () => {
-    pi.setActiveTools(['remote_read', 'remote_write']);
-    state.catalogExact = JSON.stringify(pi.getActiveTools().sort()) === JSON.stringify(['remote_read', 'remote_write']);
+    pi.setActiveTools(['remote_read', 'remote_write', 'remote_command']);
+    state.catalogExact = JSON.stringify(pi.getActiveTools().sort()) === JSON.stringify(['remote_command', 'remote_read', 'remote_write']);
     state.extensionStarts++;
   });
   pi.on('tool_call', event => {
-    if (!['remote_read', 'remote_write'].includes(event.toolName)) return { block: true, reason: 'fixture-policy-denied' };
+    if (!['remote_read', 'remote_write', 'remote_command'].includes(event.toolName)) return { block: true, reason: 'fixture-policy-denied' };
   });
 }`;
 async function engine(config) {
@@ -60,7 +62,7 @@ async function engine(config) {
     let operationSequence = 0;
     /** @type {import('../src/engine/port.ts').RemoteWorkspaceTools} */
     const authority = {
-      binding, operations: ['read', 'edit'],
+      binding, operations: ['read', 'edit', 'command'],
       async read(path) {
         const result = await call('read', { path });
         return { ...binding, operationId: `fixture-${++operationSequence}`, operation: 'read', status: result.ok ? 'completed' : 'failed', ...(result.ok ? { content: result.value } : { failure: 'origin-denied-or-unavailable' }) };
@@ -69,6 +71,10 @@ async function engine(config) {
         const before = await call('read', { path });
         const result = before.ok && before.value === oldText ? await call('write', { path, content: newText }) : { ok: false };
         return { ...binding, operationId: `fixture-${++operationSequence}`, operation: 'edit', status: result.ok ? 'completed' : 'failed' };
+      },
+      async command(executable, args, options, operationId) {
+        const result = await call('command', { executable, args, ...options });
+        return { ...binding, operationId, operation: 'command', status: result.ok ? 'completed' : 'failed', ...(result.ok ? { output: result.value, exitCode: result.exitCode } : { failure: 'origin-denied-or-unavailable' }) };
       },
       async search() { throw new Error('fixture-search-unsupported'); },
       async inspect() { return { status: 'unsupported' }; },
@@ -93,8 +99,9 @@ async function engine(config) {
         state.pi = undefined;
         state.call = async (op, args) => {
           const result = op === 'read' ? await request.remoteWorkspace.read(args.path)
+            : op === 'command' ? await request.remoteWorkspace.command(args.executable, [], { cwd: '.', timeoutMs: 5000 }, `fixture-${++operationSequence}`)
             : await request.remoteWorkspace.edit(args.path, 'REMOTE_UNCHANGED', args.content);
-          return { ok: result.status === 'completed', value: result.content ?? 'remote-write-observed' };
+          return { ok: result.status === 'completed', value: result.content ?? result.output ?? 'remote-write-observed' };
         };
         session = await piSession({ via: 'bundled' }, { cwd: request.workingDirectory, model: requiredModel, effort: 'low', appendSystemPrompt: request.instructions, ...(request.resumeSessionKey ? { resume: request.resumeSessionKey } : {}), ...(attachMcp ? { mcpServers: [{ name: 'fixture', command: process.execPath, args: [self, '--mcp', config.host] }] } : {}) });
         return {
@@ -116,7 +123,7 @@ async function engine(config) {
     facts.modelIdentityExact = session.model().value === requiredModel;
     if (![facts.catalogExact, facts.modelIdentityExact, facts.hostReadDenied, facts.hostWriteDenied, facts.directOriginReadDenied, facts.authReadable, facts.authWriteDenied].every(Boolean)) return { ...facts, blocker: 'controls-incomplete' };
     stage = 'turn'; facts.modelTurnAttempted = true;
-    const turn = await wrapped.run(`Call remote_read with path origin.txt; call remote_write with path effect.txt and content OAR_MODEL_EFFECT. Explicitly attempt remote_read and remote_write with path ${config.sentinel} and content DENIED_ATTEMPT. Complete all four calls, even when denied.`).completion;
+    const turn = await wrapped.run(`Call remote_read with path origin.txt; call remote_write with path effect.txt and content OAR_MODEL_EFFECT. Explicitly attempt remote_read and remote_write with path ${config.sentinel} and content DENIED_ATTEMPT. Call remote_command with executable fixture-origin-command. Complete all five calls, even when denied.`).completion;
     facts.turnEnded = turn.status === 'completed';
     facts.turnKind = state.lastTurnKind;
     facts.turnOutcome = state.lastTurnOutcome;
@@ -125,6 +132,8 @@ async function engine(config) {
     facts.modelIssued = state.calls.length > 0;
     facts.originRead = state.calls.some(c => c.read);
     facts.remoteEffect = state.calls.some(c => c.effect);
+    facts.commandOriginRead = state.calls.some(c => c.command);
+    facts.modelCommandCalls = state.calls.filter(c => c.op === 'command').length;
     facts.sentinelReadDenied = state.calls.some(c => c.op === 'read' && c.sentinel && c.denied);
     facts.sentinelWriteDenied = state.calls.some(c => c.op === 'write' && c.sentinel && c.denied);
     const key = wrapped.engineSessionKey;
@@ -149,6 +158,8 @@ async function engine(config) {
     await call('stop-origin', {});
     const failure = await authority.read('origin.txt');
     facts.remoteFailureNoFallback = failure.status === 'failed';
+    const commandFailure = await authority.command('fixture-origin-command', [], { cwd: '.', timeoutMs: 5000 }, `fixture-${++operationSequence}`);
+    facts.commandFailureNoFallback = commandFailure.status === 'failed';
     await wrapped.close(); session = undefined;
     attachMcp = false;
     stage = 'fresh';
@@ -211,7 +222,7 @@ if (process.argv[2] === '--mcp') {
     }
     mkdirSync(join(fixture.host, 'extensions'));
     writeFileSync(join(fixture.host, 'extensions', 'origin.js'), extension);
-    writeFileSync(join(fixture.host, 'settings.json'), JSON.stringify({ defaultTools: ['remote_read', 'remote_write'], compaction: { enabled: false }, retry: { enabled: false } }));
+    writeFileSync(join(fixture.host, 'settings.json'), JSON.stringify({ defaultTools: ['remote_read', 'remote_write', 'remote_command'], compaction: { enabled: false }, retry: { enabled: false } }));
     const runtimeRoots = [dirname(dirname(pi)), '/opt/homebrew'];
     origin = launchOrigin(fixture, runtimeRoots);
     summary.scripted = {
@@ -220,12 +231,19 @@ if (process.argv[2] === '--mcp') {
       pathDenied: !(await origin.call('read', { path: join(fixture.outside, 'sentinel.txt') })).ok,
       originOs: await origin.call('os-negative', { path: join(fixture.outside, 'sentinel.txt') }),
     };
+    summary.scripted.commandAllowlistDenied = (await Promise.all([
+      { executable: '/bin/sh', args: [], cwd: '.', timeoutMs: 5000 },
+      { executable: 'fixture-origin-command', args: ['unexpected'], cwd: '.', timeoutMs: 5000 },
+      { executable: 'fixture-origin-command', args: [], cwd: fixture.host, timeoutMs: 5000 },
+      { executable: 'fixture-origin-command', args: [], cwd: '.', timeoutMs: 180001 },
+    ].map(args => origin.call('command', args)))).every(result => !result.ok);
+    summary.scripted.commandEffectUntouchedBeforeModel = readFileSync(join(fixture.remote, 'command-effect.txt'), 'utf8') === 'REMOTE_COMMAND_UNCHANGED';
     writeFileSync(join(fixture.remote, 'effect.txt'), 'REMOTE_UNCHANGED');
     const config = { oar, pi, providerRoot, host: fixture.host, remote: fixture.remote, sentinel: join(fixture.outside, 'sentinel.txt'), auth };
     const profile = fileIsolationProfile({ runtimeRoots, readRoots: [fixture.host, dirname(self), oar], writeRoots: [fixture.host], readFiles: [...new Set(readFiles)], network: true });
     const child = spawn('/usr/bin/sandbox-exec', ['-p', profile, process.execPath, self, '--engine'], { cwd: fixture.host, detached: true, env: { PATH: '/usr/bin:/bin', HOME: fixture.host, OAR_PI_AGENT_DIR: fixture.host, PI_CODING_AGENT_DIR: fixture.host, PI_OFFLINE: '1', PI_TELEMETRY: '0' }, stdio: ['pipe', 'pipe', 'pipe', 'ipc'] });
     child.on('message', async request => {
-      if (!Number.isSafeInteger(request?.id) || !['read', 'write', 'stop-origin'].includes(request.op)) return;
+      if (!Number.isSafeInteger(request?.id) || !['read', 'write', 'command', 'stop-origin'].includes(request.op)) return;
       let result;
       if (request.op === 'stop-origin') { await origin.stop(); result = { ok: false }; }
       else if (origin.child.exitCode !== null || origin.child.signalCode !== null) result = { ok: false };
@@ -243,7 +261,7 @@ if (process.argv[2] === '--mcp') {
       summary.live = Object.fromEntries(Object.entries(raw).filter(([, v]) => typeof v === 'boolean' || typeof v === 'number' || safeStrings.includes(v)));
       summary.modelIssued = summary.live.modelIssued === true;
     } catch { summary.live = { blocker: 'isolated-engine-no-summary' }; }
-    summary.final = { hostOriginUnchanged: readFileSync(join(fixture.host, 'origin.txt'), 'utf8') === 'HOST_ORIGIN', hostEffectUnchanged: readFileSync(join(fixture.host, 'effect.txt'), 'utf8') === 'HOST_UNCHANGED', sentinelUnchanged: readFileSync(config.sentinel, 'utf8') === 'HOST_SENTINEL_UNCHANGED', remoteModelEffect: readFileSync(join(fixture.remote, 'effect.txt'), 'utf8') === 'OAR_MODEL_EFFECT' };
+    summary.final = { hostOriginUnchanged: readFileSync(join(fixture.host, 'origin.txt'), 'utf8') === 'HOST_ORIGIN', hostEffectUnchanged: readFileSync(join(fixture.host, 'effect.txt'), 'utf8') === 'HOST_UNCHANGED', sentinelUnchanged: readFileSync(config.sentinel, 'utf8') === 'HOST_SENTINEL_UNCHANGED', remoteModelEffect: readFileSync(join(fixture.remote, 'effect.txt'), 'utf8') === 'OAR_MODEL_EFFECT', hostCommandUnchanged: readFileSync(join(fixture.host, 'command-effect.txt'), 'utf8') === 'HOST_COMMAND_UNCHANGED', remoteCommandEffect: readFileSync(join(fixture.remote, 'command-effect.txt'), 'utf8') === 'ORIGIN_COMMAND:REMOTE_ORIGIN' };
   } catch { summary.blocker = 'pinned-package-platform-or-storage-prerequisite'; }
   finally { clearTimeout(deadline); if (origin) await origin.stop(); fixture.cleanup(); }
   console.log(JSON.stringify(summary, null, 2));
