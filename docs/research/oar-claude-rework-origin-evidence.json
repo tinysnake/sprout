@@ -1,0 +1,340 @@
+{
+  "ticket": 229,
+  "evidenceClasses": {
+    "modelIssued": [
+      {
+        "op": "read",
+        "originStopped": false,
+        "target": "origin",
+        "ok": true,
+        "remoteMarker": true,
+        "remoteEffect": false,
+        "syntheticMarkerWithWhitespace": false,
+        "readEffect": false,
+        "originUnavailable": false
+      },
+      {
+        "op": "read",
+        "originStopped": false,
+        "target": "symlink",
+        "ok": false,
+        "remoteMarker": false,
+        "remoteEffect": false,
+        "syntheticMarkerWithWhitespace": false,
+        "readEffect": false,
+        "originUnavailable": false
+      },
+      {
+        "op": "write",
+        "originStopped": false,
+        "target": "effect",
+        "ok": true,
+        "remoteMarker": false,
+        "remoteEffect": true,
+        "syntheticMarkerWithWhitespace": true,
+        "readEffect": false,
+        "originUnavailable": false
+      },
+      {
+        "op": "read",
+        "originStopped": false,
+        "target": "host-sentinel",
+        "ok": false,
+        "remoteMarker": false,
+        "remoteEffect": false,
+        "syntheticMarkerWithWhitespace": false,
+        "readEffect": false,
+        "originUnavailable": false
+      },
+      {
+        "op": "write",
+        "originStopped": false,
+        "target": "host-sentinel",
+        "ok": false,
+        "remoteMarker": false,
+        "remoteEffect": false,
+        "syntheticMarkerWithWhitespace": false,
+        "readEffect": false,
+        "originUnavailable": false
+      },
+      {
+        "op": "read",
+        "originStopped": false,
+        "target": "auth",
+        "ok": false,
+        "remoteMarker": false,
+        "remoteEffect": false,
+        "syntheticMarkerWithWhitespace": false,
+        "readEffect": false,
+        "originUnavailable": false
+      },
+      {
+        "op": "write",
+        "originStopped": false,
+        "target": "auth",
+        "ok": false,
+        "remoteMarker": false,
+        "remoteEffect": false,
+        "syntheticMarkerWithWhitespace": false,
+        "readEffect": false,
+        "originUnavailable": false
+      },
+      {
+        "op": "command",
+        "originStopped": false,
+        "target": "other",
+        "ok": true,
+        "remoteMarker": true,
+        "remoteEffect": false,
+        "syntheticMarkerWithWhitespace": false,
+        "readEffect": false,
+        "originUnavailable": false
+      },
+      {
+        "op": "read",
+        "originStopped": false,
+        "target": "effect",
+        "ok": true,
+        "remoteMarker": false,
+        "remoteEffect": false,
+        "syntheticMarkerWithWhitespace": false,
+        "readEffect": true,
+        "originUnavailable": false
+      },
+      {
+        "op": "read",
+        "originStopped": true,
+        "target": "origin",
+        "ok": false,
+        "remoteMarker": false,
+        "remoteEffect": false,
+        "syntheticMarkerWithWhitespace": false,
+        "readEffect": false,
+        "originUnavailable": true
+      },
+      {
+        "op": "command",
+        "originStopped": true,
+        "target": "other",
+        "ok": false,
+        "remoteMarker": false,
+        "remoteEffect": false,
+        "syntheticMarkerWithWhitespace": false,
+        "readEffect": false,
+        "originUnavailable": true
+      }
+    ],
+    "protocolOnly": {
+      "nativeModelMatchesRequested": true,
+      "observedToolUseNames": [
+        "mcp__origin__remote_read",
+        "mcp__origin__remote_read",
+        "mcp__origin__remote_write",
+        "mcp__origin__remote_read",
+        "mcp__origin__remote_write",
+        "mcp__origin__remote_read",
+        "mcp__origin__remote_write",
+        "mcp__origin__remote_command",
+        "mcp__origin__remote_read",
+        "mcp__origin__remote_read",
+        "mcp__origin__remote_command"
+      ],
+      "sameBindingResumeId": true,
+      "freshBindingDifferentId": true,
+      "effortReappliedAndReadBack": "high"
+    },
+    "scripted": {
+      "negatives": {
+        "engine_host": {
+          "readDenied": true,
+          "writeDenied": true
+        },
+        "bridge_host": {
+          "readDenied": true,
+          "writeDenied": true
+        },
+        "origin_host": {
+          "id": 1,
+          "ok": true,
+          "readDenied": true,
+          "writeDenied": true
+        },
+        "engine_auth": {
+          "readDenied": false,
+          "writeDenied": true
+        },
+        "bridge_auth": {
+          "readDenied": true,
+          "writeDenied": true
+        },
+        "origin_auth": {
+          "id": 2,
+          "ok": true,
+          "readDenied": true,
+          "writeDenied": true
+        },
+        "engine_remote": {
+          "readDenied": true,
+          "writeDenied": true
+        },
+        "bridge_remote": {
+          "readDenied": true,
+          "writeDenied": true
+        },
+        "nested": {
+          "id": 3,
+          "ok": false,
+          "reason": "unsupported-operation"
+        },
+        "shell": {
+          "id": 4,
+          "ok": false,
+          "reason": "unsupported-operation"
+        },
+        "traversal": {
+          "id": 5,
+          "ok": false,
+          "reason": "path-or-content-denied"
+        }
+      },
+      "calls": [
+        {
+          "op": "read",
+          "originStopped": true,
+          "target": "origin",
+          "ok": false,
+          "remoteMarker": false,
+          "remoteEffect": false,
+          "syntheticMarkerWithWhitespace": false,
+          "readEffect": false,
+          "originUnavailable": true
+        }
+      ],
+      "noLocalFallbackAfterOriginLoss": true
+    },
+    "sourceOnly": [
+      "Standard OAR SessionOptions has no builtin/discovery policy member.",
+      "OAR launches Claude with permission bypass; the prototype executable hook removes it.",
+      "Claude MCP stdio commands and HTTP clients originate on the engine host, not an enrolled Worker."
+    ]
+  },
+  "versions": {
+    "oar": "0.35.0",
+    "sourceCommit": "8adde16fe2d12ae54af7d4dff86c3f224380a5c7",
+    "claude": "2.1.294",
+    "cliSha256": "def0d15e64dd7d89621f88d28214f885b1c38b0ddd69762fb8593e34915d6d53",
+    "node": "26.11.1",
+    "macOS": "27.0.1",
+    "model": "group/auto-mimo-v2-6-flash[1m]",
+    "effort": "high",
+    "modelRoute": "existing non-Claude backend; no model/account substitution",
+    "fixtureSha256": "f95a7d05324cc8f528ff4e60a7ad1fb25e29e55dad4ee193ed87d6bc23e3012a",
+    "oarModules": {
+      "launch": "02c4a039c1ae0a1af333f29740d510e61667773e9dbfa8f750d46e5bb66df8ed",
+      "session": "f47cb411d1fadb25cfcce0bea16564b5d425ef8d3a55c3229b5096a578db9b38",
+      "projection": "5ad2d0b8d23af702ae025b0c4f6e92cad1531cf2e16ce3df5def1d326583d6ac",
+      "mcp-config": "1cbce5abfd76cd19fde976ab034c01d9e2daa4aea6d31ae2c79183d2cd478cf6"
+    }
+  },
+  "turns": [
+    {
+      "status": "completed",
+      "textPresent": true,
+      "diagnosticLabels": [
+        "permission",
+        "model",
+        "settings"
+      ],
+      "nativeResultCount": 1,
+      "exitCodes": []
+    },
+    {
+      "status": "completed",
+      "textPresent": true,
+      "diagnosticLabels": [
+        "permission",
+        "model"
+      ],
+      "nativeResultCount": 1,
+      "exitCodes": []
+    },
+    {
+      "status": "completed",
+      "textPresent": true,
+      "diagnosticLabels": [
+        "permission",
+        "model"
+      ],
+      "nativeResultCount": 1,
+      "exitCodes": []
+    }
+  ],
+  "catalogs": [
+    {
+      "attached": true,
+      "exact": true,
+      "tools": [
+        "mcp__origin__remote_command",
+        "mcp__origin__remote_read",
+        "mcp__origin__remote_write"
+      ],
+      "originConnected": true
+    },
+    {
+      "attached": true,
+      "exact": true,
+      "tools": [
+        "mcp__origin__remote_command",
+        "mcp__origin__remote_read",
+        "mcp__origin__remote_write"
+      ],
+      "originConnected": true
+    },
+    {
+      "attached": false,
+      "exact": true,
+      "tools": [],
+      "originConnected": false
+    }
+  ],
+  "fixture": "separate local sandbox origin; not enrolled remote work",
+  "authority": {
+    "declaredBeforeOpen": true,
+    "binding": "immutable fixture origin",
+    "allowedOperations": [
+      "read",
+      "write",
+      "command"
+    ],
+    "command": {
+      "executable": "fixture-origin-command",
+      "args": [],
+      "cwd": ".",
+      "timeoutMs": 5000
+    },
+    "changedBinding": "close and fresh; never resume across authority"
+  },
+  "final": {
+    "remoteCommandEffect": true,
+    "hostCommandUnchanged": true,
+    "remoteEffect": true,
+    "hostOriginUnchanged": true,
+    "hostEffectUnchanged": true,
+    "sentinelUnchanged": true,
+    "ambientMarkerAbsent": true,
+    "engineAuthHelperUsed": true
+  },
+  "acceptance": {
+    "modelReadEditCheck": true,
+    "modelHostAuthDenials": true,
+    "modelSymlinkDenial": true,
+    "catalogOnOpenResumeFresh": true,
+    "allTurnsCompleted": true,
+    "localMarkersUnchanged": true,
+    "modelCommand": true,
+    "modelFailureNoFallback": true,
+    "nestedInvocation": "unproved: Agent/Task/Skill/ToolSearch excluded from native catalog",
+    "remoteProjectMcpOrigin": "refuted for direct descriptors",
+    "liveCrashResumeAttribution": "unproved"
+  }
+}

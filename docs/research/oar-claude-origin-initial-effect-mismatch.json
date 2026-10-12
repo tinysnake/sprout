@@ -1,0 +1,258 @@
+{
+  "ticket": 229,
+  "evidenceClasses": {
+    "modelIssued": [
+      {
+        "op": "read",
+        "target": "origin",
+        "ok": true,
+        "remoteMarker": true,
+        "remoteEffect": false,
+        "readEffect": false,
+        "originUnavailable": false
+      },
+      {
+        "op": "write",
+        "target": "effect",
+        "ok": true,
+        "remoteMarker": false,
+        "remoteEffect": false,
+        "readEffect": false,
+        "originUnavailable": false
+      },
+      {
+        "op": "read",
+        "target": "effect",
+        "ok": true,
+        "remoteMarker": false,
+        "remoteEffect": false,
+        "readEffect": false,
+        "originUnavailable": false
+      },
+      {
+        "op": "read",
+        "target": "host-sentinel",
+        "ok": false,
+        "remoteMarker": false,
+        "remoteEffect": false,
+        "readEffect": false,
+        "originUnavailable": false
+      },
+      {
+        "op": "write",
+        "target": "host-sentinel",
+        "ok": false,
+        "remoteMarker": false,
+        "remoteEffect": false,
+        "readEffect": false,
+        "originUnavailable": false
+      },
+      {
+        "op": "read",
+        "target": "auth",
+        "ok": false,
+        "remoteMarker": false,
+        "remoteEffect": false,
+        "readEffect": false,
+        "originUnavailable": false
+      },
+      {
+        "op": "write",
+        "target": "auth",
+        "ok": false,
+        "remoteMarker": false,
+        "remoteEffect": false,
+        "readEffect": false,
+        "originUnavailable": false
+      },
+      {
+        "op": "read",
+        "target": "symlink",
+        "ok": false,
+        "remoteMarker": false,
+        "remoteEffect": false,
+        "readEffect": false,
+        "originUnavailable": false
+      },
+      {
+        "op": "read",
+        "target": "effect",
+        "ok": true,
+        "remoteMarker": false,
+        "remoteEffect": false,
+        "readEffect": false,
+        "originUnavailable": false
+      }
+    ],
+    "protocolOnly": {
+      "sameBindingResumeId": true,
+      "freshBindingDifferentId": true
+    },
+    "scripted": {
+      "negatives": {
+        "engine_host": {
+          "readDenied": true,
+          "writeDenied": true
+        },
+        "bridge_host": {
+          "readDenied": true,
+          "writeDenied": true
+        },
+        "origin_host": {
+          "id": 1,
+          "ok": true,
+          "readDenied": true,
+          "writeDenied": true
+        },
+        "engine_auth": {
+          "readDenied": false,
+          "writeDenied": true
+        },
+        "bridge_auth": {
+          "readDenied": true,
+          "writeDenied": true
+        },
+        "origin_auth": {
+          "id": 2,
+          "ok": true,
+          "readDenied": true,
+          "writeDenied": true
+        },
+        "engine_remote": {
+          "readDenied": true,
+          "writeDenied": true
+        },
+        "bridge_remote": {
+          "readDenied": true,
+          "writeDenied": true
+        },
+        "nested": {
+          "id": 3,
+          "ok": false,
+          "reason": "unsupported-operation"
+        },
+        "shell": {
+          "id": 4,
+          "ok": false,
+          "reason": "unsupported-operation"
+        },
+        "traversal": {
+          "id": 5,
+          "ok": false,
+          "reason": "path-or-content-denied"
+        }
+      },
+      "calls": [
+        {
+          "op": "read",
+          "target": "origin",
+          "ok": false,
+          "remoteMarker": false,
+          "remoteEffect": false,
+          "readEffect": false,
+          "originUnavailable": true
+        }
+      ],
+      "noLocalFallbackAfterOriginLoss": true
+    },
+    "sourceOnly": []
+  },
+  "versions": {
+    "oar": "0.35.0",
+    "sourceCommit": "8adde16fe2d12ae54af7d4dff86c3f224380a5c7",
+    "claude": "2.1.294",
+    "cliSha256": "def0d15e64dd7d89621f88d28214f885b1c38b0ddd69762fb8593e34915d6d53",
+    "node": "26.11.1",
+    "macOS": "27.0.1",
+    "model": "group/auto-mimo-v2-6-flash[1m]",
+    "modelRoute": "existing non-Claude backend; no model/account substitution",
+    "fixtureSha256": "9d050f9f0943a0b3f4244f25ca0fe1cdacd4f49a5ff8be9b2c2d72de9814ab23",
+    "oarModules": {
+      "launch": "02c4a039c1ae0a1af333f29740d510e61667773e9dbfa8f750d46e5bb66df8ed",
+      "session": "f47cb411d1fadb25cfcce0bea16564b5d425ef8d3a55c3229b5096a578db9b38",
+      "projection": "5ad2d0b8d23af702ae025b0c4f6e92cad1531cf2e16ce3df5def1d326583d6ac",
+      "mcp-config": "1cbce5abfd76cd19fde976ab034c01d9e2daa4aea6d31ae2c79183d2cd478cf6"
+    }
+  },
+  "turns": [
+    {
+      "kind": "ended",
+      "outcome": "completed",
+      "textPresent": true,
+      "diagnosticLabels": [
+        "permission",
+        "model",
+        "settings"
+      ],
+      "nativeResultCount": 1,
+      "exitCodes": []
+    },
+    {
+      "kind": "ended",
+      "outcome": "completed",
+      "textPresent": true,
+      "diagnosticLabels": [
+        "permission",
+        "model"
+      ],
+      "nativeResultCount": 1,
+      "exitCodes": []
+    },
+    {
+      "kind": "ended",
+      "outcome": "completed",
+      "textPresent": true,
+      "diagnosticLabels": [
+        "permission",
+        "model"
+      ],
+      "nativeResultCount": 1,
+      "exitCodes": []
+    }
+  ],
+  "catalogs": [
+    {
+      "attached": true,
+      "exact": true,
+      "tools": [
+        "mcp__origin__remote_read",
+        "mcp__origin__remote_write"
+      ],
+      "originConnected": true
+    },
+    {
+      "attached": true,
+      "exact": true,
+      "tools": [
+        "mcp__origin__remote_read",
+        "mcp__origin__remote_write"
+      ],
+      "originConnected": true
+    },
+    {
+      "attached": false,
+      "exact": true,
+      "tools": [],
+      "originConnected": false
+    }
+  ],
+  "fixture": "separate local sandbox origin; not enrolled remote work",
+  "authority": {
+    "declaredBeforeOpen": true,
+    "binding": "immutable fixture origin",
+    "allowedOperations": [
+      "read",
+      "write"
+    ],
+    "command": "unavailable",
+    "changedBinding": "close and fresh; never resume across authority"
+  },
+  "final": {
+    "remoteEffect": false,
+    "hostOriginUnchanged": true,
+    "hostEffectUnchanged": true,
+    "sentinelUnchanged": true,
+    "ambientMarkerAbsent": true,
+    "engineAuthHelperUsed": true
+  }
+}

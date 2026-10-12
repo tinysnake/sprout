@@ -1,0 +1,48 @@
+{
+  "evidenceClass": "scripted pinned argument-builder execution and native MCP protocol controls",
+  "launches": [
+    {
+      "scenario": "ordinary",
+      "explicitFlags": [],
+      "mcpConfig": false,
+      "streamInput": true,
+      "systemPromptIsSingleArgument": true,
+      "argumentCount": 16
+    },
+    {
+      "scenario": "unknown-options",
+      "explicitFlags": [],
+      "mcpConfig": false,
+      "streamInput": true,
+      "systemPromptIsSingleArgument": true,
+      "argumentCount": 16
+    }
+  ],
+  "mcp": [
+    {
+      "mode": "positive",
+      "exitCode": 0,
+      "capabilities": [
+        "prompts",
+        "resources"
+      ],
+      "resourceListing": true,
+      "promptListing": true,
+      "resourcesRejected": false,
+      "promptsRejected": false
+    },
+    {
+      "mode": "approved-bridge",
+      "exitCode": 0,
+      "capabilities": [
+        "tools"
+      ],
+      "resourceListing": false,
+      "promptListing": false,
+      "resourcesRejected": true,
+      "promptsRejected": true
+    }
+  ],
+  "launchSha256": "02c4a039c1ae0a1af333f29740d510e61667773e9dbfa8f750d46e5bb66df8ed",
+  "sentinelUnchanged": true
+}

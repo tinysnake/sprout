@@ -1,0 +1,248 @@
+{
+  "evidenceClass": "scripted native CLI loader controls; no model-issued evidence",
+  "cli": "2.1.294",
+  "loaders": [
+    {
+      "source": "plugin",
+      "cases": [
+        {
+          "mode": "positive",
+          "exitCode": 1,
+          "timedOut": false,
+          "entry": {
+            "entered": true,
+            "read": true,
+            "write": true,
+            "readDenied": false,
+            "writeDenied": false
+          },
+          "effectPresent": true
+        },
+        {
+          "mode": "denied",
+          "exitCode": 1,
+          "timedOut": false,
+          "entry": {
+            "entered": true,
+            "read": false,
+            "write": false,
+            "readDenied": true,
+            "writeDenied": true
+          },
+          "effectPresent": false
+        },
+        {
+          "mode": "restricted",
+          "exitCode": 1,
+          "timedOut": false,
+          "entry": null,
+          "effectPresent": false
+        }
+      ],
+      "positiveObserved": true,
+      "attemptedAndDenied": true,
+      "restrictedSuppressed": true,
+      "disposition": "bounded scripted loader control observed"
+    },
+    {
+      "source": "user",
+      "cases": [
+        {
+          "mode": "positive",
+          "exitCode": 1,
+          "timedOut": false,
+          "entry": {
+            "entered": true,
+            "read": true,
+            "write": true,
+            "readDenied": false,
+            "writeDenied": false
+          },
+          "effectPresent": true
+        },
+        {
+          "mode": "denied",
+          "exitCode": 1,
+          "timedOut": false,
+          "entry": {
+            "entered": true,
+            "read": false,
+            "write": false,
+            "readDenied": true,
+            "writeDenied": true
+          },
+          "effectPresent": false
+        },
+        {
+          "mode": "restricted",
+          "exitCode": 1,
+          "timedOut": false,
+          "entry": null,
+          "effectPresent": false
+        }
+      ],
+      "positiveObserved": true,
+      "attemptedAndDenied": true,
+      "restrictedSuppressed": true,
+      "disposition": "bounded scripted loader control observed"
+    },
+    {
+      "source": "project",
+      "cases": [
+        {
+          "mode": "positive",
+          "exitCode": 1,
+          "timedOut": false,
+          "entry": {
+            "entered": true,
+            "read": true,
+            "write": true,
+            "readDenied": false,
+            "writeDenied": false
+          },
+          "effectPresent": true
+        },
+        {
+          "mode": "denied",
+          "exitCode": 1,
+          "timedOut": false,
+          "entry": {
+            "entered": true,
+            "read": false,
+            "write": false,
+            "readDenied": true,
+            "writeDenied": true
+          },
+          "effectPresent": false
+        },
+        {
+          "mode": "restricted",
+          "exitCode": 1,
+          "timedOut": false,
+          "entry": null,
+          "effectPresent": false
+        }
+      ],
+      "positiveObserved": true,
+      "attemptedAndDenied": true,
+      "restrictedSuppressed": true,
+      "disposition": "bounded scripted loader control observed"
+    },
+    {
+      "source": "local",
+      "cases": [
+        {
+          "mode": "positive",
+          "exitCode": 1,
+          "timedOut": false,
+          "entry": {
+            "entered": true,
+            "read": true,
+            "write": true,
+            "readDenied": false,
+            "writeDenied": false
+          },
+          "effectPresent": true
+        },
+        {
+          "mode": "denied",
+          "exitCode": 1,
+          "timedOut": false,
+          "entry": {
+            "entered": true,
+            "read": false,
+            "write": false,
+            "readDenied": true,
+            "writeDenied": true
+          },
+          "effectPresent": false
+        },
+        {
+          "mode": "restricted",
+          "exitCode": 1,
+          "timedOut": false,
+          "entry": null,
+          "effectPresent": false
+        }
+      ],
+      "positiveObserved": true,
+      "attemptedAndDenied": true,
+      "restrictedSuppressed": true,
+      "disposition": "bounded scripted loader control observed"
+    },
+    {
+      "source": "explicit",
+      "cases": [
+        {
+          "mode": "positive",
+          "exitCode": 1,
+          "timedOut": false,
+          "entry": {
+            "entered": true,
+            "read": true,
+            "write": true,
+            "readDenied": false,
+            "writeDenied": false
+          },
+          "effectPresent": true
+        },
+        {
+          "mode": "denied",
+          "exitCode": 1,
+          "timedOut": false,
+          "entry": {
+            "entered": true,
+            "read": false,
+            "write": false,
+            "readDenied": true,
+            "writeDenied": true
+          },
+          "effectPresent": false
+        },
+        {
+          "mode": "restricted",
+          "exitCode": 1,
+          "timedOut": false,
+          "entry": null,
+          "effectPresent": false
+        }
+      ],
+      "positiveObserved": true,
+      "attemptedAndDenied": true,
+      "restrictedSuppressed": true,
+      "disposition": "bounded scripted loader control observed"
+    }
+  ],
+  "unproved": [
+    {
+      "loader": "CLAUDE.md and rules context",
+      "mechanism": "Bare suppresses discovery; context reads have no entry/execute callback in this probe. Original ambient marker is insufficient.",
+      "remedy": "Capture attempted file reads under pinned native CLI with an authorized OS audit tracer, plus a positive context-load control."
+    },
+    {
+      "loader": "skills",
+      "mechanism": "disable-slash-commands disables skills and Skill is excluded. Bare alone still permits slash-name resolution according to pinned help. No observed skill loader entry.",
+      "remedy": "Authorized isolated skill discovery positive control and audited denied resource read under the restricted launch."
+    },
+    {
+      "loader": "installed plugins, plugin hooks, agents and LSP",
+      "mechanism": "Bare suppresses plugin sync/hooks/LSP. Explicit disposable plugin hooks have their own controls above; automatic installed-plugin registry, agents and LSP entry were not traced.",
+      "remedy": "Register one synthetic plugin only in disposable config, verify native load, then audit denied resource reads/execution with current flags."
+    },
+    {
+      "loader": "managed settings and managed MCP",
+      "mechanism": "System-managed source cannot be redirected by setting-sources; no authorization to modify OS-managed policy and no controlled managed source installed.",
+      "remedy": "Administrator-provisioned disposable managed-policy fixture and native loader read/execute trace, without changing real policy."
+    },
+    {
+      "loader": "MCP resources/prompts",
+      "mechanism": "Approved bridge advertises tools only; resources/prompts are not admitted and no model-visible resource route exists.",
+      "remedy": "A separate bounded admitted resource-loader conformance experiment with typed Worker authority, if that surface is required."
+    },
+    {
+      "loader": "explicit plugin-url/add-dir/agents (and plugin-dir on the OAR route)",
+      "mechanism": "Constructed OAR launch supplies none; OAR SessionOptions does not add these switches. Explicit plugin-dir hook execution is controlled separately above; the remaining source routes did not enter.",
+      "remedy": "Audit immutable launch argument admission and independently control each source if admitted later."
+    }
+  ]
+}
