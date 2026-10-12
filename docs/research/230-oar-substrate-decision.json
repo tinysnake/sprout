@@ -78,7 +78,7 @@
       "verdict": "Governing order established via reconciliation reading: minimal Codex/Pi replacement precedes #225 engine-dependent delivery, while #225 substrate-independent work proceeds in parallel",
       "reconciliationBasis": "Ticket #230 AC7 and #226 require minimal replacement before #225's engine-dependent delivery; #253 ordering verdict noted replacement does not gate #225. Reconciled under Human adjudication: '#225's engine-dependent delivery' is read as the engine-dependent subset of #225. Substrate-independent #225 work proceeds immediately and in parallel, neither scope gates the other broadly, and #225 is neither amended nor closed.",
       "rules": [
-        "Minimal Codex/Pi replacement via OarEngineAdapter in Environment-hosted mode strictly precedes #225's engine-dependent delivery.",
+        "Minimal Codex/Pi replacement in Environment-hosted mode (Pi via shared OarEngineAdapter with loader hook, Codex via CodexNativeSeamException) strictly precedes #225's engine-dependent delivery.",
         "Substrate-independent #225 work (startup parsing, durable placement facts, shared Environment operations Module in #237-#238) and the Pi vertical proceed in parallel and are never blocked.",
         "Unrelated engine coverage (such as future Claude Host-run production support) follows both minimal replacement and #225 engine-dependent delivery.",
         "Codex retains native exception in both modes until upstream OAR controls exist.",
@@ -250,10 +250,10 @@
     {
       "runtime": "Claude",
       "dimension": "Remote Origin & File Isolation",
-      "evidenceLevel": "model-issued (read/edit/command on local fixture; test pass in #252)",
+      "evidenceLevel": "model-issued (read/edit on local fixture; native Host-run test pass in #252)",
       "platformScope": "macOS",
       "oarCandidateStatus": "viable_with_wrapper",
-      "gapOrLimitation": "Direct engine opens denied by OS profile; remote test execution passed in #252 under native Host-run.",
+      "gapOrLimitation": "Direct engine opens denied by OS profile; remote test execution passed in #252 under native Host-run (not OAR).",
       "remedyOrPrerequisite": "Sprout Environment operations and Worker MCP."
     },
     {
@@ -303,7 +303,7 @@
     },
     "uncertainOperationRecovery": {
       "status": "decisively_gapped_in_oar_blocked_without_acceptance",
-      "evidence": "OAR abort() is only cancellation delivery, not remote-stop proof. Pi session disposal and post-abort wait are unbounded in source; local process-group kill does not prove remote termination. #252 native recovery is partial and does not supply OAR evidence. Blocked pending OAR-specific abort/hung-close scenario with Worker-confirmed remote termination or protected lease recovery."
+      "evidence": "OAR abort() is only cancellation delivery, not remote-stop proof. Pi session disposal and post-abort wait are unbounded in source; local process-group kill does not prove remote termination. #252 native recovery is partial and does not supply OAR evidence. Blocked pending OAR-specific abort/hung-close scenario with Worker-confirmed remote termination or protected recovery state with lease retained and no replay."
     }
   }
 }
