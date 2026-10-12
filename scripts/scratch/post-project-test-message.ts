@@ -24,7 +24,6 @@ const result = await store.postMessage({
   message: {
     id,
     projectId,
-    scopeId: projectId,
     channel: 'project',
     author: { id: agentId, kind: 'agent' },
     body: 'test',
@@ -32,7 +31,7 @@ const result = await store.postMessage({
     deliveryKey,
     createdAt: now,
   },
-  plan: { inputId: id, decisions: [], observations: [] },
+  plan: { messageId: id, decisions: [], observations: [] },
   now,
 });
 

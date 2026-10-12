@@ -1,11 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { PassThrough } from 'node:stream';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { OarEngineAdapter, type OarRunnerProcess } from './oar.ts';
 import { assertSupportedNodeVersion, parseNodeMajor } from './oar-node-support.ts';
-import { EngineResumeRefusedError, EngineStartError } from './port.ts';
+import { EngineResumeRefusedError, EngineStartError, type EngineAdapter } from './port.ts';
 import type { RunnerCommand, RunnerMessage } from './oar-runner-protocol.ts';
+import { probeEnvironmentReadiness } from '../worker/readiness.ts';
+import { evaluateAdmissibleWorkOption } from '../agent/admission.ts';
+import { WorkerRecoveryJournal } from '../worker/recovery-journal.ts';
+import { EnvironmentWorker } from '../worker/server.ts';
 
 class FakeOarRunner implements OarRunnerProcess {
   readonly stdin = new PassThrough();
@@ -17,8 +24,11 @@ class FakeOarRunner implements OarRunnerProcess {
 
   readonly receivedCommands: RunnerCommand[] = [];
   #exitListeners: ((code: number | null, signal: NodeJS.Signals | null) => void)[] = [];
+  #errorListeners: ((err: Error) => void)[] = [];
   #buffer = '';
 
+  killHandler?: ((signal?: NodeJS.Signals) => void) | undefined;
+  ignoreDispose = false;
   readonly #onCommand: ((command: RunnerCommand, runner: FakeOarRunner) => void) | undefined;
 
   constructor(
@@ -37,7 +47,7 @@ class FakeOarRunner implements OarRunnerProcess {
           if (this.#onCommand) {
             this.#onCommand(cmd, this);
           }
-          if (cmd.op === 'dispose') {
+          if (cmd.op === 'dispose' && !this.ignoreDispose) {
             this.send({ kind: 'disposed' });
             this.exit(0);
           }
@@ -54,6 +64,10 @@ class FakeOarRunner implements OarRunnerProcess {
   }
 
   kill(signal: NodeJS.Signals = 'SIGTERM'): boolean {
+    if (this.killHandler) {
+      this.killHandler(signal);
+      return true;
+    }
     this.exit(0, signal);
     return true;
   }
@@ -69,9 +83,17 @@ class FakeOarRunner implements OarRunnerProcess {
     }
   }
 
+  emitError(err: Error): void {
+    for (const listener of this.#errorListeners) {
+      listener(err);
+    }
+  }
+
   on(event: 'exit' | 'error', listener: (...args: any[]) => void): this {
     if (event === 'exit') {
       this.#exitListeners.push(listener);
+    } else if (event === 'error') {
+      this.#errorListeners.push(listener);
     }
     return this;
   }
@@ -283,7 +305,7 @@ test('AC3 & AC4: Root turn completion persists correct terminal answer and filte
 
   // Assert events streamed
   assert.deepEqual(observedEvents, [
-    { type: 'tool-call', name: 'read', detail: '{"path":"file.txt"}' },
+    { type: 'tool-call', name: 'read', detail: '{"path":"<redacted-host>"}' },
     { type: 'tool-output', text: 'file content' },
     { type: 'message', text: 'The terminal answer.', final: false },
   ]);
@@ -659,6 +681,280 @@ test('AC7: Usage attribution preserves deltas across multiple turns and redacts 
   assert.equal(result2.status, 'completed');
   assert.deepEqual(result2.tokenUsage, { promptTokens: 150, completionTokens: 50, totalTokens: 200 });
   assert.deepEqual(result2.detailedTokens, { inputTokens: 150, outputTokens: 50, reasoningTokens: 10, cachedInputTokens: 20 });
+
+  await session.close();
+});
+
+test('AC4 (F1): Background or stale root turn_ended during admitted prompt neither settles nor contributes text', async () => {
+  let promptCmd: any;
+  const runner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      r.send({ kind: 'ready', sessionId: 'sess-interleave', engineSessionKey: 'sess-interleave' });
+    } else if (cmd.op === 'prompt') {
+      promptCmd = cmd;
+      // 1. Runner accepts the prompt and binds spanId
+      r.send({
+        kind: 'prompt_accepted',
+        activationId: cmd.activationId,
+        seq: 1,
+        spanId: 'admitted-span-1',
+      });
+      // 2. Injected interleaving: background root text delta with different spanId
+      r.send({
+        kind: 'event',
+        event: {
+          kind: 'text_delta',
+          text: 'stale background text',
+          sessionId: 'sess-interleave',
+          agentPath: [],
+          spanId: 'background-stale-span-99',
+          seq: 2,
+          receivedAt: Date.now(),
+        },
+      });
+      // 3. Injected interleaving: background root turn_ended with different spanId
+      r.send({
+        kind: 'turn_ended',
+        spanId: 'background-stale-span-99',
+        outcome: { kind: 'completed' },
+      });
+    }
+  });
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'codex',
+    spawnProcess: () => runner,
+  });
+
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const turn = session.run('Prompt with background interference');
+
+  // Verify the turn is NOT settled by the background turn_ended
+  let settledPrematurely = false;
+  turn.completion.then(() => { settledPrematurely = true; });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(settledPrematurely, false, 'Admitted turn must not be settled by background root turn_ended');
+
+  // Now emit the real admitted turn events
+  runner.send({
+    kind: 'event',
+    event: {
+      kind: 'text_delta',
+      text: 'Admitted terminal answer.',
+      sessionId: 'sess-interleave',
+      agentPath: [],
+      spanId: 'admitted-span-1',
+      seq: 3,
+      receivedAt: Date.now(),
+    },
+  });
+  runner.send({
+    kind: 'turn_ended',
+    activationId: promptCmd.activationId,
+    spanId: 'admitted-span-1',
+    outcome: { kind: 'completed' },
+  });
+
+  const result = await turn.completion;
+  assert.equal(result.status, 'completed');
+  assert.equal(result.text, 'Admitted terminal answer.');
+  assert.ok(!result.text.includes('stale background text'), 'Stale text must not be in reply');
+
+  await session.close();
+});
+
+test('AC1 (F2): Simulated Node 23 Worker refuses work before admission and returns actionable sanitized guidance', async () => {
+  // 1. package.json and package-lock.json floors agree on >=24.0.0
+  const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+  const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+  assert.equal(pkg.engines?.node, '>=24.0.0');
+  assert.equal(lock.packages?.['']?.engines?.node, '>=24.0.0');
+
+  // 2. Simulated Node 23 Worker readiness probe
+  const probeResult = await probeEnvironmentReadiness(
+    [{ engine: 'codex', binaryPath: '/tmp/codex', args: [], sandbox: 'read-only' }],
+    {
+      nodeVersion: '23.4.0',
+      env: { SPROUT_USE_OAR_ENGINE: 'codex' },
+      commandRunner: {
+        run: async () => ({ stdout: 'codex-cli 0.159.3\n', exitCode: 0 }),
+      },
+    },
+  );
+
+  const codexFact = probeResult.readiness.engines.find((e) => e.engine === 'codex');
+  assert.ok(codexFact);
+  assert.equal(codexFact.readiness, 'unknown', 'Codex readiness must be unknown when Node < 24');
+  assert.equal(probeResult.probe.enginesOk, false);
+  assert.match(
+    probeResult.probe.summary,
+    /Node\.js 24\+ is required by OAR \(detected Node\.js 23\.4\.0\)\. Please upgrade Node\.js to version 24\.0\.0 or later before admitting work\./,
+  );
+
+  // 3. Run admission refuses the option before a run is admitted
+  const observedFacts = probeResult.readiness.engines.map((e) => ({
+    engine: e.engine,
+    installed: e.installed,
+    readiness: e.readiness,
+    models: { state: e.modelAvailability, models: e.models },
+  }));
+  const admission = evaluateAdmissibleWorkOption(
+    [{ id: 'opt-codex', engine: 'codex', workModel: '', effort: 'default' }],
+    observedFacts,
+  );
+  assert.equal(admission.ok, false, 'No run can be admitted on unsupported Node');
+  assert.match(admission.reason ?? '', /readiness is unknown/);
+});
+
+test('AC5 (F6): Spawn failure (runner process emits error before ready) rejects startSession and cleans up resources', async () => {
+  let killCalled = false;
+  const runner = new FakeOarRunner();
+  runner.killHandler = () => {
+    killCalled = true;
+    runner.exit(1);
+  };
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'codex',
+    spawnProcess: () => {
+      // Runner emits spawn error (e.g. ENOENT / EACCES) before emitting ready
+      queueMicrotask(() => {
+        runner.emitError(new Error('spawn ENOENT'));
+      });
+      return runner;
+    },
+  });
+
+  await assert.rejects(
+    () => adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' }),
+    (err: Error) => {
+      assert.ok(err instanceof EngineStartError);
+      assert.match(err.message, /Failed to spawn OAR runner: spawn ENOENT/);
+      return true;
+    },
+  );
+
+  assert.equal(killCalled, true, 'Spawn failure must trigger process cleanup');
+});
+
+test('AC6 (F3): Non-cooperative runner failure to exit preserves stop uncertainty and keeps recovery fenced', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'oar-fence-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const journal = new WorkerRecoveryJournal(join(dir, 'journal'), 1);
+
+  // Uncooperative runner that ignores dispose and ignore kill
+  const uncooperativeRunner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      r.send({ kind: 'ready', sessionId: 'sess-uncoop', engineSessionKey: 'sess-uncoop' });
+    }
+  });
+  uncooperativeRunner.ignoreDispose = true;
+  // Refuses to exit on kill
+  uncooperativeRunner.killHandler = () => {
+    // Does NOT call exit()
+  };
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'codex',
+    spawnProcess: () => uncooperativeRunner,
+  });
+
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const workerWithIO = new EnvironmentWorker({
+    environmentInstanceId: 'inst-1',
+    engines: new Map<string, EngineAdapter>([['codex', adapter]]),
+    input,
+    output,
+    recoveryJournal: journal,
+  });
+
+  input.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'session/start', params: { engine: 'codex', agentId: 'scout', workingDirectory: '/tmp' } })}\n`);
+  await new Promise<void>((resolve) => output.once('data', () => resolve()));
+
+  // Worker shutdown with uncooperative runner: close throws, fenced remains false
+  await workerWithIO.shutdown();
+
+  // Recovery journal MUST NOT record engineStopped: stop uncertainty is preserved!
+  assert.equal(journal.snapshot().engineStopped, false, 'Recovery must remain fenced when process did not exit');
+});
+
+test('AC7 (F5): Synthetic absolute paths and credentials in tool input and output are redacted from progress events', async () => {
+  const runner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      r.send({ kind: 'ready', sessionId: 'sess-privacy', engineSessionKey: 'sess-privacy' });
+    } else if (cmd.op === 'prompt') {
+      // 1. Tool call started containing host absolute path and bearer token
+      r.send({
+        kind: 'event',
+        event: {
+          kind: 'tool_call_started',
+          callId: 'call-priv-1',
+          tool: 'read',
+          input: '{"path":"/Users/user/secret-repo/config.json","token":"Bearer test-secret-token-token-12345"}',
+          sessionId: 'sess-privacy',
+          agentPath: [],
+          seq: 1,
+          receivedAt: Date.now(),
+        },
+      });
+      // 2. Tool call ended containing Windows host path and secret auth key
+      r.send({
+        kind: 'event',
+        event: {
+          kind: 'tool_call_ended',
+          callId: 'call-priv-1',
+          content: [{ type: 'text', text: 'Error in C:\\Users\\user\\project: authorization token=test-auth-key-key-98765 failed' }],
+          result: 'failed',
+          sessionId: 'sess-privacy',
+          agentPath: [],
+          seq: 2,
+          receivedAt: Date.now(),
+        },
+      });
+      // 3. Root answer
+      r.send({
+        kind: 'event',
+        event: {
+          kind: 'text_delta',
+          text: 'Clean final reply.',
+          sessionId: 'sess-privacy',
+          agentPath: [],
+          seq: 3,
+          receivedAt: Date.now(),
+        },
+      });
+      r.send({
+        kind: 'turn_ended',
+        outcome: { kind: 'completed' },
+      });
+    }
+  });
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'codex',
+    spawnProcess: () => runner,
+  });
+
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const turn = session.run('Privacy test prompt');
+
+  const events: any[] = [];
+  for await (const ev of turn.events) {
+    events.push(ev);
+  }
+
+  const result = await turn.completion;
+  assert.equal(result.status, 'completed');
+
+  const serializedEvents = JSON.stringify(events);
+
+  // Assert absolute paths and credentials are scrubbed from events
+  assert.ok(!serializedEvents.includes('/Users/user'), 'POSIX user directory must not cross wire');
+  assert.ok(!serializedEvents.includes('C:\\Users\\user'), 'Windows user directory must not cross wire');
+  assert.ok(!serializedEvents.includes('test-secret-token-token-12345'), 'Secret key must not cross wire');
+  assert.ok(!serializedEvents.includes('test-auth-key-key-98765'), 'Auth token must not cross wire');
 
   await session.close();
 });

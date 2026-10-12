@@ -206,7 +206,6 @@ export async function createOarMcpBridge(input: {
       const sendJson = (status: number, payload: unknown) => {
         res.writeHead(status, {
           'Content-Type': 'application/json',
-          'Connection': 'close',
         });
         res.end(JSON.stringify(payload));
       };
@@ -227,8 +226,9 @@ export async function createOarMcpBridge(input: {
         return;
       }
 
-      if (method === 'notifications/initialized') {
-        sendJson(200, { jsonrpc: '2.0' });
+      if (method === 'notifications/initialized' || id === undefined) {
+        res.writeHead(204);
+        res.end();
         return;
       }
 

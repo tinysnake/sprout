@@ -78,6 +78,7 @@ test('AC8: Bounded live macOS Codex Message-to-reply demonstration through the e
     t.skip('Codex executable is not available on this host');
     return;
   }
+  assert.match(installation.version ?? '', /0\.159\.3/, 'Verified Codex CLI version is 0.159.3');
 
   const adapter = new OarEngineAdapter({
     runtimeId: 'codex',
@@ -127,5 +128,185 @@ test('AC8: Bounded live macOS Codex Message-to-reply demonstration through the e
     assert.match(projected[0]?.body ?? '', /PONG/i);
   } finally {
     await runtime.close();
+  }
+});
+
+test('AC8 & AC4 (F4): Bounded live macOS Codex execution discovers and invokes controlled MCP workspace tool through OAR', async (t) => {
+  if (process.platform !== 'darwin') {
+    t.skip('Live demonstration requires macOS host');
+    return;
+  }
+
+  const codexRuntime = defaultRuntimes.require('codex');
+  let installation: any;
+  try {
+    installation = await codexRuntime.installation?.();
+  } catch {
+    t.skip('Codex installation probe failed');
+    return;
+  }
+  if (installation?.kind !== 'available') {
+    t.skip('Codex executable is not available on this host');
+    return;
+  }
+
+  let readInvoked = false;
+  let invokedPath = '';
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'codex',
+    sandbox: 'danger-full-access',
+  });
+
+  const session = await adapter.startSession({
+    agentId: 'scout',
+    workingDirectory: process.cwd(),
+    remoteWorkspace: {
+      binding: {
+        projectId: 'live-proj',
+        environmentInstanceId: 'live-env',
+        bindingId: 'live-bind',
+        generation: 1,
+        connectionEpoch: 1,
+        workspaceId: 'live-ws',
+      },
+      bindingFence: {
+        generation: 1,
+        isCurrent: () => true,
+      },
+      operations: ['read'],
+      read: async (path: string) => {
+        readInvoked = true;
+        invokedPath = path;
+        return {
+          operationId: 'op-live-mcp',
+          projectId: 'live-proj',
+          environmentInstanceId: 'live-env',
+          bindingId: 'live-bind',
+          generation: 1,
+          connectionEpoch: 1,
+          workspaceId: 'live-ws',
+          operation: 'read',
+          status: 'completed',
+          content: 'ALPHA_LIVE_VERIFIED_CONTENT',
+        };
+      },
+      search: async () => ({
+        operationId: 'op-live-search',
+        projectId: 'live-proj',
+        environmentInstanceId: 'live-env',
+        bindingId: 'live-bind',
+        generation: 1,
+        connectionEpoch: 1,
+        workspaceId: 'live-ws',
+        operation: 'search',
+        status: 'completed',
+      }),
+      inspect: async () => ({ status: 'completed' }),
+      cancel: async () => ({ accepted: true, status: 'cancelled' }),
+    },
+  });
+
+  try {
+    const turn = session.run('Please read file "probe-target.txt" using the read tool from sprout_workspace and report its content.');
+    const result = await turn.completion;
+
+    assert.equal(result.status, 'completed', 'Turn settled as completed');
+    assert.equal(readInvoked, true, 'Real Codex discovered and called remote MCP read tool');
+    assert.match(invokedPath, /probe-target\.txt/, 'Read tool received correct target path');
+    assert.match(result.text, /ALPHA_LIVE_VERIFIED_CONTENT/, 'Result reflects content returned by MCP tool');
+  } finally {
+    await session.close();
+  }
+});
+
+test('AC8 & AC4 (F4): Bounded live macOS Codex execution enforces binding-fence refusal when capability is no longer current', async (t) => {
+  if (process.platform !== 'darwin') {
+    t.skip('Live demonstration requires macOS host');
+    return;
+  }
+
+  const codexRuntime = defaultRuntimes.require('codex');
+  let installation: any;
+  try {
+    installation = await codexRuntime.installation?.();
+  } catch {
+    t.skip('Codex installation probe failed');
+    return;
+  }
+  if (installation?.kind !== 'available') {
+    t.skip('Codex executable is not available on this host');
+    return;
+  }
+
+  let readInvoked = false;
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'codex',
+    sandbox: 'danger-full-access',
+  });
+
+  const session = await adapter.startSession({
+    agentId: 'scout',
+    workingDirectory: process.cwd(),
+    remoteWorkspace: {
+      binding: {
+        projectId: 'live-proj',
+        environmentInstanceId: 'live-env',
+        bindingId: 'live-bind',
+        generation: 1,
+        connectionEpoch: 1,
+        workspaceId: 'live-ws',
+      },
+      // Binding fence is closed/stale: capability is no longer current!
+      bindingFence: {
+        generation: 1,
+        isCurrent: () => false,
+      },
+      operations: ['read'],
+      read: async () => {
+        readInvoked = true;
+        return {
+          operationId: 'op-stale',
+          projectId: 'live-proj',
+          environmentInstanceId: 'live-env',
+          bindingId: 'live-bind',
+          generation: 1,
+          connectionEpoch: 1,
+          workspaceId: 'live-ws',
+          operation: 'read',
+          status: 'completed',
+          content: 'SHOULD_NOT_BE_REACHED',
+        };
+      },
+      search: async () => ({
+        operationId: 'op-stale-search',
+        projectId: 'live-proj',
+        environmentInstanceId: 'live-env',
+        bindingId: 'live-bind',
+        generation: 1,
+        connectionEpoch: 1,
+        workspaceId: 'live-ws',
+        operation: 'search',
+        status: 'completed',
+      }),
+      inspect: async () => ({ status: 'completed' }),
+      cancel: async () => ({ accepted: true, status: 'cancelled' }),
+    },
+  });
+
+  try {
+    const turn = session.run('Please read file "fence-test.txt" using the read tool from sprout_workspace.');
+    const result = await turn.completion;
+
+    assert.equal(result.status, 'completed', 'Turn settled as completed');
+    assert.equal(readInvoked, false, 'Underlying read operation must not be reached when binding fence is closed');
+    assert.match(
+      result.text,
+      /no longer available|couldn’t read|could not read|unavailable/i,
+      'Codex informs user of capability unavailability',
+    );
+  } finally {
+    await session.close();
   }
 });

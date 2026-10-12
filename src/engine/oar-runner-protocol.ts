@@ -10,6 +10,7 @@ export type RunnerCommand =
   | {
       readonly op: 'prompt';
       readonly input: string;
+      readonly activationId: string;
     }
   | {
       readonly op: 'abort';
@@ -29,14 +30,23 @@ export type RunnerMessage =
       readonly event: Event;
     }
   | {
+      readonly kind: 'prompt_accepted';
+      readonly activationId: string;
+      readonly seq: number;
+      readonly spanId?: string | undefined;
+    }
+  | {
       readonly kind: 'prompt_rejected';
+      readonly activationId?: string | undefined;
       readonly code: string;
       readonly reason: string;
     }
   | {
       readonly kind: 'turn_ended';
+      readonly activationId?: string | undefined;
+      readonly spanId?: string | undefined;
       readonly outcome: TurnOutcome;
-      readonly usage?: SessionUsage | null;
+      readonly usage?: SessionUsage | null | undefined;
     }
   | {
       readonly kind: 'abort_delivered';

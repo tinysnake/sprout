@@ -8,6 +8,8 @@ function send(message: RunnerMessage): void {
 }
 
 let session: Session | undefined;
+let activeActivationId: string | undefined;
+let activeSpanId: string | undefined;
 
 async function handleCommand(command: RunnerCommand): Promise<void> {
   try {
@@ -56,12 +58,23 @@ async function handleCommand(command: RunnerCommand): Promise<void> {
 
         activeSession.events((ev) => {
           send({ kind: 'event', event: ev });
-          if (ev.kind === 'turn_ended' && ev.agentPath.length === 0) {
+          if (ev.kind === 'turn_ended' && (!ev.agentPath || ev.agentPath.length === 0)) {
             try {
               const usage = activeSession.usage().value;
-              send({ kind: 'turn_ended', outcome: ev.outcome, usage });
+              send({
+                kind: 'turn_ended',
+                activationId: activeActivationId,
+                spanId: ev.spanId ?? activeSpanId,
+                outcome: ev.outcome,
+                usage,
+              });
             } catch {
-              send({ kind: 'turn_ended', outcome: ev.outcome });
+              send({
+                kind: 'turn_ended',
+                activationId: activeActivationId,
+                spanId: ev.spanId ?? activeSpanId,
+                outcome: ev.outcome,
+              });
             }
           }
         });
@@ -79,9 +92,29 @@ async function handleCommand(command: RunnerCommand): Promise<void> {
           send({ kind: 'error', message: 'No active session for prompt', stage: 'prompt' });
           return;
         }
-        const outcome = await session.prompt(command.input);
+        activeActivationId = command.activationId;
+        activeSpanId = undefined;
+        const outcome = await session.prompt(command.input, { inputId: command.activationId });
         if (outcome.kind === 'rejected') {
-          send({ kind: 'prompt_rejected', code: outcome.code, reason: outcome.reason });
+          activeActivationId = undefined;
+          send({
+            kind: 'prompt_rejected',
+            activationId: command.activationId,
+            code: outcome.code,
+            reason: outcome.reason,
+          });
+        } else {
+          const nativeBody = (outcome.response?.body as any)?.native;
+          const turnId = nativeBody?.turn?.id;
+          if (typeof turnId === 'string') {
+            activeSpanId = turnId;
+          }
+          send({
+            kind: 'prompt_accepted',
+            activationId: command.activationId,
+            seq: outcome.seq,
+            ...(activeSpanId !== undefined ? { spanId: activeSpanId } : {}),
+          });
         }
         break;
       }

@@ -46,6 +46,7 @@ import {
   WORKER_DIAGNOSTICS,
   type WorkerDiagnostic,
 } from './diagnostics.ts';
+import { redactSensitiveText } from '../environment/privacy.ts';
 
 /**
  * The worker: the part of Sprout that runs *inside* an environment.
@@ -258,6 +259,10 @@ export class EnvironmentWorker {
       // is reported as an ordinary worker error and is never retried.
       if (error instanceof EngineResumeRefusedError) {
         this.#transport.respondError(id, WORKER_ERROR_CODES.resumeRefused, WORKER_DIAGNOSTICS.resumeRefused);
+        return;
+      }
+      if (error instanceof Error && error.message.includes('Node.js 24+ is required by OAR')) {
+        this.#transport.respondError(id, -32_603, redactSensitiveText(error.message));
         return;
       }
       this.#transport.respondError(

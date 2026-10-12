@@ -1,4 +1,5 @@
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Writable, Readable } from 'node:stream';
@@ -336,9 +337,17 @@ export class OarEngineSession implements EngineSession {
 
     this.#currentTurnFinish = finish;
 
+    const activationId = randomUUID();
+    let currentSpanId: string | undefined;
+
     // Attach local state handlers before sending the command, so synchronous
     // test fixtures or fast responses cannot race turn context attachment.
     this.#activeTurnContext = {
+      activationId,
+      getSpanId: () => currentSpanId,
+      setSpanId: (spanId: string) => {
+        if (!currentSpanId) currentSpanId = spanId;
+      },
       appendRootText(text: string) {
         rootTurnText += text;
       },
@@ -351,6 +360,7 @@ export class OarEngineSession implements EngineSession {
     // Send prompt to runner
     const promptCmd: RunnerCommand = {
       op: 'prompt',
+      activationId,
       input: prompt,
     };
     this.#runner.stdin?.write(`${JSON.stringify(promptCmd)}\n`);
@@ -359,6 +369,9 @@ export class OarEngineSession implements EngineSession {
   }
 
   #activeTurnContext?: {
+    activationId: string;
+    getSpanId(): string | undefined;
+    setSpanId(spanId: string): void;
     appendRootText(text: string): void;
     getRootText(): string;
     finish(result: EngineTurnResult): void;
@@ -375,9 +388,20 @@ export class OarEngineSession implements EngineSession {
     const turn = this.#activeTurnContext;
 
     switch (msg.kind) {
+      case 'prompt_accepted': {
+        if (turn && turn.activationId === msg.activationId) {
+          if (msg.spanId) {
+            turn.setSpanId(msg.spanId);
+          }
+        }
+        break;
+      }
+
       case 'prompt_rejected': {
+        if (!turn) return;
+        if (msg.activationId && msg.activationId !== turn.activationId) return;
         const sanitized = redactSensitiveText(msg.reason);
-        turn?.finish({
+        turn.finish({
           status: 'failed',
           message: `OAR prompt rejected (${msg.code}): ${sanitized || 'engine busy or refused'}`,
         });
@@ -389,14 +413,29 @@ export class OarEngineSession implements EngineSession {
         const isRoot = (!ev.agentPath || ev.agentPath.length === 0) && ev.sessionId === this.sessionId;
 
         if (isRoot) {
+          // If turn is active, enforce span attribution:
+          // A background or stale root event must NOT contribute text or progress to the active turn.
+          if (turn) {
+            const boundSpanId = turn.getSpanId();
+            if (boundSpanId !== undefined && ev.spanId !== undefined && ev.spanId !== boundSpanId) {
+              // Stale or background root event — do NOT attribute to active turn
+              break;
+            }
+            if (boundSpanId === undefined && ev.spanId !== undefined) {
+              turn.setSpanId(ev.spanId);
+            }
+          }
+
           if (ev.kind === 'text_delta') {
             turn?.appendRootText(ev.text);
             this.#currentEventQueue?.push({ type: 'message', text: ev.text, final: false });
           } else if (ev.kind === 'tool_call_started') {
+            const rawDetail = ev.input ?? '';
+            const sanitizedDetail = redactSensitiveText(rawDetail);
             this.#currentEventQueue?.push({
               type: 'tool-call',
               name: ev.tool,
-              detail: ev.input ?? '',
+              detail: sanitizedDetail,
             });
           } else if (ev.kind === 'tool_call_ended') {
             const outputText = ev.content
@@ -404,7 +443,8 @@ export class OarEngineSession implements EngineSession {
               .filter(Boolean)
               .join('\n') ?? '';
             if (outputText) {
-              this.#currentEventQueue?.push({ type: 'tool-output', text: outputText });
+              const sanitizedOutput = redactSensitiveText(outputText);
+              this.#currentEventQueue?.push({ type: 'tool-output', text: sanitizedOutput });
             }
           }
           // Note: reasoning is excluded from AgentRunEvents and final reply text
@@ -414,6 +454,17 @@ export class OarEngineSession implements EngineSession {
 
       case 'turn_ended': {
         if (!turn) return;
+
+        // Verify activation and span attribution:
+        // Background or stale root endings must neither settle nor contribute to the current turn.
+        if (msg.activationId !== undefined && msg.activationId !== turn.activationId) {
+          return;
+        }
+
+        const boundSpanId = turn.getSpanId();
+        if (boundSpanId !== undefined && msg.spanId !== undefined && msg.spanId !== boundSpanId) {
+          return;
+        }
 
         const outcome = msg.outcome;
         const usage = msg.usage;
@@ -555,27 +606,42 @@ export class OarEngineSession implements EngineSession {
       return;
     }
 
-    await new Promise<void>((resolve) => {
-      let done = false;
-      const timer = setTimeout(() => {
-        if (!done) {
-          done = true;
-          killProcessTree(this.#runner);
-          resolve();
+    // Wait for exit with bounded escalation to killProcessTree
+    const exited = await new Promise<boolean>((resolve) => {
+      let settled = false;
+      const onExit = () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(disposeTimer);
+          clearTimeout(killTimer);
+          resolve(true);
         }
-      }, 2_000);
+      };
 
-      this.#runner.on('exit', () => {
-        if (!done) {
-          done = true;
-          clearTimeout(timer);
-          resolve();
+      this.#runner.on('exit', onExit);
+
+      const disposeTimer = setTimeout(() => {
+        if (settled) return;
+        killProcessTree(this.#runner, 'SIGKILL');
+      }, 1_000);
+      disposeTimer.unref?.();
+
+      const killTimer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(disposeTimer);
+          resolve(false);
         }
-      });
+      }, 2_500);
+      killTimer.unref?.();
     });
 
     if (this.#mcpBridge) {
       await this.#mcpBridge.close();
+    }
+
+    if (!exited && this.#runner.exitCode === null && this.#runner.signalCode === null) {
+      throw new Error('OAR runner process tree did not terminate; stop uncertainty preserved');
     }
   }
 
@@ -599,9 +665,13 @@ function killProcessTree(child: OarRunnerProcess, signal: NodeJS.Signals = 'SIGK
 
   if (process.platform === 'win32') {
     try {
-      child.kill(signal);
+      execFileSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
     } catch {
-      // Ignore
+      try {
+        child.kill(signal);
+      } catch {
+        // Ignore
+      }
     }
   } else {
     try {
