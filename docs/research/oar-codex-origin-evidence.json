@@ -1,0 +1,75 @@
+{
+  "versions": {
+    "oar": "0.35.0",
+    "oarSource": "8adde16fe2d12ae54af7d4dff86c3f224380a5c7",
+    "codex": "0.159.3",
+    "executor": "0.159.3 (same binary; help only)",
+    "node": "26.11.1",
+    "platform": "darwin"
+  },
+  "pins": {
+    "archiveSha256": "a6c7329f743cdf0ffea6e619aa3b708e2b9180087fc3ad3dbaba9b509fc58cc8",
+    "fixtureSha256": "9d050f9f0943a0b3f4244f25ca0fe1cdacd4f49a5ff8be9b2c2d72de9814ab23",
+    "moduleHashes": {
+      "dist/runtimes/codex/open.js": "27e9ac7739be642b7b0ea6a4bba179dc3282f3c2b25952d590b99d2e46958770",
+      "dist/runtimes/codex/session.js": "a5deb6475bf15b394e2049bc556b4de764681a82137af0fa07449ea2ff90c86b",
+      "dist/runtimes/codex/app-server-client.js": "73ba6e9440fcc74d7161197fc1dd11f014a761e2430635928de9c2ffc1456463",
+      "dist/contracts/session-options.d.ts": "1469f6cfc8c28ef902ef42f693b0389b788b4b05c69d0a466329779a40abfd4f"
+    }
+  },
+  "authority": {
+    "work": "shared-isolated-fixture",
+    "hostWork": false,
+    "modelSelectedEndpoint": false,
+    "modelLeaseClaims": false,
+    "admission": "refuse-unless-binding-and-tool-controls-exist"
+  },
+  "routeOrder": [
+    "native-executor",
+    "restricted-external-tools"
+  ],
+  "scripted": {
+    "actualOarRequestBuilder": true,
+    "optionNames": [
+      "cwd",
+      "model",
+      "effort",
+      "resume",
+      "env",
+      "systemPrompt",
+      "appendSystemPrompt",
+      "mcpServers"
+    ],
+    "openSelectsExecutor": false,
+    "resumeSelectsExecutor": false,
+    "dynamicToolsRegistered": false,
+    "mcpConfiguredOnOpenAndResume": true,
+    "originRead": true,
+    "originWrite": true,
+    "pathReadDenied": true,
+    "pathWriteDenied": true,
+    "originOsReadDenied": true,
+    "originOsWriteDenied": true,
+    "fixtureCommandUnavailable": true,
+    "stoppedOriginCallFailed": true,
+    "effects": {
+      "hostOriginUnchanged": true,
+      "hostEffectUnchanged": true,
+      "hostSentinelUnchanged": true,
+      "workScriptedEffect": true
+    }
+  },
+  "protocolOnly": {
+    "sessionOpened": false,
+    "executorStarted": false
+  },
+  "modelIssued": {
+    "attempted": false,
+    "toolCalls": 0
+  },
+  "admission": {
+    "refusedBeforeSession": true,
+    "reason": "missing-typed-executor-binding-and-restricted-tool-dispatch",
+    "authInspected": false
+  }
+}
