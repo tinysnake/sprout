@@ -1,0 +1,617 @@
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import type { Writable, Readable } from 'node:stream';
+
+import type {
+  DetailedTokenDimensions,
+  EngineAdapter,
+  EngineCapabilities,
+  EngineSession,
+  EngineTurn,
+  EngineTurnResult,
+  StartSessionRequest,
+  TokenUsage,
+} from './port.ts';
+import { EngineResumeRefusedError, EngineStartError } from './port.ts';
+import { EventQueue } from './event-queue.ts';
+import { assertSupportedNodeVersion } from './oar-node-support.ts';
+import { createOarMcpBridge, type OarMcpBridgeHandle } from './oar-mcp-bridge.ts';
+import type { RunnerCommand, RunnerMessage } from './oar-runner-protocol.ts';
+import type { SessionOptions, TokenTotals } from '@botiverse/oar';
+import { redactSensitiveText } from '../environment/privacy.ts';
+import type { CodexSandboxMode } from './codex.ts';
+
+export const OAR_PACKAGE_VERSION = '0.59.1';
+
+export interface OarRunnerProcess {
+  readonly pid?: number;
+  readonly stdin: Writable | null;
+  readonly stdout: Readable | null;
+  readonly stderr?: Readable | null;
+  readonly exitCode: number | null;
+  readonly signalCode: NodeJS.Signals | null;
+  kill(signal?: NodeJS.Signals): boolean | void;
+  on(event: 'exit', listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
+  on(event: 'error', listener: (err: Error) => void): this;
+}
+
+export interface OarAdapterOptions {
+  /** The OAR runtime identifier (e.g. 'codex', 'pi'). */
+  readonly runtimeId: string;
+  readonly capabilities?: Partial<EngineCapabilities>;
+  /** Optional Codex sandbox posture ('read-only' vs 'danger-full-access'). */
+  readonly sandbox?: CodexSandboxMode;
+  /** Injectable process spawner for tests or customized environments. */
+  readonly spawnProcess?: (
+    command: string,
+    args: readonly string[],
+    options: {
+      readonly cwd?: string;
+      readonly env?: NodeJS.ProcessEnv;
+      readonly detached?: boolean;
+      readonly stdio?: readonly ['pipe', 'pipe', 'pipe'];
+    },
+  ) => OarRunnerProcess;
+  readonly runnerScriptPath?: string;
+  readonly clock?: () => number;
+  readonly sourceVersion?: string;
+}
+
+export class OarEngineAdapter implements EngineAdapter {
+  readonly id: string;
+  readonly capabilities: EngineCapabilities;
+  readonly #options: OarAdapterOptions;
+
+  constructor(options: OarAdapterOptions) {
+    this.#options = options;
+    this.id = options.runtimeId;
+    this.capabilities = {
+      streaming: 'incremental',
+      supportsInterrupt: true,
+      standingInstructions: 'out-of-band',
+      ...options.capabilities,
+    };
+  }
+
+  async startSession(request: StartSessionRequest): Promise<EngineSession> {
+    assertSupportedNodeVersion();
+
+    if (!request.workingDirectory) {
+      throw new EngineStartError('Working directory is required for OAR session');
+    }
+
+    // Build SessionOptions
+    const sessionOptions: SessionOptions = {
+      cwd: request.workingDirectory,
+      ...(request.projectWorkspacePath !== undefined
+        ? { additionalDirectories: [request.projectWorkspacePath] }
+        : {}),
+      ...(request.instructions !== undefined
+        ? { appendSystemPrompt: request.instructions }
+        : {}),
+      ...(request.model !== undefined ? { model: request.model } : {}),
+      ...(request.effort !== undefined ? { effort: request.effort } : {}),
+      ...(request.resumeSessionKey !== undefined ? { resume: request.resumeSessionKey } : {}),
+      ...(request.sessionEnvironment !== undefined
+        ? { env: request.sessionEnvironment as Record<string, string> }
+        : {}),
+    };
+
+    let mcpBridge: OarMcpBridgeHandle | undefined;
+    if (request.remoteWorkspace !== undefined || request.remoteProjectMcp !== undefined) {
+      mcpBridge = await createOarMcpBridge({
+        ...(request.remoteWorkspace !== undefined ? { remoteWorkspace: request.remoteWorkspace } : {}),
+        ...(request.remoteProjectMcp !== undefined ? { remoteProjectMcp: request.remoteProjectMcp } : {}),
+      });
+      if (mcpBridge) {
+        (sessionOptions as { mcpServers?: readonly import('@botiverse/oar').McpServer[] }).mcpServers = [mcpBridge.mcpServer];
+      }
+    }
+
+    const runnerScript = this.#options.runnerScriptPath ?? fileURLToPath(new URL('./oar-runner-entry.ts', import.meta.url));
+
+    const runnerCwd = existsSync(request.workingDirectory) ? request.workingDirectory : process.cwd();
+    const runner = this.#options.spawnProcess
+      ? this.#options.spawnProcess(process.execPath, [runnerScript], {
+          cwd: runnerCwd,
+          env: {
+            ...process.env,
+            ...(request.sessionEnvironment ?? {}),
+            ...(this.#options.sandbox ? { OAR_CODEX_SANDBOX: this.#options.sandbox } : {}),
+          },
+          detached: true,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        })
+      : (spawn(process.execPath, [runnerScript], {
+          cwd: runnerCwd,
+          env: {
+            ...process.env,
+            ...(request.sessionEnvironment ?? {}),
+            ...(this.#options.sandbox ? { OAR_CODEX_SANDBOX: this.#options.sandbox } : {}),
+          },
+          detached: true,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        }) as unknown as OarRunnerProcess);
+
+    const clock = this.#options.clock ?? (() => Date.now());
+
+    return new Promise<EngineSession>((resolve, reject) => {
+      let settled = false;
+      let buffer = '';
+
+      const startTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        killProcessTree(runner);
+        void mcpBridge?.close();
+        reject(new EngineStartError('OAR runner failed to become ready within timeout'));
+      }, 25_000);
+
+      const failStart = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(startTimer);
+        killProcessTree(runner);
+        void mcpBridge?.close();
+        reject(error);
+      };
+
+      runner.on('error', (err) => {
+        failStart(new EngineStartError(`Failed to spawn OAR runner: ${err.message}`));
+      });
+
+      runner.on('exit', (code, signal) => {
+        if (!settled) {
+          failStart(new EngineStartError(`OAR runner exited before becoming ready (code=${code}, signal=${signal})`));
+        }
+      });
+
+      const onData = (chunk: Buffer | string) => {
+        buffer += chunk.toString();
+        let newline = buffer.indexOf('\n');
+        while (newline !== -1) {
+          const line = buffer.slice(0, newline).trim();
+          buffer = buffer.slice(newline + 1);
+          if (line) {
+            try {
+              const msg = JSON.parse(line) as RunnerMessage;
+              if (!settled) {
+                if (msg.kind === 'ready') {
+                  settled = true;
+                  clearTimeout(startTimer);
+                  // Remove this initial listener so the session can attach its own
+                  runner.stdout?.removeListener('data', onData);
+                  const session = new OarEngineSession({
+                    runner,
+                    sessionId: msg.sessionId,
+                    engineSessionKey: msg.engineSessionKey,
+                    runtimeId: this.#options.runtimeId,
+                    sourceVersion: this.#options.sourceVersion ?? OAR_PACKAGE_VERSION,
+                    mcpBridge,
+                    clock,
+                  });
+                  // Feed any trailing buffer into the session
+                  if (buffer.length > 0) {
+                    session.pushData(buffer);
+                    buffer = '';
+                  }
+                  resolve(session);
+                  return;
+                }
+                if (msg.kind === 'error') {
+                  const sanitized = redactSensitiveText(msg.message);
+                  if (
+                    request.resumeSessionKey &&
+                    (sanitized.includes('no rollout') ||
+                      sanitized.includes('SessionNotFoundError') ||
+                      sanitized.includes('session not found') ||
+                      sanitized.includes('unknown thread') ||
+                      sanitized.includes('resume refused'))
+                  ) {
+                    failStart(new EngineResumeRefusedError(request.resumeSessionKey, sanitized));
+                  } else {
+                    failStart(new EngineStartError(sanitized));
+                  }
+                  return;
+                }
+              }
+            } catch {
+              // Ignore unparseable lines during startup
+            }
+          }
+          newline = buffer.indexOf('\n');
+        }
+      };
+
+      runner.stdout?.on('data', onData);
+
+      // Send start command to runner
+      const startCmd: RunnerCommand = {
+        op: 'start',
+        runtimeId: this.#options.runtimeId,
+        options: sessionOptions,
+        ...(this.#options.sandbox ? { hostPolicy: { sandbox: this.#options.sandbox } } : {}),
+      };
+      runner.stdin?.write(`${JSON.stringify(startCmd)}\n`);
+    });
+  }
+}
+
+interface OarEngineSessionParams {
+  readonly runner: OarRunnerProcess;
+  readonly sessionId: string;
+  readonly engineSessionKey: string;
+  readonly runtimeId: string;
+  readonly sourceVersion: string;
+  readonly mcpBridge?: OarMcpBridgeHandle | undefined;
+  readonly clock: () => number;
+}
+
+export class OarEngineSession implements EngineSession {
+  readonly sessionId: string;
+  readonly engineSessionKey: string;
+  readonly contractDelivery = undefined;
+
+  readonly #runner: OarRunnerProcess;
+  readonly #sourceVersion: string;
+  readonly #mcpBridge: OarMcpBridgeHandle | undefined;
+  readonly #clock: () => number;
+
+  #closed = false;
+  #currentTurnFinish: ((result: EngineTurnResult) => void) | undefined;
+  #currentEventQueue: EventQueue | undefined;
+  #buffer = '';
+  #baselineUsage: TokenTotals = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
+  #interrupted = false;
+
+  constructor(params: OarEngineSessionParams) {
+    this.#runner = params.runner;
+    this.sessionId = params.sessionId;
+    this.engineSessionKey = params.engineSessionKey;
+    this.#sourceVersion = params.sourceVersion;
+    this.#mcpBridge = params.mcpBridge;
+    this.#clock = params.clock;
+
+    this.#runner.stdout?.on('data', (chunk: Buffer | string) => {
+      this.pushData(chunk.toString());
+    });
+
+    this.#runner.on('exit', () => {
+      this.#onRunnerExit();
+    });
+  }
+
+  pushData(chunk: string): void {
+    this.#buffer += chunk;
+    let newline = this.#buffer.indexOf('\n');
+    while (newline !== -1) {
+      const line = this.#buffer.slice(0, newline).trim();
+      this.#buffer = this.#buffer.slice(newline + 1);
+      if (line) {
+        this.#handleRunnerLine(line);
+      }
+      newline = this.#buffer.indexOf('\n');
+    }
+  }
+
+  run(prompt: string): EngineTurn {
+    if (this.#closed) {
+      throw new Error('OAR session is closed');
+    }
+    if (this.#currentTurnFinish !== undefined) {
+      throw new Error('OAR session is busy with an existing turn');
+    }
+
+    const queue = new EventQueue();
+    this.#currentEventQueue = queue;
+    this.#interrupted = false;
+
+    let rootTurnText = '';
+    let turnSettled = false;
+    const startedAt = this.#clock();
+
+    let resolveCompletion: (result: EngineTurnResult) => void = () => undefined;
+    const completion = new Promise<EngineTurnResult>((resolve) => {
+      resolveCompletion = resolve;
+    });
+
+    const finish = (result: EngineTurnResult) => {
+      if (turnSettled) return;
+      turnSettled = true;
+      this.#currentTurnFinish = undefined;
+      this.#currentEventQueue = undefined;
+      const duration = Math.max(0, this.#clock() - startedAt);
+      const measured: EngineTurnResult = {
+        ...result,
+        engineTurnDurationMs: result.engineTurnDurationMs ?? duration,
+      };
+      if (measured.status === 'failed') {
+        queue.fail(new Error(measured.message));
+      } else {
+        queue.end();
+      }
+      resolveCompletion(measured);
+    };
+
+    this.#currentTurnFinish = finish;
+
+    // Attach local state handlers before sending the command, so synchronous
+    // test fixtures or fast responses cannot race turn context attachment.
+    this.#activeTurnContext = {
+      appendRootText(text: string) {
+        rootTurnText += text;
+      },
+      getRootText() {
+        return rootTurnText;
+      },
+      finish,
+    };
+
+    // Send prompt to runner
+    const promptCmd: RunnerCommand = {
+      op: 'prompt',
+      input: prompt,
+    };
+    this.#runner.stdin?.write(`${JSON.stringify(promptCmd)}\n`);
+
+    return { events: queue, completion };
+  }
+
+  #activeTurnContext?: {
+    appendRootText(text: string): void;
+    getRootText(): string;
+    finish(result: EngineTurnResult): void;
+  };
+
+  #handleRunnerLine(line: string): void {
+    let msg: RunnerMessage;
+    try {
+      msg = JSON.parse(line) as RunnerMessage;
+    } catch {
+      return;
+    }
+
+    const turn = this.#activeTurnContext;
+
+    switch (msg.kind) {
+      case 'prompt_rejected': {
+        const sanitized = redactSensitiveText(msg.reason);
+        turn?.finish({
+          status: 'failed',
+          message: `OAR prompt rejected (${msg.code}): ${sanitized || 'engine busy or refused'}`,
+        });
+        break;
+      }
+
+      case 'event': {
+        const ev = msg.event;
+        const isRoot = (!ev.agentPath || ev.agentPath.length === 0) && ev.sessionId === this.sessionId;
+
+        if (isRoot) {
+          if (ev.kind === 'text_delta') {
+            turn?.appendRootText(ev.text);
+            this.#currentEventQueue?.push({ type: 'message', text: ev.text, final: false });
+          } else if (ev.kind === 'tool_call_started') {
+            this.#currentEventQueue?.push({
+              type: 'tool-call',
+              name: ev.tool,
+              detail: ev.input ?? '',
+            });
+          } else if (ev.kind === 'tool_call_ended') {
+            const outputText = ev.content
+              ?.map((c) => (c.type === 'text' ? c.text : ''))
+              .filter(Boolean)
+              .join('\n') ?? '';
+            if (outputText) {
+              this.#currentEventQueue?.push({ type: 'tool-output', text: outputText });
+            }
+          }
+          // Note: reasoning is excluded from AgentRunEvents and final reply text
+        }
+        break;
+      }
+
+      case 'turn_ended': {
+        if (!turn) return;
+
+        const outcome = msg.outcome;
+        const usage = msg.usage;
+
+        let tokenUsage: TokenUsage | undefined;
+        let detailedTokens: DetailedTokenDimensions | undefined;
+
+        if (usage?.total) {
+          const inputDelta = Math.max(0, usage.total.input - this.#baselineUsage.input);
+          const outputDelta = Math.max(0, usage.total.output - this.#baselineUsage.output);
+          tokenUsage = {
+            promptTokens: inputDelta,
+            completionTokens: outputDelta,
+            totalTokens: inputDelta + outputDelta,
+          };
+          detailedTokens = {
+            inputTokens: inputDelta,
+            outputTokens: outputDelta,
+            ...(usage.total.reasoning !== undefined
+              ? { reasoningTokens: Math.max(0, usage.total.reasoning - (this.#baselineUsage.reasoning ?? 0)) }
+              : {}),
+            ...(usage.total.cacheRead !== undefined
+              ? { cachedInputTokens: Math.max(0, usage.total.cacheRead - (this.#baselineUsage.cacheRead ?? 0)) }
+              : {}),
+          };
+          this.#baselineUsage = {
+            input: usage.total.input,
+            output: usage.total.output,
+            ...(usage.total.reasoning !== undefined ? { reasoning: usage.total.reasoning } : {}),
+            ...(usage.total.cacheRead !== undefined ? { cacheRead: usage.total.cacheRead } : {}),
+            ...(usage.total.cacheWrite !== undefined ? { cacheWrite: usage.total.cacheWrite } : {}),
+          };
+        }
+
+        if (outcome.kind === 'completed') {
+          turn.finish({
+            status: 'completed',
+            text: turn.getRootText(),
+            ...(tokenUsage !== undefined ? { tokenUsage } : {}),
+            ...(detailedTokens !== undefined ? { detailedTokens } : {}),
+            source: 'oar',
+            sourceVersion: this.#sourceVersion,
+          });
+        } else if (outcome.kind === 'aborted' || this.#interrupted) {
+          turn.finish({
+            status: 'interrupted',
+            ...(tokenUsage !== undefined ? { tokenUsage } : {}),
+            ...(detailedTokens !== undefined ? { detailedTokens } : {}),
+            source: 'oar',
+            sourceVersion: this.#sourceVersion,
+          });
+        } else if (outcome.kind === 'failed') {
+          const reason = typeof outcome.reason === 'string' && outcome.reason.trim() !== ''
+            ? redactSensitiveText(outcome.reason)
+            : 'OAR turn failed';
+          turn.finish({
+            status: 'failed',
+            message: reason,
+            ...(tokenUsage !== undefined ? { tokenUsage } : {}),
+            ...(detailedTokens !== undefined ? { detailedTokens } : {}),
+            source: 'oar',
+            sourceVersion: this.#sourceVersion,
+          });
+        }
+        break;
+      }
+
+      case 'error': {
+        const sanitized = redactSensitiveText(msg.message) || 'OAR runner error';
+        turn?.finish({
+          status: 'failed',
+          message: sanitized,
+        });
+        break;
+      }
+    }
+  }
+
+  async interrupt(): Promise<boolean> {
+    if (this.#closed || this.#runner.exitCode !== null) return false;
+    this.#interrupted = true;
+    try {
+      this.#runner.stdin?.write('{"op":"abort"}\n');
+    } catch {
+      // Stream may be closed
+    }
+
+    // Schedule bounded escalation
+    const child = this.#runner;
+    const escalationTimer = setTimeout(() => {
+      if (this.#currentTurnFinish !== undefined) {
+        killProcessTree(child, 'SIGINT');
+        const termTimer = setTimeout(() => {
+          if (this.#currentTurnFinish !== undefined) {
+            killProcessTree(child, 'SIGTERM');
+            const killTimer = setTimeout(() => {
+              if (this.#currentTurnFinish !== undefined) {
+                killProcessTree(child, 'SIGKILL');
+              }
+            }, 2_000);
+            killTimer.unref?.();
+          }
+        }, 2_000);
+        termTimer.unref?.();
+      }
+    }, 4_000);
+    escalationTimer.unref?.();
+
+    return true;
+  }
+
+  async close(): Promise<void> {
+    if (this.#closed) return;
+    this.#closed = true;
+
+    if (this.#currentTurnFinish !== undefined) {
+      this.#currentTurnFinish({ status: 'interrupted' });
+    }
+
+    if (this.#runner.exitCode !== null) {
+      if (this.#mcpBridge) {
+        await this.#mcpBridge.close();
+      }
+      return;
+    }
+
+    try {
+      if (this.#runner.stdin && !this.#runner.stdin.destroyed && this.#runner.stdin.writable) {
+        this.#runner.stdin.write('{"op":"dispose"}\n');
+      }
+    } catch {
+      // Child stdin might be closed
+    }
+
+    if (this.#runner.exitCode !== null) {
+      if (this.#mcpBridge) {
+        await this.#mcpBridge.close();
+      }
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      let done = false;
+      const timer = setTimeout(() => {
+        if (!done) {
+          done = true;
+          killProcessTree(this.#runner);
+          resolve();
+        }
+      }, 2_000);
+
+      this.#runner.on('exit', () => {
+        if (!done) {
+          done = true;
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+    });
+
+    if (this.#mcpBridge) {
+      await this.#mcpBridge.close();
+    }
+  }
+
+  #onRunnerExit(): void {
+    if (this.#currentTurnFinish !== undefined) {
+      if (this.#interrupted) {
+        this.#currentTurnFinish({ status: 'interrupted' });
+      } else {
+        this.#currentTurnFinish({
+          status: 'failed',
+          message: 'OAR runner connection was lost',
+        });
+      }
+    }
+  }
+}
+
+function killProcessTree(child: OarRunnerProcess, signal: NodeJS.Signals = 'SIGKILL'): void {
+  const pid = child.pid;
+  if (pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+
+  if (process.platform === 'win32') {
+    try {
+      child.kill(signal);
+    } catch {
+      // Ignore
+    }
+  } else {
+    try {
+      process.kill(-pid, signal);
+    } catch {
+      try {
+        child.kill(signal);
+      } catch {
+        // Ignore
+      }
+    }
+  }
+}

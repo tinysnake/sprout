@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 
 import type { EngineAdapter } from '../engine/port.ts';
 import { CodexEngineAdapter, type CodexSandboxMode } from '../engine/codex.ts';
+import { OarEngineAdapter } from '../engine/oar.ts';
 import { PiEngineAdapter } from '../engine/pi.ts';
 import { AgyEngineAdapter } from '../engine/agy.ts';
 import { OpenCodeEngineAdapter } from '../engine/opencode.ts';
@@ -109,12 +110,19 @@ export interface EngineAdapterFactories {
 }
 
 const realFactories: EngineAdapterFactories = {
-  codex: (configuration) =>
-    new CodexEngineAdapter({
+  codex: (configuration) => {
+    if (process.env['SPROUT_USE_OAR_ENGINE'] === 'codex' || process.env['SPROUT_USE_OAR_ENGINE'] === 'all') {
+      return new OarEngineAdapter({
+        runtimeId: 'codex',
+        sandbox: configuration.sandbox,
+      });
+    }
+    return new CodexEngineAdapter({
       binaryPath: configuration.binaryPath,
       args: [...configuration.args],
       sandbox: configuration.sandbox,
-    }),
+    });
+  },
   pi: (configuration) =>
     new PiEngineAdapter({
       binaryPath: configuration.binaryPath,
