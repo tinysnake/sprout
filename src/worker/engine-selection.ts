@@ -6,7 +6,6 @@ import { OarEngineAdapter } from '../engine/oar.ts';
 import { PiEngineAdapter } from '../engine/pi.ts';
 import { AgyEngineAdapter } from '../engine/agy.ts';
 import { OpenCodeEngineAdapter } from '../engine/opencode.ts';
-import { assertSupportedNodeVersion } from '../engine/oar-node-support.ts';
 import type { WorkerConfiguration } from '../host-config.ts';
 
 /**
@@ -113,7 +112,6 @@ export interface EngineAdapterFactories {
 const realFactories: EngineAdapterFactories = {
   codex: (configuration) => {
     if (process.env['SPROUT_USE_OAR_ENGINE'] === 'codex' || process.env['SPROUT_USE_OAR_ENGINE'] === 'all') {
-      assertSupportedNodeVersion();
       return new OarEngineAdapter({
         runtimeId: 'codex',
         sandbox: configuration.sandbox,

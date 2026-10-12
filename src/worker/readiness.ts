@@ -526,7 +526,7 @@ export async function probeEnvironmentReadiness(
   const requiredModels = (options.requiredModels ?? []).filter(
     (model): model is string => typeof model === 'string' && model !== '',
   );
-  const nodeVersion = options.nodeVersion ?? process.versions.node;
+  const nodeVersion = options.nodeVersion ?? process.env['SPROUT_NODE_VERSION'] ?? process.versions.node;
   const isOarActive = options.env?.SPROUT_USE_OAR_ENGINE === 'codex' ||
     options.env?.SPROUT_USE_OAR_ENGINE === 'all' ||
     process.env['SPROUT_USE_OAR_ENGINE'] === 'codex' ||

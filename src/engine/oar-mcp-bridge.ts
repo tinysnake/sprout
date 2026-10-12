@@ -1,7 +1,16 @@
 import { createServer } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { RemoteProjectMcpTools, RemoteWorkspaceTools } from './port.ts';
 import type { McpServer } from '@botiverse/oar';
+
+function safeCompare(a: string, b: string): boolean {
+  const bufA = Buffer.from(a.trim(), 'utf8');
+  const bufB = Buffer.from(b.trim(), 'utf8');
+  if (bufA.length !== bufB.length) {
+    return false;
+  }
+  return timingSafeEqual(bufA, bufB);
+}
 
 interface ToolDeclaration {
   readonly name: string;
@@ -188,7 +197,17 @@ export async function createOarMcpBridge(input: {
     }
   }
 
+  const authToken = randomBytes(24).toString('hex');
+  const expectedAuthHeader = `Bearer ${authToken}`;
+
   const server = createServer((req, res) => {
+    const authHeader = req.headers['authorization'];
+    if (typeof authHeader !== 'string' || !safeCompare(authHeader, expectedAuthHeader)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32000, message: 'Unauthorized' } }));
+      return;
+    }
+
     let body = '';
     req.on('data', (chunk: Buffer) => {
       body += chunk.toString('utf8');
@@ -300,6 +319,9 @@ export async function createOarMcpBridge(input: {
     name: 'sprout_workspace',
     type: 'http',
     url: `http://127.0.0.1:${port}/mcp`,
+    headers: {
+      authorization: expectedAuthHeader,
+    },
   };
 
   return {

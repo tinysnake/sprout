@@ -1,18 +1,22 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { spawn } from 'node:child_process';
+import { createConnection } from 'node:net';
 import { PassThrough } from 'node:stream';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { OarEngineAdapter, type OarRunnerProcess } from './oar.ts';
+import { createOarMcpBridge } from './oar-mcp-bridge.ts';
 import { assertSupportedNodeVersion, parseNodeMajor } from './oar-node-support.ts';
 import { EngineResumeRefusedError, EngineStartError, type EngineAdapter } from './port.ts';
 import type { RunnerCommand, RunnerMessage } from './oar-runner-protocol.ts';
-import { probeEnvironmentReadiness } from '../worker/readiness.ts';
 import { evaluateAdmissibleWorkOption } from '../agent/admission.ts';
 import { WorkerRecoveryJournal } from '../worker/recovery-journal.ts';
 import { EnvironmentWorker } from '../worker/server.ts';
+import { WORKER_READY_PREFIX } from '../worker/carrier.ts';
+import { WORKER_DIAGNOSTICS } from '../worker/diagnostics.ts';
 
 class FakeOarRunner implements OarRunnerProcess {
   readonly stdin = new PassThrough();
@@ -586,13 +590,19 @@ test('AC2 & Substrate: Remote workspace tools are exposed over MCP bridge to OAR
   assert.equal(attachedMcpServers.length, 1);
   assert.equal(attachedMcpServers[0].name, 'sprout_workspace');
   assert.equal(attachedMcpServers[0].type, 'http');
+  assert.ok(attachedMcpServers[0].headers?.authorization, 'MCP server must configure authorization header for OAR');
+
+  const authHeaders = {
+    'Content-Type': 'application/json',
+    authorization: attachedMcpServers[0].headers.authorization,
+  };
 
   try {
     // Query the MCP server over HTTP to prove it functions
     const mcpUrl = attachedMcpServers[0].url;
     const initRes = await fetch(mcpUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders,
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }),
     });
     const initJson = await initRes.json() as any;
@@ -600,7 +610,7 @@ test('AC2 & Substrate: Remote workspace tools are exposed over MCP bridge to OAR
 
     const listRes = await fetch(mcpUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders,
       body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
     });
     const listJson = await listRes.json() as any;
@@ -609,7 +619,7 @@ test('AC2 & Substrate: Remote workspace tools are exposed over MCP bridge to OAR
 
     const callRes = await fetch(mcpUrl, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders,
       body: JSON.stringify({
         jsonrpc: '2.0',
         id: 3,
@@ -763,47 +773,138 @@ test('AC4 (F1): Background or stale root turn_ended during admitted prompt neith
   await session.close();
 });
 
-test('AC1 (F2): Simulated Node 23 Worker refuses work before admission and returns actionable sanitized guidance', async () => {
+test('AC1 (F2): Simulated Node 23 Worker startup and readiness surface returns actionable guidance and admits zero runs', async (t) => {
   // 1. package.json and package-lock.json floors agree on >=24.0.0
   const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
   const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
   assert.equal(pkg.engines?.node, '>=24.0.0');
   assert.equal(lock.packages?.['']?.engines?.node, '>=24.0.0');
 
-  // 2. Simulated Node 23 Worker readiness probe
-  const probeResult = await probeEnvironmentReadiness(
-    [{ engine: 'codex', binaryPath: '/tmp/codex', args: [], sandbox: 'read-only' }],
-    {
-      nodeVersion: '23.4.0',
-      env: { SPROUT_USE_OAR_ENGINE: 'codex' },
-      commandRunner: {
-        run: async () => ({ stdout: 'codex-cli 0.159.3\n', exitCode: 0 }),
-      },
+  // 2. Drive the actual Worker entry point (main.ts) with simulated Node 23 + OAR opt-in
+  const mainScript = new URL('../worker/main.ts', import.meta.url).pathname;
+  const child = spawn(process.execPath, [mainScript], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      SPROUT_NODE_VERSION: '23.4.0',
+      SPROUT_USE_OAR_ENGINE: 'codex',
+      SPROUT_CODEX_BIN: '/synthetic/bin/codex',
+      SPROUT_ENV_INSTANCE: 'node23-worker-test',
+      SPROUT_WORKER_HOST: '127.0.0.1',
+      SPROUT_WORKER_PORT: '0',
+      SPROUT_WORKSPACE_ROOT: tmpdir(),
     },
-  );
+  });
 
-  const codexFact = probeResult.readiness.engines.find((e) => e.engine === 'codex');
-  assert.ok(codexFact);
-  assert.equal(codexFact.readiness, 'unknown', 'Codex readiness must be unknown when Node < 24');
-  assert.equal(probeResult.probe.enginesOk, false);
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (d: Buffer) => { stdout += d.toString('utf8'); });
+  child.stderr.on('data', (d: Buffer) => { stderr += d.toString('utf8'); });
+
+  const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+  t.after(async () => {
+    child.kill('SIGTERM');
+    await exited;
+  });
+
+  // Wait for the Worker to start, publish its discovery line, and report transport ready
+  const deadline = Date.now() + 10_000;
+  while (!stdout.includes(WORKER_READY_PREFIX) || !stderr.includes(WORKER_DIAGNOSTICS.transportReady)) {
+    if (Date.now() >= deadline) {
+      throw new Error(`Worker did not start. stdout: ${stdout}, stderr: ${stderr}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+
+  // Assert it did NOT crash with startupFailed
+  assert.ok(!stderr.includes(WORKER_DIAGNOSTICS.startupFailed), 'Worker startup must not fail with generic startupFailed');
+  assert.ok(stderr.includes(WORKER_DIAGNOSTICS.transportReady), 'Worker transport must become ready');
+
+  // Parse the published ready info
+  const readyLine = stdout.split('\n').find((line) => line.startsWith(WORKER_READY_PREFIX));
+  assert.ok(readyLine);
+  const endpointInfo = JSON.parse(readyLine.slice(WORKER_READY_PREFIX.length));
+
+  // Connect to the Worker endpoint and query readiness and session start
+  const socket = createConnection({ host: endpointInfo.host, port: endpointInfo.port });
+  t.after(() => socket.destroy());
+
+  let responseBuffer = '';
+  const responses = new Map<number, any>();
+  socket.on('data', (chunk: Buffer) => {
+    responseBuffer += chunk.toString('utf8');
+    const lines = responseBuffer.split('\n');
+    responseBuffer = lines.pop() ?? '';
+    for (const line of lines) {
+      if (line.trim()) {
+        const msg = JSON.parse(line);
+        if (msg.id !== undefined) {
+          responses.set(msg.id, msg);
+        }
+      }
+    }
+  });
+
+  const sendRpc = async (id: number, method: string, params: any = {}): Promise<any> => {
+    socket.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
+    const end = Date.now() + 5000;
+    while (!responses.has(id)) {
+      if (Date.now() >= end) throw new Error(`RPC ${method} timed out`);
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    return responses.get(id);
+  };
+
+  // 3. Worker interface worker/info returns actionable guidance
+  const infoRes = await sendRpc(1, 'worker/info');
+  assert.ok(infoRes.result);
+  const readiness = infoRes.result.readiness;
+  assert.ok(readiness);
+  assert.equal(readiness.probe?.enginesOk, false);
   assert.match(
-    probeResult.probe.summary,
+    readiness.probe?.summary ?? '',
     /Node\.js 24\+ is required by OAR \(detected Node\.js 23\.4\.0\)\. Please upgrade Node\.js to version 24\.0\.0 or later before admitting work\./,
   );
+  const codexFact = readiness.engines?.find((e: any) => e.engine === 'codex');
+  assert.ok(codexFact);
+  assert.equal(codexFact.readiness, 'unknown');
 
-  // 3. Run admission refuses the option before a run is admitted
-  const observedFacts = probeResult.readiness.engines.map((e) => ({
-    engine: e.engine,
-    installed: e.installed,
-    readiness: e.readiness,
-    models: { state: e.modelAvailability, models: e.models },
-  }));
+  // 4. Admission refuses the option before any run is admitted
   const admission = evaluateAdmissibleWorkOption(
     [{ id: 'opt-codex', engine: 'codex', workModel: '', effort: 'default' }],
-    observedFacts,
+    readiness.engines.map((e: any) => ({
+      engine: e.engine,
+      installed: e.installed,
+      readiness: e.readiness,
+      models: { state: e.modelAvailability ?? 'unknown', models: e.models ?? [] },
+    })),
   );
   assert.equal(admission.ok, false, 'No run can be admitted on unsupported Node');
   assert.match(admission.reason ?? '', /readiness is unknown/);
+
+  // 5. Worker readiness probe RPC also returns the actionable guidance
+  const probeRpcRes = await sendRpc(2, 'worker/readiness-probe');
+  assert.ok(probeRpcRes.result);
+  assert.equal(probeRpcRes.result.probe?.enginesOk, false);
+  assert.match(
+    probeRpcRes.result.probe?.summary ?? '',
+    /Node\.js 24\+ is required by OAR \(detected Node\.js 23\.4\.0\)\. Please upgrade Node\.js to version 24\.0\.0 or later before admitting work\./,
+  );
+
+  // 6. Direct session/start over Worker interface returns sanitized Node guidance rather than generic failure
+  const startRes = await sendRpc(3, 'session/start', {
+    engine: 'codex',
+    agentId: 'scout',
+    workingDirectory: tmpdir(),
+  });
+  assert.ok(startRes.error);
+  assert.equal(startRes.error.code, -32603);
+  assert.match(
+    startRes.error.message,
+    /Node\.js 24\+ is required by OAR \(detected Node\.js 23\.4\.0\)\. Please upgrade Node\.js to version 24\.0\.0 or later before admitting work\./,
+  );
+  assert.notEqual(startRes.error.message, 'sessionStartFailed');
+  assert.notEqual(startRes.error.message, 'startupFailed');
 });
 
 test('AC5 (F6): Spawn failure (runner process emits error before ready) rejects startSession and cleans up resources', async () => {
@@ -950,6 +1051,15 @@ test('AC7 (F5): Synthetic absolute paths and credentials in tool input and outpu
 
   const serializedEvents = JSON.stringify(events);
 
+  // Strengthen F5 (non-blocking suggestion 1): positive presence assertions with redaction markers
+  const toolCallEvent = events.find((e) => e.type === 'tool-call');
+  assert.ok(toolCallEvent, 'tool-call event must be present on wire');
+  assert.match(toolCallEvent.detail, /<redacted-(?:path|credential)>/, 'tool-call detail must contain redaction marker');
+
+  const toolOutputEvent = events.find((e) => e.type === 'tool-output');
+  assert.ok(toolOutputEvent, 'tool-output event must be present on wire');
+  assert.match(toolOutputEvent.text, /<redacted-(?:path|credential)>/, 'tool-output text must contain redaction marker');
+
   // Assert absolute paths and credentials are scrubbed from events
   assert.ok(!serializedEvents.includes('/Users/user'), 'POSIX user directory must not cross wire');
   assert.ok(!serializedEvents.includes('C:\\Users\\user'), 'Windows user directory must not cross wire');
@@ -957,4 +1067,156 @@ test('AC7 (F5): Synthetic absolute paths and credentials in tool input and outpu
   assert.ok(!serializedEvents.includes('test-auth-key-key-98765'), 'Auth token must not cross wire');
 
   await session.close();
+});
+
+test('Authority boundary (F8): MCP bridge authenticates caller, rejects unauthenticated requests, and preserves binding fence', async () => {
+  let workspaceReadCalled = false;
+  let bindingCurrent = true;
+
+  const bridge = await createOarMcpBridge({
+    remoteWorkspace: {
+      binding: {
+        projectId: 'auth-proj',
+        environmentInstanceId: 'auth-env',
+        bindingId: 'auth-bind',
+        generation: 1,
+        connectionEpoch: 1,
+        workspaceId: 'auth-ws',
+      },
+      bindingFence: {
+        generation: 1,
+        isCurrent: () => bindingCurrent,
+      },
+      operations: ['read'],
+      read: async () => {
+        workspaceReadCalled = true;
+        return {
+          operationId: 'op-auth-read',
+          projectId: 'auth-proj',
+          environmentInstanceId: 'auth-env',
+          bindingId: 'auth-bind',
+          generation: 1,
+          connectionEpoch: 1,
+          workspaceId: 'auth-ws',
+          operation: 'read',
+          status: 'completed',
+          content: 'SECRET_PROTECTED_DATA',
+        };
+      },
+      search: async () => ({
+        operationId: 'op-search',
+        projectId: 'auth-proj',
+        environmentInstanceId: 'auth-env',
+        bindingId: 'auth-bind',
+        generation: 1,
+        connectionEpoch: 1,
+        workspaceId: 'auth-ws',
+        operation: 'search',
+        status: 'completed',
+      }),
+      inspect: async () => ({ status: 'completed' }),
+      cancel: async () => ({ accepted: true, status: 'cancelled' }),
+    },
+  });
+
+  assert.ok(bridge);
+  assert.ok(bridge.mcpServer);
+  assert.ok('type' in bridge.mcpServer && bridge.mcpServer.type === 'http');
+  assert.ok(bridge.mcpServer.headers?.authorization, 'MCP server must configure authorization header for OAR client');
+
+  const mcpUrl = bridge.mcpServer.url;
+  const validAuthHeader = bridge.mcpServer.headers.authorization;
+
+  try {
+    // 1. Unauthenticated requests MUST return 401 Unauthorized
+    const unauthInit = await fetch(mcpUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }),
+    });
+    assert.equal(unauthInit.status, 401, 'Unauthenticated initialize must return 401');
+
+    const unauthList = await fetch(mcpUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }),
+    });
+    assert.equal(unauthList.status, 401, 'Unauthenticated tools/list must return 401');
+    const unauthListBody = await unauthList.json() as any;
+    assert.equal(unauthListBody.error?.message, 'Unauthorized');
+
+    const unauthCall = await fetch(mcpUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: { name: 'read', arguments: { path: 'file.txt' } },
+      }),
+    });
+    assert.equal(unauthCall.status, 401, 'Unauthenticated tools/call must return 401');
+    assert.equal(workspaceReadCalled, false, 'Unauthenticated call must never invoke workspace callback');
+
+    // 2. Request with forged or invalid authorization header MUST return 401
+    const invalidAuthCall = await fetch(mcpUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', authorization: 'Bearer forged-invalid-token' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 4,
+        method: 'tools/call',
+        params: { name: 'read', arguments: { path: 'file.txt' } },
+      }),
+    });
+    assert.equal(invalidAuthCall.status, 401, 'Forged authorization token must return 401');
+    assert.equal(workspaceReadCalled, false, 'Forged call must never invoke workspace callback');
+
+    // 3. Authenticated request with configured OAR credentials MUST succeed
+    const authList = await fetch(mcpUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', authorization: validAuthHeader },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'tools/list', params: {} }),
+    });
+    assert.equal(authList.status, 200, 'Authenticated tools/list must return 200');
+    const authListBody = await authList.json() as any;
+    assert.ok(authListBody.result?.tools?.some((t: any) => t.name === 'read'));
+
+    const authCall = await fetch(mcpUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', authorization: validAuthHeader },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 6,
+        method: 'tools/call',
+        params: { name: 'read', arguments: { path: 'file.txt' } },
+      }),
+    });
+    assert.equal(authCall.status, 200, 'Authenticated tools/call must return 200');
+    const authCallBody = await authCall.json() as any;
+    assert.equal(authCallBody.result?.isError, false);
+    assert.equal(workspaceReadCalled, true, 'Authenticated call must invoke workspace callback');
+
+    // 4. Stale binding fence MUST reject tool call even with valid authorization
+    workspaceReadCalled = false;
+    bindingCurrent = false; // Close / invalidate fence
+
+    const staleFenceCall = await fetch(mcpUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', authorization: validAuthHeader },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 7,
+        method: 'tools/call',
+        params: { name: 'read', arguments: { path: 'file.txt' } },
+      }),
+    });
+    assert.equal(staleFenceCall.status, 200);
+    const staleFenceBody = await staleFenceCall.json() as any;
+    assert.equal(staleFenceBody.result?.isError, true, 'Stale fence must return isError: true');
+    assert.match(staleFenceBody.result?.content?.[0]?.text ?? '', /no longer available/);
+    assert.equal(workspaceReadCalled, false, 'Stale fence must never invoke workspace callback');
+  } finally {
+    await bridge.close();
+  }
 });
