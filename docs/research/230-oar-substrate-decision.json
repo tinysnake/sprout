@@ -1,0 +1,283 @@
+{
+  "schemaVersion": "1.0.0",
+  "ticket": 230,
+  "runScope": "r226",
+  "parentSpec": 226,
+  "verdict": {
+    "summary": "OAR 0.35.0 is conditionally viable for an Environment-hosted Pi replacement with a bounded extension-loader hook; Codex is blocked from OAR production adoption and retains a bounded native exception; Claude is strictly not authorized for production Host-run and requires a named upstream/pre-dispatch native wrapper route under #225 prerequisites.",
+    "primarySubstrateDecision": {
+      "sharedAdapter": {
+        "name": "OarEngineAdapter",
+        "cardinality": "single shared adapter parameterized by runtime identity, capability, and host policy",
+        "status": "confirmed",
+        "runnerSupervision": "per-session supervised runner process group with explicit process-group timeout and isolation profile",
+        "seams": "preserves existing Sprout EngineAdapter and EngineSession seams without leaking OAR Session types into durable records or Worker protocols",
+        "credentials": "host-local credentials strictly preserved; no credential leakage to remote work origins or untrusted processes",
+        "placement": "Environment-hosted placement retained for this slice; Host-run placement remains governed by #225"
+      },
+      "runtimeDecisions": {
+        "pi": {
+          "status": "conditionally_viable_minimal_replacement",
+          "route": "OAR-based replacement via custom loader/extension hook under Environment-hosted mode; Native Host-run retained for #225",
+          "evidenceLevel": "model-issued (bounded local fixture)",
+          "productionReadiness": "blocked_pending_bounded_remedy",
+          "remedy": "Upstream or runner-level Pi opener loader policy hook supplying strict tools/noTools options, disabling default native bash/ambient discovery, and enforcing Worker-origin Project MCP transport.",
+          "acceptance": "Demonstrate model-issued read/edit/command on isolated fixture with native tools unregistered/denied, ambient extensions excluded, and no host-stdio MCP execution."
+        },
+        "codex": {
+          "status": "blocked_oar_route",
+          "route": "Bounded Native Exception retained (src/engine/codex.ts / native app-server / exec-server); OAR Codex route blocked",
+          "evidenceLevel": "source-only + scripted builder (refused before session)",
+          "nativeException": {
+            "name": "CodexNativeSeamException",
+            "mechanism": "Retain native Sprout EngineAdapter implementation for Codex",
+            "removalTrigger": "Upstream OAR release exposes typed executor binding (thread/start environments) and dynamic-tool dispatch callbacks, tested and verified on Codex >= 0.159.3 without host-stdio MCP fallback or process-global sandbox pollution."
+          },
+          "remedy": "Upstream OAR typed executor-binding option/hook and dynamic tool callback bridge; runner-level per-session sandbox posture decoupling.",
+          "acceptance": "Codex session starts with explicit remote Environment binding, issues model turns through Worker-origin tools, and refuses host sentinels without falling back to host execution."
+        },
+        "claude": {
+          "status": "blocked_from_host_run_production_by_this_issue",
+          "route": "Future route gated on upstream #55 attribution fix, native pre-dispatch wrapper for builtin exclusion, and Human CLI installation/auth prerequisites; NOT authorized as production Host-run by #230",
+          "evidenceLevel": "model-issued (bounded local fixture with non-Claude backend; native nested Agent rejection observed)",
+          "prerequisites": [
+            "Human-owned installation and authentication of Claude Code CLI on the engine host",
+            "Upstream #55 attribution resolution or verified projection hook preventing premature root completion",
+            "Native pre-dispatch exclusion wrapper (--bare, --tools '', approval denial for non-work tools)",
+            "Resolution of five unproved loader/policy boundaries (rules file read denial, automatic plugin discovery, LSP, managed policy, managed MCP)"
+          ],
+          "acceptance": "Model-issued turn with genuine Claude backend verifying exact root-turn attribution, complete builtin exclusion, remote Worker MCP transport, and zero host leakage."
+        }
+      }
+    },
+    "orderingAndSequencing": {
+      "verdict": "#225 first / independent execution; OAR adoption does not precede or gate #225",
+      "rules": [
+        "Minimal Codex/Pi replacement via OarEngineAdapter applies strictly to Environment-hosted mode and does not gate independent #225 Host-run execution.",
+        "Substrate-independent and Pi-vertical #225 work (#237-#247) proceeds independently of #226 runtime migration.",
+        "Codex retains native exception in both modes until upstream OAR controls exist.",
+        "Closing research issue #230 does not authorize production Host-run or unproven OAR routes.",
+        "Downstream tickets #231-#236 are bounded planning drafts and must respect the blocked states and native exceptions recorded here."
+      ]
+    },
+    "upstreamDriftFinding": {
+      "pinnedVersion": "0.35.0",
+      "sourceCommit": "8adde16fe2d12ae54af7d4dff86c3f224380a5c7",
+      "latestUpstreamVersion": "0.58.0",
+      "finding": "OAR upstream has drifted from 0.35.0 to 0.58.0. In accordance with constraints, OAR is not floated or upgraded in this run scope. Upstream drift is recorded as a finding for future evaluation."
+    }
+  },
+  "matrix": [
+    {
+      "runtime": "Pi",
+      "dimension": "Lifecycle & Session Supervision",
+      "evidenceLevel": "model-issued (local fixture)",
+      "platformScope": "macOS (Node >= 24)",
+      "oarCandidateStatus": "conditionally_viable",
+      "gapOrLimitation": "OAR post-abort wait is unbounded; disposal awaits native abort without timeout.",
+      "remedyOrPrerequisite": "Supervise runner process group externally with explicit hard deadline (140s kill / 170s supervisor)."
+    },
+    {
+      "runtime": "Pi",
+      "dimension": "Instructions & Cwd Isolation",
+      "evidenceLevel": "protocol-only",
+      "platformScope": "macOS",
+      "oarCandidateStatus": "conditionally_viable",
+      "gapOrLimitation": "Cwd trusted on host; ambient extensions loaded from agent dir.",
+      "remedyOrPrerequisite": "Isolate agent dir in scratch location with controlled settings.json."
+    },
+    {
+      "runtime": "Pi",
+      "dimension": "Host Restriction & Tool Exclusion",
+      "evidenceLevel": "model-issued (negative denied) / protocol-only (catalog)",
+      "platformScope": "macOS (sandbox-exec)",
+      "oarCandidateStatus": "blocked_as_published",
+      "gapOrLimitation": "SessionOptions lacks tools/noTools; native bash replaced only for env overlay, retaining native tools.",
+      "remedyOrPrerequisite": "Upstream or runner-level loader hook setting defaultTools, setActiveTools, and tool_call guard."
+    },
+    {
+      "runtime": "Pi",
+      "dimension": "Remote Origin & File Isolation",
+      "evidenceLevel": "model-issued (read/edit)",
+      "platformScope": "macOS",
+      "oarCandidateStatus": "conditionally_viable",
+      "gapOrLimitation": "Local sandboxed origin only; arbitrary patches and search/command unexercised in #227 base.",
+      "remedyOrPrerequisite": "Bridge capability injection via RemoteWorkspaceTools; full remote execution via Worker."
+    },
+    {
+      "runtime": "Pi",
+      "dimension": "MCP / Binding Behavior",
+      "evidenceLevel": "protocol-only",
+      "platformScope": "macOS",
+      "oarCandidateStatus": "blocked_for_adr0019",
+      "gapOrLimitation": "OAR launches MCP stdio processes on the engine host; cannot replace tools in-place (Session.withdraw withdraws inputs only).",
+      "remedyOrPrerequisite": "Remote Worker MCP origin per #244/#245; fresh session on binding change."
+    },
+    {
+      "runtime": "Pi",
+      "dimension": "Continuation / Resume",
+      "evidenceLevel": "model-issued",
+      "platformScope": "macOS",
+      "oarCandidateStatus": "viable",
+      "gapOrLimitation": "MCP config must be re-supplied on resume.",
+      "remedyOrPrerequisite": "Sprout session key store tracks native session ID; supplies config on resume."
+    },
+    {
+      "runtime": "Pi",
+      "dimension": "Attribution & Telemetry",
+      "evidenceLevel": "source-only",
+      "platformScope": "macOS",
+      "oarCandidateStatus": "conditionally_viable",
+      "gapOrLimitation": "Progress declared none in prototype; telemetry mapping not certified.",
+      "remedyOrPrerequisite": "Map OAR turn events to Sprout progress/event stream at EngineAdapter seam."
+    },
+    {
+      "runtime": "Codex",
+      "dimension": "Lifecycle & Session Supervision",
+      "evidenceLevel": "scripted (refused before session)",
+      "platformScope": "macOS",
+      "oarCandidateStatus": "blocked",
+      "gapOrLimitation": "OAR app-server client lacks supported typed executor binding; defaults to danger-full-access via process env.",
+      "remedyOrPrerequisite": "Native Exception (retain native adapter). Upstream OAR hook for per-session sandbox and typed executor."
+    },
+    {
+      "runtime": "Codex",
+      "dimension": "Instructions & Cwd Isolation",
+      "evidenceLevel": "source-only",
+      "platformScope": "macOS",
+      "oarCandidateStatus": "blocked",
+      "gapOrLimitation": "App server spawned in caller cwd; thread gets options.cwd.",
+      "remedyOrPrerequisite": "Controlled scratch cwd at runner start."
+    },
+    {
+      "runtime": "Codex",
+      "dimension": "Host Restriction & Tool Exclusion",
+      "evidenceLevel": "source-only",
+      "platformScope": "macOS",
+      "oarCandidateStatus": "blocked",
+      "gapOrLimitation": "No tool exclusion in thread/start; OAR never answers server-initiated dynamic-tool requests (toApp).",
+      "remedyOrPrerequisite": "Upstream OAR dynamic-tool bridge or Native Exception."
+    },
+    {
+      "runtime": "Codex",
+      "dimension": "Remote Origin & File Isolation",
+      "evidenceLevel": "scripted builder check",
+      "platformScope": "macOS",
+      "oarCandidateStatus": "blocked",
+      "gapOrLimitation": "No remote executor binding in thread/start or turn/start.",
+      "remedyOrPrerequisite": "Native Exception using Sprout's native exec-server / remote environment forward."
+    },
+    {
+      "runtime": "Codex",
+      "dimension": "MCP / Binding Behavior",
+      "evidenceLevel": "scripted builder check",
+      "platformScope": "macOS",
+      "oarCandidateStatus": "blocked",
+      "gapOrLimitation": "mcpServers config is additive, runs stdio on engine host; cannot enforce empty native tools.",
+      "remedyOrPrerequisite": "Worker-origin MCP via native adapter."
+    },
+    {
+      "runtime": "Codex",
+      "dimension": "Continuation / Resume",
+      "evidenceLevel": "scripted builder check",
+      "platformScope": "macOS",
+      "oarCandidateStatus": "blocked",
+      "gapOrLimitation": "Resume builder omits executor/environment binding.",
+      "remedyOrPrerequisite": "Native Exception."
+    },
+    {
+      "runtime": "Codex",
+      "dimension": "Attribution & Telemetry",
+      "evidenceLevel": "unproved",
+      "platformScope": "macOS",
+      "oarCandidateStatus": "unproved",
+      "gapOrLimitation": "Zero dynamic tool calls observed in #249 and #252; billing facts unknown.",
+      "remedyOrPrerequisite": "Native Codex telemetry resolution under #248/#249."
+    },
+    {
+      "runtime": "Claude",
+      "dimension": "Lifecycle & Session Supervision",
+      "evidenceLevel": "protocol-only / scripted",
+      "platformScope": "macOS",
+      "oarCandidateStatus": "conditionally_viable_with_hooks",
+      "gapOrLimitation": "Unmodified OAR launch passes --dangerously-skip-permissions and merges host env.",
+      "remedyOrPrerequisite": "Executable launch wrapper stripping flags, applying bare mode, and sanitizing env."
+    },
+    {
+      "runtime": "Claude",
+      "dimension": "Instructions & Cwd Isolation",
+      "evidenceLevel": "scripted (loader probe)",
+      "platformScope": "macOS",
+      "oarCandidateStatus": "partially_viable",
+      "gapOrLimitation": "Automatic discovery of CLAUDE.md excluded by --bare; rules-file read denial and managed policy unproved.",
+      "remedyOrPrerequisite": "Pre-dispatch wrapper + OS sandbox profile + isolated policy fixture."
+    },
+    {
+      "runtime": "Claude",
+      "dimension": "Host Restriction & Tool Exclusion",
+      "evidenceLevel": "model-issued (Agent rejected pre-dispatch) / scripted",
+      "platformScope": "macOS",
+      "oarCandidateStatus": "viable_with_wrapper",
+      "gapOrLimitation": "Unmodified OAR has no exclusion flags; wrapper supplies --tools '' and permission denials.",
+      "remedyOrPrerequisite": "Verified wrapper applying strict tool denials and approval rejection."
+    },
+    {
+      "runtime": "Claude",
+      "dimension": "Remote Origin & File Isolation",
+      "evidenceLevel": "model-issued (read/edit/command on local fixture; test pass in #252)",
+      "platformScope": "macOS",
+      "oarCandidateStatus": "viable_with_wrapper",
+      "gapOrLimitation": "Direct engine opens denied by OS profile; remote test execution passed in #252 under native Host-run.",
+      "remedyOrPrerequisite": "Sprout Environment operations and Worker MCP."
+    },
+    {
+      "runtime": "Claude",
+      "dimension": "MCP / Binding Behavior",
+      "evidenceLevel": "model-issued / protocol-only",
+      "platformScope": "macOS",
+      "oarCandidateStatus": "viable_with_wrapper",
+      "gapOrLimitation": "Approved bridge advertises tools only; MCP resources/prompts rejected with -32601; managed MCP unproved.",
+      "remedyOrPrerequisite": "Strict MCP configuration; Worker-origin HTTP/stdio MCP."
+    },
+    {
+      "runtime": "Claude",
+      "dimension": "Continuation / Resume",
+      "evidenceLevel": "model-issued",
+      "platformScope": "macOS",
+      "oarCandidateStatus": "viable",
+      "gapOrLimitation": "Same-binding resume verified; changed-authority fencing requires fresh session.",
+      "remedyOrPrerequisite": "Session key store partition by mode/host; fresh session on re-binding."
+    },
+    {
+      "runtime": "Claude",
+      "dimension": "Attribution & Telemetry",
+      "evidenceLevel": "scripted (#55 reproducible) + model-issued (non-Claude backend)",
+      "platformScope": "macOS",
+      "oarCandidateStatus": "blocked_pending_upstream_55",
+      "gapOrLimitation": "Upstream issue #55 causes premature root settlement; non-Claude backend used in prototypes.",
+      "remedyOrPrerequisite": "Upstream #55 resolution or verified projection hook; genuine Claude backend verification."
+    }
+  ],
+  "goNoGoCriteria": {
+    "conversationWithoutWorkEnvironment": {
+      "status": "passed_native_unproved_oar",
+      "evidence": "#252 proved bounded PONG baseline on native Pi and Claude without Environment or leases; OAR route unproven for standalone no-env conversation."
+    },
+    "enrolledRemoteOperationMcpOrigin": {
+      "status": "decisively_gapped_in_oar",
+      "evidence": "OAR 0.35.0 launches MCP stdio on the engine host (violating ADR-0019). #244/#245 proved Worker-origin HTTP/stdio MCP natively; OAR requires Sprout-managed HTTP MCP bridging or upstream remote-origin transport."
+    },
+    "accessLeaseEnforcement": {
+      "status": "passed_at_sprout_layer",
+      "evidence": "Task mutation leases enforced at Sprout runtime/operations layer; OAR carries no native lease concept."
+    },
+    "staleBindingRejection": {
+      "status": "passed_with_fresh_session_policy",
+      "evidence": "OAR cannot dynamically refresh tool bindings in-place (withdraw affects inputs only). Re-binding requires session disposal and fresh session creation, which rejects stale authority."
+    },
+    "uncertainOperationRecovery": {
+      "status": "passed_at_sprout_supervision_layer",
+      "evidence": "OAR abort() is only cancellation delivery; settlement must be verified by Sprout runner supervision and Worker delivery journal."
+    }
+  }
+}
