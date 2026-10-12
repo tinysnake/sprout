@@ -1,5 +1,7 @@
 # Claude builtin exclusion and root attribution through OAR (#229)
 
+> Historical first attempt. The [rework record](oar-claude-rework.md) and its separate evidence supersede the unavailable-command and scripted-only failure classifications below. Remaining nested/automatic-loader gaps are explicitly unproved; neither attempt establishes Claude-native model compatibility.
+
 Run `r226`, Job `r226-pro-worker-a3`, first attempt. Fixed branch base:
 `6fe675fe77f46403eabf623c5e6300d3ab4e0a3c`. The accepted #227 report and evidence
 were read from integration commit `465bd94b31cf7ec0bed83ae6946376e39c0a6d1d`;

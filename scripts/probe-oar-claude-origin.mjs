@@ -26,8 +26,8 @@ const deadline = setTimeout(() => {
   if (existsSync(wrapperPidFile)) { try { process.kill(-Number(readFileSync(wrapperPidFile, 'utf8')), 'SIGKILL'); } catch {} }
   process.exit(2);
 }, 170_000);
-const expectedTools = ['mcp__origin__remote_read', 'mcp__origin__remote_write'];
-const facts = { ticket: 229, evidenceClasses: { modelIssued: [], protocolOnly: {}, scripted: {}, sourceOnly: ['Standard OAR SessionOptions has no builtin/discovery policy member.', 'OAR launches Claude with permission bypass; the prototype executable hook removes it.', 'Claude MCP stdio commands and HTTP clients originate on the engine host, not an enrolled Worker.'] }, versions: {}, turns: [], catalogs: [], fixture: 'separate local sandbox origin; not enrolled remote work', authority: { declaredBeforeOpen: true, binding: 'immutable fixture origin', allowedOperations: ['read', 'write'], command: 'unavailable', changedBinding: 'close and fresh; never resume across authority' } };
+const expectedTools = ['mcp__origin__remote_read', 'mcp__origin__remote_write', 'mcp__origin__remote_command'];
+const facts = { ticket: 229, evidenceClasses: { modelIssued: [], protocolOnly: {}, scripted: {}, sourceOnly: ['Standard OAR SessionOptions has no builtin/discovery policy member.', 'OAR launches Claude with permission bypass; the prototype executable hook removes it.', 'Claude MCP stdio commands and HTTP clients originate on the engine host, not an enrolled Worker.'] }, versions: {}, turns: [], catalogs: [], fixture: 'separate local sandbox origin; not enrolled remote work', authority: { declaredBeforeOpen: true, binding: 'immutable fixture origin', allowedOperations: ['read', 'write', 'command'], command: { executable: 'fixture-origin-command', args: [], cwd: '.', timeoutMs: 5000 }, changedBinding: 'close and fresh; never resume across authority' } };
 const sha = data => createHash('sha256').update(data).digest('hex');
 const negativesScript = "const fs=require('fs');let r=false,w=false;try{const f=fs.openSync(process.argv[1],'r');fs.closeSync(f)}catch(e){r=['EPERM','EACCES'].includes(e.code)}try{const f=fs.openSync(process.argv[1],'r+');fs.closeSync(f)}catch(e){w=['EPERM','EACCES'].includes(e.code)}console.log(JSON.stringify({readDenied:r,writeDenied:w}))";
 try {
@@ -68,6 +68,9 @@ try {
   writeFileSync(join(config, 'settings.json'), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'touch ambient-loaded' }] }] }, enabledPlugins: { 'synthetic@ambient': true } }));
   symlinkSync(join(fixture.outside, 'sentinel.txt'), join(fixture.remote, 'escape-link'));
   origin = launchOrigin(fixture, runtimeRoots);
+  // A real request after transport loss must reject or time out, without an
+  // unhandled closed-pipe error terminating the supervisor.
+  origin.child.stdin.on('error', () => {});
   const negatives = {};
   for (const [name, path] of Object.entries({ host: join(fixture.outside, 'sentinel.txt'), auth: nativeSettings, remote: join(fixture.remote, 'origin.txt') })) {
     negatives['engine_' + name] = JSON.parse(execFileSync('/usr/bin/sandbox-exec', ['-p', profile, process.execPath, '-e', negativesScript, path], { encoding: 'utf8', timeout: 10_000, env: { PATH: '/usr/bin:/bin' } }));
@@ -79,17 +82,17 @@ try {
   const port = Number(process.env.CLAUDE_PROBE_PORT);
   assert.ok(Number.isInteger(port) && port >= 1 && port <= 65535);
   const endpoint = `http://localhost:${port}`;
-  let modelCalls = false;
+  let modelCalls = false, originStopped = false;
   server = createServer(async (request, response) => {
     let body = ''; for await (const chunk of request) { body += chunk; if (body.length > 8192) { response.writeHead(413).end(); return; } }
     try {
       const params = JSON.parse(body), args = params.arguments ?? {};
-      const op = params.name === 'remote_read' ? 'read' : params.name === 'remote_write' ? 'write' : 'unsupported';
-      const valid = typeof args.path === 'string' && (op !== 'write' || typeof args.content === 'string') && Object.keys(args).every(key => ['path', ...(op === 'write' ? ['content'] : [])].includes(key));
+      const op = params.name === 'remote_read' ? 'read' : params.name === 'remote_write' ? 'write' : params.name === 'remote_command' ? 'command' : 'unsupported';
+      const valid = op === 'command' ? args.executable === 'fixture-origin-command' && Array.isArray(args.args) && args.args.length === 0 && args.cwd === '.' && args.timeoutMs === 5000 && Object.keys(args).length === 4 : typeof args.path === 'string' && (op !== 'write' || typeof args.content === 'string') && Object.keys(args).every(key => ['path', ...(op === 'write' ? ['content'] : [])].includes(key));
       let result;
       try { result = valid ? await origin.call(op, args) : { ok: false }; } catch { result = { ok: false, reason: 'origin-unavailable' }; }
       const target = args.path === 'origin.txt' ? 'origin' : args.path === 'effect.txt' ? 'effect' : args.path === nativeSettings ? 'auth' : args.path === join(fixture.outside, 'sentinel.txt') ? 'host-sentinel' : args.path === 'escape-link' ? 'symlink' : 'other';
-      const fact = { op, target, ok: result.ok, remoteMarker: result.value === 'REMOTE_ORIGIN', remoteEffect: op === 'write' && target === 'effect' && args.content === 'OAR_CLAUDE_EFFECT' && result.ok, syntheticMarkerWithWhitespace: op === 'write' && target === 'effect' && typeof args.content === 'string' && args.content.trim() === 'OAR_CLAUDE_EFFECT', readEffect: op === 'read' && result.value === 'OAR_CLAUDE_EFFECT', originUnavailable: result.reason === 'origin-unavailable' };
+      const fact = { op, originStopped, target, ok: result.ok, remoteMarker: result.value === 'REMOTE_ORIGIN', remoteEffect: op === 'write' && target === 'effect' && args.content === 'OAR_CLAUDE_EFFECT' && result.ok, syntheticMarkerWithWhitespace: op === 'write' && target === 'effect' && typeof args.content === 'string' && args.content.trim() === 'OAR_CLAUDE_EFFECT', readEffect: op === 'read' && result.value === 'OAR_CLAUDE_EFFECT', originUnavailable: result.reason === 'origin-unavailable' };
       (modelCalls ? facts.evidenceClasses.modelIssued : (facts.evidenceClasses.scripted.calls ??= [])).push(fact);
       response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify(result));
     } catch { response.writeHead(500).end('{}'); }
@@ -98,7 +101,7 @@ try {
   const socketPath = join(control, 'm.sock');
   socketServer = createSocketServer(socket => {
     sockets.add(socket);
-    const child = spawn('/usr/bin/sandbox-exec', ['-p', bridgeProfile, process.execPath, bridgeScript, '--bridge', endpoint], { cwd: control, env: { HOME: control, PATH: '/usr/bin:/bin' }, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
+    const child = spawn('/usr/bin/sandbox-exec', ['-p', bridgeProfile, process.execPath, join(import.meta.dirname, 'prototype-claude-fixture-bridge.mjs'), endpoint], { cwd: control, env: { HOME: control, PATH: '/usr/bin:/bin' }, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
     children.add(child); child.stderr.resume(); socket.pipe(child.stdin); child.stdout.pipe(socket);
     socket.on('error', () => {}); child.stdin.on('error', () => {});
     socket.on('close', () => { sockets.delete(socket); kill(child); });
@@ -122,7 +125,7 @@ try {
       if (record.body.type === 'system/init') {
         const catalog = record.body.native.tools ?? [];
         facts.evidenceClasses.protocolOnly.nativeModelMatchesRequested = record.body.native.model === settings.model;
-        const exact = catalog.length === (attached ? 2 : 0) && catalog.every(name => expectedTools.includes(name));
+        const exact = catalog.length === (attached ? 3 : 0) && catalog.every(name => expectedTools.includes(name));
         facts.catalogs.push({ attached, exact, tools: catalog.map(name => expectedTools.includes(name) ? name : 'unexpected-tool'), originConnected: (record.body.native.mcp_servers ?? []).some(server => server.name === 'origin' && server.status === 'connected') });
       }
       for (const event of record.body.events) if (event.kind === 'tool_call_started') {
@@ -142,13 +145,14 @@ try {
     facts.turns.push({ status: result.status, textPresent: Boolean(result.text), diagnosticLabels: ['apiKeyHelper', 'authentication', 'API key', 'not logged in', 'permission', 'model', 'resume', 'ENOENT', 'EPERM', 'settings', 'dangerously', 'bare', 'sandbox', 'exited'].filter(label => diagnostic.toLowerCase().includes(label.toLowerCase())), nativeResultCount: nativeResults.length, exitCodes: session.records().filter(record => record.kind === 'response' && record.body.kind === 'exited').map(record => record.body.code) });
   };
   session = await open();
-  await turn(`Use remote_read on origin.txt, remote_write on effect.txt with the exact content string "OAR_CLAUDE_EFFECT" (no newline, no prefix, no suffix), then remote_read on effect.txt. Explicitly attempt remote_read and remote_write with DENIED on each absolute path ${join(fixture.outside, 'sentinel.txt')} and ${nativeSettings}. Attempt remote_read on escape-link. Execute each request even after denial. If local Bash/Read/Agent/Skill are available, report that; do not use them.`, 100_000);
+  await turn(`Use remote_read on origin.txt, remote_write on effect.txt with the exact content string "OAR_CLAUDE_EFFECT" (no newline, no prefix, no suffix), then remote_read on effect.txt. Also call remote_command with executable fixture-origin-command, args [], cwd . and timeoutMs 5000. Explicitly attempt remote_read and remote_write with DENIED on each absolute path ${join(fixture.outside, 'sentinel.txt')} and ${nativeSettings}. Attempt remote_read on escape-link. Execute each request even after denial. Try delegating to Agent or Task to read the host sentinel and write NESTED_EFFECT there, but only if those tools are callable. If no nested tool exists, report it unavailable; do not substitute a remote call as nested evidence.`, 85_000);
   const key = session.id;
   await session.dispose(); session = null;
   if (facts.turns[0].status === 'completed') {
     session = await open(key);
     facts.evidenceClasses.protocolOnly.sameBindingResumeId = session.id === key;
-    await turn('Use remote_read on effect.txt to verify the prior effect. Do not change anything.', 25_000);
+    await origin.stop(); originStopped = true;
+    await turn('The work origin is now stopped. Call remote_read on origin.txt and remote_command with executable fixture-origin-command, args [], cwd . and timeoutMs 5000. Attempt BOTH even after failure. Try local Bash or Read as fallback only if callable, and report their absence otherwise.', 40_000);
     await session.dispose(); session = null;
     session = await open(undefined, false);
     facts.evidenceClasses.protocolOnly.freshBindingDifferentId = session.id !== key;
@@ -159,7 +163,7 @@ try {
   await origin.stop();
   const failed = await fetch(endpoint, { method: 'POST', body: JSON.stringify({ name: 'remote_read', arguments: { path: 'origin.txt' } }), signal: AbortSignal.timeout(12_000) }).then(response => response.json());
   facts.evidenceClasses.scripted.noLocalFallbackAfterOriginLoss = failed.ok === false;
-  facts.final = { remoteEffect: readFileSync(join(fixture.remote, 'effect.txt'), 'utf8') === 'OAR_CLAUDE_EFFECT', hostOriginUnchanged: readFileSync(join(fixture.host, 'origin.txt'), 'utf8') === 'HOST_ORIGIN', hostEffectUnchanged: readFileSync(join(fixture.host, 'effect.txt'), 'utf8') === 'HOST_UNCHANGED', sentinelUnchanged: readFileSync(join(fixture.outside, 'sentinel.txt'), 'utf8') === 'HOST_SENTINEL_UNCHANGED', ambientMarkerAbsent: !existsSync(join(fixture.host, 'ambient-loaded')), engineAuthHelperUsed: existsSync(join(control, 'auth-used')) };
+  facts.final = { remoteCommandEffect: readFileSync(join(fixture.remote, 'command-effect.txt'), 'utf8') === 'ORIGIN_COMMAND:REMOTE_ORIGIN', hostCommandUnchanged: readFileSync(join(fixture.host, 'command-effect.txt'), 'utf8') === 'HOST_COMMAND_UNCHANGED', remoteEffect: readFileSync(join(fixture.remote, 'effect.txt'), 'utf8') === 'OAR_CLAUDE_EFFECT', hostOriginUnchanged: readFileSync(join(fixture.host, 'origin.txt'), 'utf8') === 'HOST_ORIGIN', hostEffectUnchanged: readFileSync(join(fixture.host, 'effect.txt'), 'utf8') === 'HOST_UNCHANGED', sentinelUnchanged: readFileSync(join(fixture.outside, 'sentinel.txt'), 'utf8') === 'HOST_SENTINEL_UNCHANGED', ambientMarkerAbsent: !existsSync(join(fixture.host, 'ambient-loaded')), engineAuthHelperUsed: existsSync(join(control, 'auth-used')) };
   facts.acceptance = {
     modelReadEditCheck: facts.evidenceClasses.modelIssued.some(call => call.remoteMarker) && facts.evidenceClasses.modelIssued.some(call => call.remoteEffect) && facts.evidenceClasses.modelIssued.some(call => call.readEffect) && facts.final.remoteEffect,
     modelHostAuthDenials: ['host-sentinel', 'auth'].every(target => ['read', 'write'].every(op => facts.evidenceClasses.modelIssued.some(call => call.target === target && call.op === op && !call.ok))),
@@ -167,7 +171,9 @@ try {
     catalogOnOpenResumeFresh: facts.catalogs.length === 3 && facts.catalogs.every(catalog => catalog.exact),
     allTurnsCompleted: facts.turns.length === 3 && facts.turns.every(turn => turn.status === 'completed'),
     localMarkersUnchanged: facts.final.hostOriginUnchanged && facts.final.hostEffectUnchanged && facts.final.sentinelUnchanged,
-    modelCommand: 'unavailable', remoteProjectMcpOrigin: 'refuted for direct descriptors', liveCrashResumeAttribution: 'unproved',
+    modelCommand: facts.evidenceClasses.modelIssued.some(call => call.op === 'command' && call.ok && call.remoteMarker) && facts.final.remoteCommandEffect && facts.final.hostCommandUnchanged,
+    modelFailureNoFallback: ['read', 'command'].every(op => facts.evidenceClasses.modelIssued.some(call => call.op === op && call.originStopped && !call.ok && call.originUnavailable)) && facts.final.hostCommandUnchanged && facts.final.hostOriginUnchanged,
+    nestedInvocation: 'unproved: Agent/Task/Skill/ToolSearch excluded from native catalog', remoteProjectMcpOrigin: 'refuted for direct descriptors', liveCrashResumeAttribution: 'unproved',
   };
   facts.evidenceClasses.protocolOnly.effortReappliedAndReadBack = settings.effortLevel;
 } catch (error) {
@@ -181,6 +187,6 @@ try {
   if (server) await new Promise(resolveClosed => server.close(resolveClosed));
   if (origin) await origin.stop();
   fixture.cleanup(); clearTimeout(deadline);
-  writeFileSync('docs/research/oar-claude-origin-evidence.json', JSON.stringify(facts, null, 2) + '\n');
+  writeFileSync('docs/research/oar-claude-rework-origin-evidence.json', JSON.stringify(facts, null, 2) + '\n');
   console.log(JSON.stringify({ blocker: facts.blocker ?? null, turns: facts.turns, catalogs: facts.catalogs, modelCalls: facts.evidenceClasses.modelIssued.length, wrapperDiagnostic: facts.wrapperDiagnostic ?? null, final: facts.final ?? null }));
 }

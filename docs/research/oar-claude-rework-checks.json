@@ -1,0 +1,266 @@
+{
+  "quick": {
+    "command": [
+      "npm",
+      "run",
+      "test:quick"
+    ],
+    "base": "06f829dee plus rework",
+    "explicitTimeoutSeconds": 180,
+    "exitCode": 0,
+    "outerTimeout": false,
+    "durationSeconds": 111.69,
+    "loadStart": [
+      18.6591796875,
+      11.02001953125,
+      10.7763671875
+    ],
+    "loadEnd": [
+      21.39990234375,
+      14.72021484375,
+      12.3076171875
+    ],
+    "logicalCpus": 10,
+    "output": "\n> sprout@0.0.0 test:quick\n> node scripts/test-select.ts --run quick\n\nquick: 279 files\n\u2139 tests 2131\n\u2139 suites 0\n\u2139 pass 2131\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 111104.092667\n",
+    "counters": {
+      "tests": 2131,
+      "pass": 2131,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    },
+    "disposition": "passed"
+  },
+  "affected": {
+    "command": [
+      "npm",
+      "run",
+      "test:affected"
+    ],
+    "base": "06f829dee plus rework",
+    "explicitTimeoutSeconds": 180,
+    "exitCode": 0,
+    "outerTimeout": false,
+    "durationSeconds": 116.06,
+    "loadStart": [
+      22.83984375,
+      15.267578125,
+      12.53076171875
+    ],
+    "loadEnd": [
+      19.34375,
+      17.16455078125,
+      13.67333984375
+    ],
+    "logicalCpus": 10,
+    "output": "\n> sprout@0.0.0 test:affected\n> node scripts/test-select.ts --run affected\n\naffected: 279 files\n\u2139 tests 2131\n\u2139 suites 0\n\u2139 pass 2131\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 114931.918833\n",
+    "counters": {
+      "tests": 2131,
+      "pass": 2131,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    },
+    "disposition": "passed"
+  },
+  "base-summary": {
+    "command": [
+      "npm",
+      "test",
+      "--",
+      "src/test-summary.test.ts"
+    ],
+    "base": "6fe675fe77f46403eabf623c5e6300d3ab4e0a3c",
+    "explicitTimeoutSeconds": 180,
+    "exitCode": 0,
+    "outerTimeout": false,
+    "durationSeconds": 14.98,
+    "loadStart": [
+      16.9267578125,
+      16.7001953125,
+      13.70751953125
+    ],
+    "loadEnd": [
+      15.78857421875,
+      16.42822265625,
+      13.66064453125
+    ],
+    "logicalCpus": 10,
+    "output": "\n> sprout@0.0.0 test\n> node scripts/test-summary.ts src/test-summary.test.ts\n\n\u2139 tests 8\n\u2139 suites 0\n\u2139 pass 8\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 14548.546459\n",
+    "counters": {
+      "tests": 8,
+      "pass": 8,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    },
+    "disposition": "passed"
+  },
+  "ticket-summary": {
+    "command": [
+      "npm",
+      "test",
+      "--",
+      "src/test-summary.test.ts"
+    ],
+    "base": "06f829dee plus rework",
+    "explicitTimeoutSeconds": 180,
+    "exitCode": 0,
+    "outerTimeout": false,
+    "durationSeconds": 15.75,
+    "loadStart": [
+      15.78857421875,
+      16.42822265625,
+      13.66064453125
+    ],
+    "loadEnd": [
+      13.8466796875,
+      15.97119140625,
+      13.5625
+    ],
+    "logicalCpus": 10,
+    "output": "\n> sprout@0.0.0 test\n> node scripts/test-summary.ts src/test-summary.test.ts\n\n\u2139 tests 8\n\u2139 suites 0\n\u2139 pass 8\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 14707.146667\n",
+    "counters": {
+      "tests": 8,
+      "pass": 8,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    },
+    "disposition": "passed"
+  },
+  "base-typecheck": {
+    "command": [
+      "npm",
+      "run",
+      "typecheck"
+    ],
+    "base": "6fe675fe77f46403eabf623c5e6300d3ab4e0a3c",
+    "explicitTimeoutSeconds": 180,
+    "exitCode": 2,
+    "outerTimeout": false,
+    "durationSeconds": 4.85,
+    "loadStart": [
+      13.8466796875,
+      15.97119140625,
+      13.5625
+    ],
+    "loadEnd": [
+      12.89794921875,
+      15.73876953125,
+      13.49462890625
+    ],
+    "logicalCpus": 10,
+    "output": "\n> sprout@0.0.0 typecheck\n> tsc --noEmit && tsc --noEmit -p web/tsconfig.json\n\nscripts/scratch/post-project-test-message.ts(24,3): error TS2741: Property 'scopeId' is missing in type '{ id: string; projectId: string; channel: \"project\"; author: { id: string; kind: \"agent\"; }; body: string; recipients: never[]; deliveryKey: string; createdAt: number; }' but required in type 'Message'.\nscripts/scratch/post-project-test-message.ts(34,11): error TS2353: Object literal may only specify known properties, and 'messageId' does not exist in type 'WakePlan'.\nscripts/tasks-layout.browser.test.ts(5,51): error TS2307: Cannot find module 'playwright' or its corresponding type declarations.\nscripts/tasks-layout.browser.test.ts(72,33): error TS7006: Parameter 'route' implicitly has an 'any' type.\nscripts/tasks-layout.browser.test.ts(75,63): error TS7006: Parameter 'shell' implicitly has an 'any' type.\nscripts/tasks-layout.browser.test.ts(75,70): error TS7006: Parameter 'safe' implicitly has an 'any' type.\nscripts/tasks-layout.browser.test.ts(88,27): error TS7031: Binding element 'selector' implicitly has an 'any' type.\n",
+    "counters": {
+      "tests": null,
+      "pass": null,
+      "fail": null,
+      "cancelled": null,
+      "skipped": null,
+      "todo": null
+    },
+    "disposition": "baseline_reproduced_type_errors"
+  },
+  "typecheck": {
+    "command": [
+      "npm",
+      "run",
+      "typecheck"
+    ],
+    "base": "06f829dee plus rework",
+    "explicitTimeoutSeconds": 180,
+    "exitCode": 2,
+    "outerTimeout": false,
+    "durationSeconds": 4.53,
+    "loadStart": [
+      12.89794921875,
+      15.73876953125,
+      13.49462890625
+    ],
+    "loadEnd": [
+      12.89794921875,
+      15.73876953125,
+      13.49462890625
+    ],
+    "logicalCpus": 10,
+    "output": "\n> sprout@0.0.0 typecheck\n> tsc --noEmit && tsc --noEmit -p web/tsconfig.json\n\nscripts/scratch/post-project-test-message.ts(24,3): error TS2741: Property 'scopeId' is missing in type '{ id: string; projectId: string; channel: \"project\"; author: { id: string; kind: \"agent\"; }; body: string; recipients: never[]; deliveryKey: string; createdAt: number; }' but required in type 'Message'.\nscripts/scratch/post-project-test-message.ts(34,11): error TS2353: Object literal may only specify known properties, and 'messageId' does not exist in type 'WakePlan'.\nscripts/tasks-layout.browser.test.ts(5,51): error TS2307: Cannot find module 'playwright' or its corresponding type declarations.\nscripts/tasks-layout.browser.test.ts(72,33): error TS7006: Parameter 'route' implicitly has an 'any' type.\nscripts/tasks-layout.browser.test.ts(75,63): error TS7006: Parameter 'shell' implicitly has an 'any' type.\nscripts/tasks-layout.browser.test.ts(75,70): error TS7006: Parameter 'safe' implicitly has an 'any' type.\nscripts/tasks-layout.browser.test.ts(88,27): error TS7031: Binding element 'selector' implicitly has an 'any' type.\n",
+    "counters": {
+      "tests": null,
+      "pass": null,
+      "fail": null,
+      "cancelled": null,
+      "skipped": null,
+      "todo": null
+    },
+    "disposition": "baseline_reproduced_type_errors"
+  },
+  "full": {
+    "command": [
+      "npm",
+      "test"
+    ],
+    "base": "06f829dee plus rework",
+    "explicitTimeoutSeconds": 180,
+    "exitCode": 124,
+    "outerTimeout": false,
+    "durationSeconds": 175.77,
+    "loadStart": [
+      11.369140625,
+      15.318359375,
+      13.37158203125
+    ],
+    "loadEnd": [
+      17.0732421875,
+      16.36279296875,
+      14.12353515625
+    ],
+    "logicalCpus": 10,
+    "output": "\n> sprout@0.0.0 test\n> node scripts/test-summary.ts\n\nTest suite timed out after 175000 ms; diagnostic appended to <checkout>/test-timeout.jsonl.\n",
+    "counters": {
+      "tests": null,
+      "pass": null,
+      "fail": null,
+      "cancelled": null,
+      "skipped": null,
+      "todo": null
+    },
+    "disposition": "timed_out_no_final_counters"
+  },
+  "base-full": {
+    "command": [
+      "npm",
+      "test"
+    ],
+    "base": "6fe675fe77f46403eabf623c5e6300d3ab4e0a3c",
+    "explicitTimeoutSeconds": 180,
+    "exitCode": 124,
+    "outerTimeout": false,
+    "durationSeconds": 175.33,
+    "loadStart": [
+      13.580078125,
+      15.62548828125,
+      13.8994140625
+    ],
+    "loadEnd": [
+      5.765625,
+      11.33349609375,
+      12.44189453125
+    ],
+    "logicalCpus": 10,
+    "output": "\n> sprout@0.0.0 test\n> node scripts/test-summary.ts\n\nTest suite timed out after 175000 ms; diagnostic appended to <checkout>/.rework-baseline/test-timeout.jsonl.\n",
+    "counters": {
+      "tests": null,
+      "pass": null,
+      "fail": null,
+      "cancelled": null,
+      "skipped": null,
+      "todo": null
+    },
+    "disposition": "timed_out_no_final_counters"
+  }
+}
