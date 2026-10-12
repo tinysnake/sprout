@@ -120,3 +120,42 @@ For #230: record **Codex #225 through current OAR: unavailable pending named ups
 - Accepted #227 [report and reusable contract at integration baseline](https://github.com/tinysnake/sprout/blob/465bd94b31cf7ec0bed83ae6946376e39c0a6d1d/docs/research/oar-pi-origin-prototype.md).
 - [Prior Codex native/protocol evidence](codex-claude-host-run-remote-work-compatibility.md), [ordering verdict](225-226-ordering-verdict.md), [OAR seam recommendation](oar-engine-seam-recommendation.md), [integration spec](oar-integration-spec.md), [historical integration plan](oar-sprout-integration-plan.md), [Pi isolation precedent](pi-host-isolation-prototype.md).
 - [ADR-0016](../adr/0016-immutable-execution-mode-at-startup.md), [ADR-0019](../adr/0019-project-mcp-tools-run-on-the-environment-worker.md), [references policy](../references.md). No reference code was copied; this ticket introduces no process transport/parser to compare or replace.
+
+## F1 rework — full-suite baseline disposition
+
+### Triage
+
+Read the original Dispatch, first Work record, complete independent FAIL verdict and all artifacts at `8e102667af0b50ba0abdd9805d5bb329cd530b2f` before edits. F1 is missing verification attribution: the first attempt's dependency-restored green run did not explain the reviewer's later timeout with load observations and a base control. The accepted pinned source finding is unaffected. The reviewer's initial missing dependencies invalidate its first quick measurement; later dependency-complete timeouts still need disposition. The Orchestrator's already-established base timeout and #254 support a load-sensitive baseline explanation.
+
+### Next attempt
+
+- Unmet criterion: #228 Constraints / F1 requires a completed full-suite exit 0 within the bound, or an explicitly accepted baseline disposition.
+- Current explanation: baseline suite duration under shared-machine load (#254); first attempt lacked a matched control and load observations.
+- Change or experiment: dependency-complete bounded checks followed by the same full suite on a clean archive of the fixed base when the Ticket timed out.
+- Expected observation: completed green full run or matching base timeout supporting the permitted baseline disposition; otherwise blocked attribution.
+
+### Disposition and observations
+
+**F1: fixed by the explicitly permitted baseline disposition; the full suite timed out on both the Ticket and unmodified base.** This records the rework-authorized disposition for gate reconciliation; it is not a completed green run or a final acceptance verdict. #254 tracks the baseline command-bound defect. No production repair belongs to #228.
+
+Dependencies were present before checks; `npm ls --depth=0` exited 0. No dependency or engine installation was needed. Control: clean `git archive` of `6fe675fe77f46403eabf623c5e6300d3ab4e0a3c` in temporary storage, with the exact same dependency tree linked as `node_modules`. Package and lockfile are byte-identical; tested source and web trees have no Ticket diff. Ticket was measured at `8e102667af0b50ba0abdd9805d5bb329cd530b2f` before evidence edits.
+
+All commands had explicit 180-second outer bounds. Both full suites used the unchanged 175,000 ms internal deadline and test concurrency 4. Load entries are OS 1/5/15-minute averages at start → end. Checks were sequential; machine-wide concurrent activity is evident in load, but the number/identity of other Jobs was not measured.
+
+| Check | Exit | Wall time | Tests / pass / fail | Load start → end |
+|---|---|---|---|---|
+| quick | 0 | 58.21 s | 2,131 / 2,131 / 0; complete | 3.81/12.41/26.32 → 4.39/11.10/24.88 |
+| affected | 0 | 91.83 s | 2,131 / 2,131 / 0; complete | 4.20/10.94/24.75 → 5.31/9.65/22.80 |
+| full | 124 | 175.43 s | 2,117 observed / 2,116 / 1; partial | 5.52/9.55/22.60 → 25.94/15.45/22.45 |
+| Unmodified base full | 124 | 175.42 s | 2,117 observed / 2,115 / 2; partial | 18.52/14.67/21.92 → 27.02/18.70/22.14 |
+| typecheck | 2 | 3.63 s | 2 existing TypeScript errors; web not reached | 21.94/18.00/21.83 → 20.35/17.73/21.71 |
+
+The Ticket full run observed results from 2026-10-12T08:24:11.689Z to 2026-10-12T08:27:06.752Z; base control from 2026-10-12T08:27:38.450Z to 2026-10-12T08:30:33.536Z. Both selected 301 files with inventory SHA-256 `9d08796a551f7c7ffddf8315b168121ff5546f029b30882e3ef36e4c15d6d8d6`. Partial counters count durable `test_result` records, not complete-suite TAP counters: both closing records say `timed_out`. Unfinished/cancelled/skipped/todo totals are unavailable; do not infer zero. Timeout candidates are not proven causes.
+
+Partial failures differed: Ticket recorded the production DOM emergency Force Release Alert Dialog test; control recorded two test-summary self-tests (ordinary failure/completed slow success records, externally killed wrapper records). Their individual causes are not established. Baseline attribution concerns the full-suite bound, supported by unchanged tested inputs and the matching control timeout; it does not assert identical failures. Typecheck reproduced missing `Message.scopeId` at line 24 and invalid `WakePlan.messageId` at line 34 in `scripts/scratch/post-project-test-message.ts`, byte-identical to base; web typecheck was not reached.
+
+### Preserved evidence boundaries
+
+Pins remain OAR 0.35.0 / source `8adde16fe2d12ae54af7d4dff86c3f224380a5c7`; Codex and executor 0.159.3 (executor help only), Node 26.11.1. No engine probe was rerun or upgraded. **Model-issued:** none, zero new turns/tool calls. **Protocol-only:** none new, no session/executor opened. **Scripted:** repository checks added here; original pinned builder and fixture results retained. **Source-only:** original pinned inspection retained. No class inherits another's claims. `refusedBeforeSession` describes the probe's scripted no-session disposition: it never invokes an OAR session opener, so it does not prove runtime admission refusal.
+
+The shared fixture remains byte-identical (SHA-256 `9d050f9f0943a0b3f4244f25ca0fe1cdacd4f49a5ff8be9b2c2d72de9814ab23`); disposable probe unchanged. Original report and JSON history remain above / in their original fields. Native binding, model-origin effects, isolation, failure/fencing/resume and authentication remain unproved with the original bounded upstream remedies. Follow up on suite performance in #254; #230 consumes the original bounded source finding separately.

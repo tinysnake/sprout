@@ -71,5 +71,178 @@
     "refusedBeforeSession": true,
     "reason": "missing-typed-executor-binding-and-restricted-tool-dispatch",
     "authInspected": false
-  }
+  },
+  "rework": [
+    {
+      "finding": "F1",
+      "nature": "missing evidence",
+      "disposition": "fixed",
+      "basis": "Explicit baseline disposition under the rework instruction: both Ticket and unmodified base time out; not a green suite or final gate acceptance.",
+      "trackingIssue": 254,
+      "ticketCommit": "8e102667af0b50ba0abdd9805d5bb329cd530b2f",
+      "baseCommit": "6fe675fe77f46403eabf623c5e6300d3ab4e0a3c",
+      "dependencies": {
+        "nodeModulesPresent": true,
+        "npmLsExitCode": 0,
+        "control": "clean git archive of fixed base with same node_modules linked; identical package and lockfile",
+        "installedDuringRework": false
+      },
+      "loadUnits": "1/5/15-minute OS load averages at start/end; machine shared, other Job count not measured; checks sequential, runner concurrency 4",
+      "checks": {
+        "quick": {
+          "check": "quick",
+          "exitCode": 0,
+          "seconds": 58.21,
+          "loadStart": [
+            3.8134765625,
+            12.40869140625,
+            26.31640625
+          ],
+          "loadEnd": [
+            4.38671875,
+            11.09521484375,
+            24.8818359375
+          ],
+          "boundSeconds": 180,
+          "counts": {
+            "tests": 2131,
+            "pass": 2131,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0,
+            "selectedFiles": 279
+          }
+        },
+        "affected": {
+          "check": "affected",
+          "exitCode": 0,
+          "seconds": 91.83,
+          "loadStart": [
+            4.1953125,
+            10.94384765625,
+            24.74755859375
+          ],
+          "loadEnd": [
+            5.3125,
+            9.65185546875,
+            22.79541015625
+          ],
+          "boundSeconds": 180,
+          "counts": {
+            "tests": 2131,
+            "pass": 2131,
+            "fail": 0,
+            "cancelled": 0,
+            "skipped": 0,
+            "todo": 0,
+            "selectedFiles": 279
+          }
+        },
+        "full": {
+          "check": "full",
+          "exitCode": 124,
+          "seconds": 175.43,
+          "loadStart": [
+            5.51708984375,
+            9.54833984375,
+            22.6044921875
+          ],
+          "loadEnd": [
+            25.93994140625,
+            15.44873046875,
+            22.4501953125
+          ],
+          "boundSeconds": 180,
+          "internalDeadlineMs": 175000
+        },
+        "control": {
+          "check": "base-control-full",
+          "base": "6fe675fe77f46403eabf623c5e6300d3ab4e0a3c",
+          "exitCode": 124,
+          "seconds": 175.42,
+          "loadStart": [
+            18.52294921875,
+            14.66796875,
+            21.9248046875
+          ],
+          "loadEnd": [
+            27.01708984375,
+            18.70263671875,
+            22.142578125
+          ],
+          "boundSeconds": 180,
+          "internalDeadlineMs": 175000
+        },
+        "typecheck": {
+          "check": "typecheck",
+          "exitCode": 2,
+          "seconds": 3.63,
+          "loadStart": [
+            21.943359375,
+            17.99609375,
+            21.83056640625
+          ],
+          "loadEnd": [
+            20.34619140625,
+            17.73046875,
+            21.71435546875
+          ],
+          "boundSeconds": 180
+        }
+      },
+      "observations": {
+        "ticket": {
+          "startedAt": "2026-10-12T08:24:11.689Z",
+          "endedAt": "2026-10-12T08:27:06.752Z",
+          "inventoryDigest": "9d08796a551f7c7ffddf8315b168121ff5546f029b30882e3ef36e4c15d6d8d6",
+          "targetFiles": 301,
+          "concurrency": 4,
+          "disposition": "timed_out",
+          "partialResultCounts": {
+            "pass": 2116,
+            "fail": 1
+          },
+          "completeSuiteCounters": false
+        },
+        "base": {
+          "startedAt": "2026-10-12T08:27:38.450Z",
+          "endedAt": "2026-10-12T08:30:33.536Z",
+          "inventoryDigest": "9d08796a551f7c7ffddf8315b168121ff5546f029b30882e3ef36e4c15d6d8d6",
+          "targetFiles": 301,
+          "concurrency": 4,
+          "disposition": "timed_out",
+          "partialResultCounts": {
+            "pass": 2115,
+            "fail": 2
+          },
+          "completeSuiteCounters": false
+        }
+      },
+      "partialFailures": {
+        "ticket": [
+          "web/src/app/production.dom.test.ts: emergency Force Release Alert Dialog"
+        ],
+        "base": [
+          "src/test-summary.test.ts: ordinary failure and completed slow success both leave durable records",
+          "src/test-summary.test.ts: an externally killed wrapper leaves run_started without a closing summary"
+        ],
+        "interpretation": "Different partial failures; individual failure causes not established. Timeout attribution rests on unchanged tested sources/manifests and matching base timeout, not matching failure identities."
+      },
+      "typecheckBaseline": "exit 2: missing Message.scopeId at line 24; invalid WakePlan.messageId at line 34 in unchanged scripts/scratch/post-project-test-message.ts; web check not reached",
+      "evidenceClasses": {
+        "modelIssued": "none; zero new turns/tool calls",
+        "protocolOnly": "none new; no session or executor opened",
+        "scripted": "repository verification only in rework; original request-builder and isolated-fixture observations unchanged",
+        "sourceOnly": "original pinned source inspection retained; no additional engine capability claimed"
+      },
+      "probeDispositionClarification": "refusedBeforeSession names the scripted no-session disposition; probe never calls an OAR session opener and does not prove runtime admission refusal",
+      "preserved": {
+        "sharedFixtureByteIdentical": true,
+        "probeUnchanged": true,
+        "productionAndManifestsDiffEmpty": true,
+        "originalEvidenceRetained": true
+      }
+    }
+  ]
 }
