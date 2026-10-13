@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { defaultRuntimes, type Session } from '@botiverse/oar';
 import { assertSupportedNodeVersion } from './oar-node-support.ts';
+import { assertOarRuntimePolicy } from './oar-runtime-policy.ts';
 import type { RunnerCommand, RunnerMessage } from './oar-runner-protocol.ts';
 
 function send(message: RunnerMessage): void {
@@ -18,6 +19,7 @@ async function handleCommand(command: RunnerCommand): Promise<void> {
     switch (command.op) {
       case 'start': {
         assertSupportedNodeVersion();
+        assertOarRuntimePolicy(command.runtimeId);
 
         if (command.hostPolicy?.sandbox) {
           process.env.OAR_CODEX_SANDBOX = command.hostPolicy.sandbox;

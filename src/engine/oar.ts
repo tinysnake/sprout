@@ -17,6 +17,7 @@ import type {
 import { EngineResumeRefusedError, EngineStartError } from './port.ts';
 import { EventQueue } from './event-queue.ts';
 import { assertSupportedNodeVersion } from './oar-node-support.ts';
+import { assertOarRuntimePolicy } from './oar-runtime-policy.ts';
 import { createOarMcpBridge, type OarMcpBridgeHandle } from './oar-mcp-bridge.ts';
 import type { RunnerCommand, RunnerMessage } from './oar-runner-protocol.ts';
 import type { SessionOptions, TokenTotals } from '@botiverse/oar';
@@ -103,6 +104,9 @@ export class OarEngineAdapter implements EngineAdapter {
     if (!request.workingDirectory) {
       throw new EngineStartError('Working directory is required for OAR session');
     }
+
+    // Refuse before bridge creation, runner spawn, or vendor resource loading.
+    assertOarRuntimePolicy(this.id);
 
     // OAR's permission bypass and ambient loaders do not establish host isolation.
     if (this.id === 'claude' && (request.remoteWorkspace || request.remoteProjectMcp)) {
