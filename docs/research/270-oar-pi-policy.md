@@ -1,14 +1,22 @@
 # OAR Pi loader and native-tool policy (#270)
 
-## Disposition
+## Historical #270 disposition
 
-**A controlled OAR Pi opener is delivered.** The shared `src/engine/oar-runtime-policy.ts` establishes approved-only tools using OAR 0.59.1's published `OAR_PI_AGENT_DIR` pin and Pi's global/project settings. The adapter acquires an exclusive settings lease before spawning; the runner verifies it before importing OAR and pins the controlled root. Missing, conflicting, malformed or modified policy fails closed. #232 must use this shared policy, with no parallel loader policy. Native production selection and `pi-host.ts` are unchanged.
+The #270 controlled OAR Pi opener was delivered under its original acceptance boundary: approved-only tools using OAR 0.59.1's published `OAR_PI_AGENT_DIR` pin and Pi's global/project settings. The adapter acquired an exclusive settings lease before spawning; the runner verified it before importing OAR and pinned the controlled root. Missing, conflicting, malformed or modified policy failed closed. #232 used this shared policy, with no parallel loader policy. Native production selection and `pi-host.ts` were unchanged.
 
-This supersedes the first attempt's framework-wide negative conclusion under [the acceptance change](https://github.com/tinysnake/sprout/issues/270#issuecomment-6143986284). Its narrower conclusion about `SessionOptions` remains correct. Upstream parameter forwarding is an improvement, not a prerequisite for this control. This establishes #230 §5.2 acceptance 1 at the scripted substrate boundary; actual enrolled Worker and separate lifecycle/settlement acceptance remain independent.
+This supersedes the first attempt's framework-wide negative conclusion under [the acceptance change](https://github.com/tinysnake/sprout/issues/270#issuecomment-6143986284). Its narrower conclusion about `SessionOptions` remains correct. Upstream parameter forwarding was an improvement, not a prerequisite for that control. This established #230 §5.2 acceptance 1 at the scripted substrate boundary; actual enrolled Worker and separate lifecycle/settlement acceptance remained independent.
 
-## Delivered control
+## Current boundary after Ticket #273
 
-A fresh host-owned agent directory contains only suppression settings and optional host-supplied `OarAdapterOptions.piModels` provider configuration. No ambient auth, models, packages or extensions are copied. Global settings use `defaultTools: []`, `extensions: ['!**/*']` and `packages: []`. The same suppression overrides are applied in `<cwd>/.pi/settings.json`: project exclusion is essential; global exclusion alone does not exclude project discovery. `!` is a normal exclusion pattern; `-` exact-path force exclusion is deliberately not used. OAR still pre-trusts cwd; this control does not alter trust.
+Ticket #273 supersedes this document's earlier controlled-root and fail-closed provider conclusions for the OAR Pi route. The operator has authorized the host's own Pi agent directory, settings, providers, installed extensions and packages as the active configuration. The admitted built-in tool set is empty: the policy writes `defaultTools: []` into the host and project settings layers and supplies Pi's published `disallowedTools` option for `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `powershell` and `codemode`, so an extension cannot reactivate these names. Extension-contributed tools remain available under host configuration.
+
+`OarPiConfigurationProvider.resolve()` in `src/engine/oar-runtime-policy.ts` is the single host-configuration seam. `OarEngineAdapter.startSession()` resolves it once, passes the selected agent directory into the shared policy lease, and the runner asserts that lease and pins `OAR_PI_AGENT_DIR` before its lazy OAR import. The lease overlays only `defaultTools`, uses mode `0600`, refuses a stale lock, and restores original host and project settings by rename. It does not create an OS filesystem sandbox; host extensions run with their normal process authority.
+
+Ticket #273's scripted probes prove unrestricted positive controls for the eight built-ins executable on this macOS host (`bash`, `edit`, `write`, `read`, `grep`, `find`, `ls`, `codemode`) and provider-visible denied attempts with no side effects for those eight plus the policy-listed Windows-only `powershell` tool. Pi's own platform guard prevents the unrestricted `powershell` arm from executing on this host. The probes also execute a host-extension tool and confirm the extension-registered provider resolves. The real enrolled Worker test supplies model-issued proof that the host extension-registered provider resolves and returns a reply. The real host inventory check observes 28 loaded extensions with sanitized identifiers. See the #273 Work record for exact run counts and evidence classes. Historical #270 boundary measurements below remain a record of that earlier acceptance, not the current Pi route contract.
+
+## Historical delivered control (superseded for the OAR Pi route by #273)
+
+A fresh host-owned agent directory contained only suppression settings and optional host-supplied `OarAdapterOptions.piModels` provider configuration. No ambient auth, models, packages or extensions were copied. Global settings used `defaultTools: []`, `extensions: ['!**/*']` and `packages: []`. The same suppression overrides were applied in `<cwd>/.pi/settings.json`: project exclusion was essential; global exclusion alone did not exclude project discovery. `!` was a normal exclusion pattern; `-` exact-path force exclusion was deliberately not used. OAR pre-trusted cwd; this control did not alter trust.
 
 The original project settings file is moved into an exclusive lock directory before the temporary overlay is created. On session exit it is renamed back, preserving bytes and permissions. Missing `.pi` directories are removed if still empty. Invalid settings, symlinks and overlapping sessions for the same canonical cwd are refused. The parent owns restoration on normal disposal, spawn error, startup failure and runner termination, including SIGKILL. Parent process death or an OS crash cannot execute cleanup: a remaining lock causes future acquisition to refuse rather than reuse uncontrolled state; recovering such a stale lock requires restoring its saved settings. This is a filesystem lease, not an OS sandbox against concurrent hostile writes.
 
@@ -16,9 +24,11 @@ Only the existing authenticated `createOarMcpBridge` handle is attached by the a
 
 Temporary agent roots and native session records are removed when the runner exits. Cross-session Pi resume from a removed root therefore fails closed; this change does not claim durable Pi resume. A persistent, host-owned session store/config broker is follow-up integration work. Models requiring ambient provider extensions must be configured through a reviewed host channel or remain unavailable; no ambient-provider fallback is permitted.
 
-## Executed control evidence
+## Historical executed control evidence
 
-Reproduce with `node scripts/probe-oar-pi-controlled.mjs` (120-second command bound; probe has a 110-second deadline). Reduced facts are in `270-oar-pi-controlled-evidence.json`. This is **scripted** execution against the real installed OAR/Pi and the shared adapter's real child runner. A synthetic provider forces calls, including tools it was not advertised. Every turn waits for completion and at least two actual provider requests, including the tool result, before disposal; prompt acceptance is never counted as a request.
+The following records the pre-#273 probe and is retained for history. Its old boundary assertions and counts are superseded; the updated scripted evidence is summarized above and in the #273 Work record.
+
+Reproduce the historical control with `node scripts/probe-oar-pi-controlled.mjs` (120-second command bound; probe had a 110-second deadline). Reduced facts are in `270-oar-pi-controlled-evidence.json`.
 
 | Run | Provider-observed tools | Resource effect / result |
 | --- | --- | --- |

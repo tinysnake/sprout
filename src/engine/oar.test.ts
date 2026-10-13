@@ -13,6 +13,16 @@ import type { RunnerCommand, RunnerMessage } from './oar-runner-protocol.ts';
 import { WorkerRecoveryJournal } from '../worker/recovery-journal.ts';
 import { EnvironmentWorker } from '../worker/server.ts';
 
+// Keep adapter-policy tests from overlaying the developer's real Pi settings.
+const previousPiAgentDir = process.env.PI_CODING_AGENT_DIR;
+const piTestAgentDir = mkdtempSync(join(tmpdir(), 'sprout-oar-test-agent-'));
+process.env.PI_CODING_AGENT_DIR = piTestAgentDir;
+process.on('exit', () => {
+  if (previousPiAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = previousPiAgentDir;
+  rmSync(piTestAgentDir, { recursive: true, force: true });
+});
+
 class FakeOarRunner implements OarRunnerProcess {
   readonly stdin = new PassThrough();
   readonly stdout = new PassThrough();
@@ -277,31 +287,65 @@ test('AC5: Configured custom sessionDirectory for Pi reports bounded compatibili
   );
 });
 
-test('AC5: Configured agentDirectory sets OAR_PI_AGENT_DIR in runner environment without mutating host Worker env', async () => {
-  let spawnedEnv: NodeJS.ProcessEnv | undefined;
-  const runner = new FakeOarRunner((cmd, r) => {
-    if (cmd.op === 'start') {
-      r.send({ kind: 'ready', sessionId: 'sess-agent-dir', engineSessionKey: 'sess-agent-dir' });
-    }
-  });
-
-  const adapter = new OarEngineAdapter({
-    runtimeId: 'pi',
-    agentDirectory: '/var/sprout/custom-agent-dir',
-    spawnProcess: (_cmd, _args, options) => {
-      spawnedEnv = options.env;
-      return runner;
-    },
-  });
-
+test('Pi host-configuration seam replaces only the host config input on the same route', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'oar-pi-config-seam-'));
+  const cwd = join(root, 'project');
+  const agentDirs = [join(root, 'host-agent'), join(root, 'replacement-agent')];
+  mkdirSync(cwd);
+  mkdirSync(join(cwd, '.pi'));
+  for (const agentDir of agentDirs) mkdirSync(agentDir);
+  const settings = join(cwd, '.pi', 'settings.json');
+  const original = '{ "theme": "dark" }\n';
+  writeFileSync(settings, original);
   const hostBefore = process.env.OAR_PI_AGENT_DIR;
-  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
-  await session.close();
 
-  assert.equal(spawnedEnv?.OAR_PI_AGENT_DIR, '/var/sprout/custom-agent-dir');
-  assert.equal(process.env.OAR_PI_AGENT_DIR, hostBefore, 'Host Worker process.env must not be mutated');
+  const capture = async (agentDir: string, sessionId: string) => {
+    let startCommand: Extract<RunnerCommand, { op: 'start' }> | undefined;
+    let spawnedEnv: NodeJS.ProcessEnv | undefined;
+    const runner = new FakeOarRunner((cmd, r) => {
+      if (cmd.op === 'start') {
+        startCommand = cmd;
+        r.send({ kind: 'ready', sessionId, engineSessionKey: sessionId });
+      }
+    });
+    const adapter = new OarEngineAdapter({
+      runtimeId: 'pi',
+      piConfigurationProvider: { resolve: () => ({ agentDir }) },
+      spawnProcess: (_cmd, _args, options) => {
+        spawnedEnv = options.env;
+        return runner;
+      },
+    });
+    const session = await adapter.startSession({
+      agentId: 'scout',
+      workingDirectory: cwd,
+      instructions: 'same route input',
+      model: 'fixture/provider-model',
+    });
+    assert.deepEqual(JSON.parse(readFileSync(settings, 'utf8')).defaultTools, []);
+    assert.deepEqual(JSON.parse(readFileSync(join(agentDir, 'settings.json'), 'utf8')).defaultTools, []);
+    assert.equal(spawnedEnv?.OAR_PI_AGENT_DIR, hostBefore);
+    await session.close();
+    assert.equal(readFileSync(settings, 'utf8'), original);
+    assert.equal(existsSync(join(agentDir, 'settings.json')), false);
+    assert.equal(existsSync(join(agentDir, '.sprout-oar-policy')), false);
+    return startCommand!;
+  };
+
+  try {
+    const first = await capture(agentDirs[0]!, 'sess-agent-dir-a');
+    const replacement = await capture(agentDirs[1]!, 'sess-agent-dir-b');
+    assert.equal(first.hostPolicy?.pi?.agentDir, agentDirs[0]);
+    assert.equal(replacement.hostPolicy?.pi?.agentDir, agentDirs[1]);
+    assert.deepEqual(first.options, replacement.options);
+    const normalizePolicy = (command: Extract<RunnerCommand, { op: 'start' }>) => {
+      const { agentDir: _agentDir, ...policy } = command.hostPolicy?.pi ?? {};
+      return { ...command.hostPolicy, pi: policy };
+    };
+    assert.deepEqual(normalizePolicy(first), normalizePolicy(replacement));
+    assert.equal(process.env.OAR_PI_AGENT_DIR, hostBefore, 'Host Worker process.env must not be mutated');
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
-
 test('AC5: Missing resume session for Pi classifies as EngineResumeRefusedError', async () => {
   const runner = new FakeOarRunner((cmd, r) => {
     if (cmd.op === 'start') {
@@ -353,6 +397,10 @@ const rl = createInterface({ input: process.stdin });
 rl.on('line', (line) => {
   const cmd = JSON.parse(line);
   if (cmd.op === 'start') {
+    if (cmd.runtimeId === 'pi') {
+      process.env.OAR_PI_AGENT_DIR = cmd.hostPolicy.pi.agentDir;
+      reportedEnv.OAR_PI_AGENT_DIR = process.env.OAR_PI_AGENT_DIR;
+    }
     process.stdout.write(JSON.stringify({
       kind: 'ready',
       sessionId: 'sess-' + (process.env.SESSION_KIND ?? 'default'),
@@ -386,7 +434,7 @@ rl.on('line', (line) => {
 
   const piAdapter = new OarEngineAdapter({
     runtimeId: 'pi',
-    agentDirectory: piAgentDir,
+    piConfigurationProvider: { resolve: () => ({ agentDir: piAgentDir }) },
     runnerScriptPath: scriptPath,
   });
 
