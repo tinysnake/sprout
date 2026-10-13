@@ -1,4 +1,5 @@
 import type { Event, SessionOptions, SessionUsage, TurnOutcome } from '@botiverse/oar';
+import type { OarPiPolicy } from './oar-runtime-policy.ts';
 
 export type RunnerCommand =
   | {
@@ -6,7 +7,7 @@ export type RunnerCommand =
       readonly runtimeId: string;
       readonly binaryPath?: string;
       readonly options: SessionOptions;
-      readonly hostPolicy?: { readonly sandbox?: string };
+      readonly hostPolicy?: { readonly sandbox?: string; readonly pi?: OarPiPolicy };
     }
   | {
       readonly op: 'prompt';

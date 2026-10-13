@@ -1,0 +1,61 @@
+{
+  "evidenceClass": "scripted",
+  "oar": "0.59.1",
+  "node": "26.11.1",
+  "platform": "darwin",
+  "unrestrictedBashCreatesResource": true,
+  "ambientAgentAndProjectExtensionsExecute": true,
+  "forcedBashAttemptDenied": true,
+  "deniedBashResourceAbsent": true,
+  "deniedBashNotAdvertised": true,
+  "controlledAgentRootExcludesAmbientAgentExtension": true,
+  "projectExtensionStillExecutes": true,
+  "unlistedExtensionToolCreatesResource": true,
+  "wildcardDeniesAllTools": true,
+  "loaderLaunchArgsRefused": true,
+  "hostStdioMcpProcessExecuted": true,
+  "runs": {
+    "positive": {
+      "resultSeen": true,
+      "denied": false,
+      "attempted": true,
+      "advertised": [
+        "read",
+        "bash",
+        "edit",
+        "write",
+        "unapproved_fixture_tool"
+      ],
+      "outcome": "completed",
+      "providerRequests": 2
+    },
+    "negative": {
+      "resultSeen": true,
+      "denied": true,
+      "attempted": true,
+      "advertised": [
+        "unapproved_fixture_tool"
+      ],
+      "outcome": "completed",
+      "providerRequests": 2
+    },
+    "newTool": {
+      "resultSeen": true,
+      "denied": false,
+      "attempted": true,
+      "advertised": [
+        "unapproved_fixture_tool"
+      ],
+      "outcome": "completed",
+      "providerRequests": 2
+    },
+    "wildcard": {
+      "resultSeen": true,
+      "denied": true,
+      "attempted": true,
+      "advertised": [],
+      "outcome": "completed",
+      "providerRequests": 2
+    }
+  }
+}

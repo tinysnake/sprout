@@ -17,6 +17,7 @@ import type {
 import { EngineResumeRefusedError, EngineStartError } from './port.ts';
 import { EventQueue } from './event-queue.ts';
 import { assertSupportedNodeVersion } from './oar-node-support.ts';
+import { prepareOarRuntimePolicy } from './oar-runtime-policy.ts';
 import { createOarMcpBridge, type OarMcpBridgeHandle } from './oar-mcp-bridge.ts';
 import type { RunnerCommand, RunnerMessage } from './oar-runner-protocol.ts';
 import type { SessionOptions, TokenTotals } from '@botiverse/oar';
@@ -76,6 +77,8 @@ export interface OarAdapterOptions {
       readonly stdio?: readonly ['pipe', 'pipe', 'pipe'];
     },
   ) => OarRunnerProcess;
+  /** Host-owned provider configuration; never copied from ambient Pi directories. */
+  readonly piModels?: Readonly<Record<string, unknown>>;
   readonly runnerScriptPath?: string;
   readonly clock?: () => number;
   readonly sourceVersion?: string;
@@ -104,6 +107,8 @@ export class OarEngineAdapter implements EngineAdapter {
       throw new EngineStartError('Working directory is required for OAR session');
     }
 
+    // The shared policy is acquired below, after creating only the approved bridge.
+
     // OAR's permission bypass and ambient loaders do not establish host isolation.
     if (this.id === 'claude' && (request.remoteWorkspace || request.remoteProjectMcp)) {
       throw new EngineStartError('OAR Claude Host-run authority is unproved; a validated host isolation policy is required');
@@ -122,7 +127,7 @@ export class OarEngineAdapter implements EngineAdapter {
       ...(request.model !== undefined ? { model: request.model } : {}),
       ...(request.effort !== undefined ? { effort: request.effort } : {}),
       ...(request.resumeSessionKey !== undefined ? { resume: request.resumeSessionKey } : {}),
-      ...(request.sessionEnvironment !== undefined
+      ...(request.sessionEnvironment !== undefined && this.id !== 'pi'
         ? { env: request.sessionEnvironment as Record<string, string> }
         : {}),
     };
@@ -138,10 +143,24 @@ export class OarEngineAdapter implements EngineAdapter {
       }
     }
 
+    let policy;
+    try {
+      policy = prepareOarRuntimePolicy(this.id, request.workingDirectory, {
+        ...(mcpBridge ? { approvedMcp: mcpBridge.mcpServer } : {}),
+        ...(this.#options.piModels ? { models: this.#options.piModels } : {}),
+      });
+      if (policy) (sessionOptions as { cwd: string }).cwd = policy.descriptor.cwd;
+    } catch (error) {
+      await mcpBridge?.close();
+      throw error;
+    }
+
     const runnerScript = this.#options.runnerScriptPath ?? fileURLToPath(new URL('./oar-runner-entry.ts', import.meta.url));
 
     const runnerCwd = existsSync(request.workingDirectory) ? request.workingDirectory : process.cwd();
-    const runner = this.#options.spawnProcess
+    let runner: OarRunnerProcess;
+    try {
+      runner = this.#options.spawnProcess
       ? this.#options.spawnProcess(process.execPath, [runnerScript], {
           cwd: runnerCwd,
           env: {
@@ -162,6 +181,17 @@ export class OarEngineAdapter implements EngineAdapter {
           detached: true,
           stdio: ['pipe', 'pipe', 'pipe'],
         }) as unknown as OarRunnerProcess);
+    } catch (error) {
+      policy?.close();
+      await mcpBridge?.close();
+      throw error;
+    }
+    // Parent owns restoration even when the runner is killed before graceful disposal.
+    runner.on('exit', () => policy?.close());
+    runner.on('error', () => {
+      // Spawn errors have no process; other errors must not release a still-live loader.
+      if (runner.pid === undefined) policy?.close();
+    });
 
     const clock = this.#options.clock ?? (() => Date.now());
 
@@ -261,7 +291,10 @@ export class OarEngineAdapter implements EngineAdapter {
         runtimeId: this.#options.runtimeId,
         ...(this.#options.binaryPath ? { binaryPath: this.#options.binaryPath } : {}),
         options: sessionOptions,
-        ...(this.#options.sandbox ? { hostPolicy: { sandbox: this.#options.sandbox } } : {}),
+        hostPolicy: {
+          ...(this.#options.sandbox ? { sandbox: this.#options.sandbox } : {}),
+          ...(policy ? { pi: policy.descriptor } : {}),
+        },
       };
       runner.stdin?.write(`${JSON.stringify(startCmd)}\n`);
     });
