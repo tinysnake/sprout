@@ -5,6 +5,7 @@ import { homedir, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
+import { JsonRpcError } from './jsonrpc.ts';
 import { formatNodeUpgradeGuidance, isSupportedNodeVersion, parseNodeMajor } from './oar-node-support.ts';
 import { createRuntime, hostConfiguration, inMemoryStores, INSTANCE_ID, PROJECT_ID, project, testComposition, waitFor } from '../runtime-test-harness.ts';
 import { loadOrCreateWorkerIdentity, workerPublicKey } from '../worker/enrollment-connector.ts';
@@ -140,7 +141,18 @@ OarEngineAdapter.prototype.startSession = async function (...args) {
         assert.ok(delivered.message.id, 'the real Runtime persisted the Human Message');
         assert.deepEqual(delivered.admittedRunIds, []);
         assert.equal(delivered.wakes.length, 1, 'the addressed Agent has a real durable wake');
-        assert.equal(delivered.wakes[0]?.status, 'pending', 'readiness blocks admission without losing the wake');
+        assert.equal(delivered.wakes[0]?.status, 'failed', 'unsupported readiness is a terminal pre-run failure');
+        const refusal = 'Engine "codex" readiness is unknown on this Environment.';
+        assert.equal(delivered.wakes[0]?.detail, refusal);
+        const failureEvents = (await runtime.collaboration.listEvents(PROJECT_ID))
+          .filter((event) => event.kind === 'wake-admission-failure');
+        assert.equal(failureEvents.length, 1, 'the Project projection exposes the refusal');
+        assert.equal(failureEvents[0]?.disposition, 'informational');
+        assert.equal(failureEvents[0]?.detail, refusal);
+        assert.ok(!JSON.stringify([delivered.wakes, failureEvents]).includes('ARBITRARY_OVERRIDE_TEXT'));
+        await runtime.collaboration.reconcile();
+        assert.equal((await runtime.collaboration.listEvents(PROJECT_ID))
+          .filter((event) => event.kind === 'wake-admission-failure').length, 1);
         assert.deepEqual(await stores.runs.list(), []);
         assert.equal(stores.runsStore.writes.length, 0, 'no transient run was created');
         assert.deepEqual(await stores.sessionKeys.list(), []);
@@ -148,7 +160,8 @@ OarEngineAdapter.prototype.startSession = async function (...args) {
         await assert.rejects(accepted.transport.request('session/start', {
           engine: 'codex', agentId: 'scout', workingDirectory: directory,
         }), (error: unknown) => {
-          assert.ok(error instanceof Error);
+          assert.ok(error instanceof JsonRpcError);
+          assert.equal(error.code, -32603);
           assert.equal(error.message, `session/start: ${expected}`);
           return true;
         });
