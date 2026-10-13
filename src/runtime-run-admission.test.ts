@@ -401,4 +401,3 @@ test('composed runtime preflight: multi-instance project pins submission to the 
   assert.ok(run);
   assert.equal(run.environmentInstanceId, 'host-ready', 'run was pinned to the ready instance');
 });
-

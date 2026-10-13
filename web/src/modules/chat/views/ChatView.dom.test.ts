@@ -1009,4 +1009,3 @@ test('project event details render with distinct styling for failures and non-fa
     p.close();
   }
 });
-
