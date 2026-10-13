@@ -4,6 +4,7 @@ export type RunnerCommand =
   | {
       readonly op: 'start';
       readonly runtimeId: string;
+      readonly binaryPath?: string;
       readonly options: SessionOptions;
       readonly hostPolicy?: { readonly sandbox?: string };
     }

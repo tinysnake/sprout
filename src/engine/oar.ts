@@ -25,6 +25,26 @@ import type { CodexSandboxMode } from './codex.ts';
 
 export const OAR_PACKAGE_VERSION = '0.59.1';
 
+/** Verified runtime facts; registration does not grant Host-run authority. */
+export const OAR_RUNTIME_REGISTRATIONS = {
+  codex: { finalAnswer: 'turn-text', standingInstructions: 'out-of-band' },
+  claude: {
+    finalAnswer: 'last-message',
+    standingInstructions: 'out-of-band',
+    verifiedPlatforms: ['darwin'],
+    verifiedCliVersion: '2.1.294',
+    readiness: 'non-inference-auth-status',
+    hostRun: 'unproved',
+  },
+} as const;
+
+/** Builtins excluded from the Claude candidate; this is not an OS sandbox. */
+export const OAR_CLAUDE_DISALLOWED_TOOLS = [
+  'Bash', 'Read', 'Write', 'Edit', 'MultiEdit', 'Glob', 'Grep',
+  'Agent', 'Task', 'Skill', 'ToolSearch', 'WebFetch', 'WebSearch',
+  'NotebookEdit',
+] as const;
+
 export interface OarRunnerProcess {
   readonly pid?: number;
   readonly stdin: Writable | null;
@@ -38,8 +58,10 @@ export interface OarRunnerProcess {
 }
 
 export interface OarAdapterOptions {
-  /** The OAR runtime identifier (e.g. 'codex', 'pi'). */
+  /** The OAR runtime identifier (e.g. 'codex', 'claude'). */
   readonly runtimeId: string;
+  /** Host-selected executable, passed as data rather than a process-wide override. */
+  readonly binaryPath?: string;
   readonly capabilities?: Partial<EngineCapabilities>;
   /** Optional Codex sandbox posture ('read-only' vs 'danger-full-access'). */
   readonly sandbox?: CodexSandboxMode;
@@ -82,8 +104,14 @@ export class OarEngineAdapter implements EngineAdapter {
       throw new EngineStartError('Working directory is required for OAR session');
     }
 
+    // OAR's permission bypass and ambient loaders do not establish host isolation.
+    if (this.id === 'claude' && (request.remoteWorkspace || request.remoteProjectMcp)) {
+      throw new EngineStartError('OAR Claude Host-run authority is unproved; a validated host isolation policy is required');
+    }
+
     // Build SessionOptions
     const sessionOptions: SessionOptions = {
+      ...(this.id === 'claude' ? { disallowedTools: [...OAR_CLAUDE_DISALLOWED_TOOLS] } : {}),
       cwd: request.workingDirectory,
       ...(request.projectWorkspacePath !== undefined
         ? { additionalDirectories: [request.projectWorkspacePath] }
@@ -231,6 +259,7 @@ export class OarEngineAdapter implements EngineAdapter {
       const startCmd: RunnerCommand = {
         op: 'start',
         runtimeId: this.#options.runtimeId,
+        ...(this.#options.binaryPath ? { binaryPath: this.#options.binaryPath } : {}),
         options: sessionOptions,
         ...(this.#options.sandbox ? { hostPolicy: { sandbox: this.#options.sandbox } } : {}),
       };
@@ -256,6 +285,7 @@ export class OarEngineSession implements EngineSession {
 
   readonly #runner: OarRunnerProcess;
   readonly #sourceVersion: string;
+  readonly #runtimeId: string;
   readonly #mcpBridge: OarMcpBridgeHandle | undefined;
   readonly #clock: () => number;
 
@@ -271,6 +301,7 @@ export class OarEngineSession implements EngineSession {
     this.sessionId = params.sessionId;
     this.engineSessionKey = params.engineSessionKey;
     this.#sourceVersion = params.sourceVersion;
+    this.#runtimeId = params.runtimeId;
     this.#mcpBridge = params.mcpBridge;
     this.#clock = params.clock;
 
@@ -309,6 +340,7 @@ export class OarEngineSession implements EngineSession {
     this.#interrupted = false;
 
     let rootTurnText = '';
+    let rootMessageId: string | undefined;
     let turnSettled = false;
     const startedAt = this.#clock();
 
@@ -348,7 +380,11 @@ export class OarEngineSession implements EngineSession {
       setSpanId: (spanId: string) => {
         if (!currentSpanId) currentSpanId = spanId;
       },
-      appendRootText(text: string) {
+      appendRootText: (text: string, messageId?: string) => {
+        if (OAR_RUNTIME_REGISTRATIONS[this.#runtimeId as keyof typeof OAR_RUNTIME_REGISTRATIONS]?.finalAnswer === 'last-message' && messageId !== undefined && messageId !== rootMessageId) {
+          rootTurnText = '';
+          rootMessageId = messageId;
+        }
         rootTurnText += text;
       },
       getRootText() {
@@ -372,7 +408,7 @@ export class OarEngineSession implements EngineSession {
     activationId: string;
     getSpanId(): string | undefined;
     setSpanId(spanId: string): void;
-    appendRootText(text: string): void;
+    appendRootText(text: string, messageId?: string): void;
     getRootText(): string;
     finish(result: EngineTurnResult): void;
   };
@@ -427,7 +463,7 @@ export class OarEngineSession implements EngineSession {
           }
 
           if (ev.kind === 'text_delta') {
-            turn?.appendRootText(ev.text);
+            turn?.appendRootText(ev.text, ev.messageId);
             this.#currentEventQueue?.push({ type: 'message', text: ev.text, final: false });
           } else if (ev.kind === 'tool_call_started') {
             const rawDetail = ev.input ?? '';
@@ -488,6 +524,9 @@ export class OarEngineSession implements EngineSession {
               : {}),
             ...(usage.total.cacheRead !== undefined
               ? { cachedInputTokens: Math.max(0, usage.total.cacheRead - (this.#baselineUsage.cacheRead ?? 0)) }
+              : {}),
+            ...(this.#runtimeId === 'claude' && usage.total.cacheWrite !== undefined
+              ? { cacheWriteInputTokens: Math.max(0, usage.total.cacheWrite - (this.#baselineUsage.cacheWrite ?? 0)) }
               : {}),
           };
           this.#baselineUsage = {

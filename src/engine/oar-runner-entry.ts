@@ -1,4 +1,6 @@
 import { createInterface } from 'node:readline';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { defaultRuntimes, type Session } from '@botiverse/oar';
 import { assertSupportedNodeVersion } from './oar-node-support.ts';
 import type { RunnerCommand, RunnerMessage } from './oar-runner-protocol.ts';
@@ -30,7 +32,16 @@ async function handleCommand(command: RunnerCommand): Promise<void> {
           });
           return;
         }
-        const installation = await runtime.installation();
+        const installation = command.binaryPath === undefined
+          ? await runtime.installation()
+          : {
+              kind: 'available' as const,
+              via: 'executable' as const,
+              command: command.binaryPath,
+              version: (await promisify(execFile)(command.binaryPath, ['--version'], {
+                timeout: 10_000, maxBuffer: 4096,
+              })).stdout.trim(),
+            };
         if (installation.kind !== 'available') {
           send({
             kind: 'error',

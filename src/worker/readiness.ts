@@ -99,6 +99,7 @@ async function defaultRun(
       ...(useShell ? { shell: true } : {}),
       ...(options?.env !== undefined ? { env: options.env } : {}),
       maxBuffer: 4 * 1024 * 1024,
+      timeout: 10_000,
       windowsHide: true,
     });
     return { stdout: String(result.stdout), exitCode: 0 };
@@ -151,8 +152,9 @@ export interface ReadinessProbeOptions {
   readonly nodeVersion?: string;
 }
 
-/** Minimum supported versions whose non-inference contracts were pinned and verified by #114. */
+/** Minimum versions whose non-inference contracts were verified (#114; Claude #268). */
 export const SUPPORTED_READINESS_VERSION_FLOORS = {
+  claude: '2.1.294',
   codex: '0.154.0',
   pi: '0.86.1',
 } as const;
@@ -515,6 +517,38 @@ function codexBundledModels(stdout: string): { readonly slugs: readonly string[]
   return { slugs };
 }
 
+/** Non-inference auth observation; model entitlement remains independently unknown. */
+async function probeClaude(
+  configuration: Extract<EngineConfiguration, { readonly engine: 'claude' }>,
+  options: Required<Pick<ReadinessProbeOptions, 'clock' | 'commandRunner'>> & ReadinessProbeOptions,
+): Promise<WorkerEngineReadinessFact> {
+  const at = options.clock();
+  const result = await options.commandRunner.run(configuration.binaryPath, ['--version'], commandOptions(options.env));
+  const match = /^(\d+\.\d+\.\d+) \(Claude Code\)$/.exec(result.stdout.trim());
+  const version = result.exitCode === 0 ? match?.[1] : undefined;
+  if (version === undefined || !isAtLeastVersion(version, SUPPORTED_READINESS_VERSION_FLOORS.claude)) {
+    return unknownFact('claude', version, at, 'claude-auth-status', result.exitCode || 1);
+  }
+  const auth = await options.commandRunner.run(configuration.binaryPath, ['auth', 'status', '--json'], commandOptions(options.env));
+  let value: { loggedIn?: unknown; authMethod?: unknown };
+  try { value = JSON.parse(auth.stdout); } catch {
+    return unknownFact('claude', version, at, 'claude-auth-status', auth.exitCode || 1);
+  }
+  const methods = ['none', 'claude.ai', 'oauth_token', 'api_key', 'api_key_helper', 'third_party'];
+  if (value === null || typeof value !== 'object' || !methods.includes(String(value.authMethod)) ||
+      typeof value.loggedIn !== 'boolean' || auth.exitCode !== (value.loggedIn ? 0 : 1)) {
+    return unknownFact('claude', version, at, 'claude-auth-status', auth.exitCode || 1);
+  }
+  const revision = options.requirements?.revisionsByEngine?.claude ?? options.requirements?.revision;
+  return {
+    engine: 'claude', version, installed: true,
+    readiness: value.loggedIn ? 'ready' : 'login-required', authenticated: value.loggedIn,
+    modelAvailability: 'unknown', models: [], targetModels: [],
+    ...(revision !== undefined ? { requirementRevision: revision } : {}),
+    probedAt: at, probeExitCode: auth.exitCode, source: 'claude-auth-status',
+  };
+}
+
 /** Execute non-inference probes on the Worker host for the configured engines. */
 export async function probeEnvironmentReadiness(
   configurations: readonly EngineConfiguration[],
@@ -531,11 +565,11 @@ export async function probeEnvironmentReadiness(
     options.env?.SPROUT_USE_OAR_ENGINE === 'all' ||
     process.env['SPROUT_USE_OAR_ENGINE'] === 'codex' ||
     process.env['SPROUT_USE_OAR_ENGINE'] === 'all';
-  const oarNodeUnsupported = isOarActive && !isSupportedNodeVersion(nodeVersion);
+  const oarNodeUnsupported = (isOarActive || configurations.some(configuration => configuration.engine === 'claude')) && !isSupportedNodeVersion(nodeVersion);
 
   const engines: WorkerEngineReadinessFact[] = [];
   for (const configuration of configurations) {
-    if (configuration.engine === 'codex' && oarNodeUnsupported) {
+    if ((configuration.engine === 'codex' || configuration.engine === 'claude') && oarNodeUnsupported) {
       engines.push(unknownFact(configuration.engine, undefined, clock(), 'unknown', 1));
       continue;
     }
@@ -545,7 +579,9 @@ export async function probeEnvironmentReadiness(
         ? await probeCodex(configuration, { ...options, clock, commandRunner, requiredModels: engineModels })
         : configuration.engine === 'pi'
           ? await probePi(configuration, { ...options, clock, commandRunner })
-          : unknownFact(configuration.engine, undefined, clock(), 'unknown', 1));
+          : configuration.engine === 'claude'
+            ? await probeClaude(configuration, { ...options, clock, commandRunner })
+            : unknownFact(configuration.engine, undefined, clock(), 'unknown', 1));
     } catch {
       engines.push(unknownFact(configuration.engine, undefined, clock(), 'unknown', 1));
     }

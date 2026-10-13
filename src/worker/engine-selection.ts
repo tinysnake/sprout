@@ -90,7 +90,18 @@ export interface OpenCodeEngineConfiguration {
   readonly binaryPath: string;
 }
 
+export interface ClaudeEngineConfiguration {
+  readonly engine: 'claude';
+  readonly binaryPath: string;
+}
+
+/** Explicit composition seam for candidates awaiting acceptance; never read from env. */
+export interface EngineCandidateSelection {
+  readonly claude?: boolean;
+}
+
 export type EngineConfiguration =
+  | ClaudeEngineConfiguration
   | CodexEngineConfiguration
   | PiEngineConfiguration
   | AgyEngineConfiguration
@@ -103,6 +114,7 @@ export type EngineConfiguration =
  * which is what makes a configuration outcome testable without a live engine.
  */
 export interface EngineAdapterFactories {
+  claude(configuration: ClaudeEngineConfiguration): EngineAdapter;
   codex(configuration: CodexEngineConfiguration): EngineAdapter;
   pi(configuration: PiEngineConfiguration): EngineAdapter;
   agy(configuration: AgyEngineConfiguration): EngineAdapter;
@@ -110,6 +122,7 @@ export interface EngineAdapterFactories {
 }
 
 const realFactories: EngineAdapterFactories = {
+  claude: configuration => new OarEngineAdapter({ runtimeId: 'claude', binaryPath: configuration.binaryPath }),
   codex: (configuration) => {
     if (process.env['SPROUT_USE_OAR_ENGINE'] === 'codex' || process.env['SPROUT_USE_OAR_ENGINE'] === 'all') {
       return new OarEngineAdapter({
@@ -146,7 +159,10 @@ const realFactories: EngineAdapterFactories = {
  * Pi, `agy`, and `opencode` keep the order the entry point established. An engine
  * whose CLI is absent is omitted rather than configured against a missing binary.
  */
-export function describeEnvironmentWorkerEngines(facts: EngineHostFacts): readonly EngineConfiguration[] {
+export function describeEnvironmentWorkerEngines(
+  facts: EngineHostFacts,
+  candidates: EngineCandidateSelection = {},
+): readonly EngineConfiguration[] {
   const configuration = facts.configuration;
   const configurations: EngineConfiguration[] = [];
 
@@ -185,6 +201,11 @@ export function describeEnvironmentWorkerEngines(facts: EngineHostFacts): readon
     configurations.push({ engine: 'opencode', binaryPath: opencodeBinary });
   }
 
+  if (candidates.claude && facts.platform === 'darwin') {
+    const binaryPath = resolveEngineBinary('claude', facts, { preferWindowsExecutable: false });
+    if (binaryPath !== undefined) configurations.push({ engine: 'claude', binaryPath });
+  }
+
   return configurations;
 }
 
@@ -198,11 +219,15 @@ export function describeEnvironmentWorkerEngines(facts: EngineHostFacts): readon
 export function createEnvironmentWorkerEngines(
   facts: EngineHostFacts,
   factories: Partial<EngineAdapterFactories> = {},
+  candidates: EngineCandidateSelection = {},
 ): Map<string, EngineAdapter> {
   const adapters = { ...realFactories, ...factories };
   const engines = new Map<string, EngineAdapter>();
-  for (const configuration of describeEnvironmentWorkerEngines(facts)) {
+  for (const configuration of describeEnvironmentWorkerEngines(facts, candidates)) {
     switch (configuration.engine) {
+      case 'claude':
+        engines.set('claude', adapters.claude(configuration));
+        break;
       case 'codex':
         engines.set('codex', adapters.codex(configuration));
         break;
