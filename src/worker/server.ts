@@ -7,6 +7,7 @@ import type {
   EngineTurnResult,
 } from '../engine/port.ts';
 import { EngineResumeRefusedError } from '../engine/port.ts';
+import { UnsupportedOarNodeVersionError } from '../engine/oar-node-support.ts';
 import { LineJsonRpcTransport, type JsonRpcTransport } from '../engine/jsonrpc.ts';
 import {
   WORKER_ERROR_CODES,
@@ -258,6 +259,10 @@ export class EnvironmentWorker {
       // is reported as an ordinary worker error and is never retried.
       if (error instanceof EngineResumeRefusedError) {
         this.#transport.respondError(id, WORKER_ERROR_CODES.resumeRefused, WORKER_DIAGNOSTICS.resumeRefused);
+        return;
+      }
+      if (error instanceof UnsupportedOarNodeVersionError) {
+        this.#transport.respondError(id, -32_603, error.message);
         return;
       }
       this.#transport.respondError(

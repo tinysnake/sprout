@@ -132,6 +132,10 @@ test('a connected but unready pre-run admission is terminal, visible, and never 
   assert.deepEqual(event.originScopeIds, [scopeId]);
 
   ready = true;
+  const reconciled = await coordinator.reconcile();
+  assert.deepEqual(reconciled.admittedRunIds, [], 'readiness changes cannot retry a terminal failed wake');
+  await coordinator.reconcile();
+  assert.equal((await orchestrator.list()).length, 0);
   const duplicate = await coordinator.deliver({
     scopeId, author: { id: 'human-lead', kind: 'human' }, body: 'please run',
     deliveryKey: 'pre-run-failure', awaitReply: true,

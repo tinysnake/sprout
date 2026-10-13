@@ -8,6 +8,10 @@ import type {
   WorkerReadinessProbeResult,
 } from './protocol.ts';
 import type { ReadinessRequirementScope } from '../environment/readiness.ts';
+import {
+  formatNodeUpgradeGuidance,
+  isSupportedNodeVersion,
+} from '../engine/oar-node-support.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -143,6 +147,8 @@ export interface ReadinessProbeOptions {
    */
   readonly requiredModels?: readonly string[];
   readonly requirements?: ReadinessRequirementScope;
+  /** Explicit Node.js version string for testing version constraints. */
+  readonly nodeVersion?: string;
 }
 
 /** Minimum supported versions whose non-inference contracts were pinned and verified by #114. */
@@ -520,8 +526,19 @@ export async function probeEnvironmentReadiness(
   const requiredModels = (options.requiredModels ?? []).filter(
     (model): model is string => typeof model === 'string' && model !== '',
   );
+  const nodeVersion = options.nodeVersion ?? process.versions.node;
+  const isOarActive = options.env?.SPROUT_USE_OAR_ENGINE === 'codex' ||
+    options.env?.SPROUT_USE_OAR_ENGINE === 'all' ||
+    process.env['SPROUT_USE_OAR_ENGINE'] === 'codex' ||
+    process.env['SPROUT_USE_OAR_ENGINE'] === 'all';
+  const oarNodeUnsupported = isOarActive && !isSupportedNodeVersion(nodeVersion);
+
   const engines: WorkerEngineReadinessFact[] = [];
   for (const configuration of configurations) {
+    if (configuration.engine === 'codex' && oarNodeUnsupported) {
+      engines.push(unknownFact(configuration.engine, undefined, clock(), 'unknown', 1));
+      continue;
+    }
     const engineModels = options.requirements?.modelsByEngine?.[configuration.engine] ?? requiredModels;
     try {
       engines.push(configuration.engine === 'codex'
@@ -535,7 +552,7 @@ export async function probeEnvironmentReadiness(
   }
   const at = clock();
   const version = engines.map((engine) => engine.version).filter((value): value is string => value !== undefined).join(', ');
-  const enginesOk = engines.length > 0 && engines.every((engine) => engine.installed && engine.readiness === 'ready');
+  const enginesOk = !oarNodeUnsupported && engines.length > 0 && engines.every((engine) => engine.installed && engine.readiness === 'ready');
   const probe = {
     at,
     latencyMs: Math.max(0, at - started),
@@ -543,7 +560,9 @@ export async function probeEnvironmentReadiness(
     enginesOk,
     source: 'worker' as const,
     version: version || 'unknown',
-    summary: enginesOk
+    summary: oarNodeUnsupported
+      ? formatNodeUpgradeGuidance(nodeVersion)
+      : enginesOk
       ? 'Worker non-inference readiness probe completed.'
       : 'Worker non-inference readiness probe completed with unknown or unavailable facts.',
   };
