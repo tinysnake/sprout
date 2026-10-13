@@ -19,7 +19,10 @@ async function handleCommand(command: RunnerCommand): Promise<void> {
     switch (command.op) {
       case 'start': {
         assertSupportedNodeVersion();
-        assertOarRuntimePolicy(command.runtimeId);
+        assertOarRuntimePolicy(command.runtimeId, command.options, command.hostPolicy?.pi);
+        if (command.runtimeId === 'pi') {
+          process.env.OAR_PI_AGENT_DIR = command.hostPolicy!.pi!.agentDir;
+        }
 
         if (command.hostPolicy?.sandbox) {
           process.env.OAR_CODEX_SANDBOX = command.hostPolicy.sandbox;
