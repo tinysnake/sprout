@@ -432,7 +432,7 @@ export function protocolCompatibility(
  */
 export const READINESS_AUTH_MODES = new Set(['chatgpt', 'api_key', 'workload_identity']);
 export const READINESS_AUTH_TYPES = new Set(['oauth', 'api_key']);
-export const READINESS_SOURCES = new Set(['codex-account-read', 'pi-auth-check', 'human-approval', 'unknown']);
+export const READINESS_SOURCES = new Set(['codex-account-read', 'pi-auth-check', 'claude-auth-status', 'human-approval', 'unknown']);
 
 /**
  * Reduce a Worker-declared auth/source field to the allowlisted enum, or drop it.
