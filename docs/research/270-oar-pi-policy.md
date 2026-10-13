@@ -47,7 +47,7 @@ The executable alternative is the unchanged native Pi adapter. A sandbox may con
 | 4. Worker-origin Project MCP only; no host stdio | blocked for an active Pi session | Upstream local stdio process actually executes. Sprout refuses all Pi OAR sessions; this prevents effects but does not prove active origin enforcement |
 | 5. Reconcile #230 and route status | met | This document and the #230 §5.2 addendum explicitly retain the block and name exact prerequisites |
 | 6. State upstream ownership; no parser/second transport | met | Required upstream proposal above; no vendor changes, wrapper or alternate transport |
-| 7. Bounded standard checks; no deny/allow equivalence | recorded in Work record | All command bounds at most 180 seconds; incomplete runs and baseline type errors remain non-passes |
+| 7. Bounded standard checks; no deny/allow equivalence | met for command bounds; test gates not all green | Commands/results are recorded in the Work record; incomplete runs and baseline type errors remain non-passes |
 
 ## Regression protection and limits
 
