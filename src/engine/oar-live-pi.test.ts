@@ -1,0 +1,560 @@
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+import { defaultRuntimes } from '@botiverse/oar';
+
+import { OarEngineAdapter } from './oar.ts';
+import { PiEngineAdapter } from './pi.ts';
+import type { EngineAdapter } from './port.ts';
+import {
+  createRuntime,
+  hostConfiguration,
+  project,
+  runtimePort,
+  PROJECT_ID,
+} from '../runtime-test-harness.ts';
+import {
+  loadOrCreateWorkerIdentity,
+  workerPublicKey,
+  connectWorkerEnrollment,
+} from '../worker/enrollment-connector.ts';
+import { EnvironmentWorker } from '../worker/server.ts';
+import {
+  createEnvironmentWorkerEngines,
+  describeEnvironmentWorkerEngines,
+  lookupCommand,
+  type EngineHostFacts,
+} from '../worker/engine-selection.ts';
+import { probeEnvironmentReadiness } from '../worker/readiness.ts';
+
+/** Test host explicitly approves the active native Pi model for the OAR adapter. */
+async function explicitLivePiModel(installation: any, cwd: string): Promise<{
+  readonly model: string;
+  readonly piModels: Readonly<Record<string, unknown>>;
+}> {
+  const piRuntime = defaultRuntimes.require('pi');
+  const nativeSession = await piRuntime.session(installation, { cwd });
+  let modelSelector: string | undefined;
+  try {
+    modelSelector = nativeSession.model?.().value ?? undefined;
+  } finally {
+    await nativeSession.dispose();
+  }
+  assert.ok(typeof modelSelector === 'string' && modelSelector.length > 0, 'Live Pi model resolved');
+  const slash = modelSelector.indexOf('/');
+  assert.ok(slash > 0, 'Live Pi model has an explicit provider');
+  const providerId = modelSelector.slice(0, slash);
+  const modelId = modelSelector.slice(slash + 1);
+
+  const { createAgentSessionServices } = await import('@earendil-works/pi-coding-agent');
+  const services = await createAgentSessionServices({ cwd });
+  const model = services.modelRuntime.getModel(providerId, modelId);
+  assert.ok(model, 'Active Pi model descriptor is available to the test host');
+  const auth = await services.modelRuntime.getAuth(model);
+  const registered = services.modelRuntime.getRegisteredProviderConfig(providerId);
+  const configuredReference = registered?.apiKey;
+  const referencePattern = /^\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)$/;
+  const authStatus = services.modelRuntime.getProviderAuthStatus(providerId);
+  const envName = authStatus.source === 'environment'
+    ? authStatus.label?.split(/[ ,]+/)
+      .find((name) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && process.env[name])
+    : undefined;
+  const apiKey = configuredReference && referencePattern.test(configuredReference)
+    ? configuredReference
+    : envName
+      ? `$${envName}`
+      : auth?.auth.apiKey;
+
+  return {
+    model: modelSelector,
+    piModels: {
+      providers: {
+        [providerId]: {
+          baseUrl: auth?.auth.baseUrl ?? model.baseUrl,
+          api: model.api,
+          ...(apiKey ? { apiKey } : {}),
+          models: [{
+            id: model.id,
+            name: model.name,
+            reasoning: model.reasoning,
+            contextWindow: model.contextWindow,
+            maxTokens: model.maxTokens,
+          }],
+        },
+      },
+    },
+  };
+}
+
+test('AC7: Native production default is preserved for Pi when OAR opt-in is not active', () => {
+  const previousEnv = process.env['SPROUT_USE_OAR_ENGINE'];
+  try {
+    delete process.env['SPROUT_USE_OAR_ENGINE'];
+
+    const fakeFacts: EngineHostFacts = {
+      configuration: {
+        environmentPlatform: 'host',
+        engineBinaries: { pi: '/usr/local/bin/pi' },
+        piSessionDirectory: undefined,
+      },
+      platform: 'darwin',
+      locate: () => '/usr/local/bin/pi',
+    };
+
+    const engines = createEnvironmentWorkerEngines(fakeFacts);
+    const pi = engines.get('pi');
+    assert.ok(pi, 'pi engine is configured');
+    assert.ok(
+      pi instanceof PiEngineAdapter,
+      'production default remains native PiEngineAdapter when opt-in is not active',
+    );
+    assert.ok(
+      !(pi instanceof OarEngineAdapter),
+      'OarEngineAdapter is not used by default for Pi',
+    );
+
+    // Now test with opt-in active
+    process.env['SPROUT_USE_OAR_ENGINE'] = 'pi';
+    const oarEngines = createEnvironmentWorkerEngines(fakeFacts);
+    const oarPi = oarEngines.get('pi');
+    assert.ok(oarPi, 'pi engine is configured with opt-in');
+    assert.ok(
+      oarPi instanceof OarEngineAdapter,
+      'opt-in successfully selects OarEngineAdapter for Pi',
+    );
+  } finally {
+    if (previousEnv === undefined) {
+      delete process.env['SPROUT_USE_OAR_ENGINE'];
+    } else {
+      process.env['SPROUT_USE_OAR_ENGINE'] = previousEnv;
+    }
+  }
+});
+
+test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enrolled path', async (t) => {
+  if (process.platform !== 'darwin') {
+    t.skip('Live demonstration requires macOS host');
+    return;
+  }
+
+  const piRuntime = defaultRuntimes.require('pi');
+  let installation: any;
+  try {
+    installation = await piRuntime.installation?.();
+  } catch {
+    t.skip('Pi installation probe failed');
+    return;
+  }
+
+  if (installation?.kind !== 'available') {
+    t.skip('Pi runtime is not available on this host');
+    return;
+  }
+
+  const approved = await explicitLivePiModel(installation, process.cwd());
+  const liveModel = approved.model;
+  const liveEffort = 'low';
+
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-oar-pi-live-'));
+  const instanceId = 'pi-enrolled-live-worker';
+  const marker = 'PONG';
+  const rules = [`Reply with only the word ${marker}. Do not use tools.`];
+  const collaborationInstructions = 'Follow the Project reply rule and say PONG.';
+
+  let projectInstructionsReceived = false;
+  let projectModelReceived = false;
+  let projectEffortReceived = false;
+
+  const realAdapter = new OarEngineAdapter({
+    runtimeId: 'pi',
+    piModels: approved.piModels,
+  });
+
+  const observedStart = realAdapter.startSession.bind(realAdapter);
+  realAdapter.startSession = async (request) => {
+    projectInstructionsReceived = request.instructions?.includes(marker) === true;
+    projectModelReceived = request.model === liveModel;
+    projectEffortReceived = request.effort === liveEffort;
+    return observedStart(request);
+  };
+
+  const engines = new Map<string, EngineAdapter>([['pi', realAdapter]]);
+
+  let runtime: any;
+  let worker: EnvironmentWorker | undefined;
+  let connection: any;
+
+  try {
+    runtime = await createRuntime({
+      configuration: hostConfiguration({
+        environmentSource: 'enrollment',
+        engineId: 'pi',
+        executionMode: 'environment-hosted',
+        databasePath: join(directory, 'runtime.db'),
+        workingDirectory: directory,
+        runtimeConfiguration: {
+          agents: [{
+            id: 'scout',
+            name: 'Live Pi Agent',
+            engine: 'pi',
+            capability: 'agent-run',
+            model: liveModel,
+            effort: liveEffort,
+            workOptions: [{
+              id: 'pi-live-opt',
+              engine: 'pi',
+              workModel: liveModel,
+              effort: liveEffort,
+            }],
+          }],
+          project: {
+            ...project(),
+            availableEnvironmentInstanceIds: [instanceId],
+            rules,
+            memberships: [{
+              agentId: 'scout',
+              responsibilities: [],
+              collaborationInstructions,
+            }],
+          },
+        },
+      }),
+      projectRoot: directory,
+    });
+
+    await runtime.projectService.create({
+      id: PROJECT_ID,
+      displayName: 'Live Pi Enrolled Project',
+      rules,
+      agentMemberships: [{
+        agentId: 'scout',
+        responsibilities: [],
+        collaborationInstructions,
+      }],
+    });
+
+    const identityPath = join(directory, 'worker-identity.pem');
+    const identity = loadOrCreateWorkerIdentity(identityPath);
+    const enrollment = await runtime.enrollments.requestEnrollment({
+      environmentInstanceId: instanceId,
+      displayName: 'Live Pi Enrolled Worker',
+      publicKey: workerPublicKey(identity.privateKey),
+      platform: 'macos',
+      protocolVersion: '3',
+      capabilityRequests: ['agent-run'],
+      engineFacts: [{ engine: 'pi', installed: true, authenticated: true, models: [liveModel] }],
+    });
+
+    await runtime.enrollments.approve(enrollment.enrollment.id, {
+      capabilityPermissions: { 'agent-run': true },
+      modelAuthorizations: { pi: [liveModel] },
+    });
+
+    connection = await connectWorkerEnrollment({
+      target: {
+        enrollmentId: enrollment.enrollment.id,
+        host: '127.0.0.1',
+        port: await runtimePort(runtime),
+        claimSecret: undefined,
+        identityKeyPath: identityPath,
+      },
+      protocolVersion: '3',
+      engineFacts: [{ engine: 'pi', installed: true, authenticated: true, models: [liveModel] }],
+    });
+
+    const hostFacts = {
+      configuration: {
+        environmentPlatform: 'macos' as const,
+        piSessionDirectory: undefined,
+        engineBinaries: {},
+      },
+      platform: process.platform,
+      locate: (cmd: string, opts: { preferWindowsExecutable: boolean }) =>
+        lookupCommand(cmd, process.platform, opts.preferWindowsExecutable),
+    };
+    const configurations = describeEnvironmentWorkerEngines(hostFacts).filter(
+      (c) => c.engine === 'pi',
+    );
+    let current = await probeEnvironmentReadiness(configurations);
+
+    worker = new EnvironmentWorker({
+      environmentInstanceId: instanceId,
+      engines,
+      input: connection.stream,
+      output: connection.stream,
+      workspaceRoot: directory,
+      readiness: () => current.readiness,
+      readinessProbe: async (params) => {
+        current = await probeEnvironmentReadiness(configurations, {
+          ...(params.requirements !== undefined ? { requirements: params.requirements } : {}),
+        });
+        return current;
+      },
+    });
+
+    // Evaluate admission
+    let decision;
+    const admissionDeadline = Date.now() + 20_000;
+    do {
+      await runtime.refreshEnvironmentCatalog();
+      decision = await runtime.orchestrator.evaluateOptionAdmission('scout', instanceId);
+      if (decision.ok) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } while (Date.now() < admissionDeadline);
+    assert.ok(decision?.ok, `Admission refused: ${decision?.reason}`);
+
+    // Grant workspace access
+    mkdirSync(join(directory, 'candidate-project'));
+    await runtime.projectAccess.grant({
+      projectId: PROJECT_ID,
+      environmentInstanceId: instanceId,
+      selection: { kind: 'relative', path: 'candidate-project' },
+    });
+
+    const delivered = await runtime.collaboration.deliver({
+      scopeId: `channel-${PROJECT_ID}`,
+      author: { id: 'operator', kind: 'human' },
+      body: `@scout Follow the Project rule and answer now with ${marker}.`,
+      deliveryKey: `live-pi-enrolled-${Date.now()}`,
+      awaitReply: true,
+    });
+
+    assert.equal(delivered.duplicate, false);
+    assert.equal(delivered.admittedRunIds.length, 1);
+
+    const run = await runtime.orchestrator.waitFor(delivered.admittedRunIds[0]!);
+    assert.equal(run.status, 'completed', 'Admitted run settled as completed');
+    assert.equal(run.result?.status, 'completed', 'Turn result completed');
+    assert.match(run.result?.status === 'completed' ? run.result.text : '', /PONG/i, 'Terminal answer contains PONG');
+    assert.equal(run.result?.source, 'oar', 'Result source is oar');
+    assert.ok(
+      run.result?.tokenUsage && run.result.tokenUsage.promptTokens > 0,
+      'Truthful prompt tokens recorded',
+    );
+    assert.ok(
+      run.result?.tokenUsage && run.result.tokenUsage.completionTokens > 0,
+      'Truthful completion tokens recorded',
+    );
+    assert.ok(run.result?.detailedTokens !== undefined, 'Detailed tokens recorded');
+
+    // External observation of project settings delivered
+    assert.equal(projectInstructionsReceived, true, 'Project instructions delivered to session');
+    assert.equal(projectModelReceived, true, 'Project model delivered to session');
+    assert.equal(projectEffortReceived, true, 'Project effort delivered to session');
+
+    // Real progress events streamed
+    const progressEvents = run.events.filter((e: any) => e.type === 'message' && !e.final);
+    assert.ok(progressEvents.length > 0, 'Real incremental progress events streamed during turn');
+
+    // Verify exactly one reply was projected back to the scope
+    const messages = await runtime.collaboration.listMessages();
+    const projected = messages.filter(
+      (m: any) => m.author.kind === 'agent' && m.inReplyTo === delivered.message.id,
+    );
+    assert.equal(projected.length, 1, 'Exactly one reply was projected from the root turn');
+    assert.equal(projected[0]?.author.id, 'scout');
+    assert.match(projected[0]?.body ?? '', /PONG/i);
+
+    // Reconcile and assert still exactly one reply
+    await runtime.collaboration.reconcile();
+    const projectedAfter = (await runtime.collaboration.listMessages()).filter(
+      (m: any) => m.author.kind === 'agent' && m.inReplyTo === delivered.message.id,
+    );
+    assert.equal(projectedAfter.length, 1, 'Still exactly one reply after reconcile');
+
+    // Persisted run record in store matches
+    const persisted = await runtime.stores.runs.get(run.id);
+    assert.equal(persisted?.result?.status, 'completed');
+    assert.match(persisted?.result?.text ?? '', /PONG/i);
+  } finally {
+    await worker?.shutdown();
+    connection?.close();
+    await runtime?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('AC2 & AC4: Bounded live macOS Pi execution discovers and invokes controlled MCP workspace tool through OAR', async (t) => {
+  if (process.platform !== 'darwin') {
+    t.skip('Live demonstration requires macOS host');
+    return;
+  }
+
+  const piRuntime = defaultRuntimes.require('pi');
+  let installation: any;
+  try {
+    installation = await piRuntime.installation?.();
+  } catch {
+    t.skip('Pi installation probe failed');
+    return;
+  }
+  if (installation?.kind !== 'available') {
+    t.skip('Pi runtime is not available on this host');
+    return;
+  }
+
+  const approved = await explicitLivePiModel(installation, process.cwd());
+  let readInvoked = false;
+  let invokedPath = '';
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'pi',
+    piModels: approved.piModels,
+  });
+
+  const session = await adapter.startSession({
+    agentId: 'scout',
+    workingDirectory: process.cwd(),
+    model: approved.model,
+    remoteWorkspace: {
+      binding: {
+        projectId: 'live-proj-pi',
+        environmentInstanceId: 'live-env-pi',
+        bindingId: 'live-bind-pi',
+        generation: 1,
+        connectionEpoch: 1,
+        workspaceId: 'live-ws-pi',
+      },
+      bindingFence: {
+        generation: 1,
+        isCurrent: () => true,
+      },
+      operations: ['read'],
+      read: async (path: string) => {
+        readInvoked = true;
+        invokedPath = path;
+        return {
+          operationId: 'op-live-pi-mcp',
+          projectId: 'live-proj-pi',
+          environmentInstanceId: 'live-env-pi',
+          bindingId: 'live-bind-pi',
+          generation: 1,
+          connectionEpoch: 1,
+          workspaceId: 'live-ws-pi',
+          operation: 'read',
+          status: 'completed',
+          content: 'ALPHA_LIVE_VERIFIED_PI_CONTENT',
+        };
+      },
+      search: async () => ({
+        operationId: 'op-live-pi-search',
+        projectId: 'live-proj-pi',
+        environmentInstanceId: 'live-env-pi',
+        bindingId: 'live-bind-pi',
+        generation: 1,
+        connectionEpoch: 1,
+        workspaceId: 'live-ws-pi',
+        operation: 'search',
+        status: 'completed',
+      }),
+      inspect: async () => ({ status: 'completed' }),
+      cancel: async () => ({ accepted: true, status: 'cancelled' }),
+    },
+  });
+
+  try {
+    const turn = session.run('Please call the tool mcp__sprout_workspace__read with path "probe-target.txt" and report its content.');
+    const result = await turn.completion;
+
+    assert.equal(result.status, 'completed', 'Turn settled as completed');
+    assert.equal(readInvoked, true, 'Real Pi discovered and called remote MCP read tool');
+    assert.match(invokedPath, /probe-target\.txt/, 'Read tool received correct target path');
+    assert.match(result.text, /ALPHA_LIVE_VERIFIED_PI_CONTENT/, 'Result reflects content returned by MCP tool');
+  } finally {
+    await session.close();
+  }
+});
+
+test('AC2 & AC4: Bounded live macOS Pi execution enforces binding-fence refusal when capability is no longer current', async (t) => {
+  if (process.platform !== 'darwin') {
+    t.skip('Live demonstration requires macOS host');
+    return;
+  }
+
+  const piRuntime = defaultRuntimes.require('pi');
+  let installation: any;
+  try {
+    installation = await piRuntime.installation?.();
+  } catch {
+    t.skip('Pi installation probe failed');
+    return;
+  }
+  if (installation?.kind !== 'available') {
+    t.skip('Pi runtime is not available on this host');
+    return;
+  }
+
+  const approved = await explicitLivePiModel(installation, process.cwd());
+  let readInvoked = false;
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'pi',
+    piModels: approved.piModels,
+  });
+
+  const session = await adapter.startSession({
+    agentId: 'scout',
+    workingDirectory: process.cwd(),
+    model: approved.model,
+    remoteWorkspace: {
+      binding: {
+        projectId: 'live-proj-pi-stale',
+        environmentInstanceId: 'live-env-pi',
+        bindingId: 'live-bind-pi-stale',
+        generation: 1,
+        connectionEpoch: 1,
+        workspaceId: 'live-ws-pi',
+      },
+      bindingFence: {
+        generation: 1,
+        // Capability is no longer current
+        isCurrent: () => false,
+      },
+      operations: ['read'],
+      read: async () => {
+        readInvoked = true;
+        return {
+          operationId: 'op-stale',
+          projectId: 'live-proj-pi-stale',
+          environmentInstanceId: 'live-env-pi',
+          bindingId: 'live-bind-pi-stale',
+          generation: 1,
+          connectionEpoch: 1,
+          workspaceId: 'live-ws-pi',
+          operation: 'read',
+          status: 'completed',
+          content: 'MUST_NEVER_BE_READ',
+        };
+      },
+      search: async () => ({
+        operationId: 'op-stale-search',
+        projectId: 'live-proj-pi-stale',
+        environmentInstanceId: 'live-env-pi',
+        bindingId: 'live-bind-pi-stale',
+        generation: 1,
+        connectionEpoch: 1,
+        workspaceId: 'live-ws-pi',
+        operation: 'search',
+        status: 'completed',
+      }),
+      inspect: async () => ({ status: 'completed' }),
+      cancel: async () => ({ accepted: true, status: 'cancelled' }),
+    },
+  });
+
+  try {
+    const turn = session.run('Please call the tool mcp__sprout_workspace__read with path "probe-target.txt" and report its content.');
+    const result = await turn.completion;
+
+    assert.equal(result.status, 'completed', 'Turn completed (model observed failure and replied)');
+    assert.equal(readInvoked, false, 'Read was NOT invoked when binding fence reported not current');
+    assert.ok(
+      !result.text.includes('ALPHA_LIVE_VERIFIED_PI_CONTENT'),
+      'Output does not contain forbidden content',
+    );
+  } finally {
+    await session.close();
+  }
+});

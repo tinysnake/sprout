@@ -136,13 +136,22 @@ const realFactories: EngineAdapterFactories = {
       sandbox: configuration.sandbox,
     });
   },
-  pi: (configuration) =>
-    new PiEngineAdapter({
+  pi: (configuration) => {
+    if (process.env['SPROUT_USE_OAR_ENGINE'] === 'pi' || process.env['SPROUT_USE_OAR_ENGINE'] === 'all') {
+      return new OarEngineAdapter({
+        runtimeId: 'pi',
+        ...(configuration.sessionDirectory !== undefined
+          ? { sessionDirectory: configuration.sessionDirectory }
+          : {}),
+      });
+    }
+    return new PiEngineAdapter({
       binaryPath: configuration.binaryPath,
       ...(configuration.sessionDirectory !== undefined
         ? { sessionDirectory: configuration.sessionDirectory }
         : {}),
-    }),
+    });
+  },
   agy: (configuration) =>
     new AgyEngineAdapter({
       binaryPath: configuration.binaryPath,

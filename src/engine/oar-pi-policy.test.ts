@@ -5,7 +5,8 @@ import { mkdtempSync, existsSync, rmSync, mkdirSync, writeFileSync, readFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { OarEngineAdapter } from './oar.ts';
+import { defaultRuntimes } from '@botiverse/oar';
+import { OarEngineAdapter, type OarRunnerProcess } from './oar.ts';
 import { EngineStartError } from './port.ts';
 
 import { assertOarRuntimePolicy, prepareOarRuntimePolicy } from './oar-runtime-policy.ts';
@@ -31,6 +32,92 @@ test('OAR Pi refuses fresh and resumed sessions when project settings cannot be 
     assert.equal(readFileSync(join(root, '.pi', 'settings.json'), 'utf8'), 'invalid JSON');
     assert.equal(existsSync(join(root, '.pi', '.sprout-oar-policy')), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// Risk: absence of an explicit approval silently falls back to an ambient provider.
+test('Pi provider is unavailable without explicit approved models', { timeout: 60000 }, async (t) => {
+  const installation = await defaultRuntimes.require('pi').installation?.();
+  if (installation?.kind !== 'available') {
+    t.skip('Pi runtime is not available on this host');
+    return;
+  }
+
+  const root = mkdtempSync(join(tmpdir(), 'sprout-pi-no-provider-'));
+  let runner: OarRunnerProcess | undefined;
+  let runnerClosed: Promise<void> | undefined;
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'pi',
+    spawnProcess: (command, args, options) => {
+      const child = spawn(command, [...args], {
+        ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
+        ...(options.env !== undefined ? { env: options.env } : {}),
+        ...(options.detached !== undefined ? { detached: options.detached } : {}),
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      runner = child as unknown as OarRunnerProcess;
+      runnerClosed = new Promise((resolve) => child.once('close', () => resolve()));
+      return runner;
+    },
+  });
+  let session: Awaited<ReturnType<typeof adapter.startSession>> | undefined;
+  let startError: unknown;
+  try {
+    try {
+      session = await adapter.startSession({
+        agentId: 'fixture',
+        workingDirectory: root,
+        model: 'sprout-unapproved-fixture/model',
+      });
+    } catch (error) {
+      startError = error;
+    }
+    await session?.close();
+    if (runnerClosed) await runnerClosed;
+
+    assert.ok(startError instanceof EngineStartError, 'The adapter refuses provider resolution during session start');
+    assert.match(startError.message, /model sprout-unapproved-fixture\/model is not registered/i);
+    if (runnerClosed) await runnerClosed;
+  } finally {
+    await session?.close();
+    if (runner && runner.exitCode === null && runner.signalCode === null) runner.kill('SIGKILL');
+    if (runnerClosed) await runnerClosed;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Risk: implicit host discovery turns ambient provider configuration into approval.
+test('Pi models are written only from explicit approval; ambient configuration is ignored', () => {
+  const root = mkdtempSync(join(tmpdir(), 'sprout-pi-model-approval-'));
+  const ambient = join(root, 'ambient');
+  mkdirSync(ambient);
+  const ambientModels = { providers: { ambient: { baseUrl: 'https://ambient.invalid', api: 'openai-completions', models: [{ id: 'ambient-model' }] } } };
+  writeFileSync(join(ambient, 'models.json'), JSON.stringify(ambientModels));
+  const previousAgentDirectory = process.env.PI_CODING_AGENT_DIR;
+  const explicitModels = {
+    providers: {
+      approved: {
+        baseUrl: 'https://approved.invalid',
+        api: 'openai-completions',
+        models: [{ id: 'approved-model', name: 'Approved fixture', reasoning: false, contextWindow: 4096, maxTokens: 512 }],
+      },
+    },
+  };
+  try {
+    process.env.PI_CODING_AGENT_DIR = ambient;
+    const withoutApproval = prepareOarRuntimePolicy('pi', root)!;
+    assert.equal(existsSync(join(withoutApproval.descriptor.agentDir, 'models.json')), false);
+    withoutApproval.close();
+
+    const withApproval = prepareOarRuntimePolicy('pi', root, { models: explicitModels })!;
+    const modelsPath = join(withApproval.descriptor.agentDir, 'models.json');
+    assert.deepEqual(JSON.parse(readFileSync(modelsPath, 'utf8')), explicitModels);
+    assert.equal(statSync(modelsPath).mode & 0o777, 0o600);
+    withApproval.close();
+  } finally {
+    if (previousAgentDirectory === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDirectory;
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // Risk: session overlays lose project configuration, race another session, or follow symlinks.

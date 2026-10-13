@@ -561,15 +561,26 @@ export async function probeEnvironmentReadiness(
     (model): model is string => typeof model === 'string' && model !== '',
   );
   const nodeVersion = options.nodeVersion ?? process.versions.node;
-  const isOarActive = options.env?.SPROUT_USE_OAR_ENGINE === 'codex' ||
+  const isCodexOarActive = options.env?.SPROUT_USE_OAR_ENGINE === 'codex' ||
     options.env?.SPROUT_USE_OAR_ENGINE === 'all' ||
     process.env['SPROUT_USE_OAR_ENGINE'] === 'codex' ||
     process.env['SPROUT_USE_OAR_ENGINE'] === 'all';
+  const isPiOarActive = options.env?.SPROUT_USE_OAR_ENGINE === 'pi' ||
+    options.env?.SPROUT_USE_OAR_ENGINE === 'all' ||
+    process.env['SPROUT_USE_OAR_ENGINE'] === 'pi' ||
+    process.env['SPROUT_USE_OAR_ENGINE'] === 'all';
+  const isOarActive = isCodexOarActive || isPiOarActive;
   const oarNodeUnsupported = (isOarActive || configurations.some(configuration => configuration.engine === 'claude')) && !isSupportedNodeVersion(nodeVersion);
 
   const engines: WorkerEngineReadinessFact[] = [];
   for (const configuration of configurations) {
-    if ((configuration.engine === 'codex' || configuration.engine === 'claude') && oarNodeUnsupported) {
+    const isEngineOarUnsupported =
+      !isSupportedNodeVersion(nodeVersion) && (
+        (configuration.engine === 'codex' && isCodexOarActive) ||
+        (configuration.engine === 'pi' && isPiOarActive) ||
+        configuration.engine === 'claude'
+      );
+    if (isEngineOarUnsupported) {
       engines.push(unknownFact(configuration.engine, undefined, clock(), 'unknown', 1));
       continue;
     }

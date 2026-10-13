@@ -208,6 +208,22 @@ export async function createOarMcpBridge(input: {
       return;
     }
 
+    if (req.method === 'GET') {
+      res.writeHead(405, { 'Content-Type': 'text/plain', Allow: 'POST, DELETE' });
+      res.end('Method Not Allowed');
+      return;
+    }
+    if (req.method === 'DELETE') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+    if (req.method !== 'POST') {
+      res.writeHead(405, { 'Content-Type': 'text/plain', Allow: 'POST, DELETE' });
+      res.end('Method Not Allowed');
+      return;
+    }
+
     let body = '';
     req.on('data', (chunk: Buffer) => {
       body += chunk.toString('utf8');
