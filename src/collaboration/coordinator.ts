@@ -186,6 +186,8 @@ export interface RunAdmitter {
     readonly projectId: string;
     /** Authorized scope that owns this wake's native continuation. */
     readonly sessionKeyScope: SessionKeyScope;
+    /** Pin a readiness-checked Environment for this delivery. */
+    readonly environmentPreference?: { readonly kind: 'instance'; readonly id: string };
   }): Promise<{ id: string }>;
   waitFor(runId: string): Promise<AgentRun>;
   /**
@@ -277,11 +279,18 @@ export class MessageDeliveryError extends Error {
   }
 }
 
+export type RunAdmissionPreflight =
+  | { readonly kind: 'ready'; readonly environmentInstanceId: string }
+  | { readonly kind: 'unavailable' }
+  | { readonly kind: 'failed'; readonly reason: string };
+
 export interface CollaborationCoordinatorOptions {
   readonly taskGroupFacts?: (scopeId: string) => Promise<TaskGroupWakeFacts | undefined>;
   readonly taskGroupModel?: TaskGroupWakeModelPort;
   readonly store: CollaborationStore;
   readonly runs: RunOrchestrator | RunAdmitter;
+  /** Resolve readiness before submission; a refusal is terminal and visible. */
+  readonly preflightRun?: (agentId: string, projectId: string) => Promise<RunAdmissionPreflight>;
   readonly scopes: CollaborationScopePort;
   /** Ids for new Messages and Project events. Injected so tests are deterministic. */
   readonly ids?: IdFactory;
@@ -457,6 +466,7 @@ export class CollaborationCoordinator {
   readonly #taskGroups: TaskGroupOrchestration;
   readonly #store: CollaborationStore;
   readonly #runs: RunAdmitter;
+  readonly #preflightRun: CollaborationCoordinatorOptions['preflightRun'];
   readonly #scopes: CollaborationScopePort;
   readonly #ids: IdFactory;
   readonly #clock: { now(): number };
@@ -475,6 +485,7 @@ export class CollaborationCoordinator {
   constructor(options: CollaborationCoordinatorOptions) {
     this.#store = options.store;
     this.#runs = options.runs;
+    this.#preflightRun = options.preflightRun;
     this.#scopes = options.scopes;
     this.#ids = options.ids ?? createIdFactory();
     this.#clock = options.clock ?? { now: () => Date.now() };
@@ -653,7 +664,11 @@ export class CollaborationCoordinator {
     // A retry. No new Message is written, but any wake of this input that is
     // still pending is admitted now: idempotency must not leave addressed work
     // unwoken just because an earlier process died between persist and admit.
-    const pending = (await this.#store.listWakeRequests()).filter((wake) => wake.inputId === message.id);
+    const wakes = (await this.#store.listWakeRequests()).filter((wake) => wake.inputId === message.id);
+    for (const wake of wakes) {
+      if (wake.status === 'failed') await this.#publishPreRunAdmissionFailure(wake);
+    }
+    const pending = wakes.filter((wake) => wake.status === 'pending');
     input.assertActive?.();
     await input.assertPersistenceAuthority?.();
     input.assertActive?.();
@@ -767,6 +782,24 @@ export class CollaborationCoordinator {
     return result.duplicate ? 'duplicate' : 'published';
   }
 
+  async #publishPreRunAdmissionFailure(wake: WakeRequest): Promise<void> {
+    if (wake.status !== 'failed' || wake.detail === undefined) return;
+    const source = await this.#resolveWakeSource(wake);
+    const sourceInputs = source === undefined ? [] : source.kind === 'batch' ? source.assigned : [source.input];
+    const originScopeIds = [...new Set(sourceInputs.flatMap((input) => isProjectEvent(input) ? [] : [input.scopeId]))];
+    await this.publishEvent({
+      projectId: wake.projectId,
+      kind: 'wake-admission-failure',
+      summary: `Message delivery failed before run admission for ${wake.agentId}`,
+      detail: wake.detail,
+      ...(originScopeIds.length > 0 ? { originScopeIds } : {}),
+      producer: { id: 'sprout', kind: 'system' },
+      disposition: 'informational',
+      deliveryKey: `wake-admission-failure:${wake.idempotencyKey}`,
+      awaitReply: false,
+    });
+  }
+
   /** Publish one informational event for an intentional Human Chat interruption. */
   async publishRunInterruption(run: AgentRun): Promise<'skipped' | 'duplicate' | 'published'> {
     const input = runInterruptionEventInput(run);
@@ -809,6 +842,23 @@ export class CollaborationCoordinator {
   ): Promise<{ readonly runId: string; readonly projected: boolean } | undefined> {
     if (wake.status !== 'pending') return undefined;
 
+    const preflight = this.#preflightRun
+      ? await this.#preflightRun(wake.agentId, sourceProjectId(source))
+      : { kind: 'unavailable' as const };
+    if (preflight.kind === 'failed') {
+      const safeReason = sanitizeProjectEventDetail(preflight.reason) ?? 'Run admission requirements were not met.';
+      const observation: WakeObservation = {
+        agentId: wake.agentId,
+        status: 'failed',
+        reason: wake.reason,
+        detail: safeReason,
+      };
+      await this.#store.recordObservation({ inputId: wake.inputId, observation, now: this.#clock.now() });
+      this.#onObservation?.({ inputId: wake.inputId, observation });
+      await this.#publishPreRunAdmissionFailure({ ...wake, status: 'failed', detail: safeReason });
+      return undefined;
+    }
+
     // Submit the run, then admit the wake with a compare-and-set. The order
     // matters: a run submitted but not admitted is the *extra wake* the contract
     // explicitly prefers over a lost one, while an admitted wake always names a
@@ -828,6 +878,7 @@ export class CollaborationCoordinator {
       prompt: renderSourcePrompt(source, wake.agentId),
       projectId: sourceProjectId(source),
       sessionKeyScope,
+      ...(preflight.kind === 'ready' ? { environmentPreference: { kind: 'instance' as const, id: preflight.environmentInstanceId } } : {}),
     });
 
     const admitted = await this.#store.admitWake({
@@ -1034,6 +1085,10 @@ export class CollaborationCoordinator {
           admittedRunIds.push(outcome.runId);
           if (outcome.projected) projectedMessageIds.add(causalId);
         }
+        continue;
+      }
+      if (wake.status === 'failed') {
+        await this.#publishPreRunAdmissionFailure(wake);
         continue;
       }
       if (wake.status !== 'admitted') continue;

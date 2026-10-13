@@ -913,3 +913,99 @@ test('automatic positioning: unchanged bottom writes do not swallow the next use
     assert.equal(p.olderRequests(), 2, 'conversation start stops paging');
   } finally { p.close(); }
 });
+
+test('project event details render with distinct styling for failures and non-failure events', async () => {
+  const admissionFailureEvent: ProjectEventView = {
+    id: 'event-admission-fail',
+    projectId: 'project',
+    kind: 'wake-admission-failure',
+    summary: 'Message delivery failed before run admission for scout',
+    detail: 'No connected Environment can admit work; check Worker readiness.',
+    producerId: 'sprout',
+    producerKind: 'system',
+    disposition: 'informational',
+    responsibleAgentIds: [],
+    createdAt: 10,
+  };
+  const runFailureEvent: ProjectEventView = {
+    id: 'event-run-fail',
+    projectId: 'project',
+    kind: 'agent-run-failure',
+    summary: 'Agent run failed',
+    detail: 'Execution failed due to unhandled error in container.',
+    producerId: 'agent',
+    producerKind: 'agent',
+    disposition: 'recorded',
+    responsibleAgentIds: ['scout'],
+    createdAt: 20,
+  };
+  const customDetailEvent: ProjectEventView = {
+    id: 'event-custom-detail',
+    projectId: 'project',
+    kind: 'custom-notice',
+    summary: 'Custom notification',
+    detail: 'Informational detail payload.',
+    producerId: 'sprout',
+    producerKind: 'system',
+    disposition: 'informational',
+    responsibleAgentIds: [],
+    createdAt: 30,
+  };
+  const noDetailEvent: ProjectEventView = {
+    id: 'event-no-detail',
+    projectId: 'project',
+    kind: 'custom-no-detail',
+    summary: 'Notice without detail',
+    producerId: 'sprout',
+    producerKind: 'system',
+    disposition: 'informational',
+    responsibleAgentIds: [],
+    createdAt: 40,
+  };
+
+  const p = await page('', {
+    channelMessages: 0,
+    events: [admissionFailureEvent, runFailureEvent, customDetailEvent, noDetailEvent],
+  });
+  try {
+    // 1. Generic project event with detail renders its detail
+    const customRow = p.list.querySelector<HTMLElement>('[data-event-id="event-custom-detail"]')!;
+    assert.ok(customRow, 'custom event row is rendered');
+    const customParas = customRow.querySelectorAll('p');
+    assert.equal(customParas.length, 3);
+    assert.equal(customParas[1]?.textContent, 'Custom notification');
+    assert.equal(customParas[2]?.textContent, 'Informational detail payload.');
+    assert.match(customParas[2]?.className ?? '', /text-\[var\(--text-secondary\)\]/);
+    assert.doesNotMatch(customParas[2]?.className ?? '', /text-\[var\(--red-action\)\]/);
+
+    // 2. wake-admission-failure renders its sanitized reason
+    const admissionRow = p.list.querySelector<HTMLElement>('[data-event-id="event-admission-fail"]')!;
+    assert.ok(admissionRow, 'wake-admission-failure row is rendered');
+    const admissionParas = admissionRow.querySelectorAll('p');
+    assert.equal(admissionParas.length, 3);
+    assert.equal(admissionParas[1]?.textContent, 'Message delivery failed before run admission for scout');
+    assert.equal(admissionParas[2]?.textContent, 'No connected Environment can admit work; check Worker readiness.');
+
+    // 3. wake-admission-failure styling is --text-secondary, NOT red
+    assert.match(admissionParas[2]?.className ?? '', /text-\[var\(--text-secondary\)\]/);
+    assert.doesNotMatch(admissionParas[2]?.className ?? '', /text-\[var\(--red-action\)\]/);
+
+    // 4. Regression guard: agent-run-failure renders its detail in red
+    const runFailRow = p.list.querySelector<HTMLElement>('[data-event-id="event-run-fail"]')!;
+    assert.ok(runFailRow, 'agent-run-failure row is rendered');
+    const runFailParas = runFailRow.querySelectorAll('p');
+    assert.equal(runFailParas.length, 3);
+    assert.equal(runFailParas[1]?.textContent, 'Agent run failed');
+    assert.equal(runFailParas[2]?.textContent, 'Execution failed due to unhandled error in container.');
+    assert.match(runFailParas[2]?.className ?? '', /text-\[var\(--red-action\)\]/);
+    assert.doesNotMatch(runFailParas[2]?.className ?? '', /text-\[var\(--text-secondary\)\]/);
+
+    // Event without detail does not render a detail paragraph
+    const noDetailRow = p.list.querySelector<HTMLElement>('[data-event-id="event-no-detail"]')!;
+    assert.ok(noDetailRow, 'no-detail event row is rendered');
+    const noDetailParas = noDetailRow.querySelectorAll('p');
+    assert.equal(noDetailParas.length, 2);
+  } finally {
+    p.close();
+  }
+});
