@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdirSync, mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, existsSync, readFileSync, rmSync, statSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defaultRuntimes } from '@botiverse/oar';
 
@@ -21,7 +21,7 @@ const receipts = Object.fromEntries(
 mkdirSync(extensionDir, { recursive: true });
 mkdirSync(cwd, { recursive: true });
 const saved = Object.fromEntries(
-  ['OAR_PI_AGENT_DIR', 'PI_CODING_AGENT_DIR', 'SPROUT_OAR_FIXTURE_KEY', 'no_proxy', 'NO_PROXY'].map(name => [name, process.env[name]]),
+  ['OAR_PI_AGENT_DIR', 'PI_CODING_AGENT_DIR', 'SPROUT_OAR_FIXTURE_KEY', 'SPROUT_OAR_PWSH_PATH', 'SPROUT_OAR_POWERSHELL_RECEIPT', 'no_proxy', 'NO_PROXY'].map(name => [name, process.env[name]]),
 );
 process.env.PI_CODING_AGENT_DIR = agentDir;
 delete process.env.OAR_PI_AGENT_DIR;
@@ -103,6 +103,41 @@ function negativeEffectAbsent(name) {
   if (name === 'write') return !existsSync(join(cwd, 'write-target.txt'));
   return !existsSync(receipts[name]);
 }
+function preparePowerShellPositiveControl() {
+  if (process.platform === 'win32') return () => {};
+  const directory = join(root, 'fixture-bin');
+  mkdirSync(directory);
+  const wherePath = join(directory, 'where');
+  const shellPath = join(directory, 'pwsh.exe');
+  writeFileSync(wherePath, `#!/bin/sh\nprintf '%s\\n' "$SPROUT_OAR_PWSH_PATH"\n`, { mode: 0o700 });
+  writeFileSync(shellPath, `#!/bin/sh\nprintf 'powershell-fixture-effect' > "$SPROUT_OAR_POWERSHELL_RECEIPT"\nprintf 'powershell-fixture-output\\n'\n`, { mode: 0o700 });
+  chmodSync(wherePath, 0o700);
+  chmodSync(shellPath, 0o700);
+  const pathKey = Object.keys(process.env).find(name => name.toLowerCase() === 'path') ?? 'PATH';
+  const previousPath = process.env[pathKey];
+  const previousPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+  const previousShellPath = process.env.SPROUT_OAR_PWSH_PATH;
+  const previousReceipt = process.env.SPROUT_OAR_POWERSHELL_RECEIPT;
+  process.env[pathKey] = [directory, previousPath].filter(Boolean).join(delimiter);
+  process.env.SPROUT_OAR_PWSH_PATH = shellPath;
+  process.env.SPROUT_OAR_POWERSHELL_RECEIPT = receipts.powershell;
+  Object.defineProperty(process, 'platform', { ...previousPlatform, value: 'win32' });
+  return () => {
+    Object.defineProperty(process, 'platform', previousPlatform);
+    if (previousPath === undefined) delete process.env[pathKey];
+    else process.env[pathKey] = previousPath;
+    if (previousShellPath === undefined) delete process.env.SPROUT_OAR_PWSH_PATH;
+    else process.env.SPROUT_OAR_PWSH_PATH = previousShellPath;
+    if (previousReceipt === undefined) delete process.env.SPROUT_OAR_POWERSHELL_RECEIPT;
+    else process.env.SPROUT_OAR_POWERSHELL_RECEIPT = previousReceipt;
+  };
+}
+async function runUnrestricted(name) {
+  const simulatedPowerShell = name === 'powershell' && process.platform !== 'win32';
+  const restorePowerShellFixture = name === 'powershell' ? preparePowerShellPositiveControl() : undefined;
+  try { return { result: await run(name, allTools), simulatedPowerShell }; }
+  finally { restorePowerShellFixture?.(); }
+}
 async function run(name, defaultTools, disallowedTools = undefined) {
   settings(defaultTools);
   assert.equal(statSync(settingsPath).mode & 0o777, 0o600);
@@ -145,17 +180,13 @@ try {
   facts.hostExtensionProviderRegistered = existsSync(join(extensionDir, 'fixture.ts'));
 
   for (const name of allTools) {
-    const unrestricted = await run(name, allTools);
+    const control = await runUnrestricted(name);
+    const unrestricted = control.result;
     assert.equal(unrestricted.outcome, 'completed');
     assert.ok(unrestricted.resultSeen && !unrestricted.denied && unrestricted.advertised.includes(name), `${name} unrestricted call failed (denied=${unrestricted.denied}, advertised=${unrestricted.advertised.join(',')})`);
     const effectObserved = positiveEffect(name, unrestricted.result);
-    if (name === 'powershell' && !effectObserved) {
-      assert.match(unrestricted.result, /only available on Windows|no PowerShell executable found/i);
-      facts.runs[`${name}.unrestricted`] = { advertised: unrestricted.advertised, providerVisibleResult: true, effectObserved: false, platformUnavailable: true };
-    } else {
-      assert.ok(effectObserved, `${name} unrestricted control had an observable effect`);
-      facts.runs[`${name}.unrestricted`] = { advertised: unrestricted.advertised, providerVisibleResult: true, effectObserved: true };
-    }
+    assert.ok(effectObserved, `${name} unrestricted control had an observable effect`);
+    facts.runs[`${name}.unrestricted`] = { advertised: unrestricted.advertised, providerVisibleResult: true, effectObserved: true, ...(control.simulatedPowerShell ? { executionFixture: 'temporary pwsh.exe shell stub' } : {}) };
 
     const denied = await run(name, [], ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls', 'powershell', 'codemode']);
     assert.equal(denied.outcome, 'completed');
