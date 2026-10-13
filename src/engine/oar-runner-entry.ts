@@ -1,7 +1,7 @@
 import { createInterface } from 'node:readline';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { defaultRuntimes, type Session } from '@botiverse/oar';
+import type { Session } from '@botiverse/oar';
 import { assertSupportedNodeVersion } from './oar-node-support.ts';
 import { assertOarRuntimePolicy } from './oar-runtime-policy.ts';
 import type { RunnerCommand, RunnerMessage } from './oar-runner-protocol.ts';
@@ -25,6 +25,7 @@ async function handleCommand(command: RunnerCommand): Promise<void> {
           process.env.OAR_CODEX_SANDBOX = command.hostPolicy.sandbox;
         }
 
+        const { defaultRuntimes } = await import('@botiverse/oar');
         const runtime = defaultRuntimes.require(command.runtimeId);
         if (typeof runtime.installation !== 'function') {
           send({
