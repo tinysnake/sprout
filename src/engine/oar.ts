@@ -163,7 +163,6 @@ export class OarEngineAdapter implements EngineAdapter {
       policy = prepareOarRuntimePolicy(this.id, request.workingDirectory, {
         ...(mcpBridge ? { approvedMcp: mcpBridge.mcpServer } : {}),
         ...(this.#options.piModels ? { models: this.#options.piModels } : {}),
-        ...(request.model ? { targetModel: request.model } : {}),
       });
       if (policy) (sessionOptions as { cwd: string }).cwd = policy.descriptor.cwd;
     } catch (error) {

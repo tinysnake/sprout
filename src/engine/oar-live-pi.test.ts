@@ -29,6 +29,65 @@ import {
 } from '../worker/engine-selection.ts';
 import { probeEnvironmentReadiness } from '../worker/readiness.ts';
 
+/** Test host explicitly approves the active native Pi model for the OAR adapter. */
+async function explicitLivePiModel(installation: any, cwd: string): Promise<{
+  readonly model: string;
+  readonly piModels: Readonly<Record<string, unknown>>;
+}> {
+  const piRuntime = defaultRuntimes.require('pi');
+  const nativeSession = await piRuntime.session(installation, { cwd });
+  let modelSelector: string | undefined;
+  try {
+    modelSelector = nativeSession.model?.().value ?? undefined;
+  } finally {
+    await nativeSession.dispose();
+  }
+  assert.ok(typeof modelSelector === 'string' && modelSelector.length > 0, 'Live Pi model resolved');
+  const slash = modelSelector.indexOf('/');
+  assert.ok(slash > 0, 'Live Pi model has an explicit provider');
+  const providerId = modelSelector.slice(0, slash);
+  const modelId = modelSelector.slice(slash + 1);
+
+  const { createAgentSessionServices } = await import('@earendil-works/pi-coding-agent');
+  const services = await createAgentSessionServices({ cwd });
+  const model = services.modelRuntime.getModel(providerId, modelId);
+  assert.ok(model, 'Active Pi model descriptor is available to the test host');
+  const auth = await services.modelRuntime.getAuth(model);
+  const registered = services.modelRuntime.getRegisteredProviderConfig(providerId);
+  const configuredReference = registered?.apiKey;
+  const referencePattern = /^\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)$/;
+  const authStatus = services.modelRuntime.getProviderAuthStatus(providerId);
+  const envName = authStatus.source === 'environment'
+    ? authStatus.label?.split(/[ ,]+/)
+      .find((name) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) && process.env[name])
+    : undefined;
+  const apiKey = configuredReference && referencePattern.test(configuredReference)
+    ? configuredReference
+    : envName
+      ? `$${envName}`
+      : auth?.auth.apiKey;
+
+  return {
+    model: modelSelector,
+    piModels: {
+      providers: {
+        [providerId]: {
+          baseUrl: auth?.auth.baseUrl ?? model.baseUrl,
+          api: model.api,
+          ...(apiKey ? { apiKey } : {}),
+          models: [{
+            id: model.id,
+            name: model.name,
+            reasoning: model.reasoning,
+            contextWindow: model.contextWindow,
+            maxTokens: model.maxTokens,
+          }],
+        },
+      },
+    },
+  };
+}
+
 test('AC7: Native production default is preserved for Pi when OAR opt-in is not active', () => {
   const previousEnv = process.env['SPROUT_USE_OAR_ENGINE'];
   try {
@@ -94,11 +153,8 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
     return;
   }
 
-  // Resolve active Pi model from local installation
-  const probeSession = await piRuntime.session(installation, { cwd: process.cwd() });
-  const liveModel = probeSession.model?.().value;
-  await probeSession.dispose();
-  assert.ok(typeof liveModel === 'string' && liveModel.length > 0, 'Live Pi model resolved');
+  const approved = await explicitLivePiModel(installation, process.cwd());
+  const liveModel = approved.model;
   const liveEffort = 'low';
 
   const directory = mkdtempSync(join(tmpdir(), 'sprout-oar-pi-live-'));
@@ -113,6 +169,7 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
 
   const realAdapter = new OarEngineAdapter({
     runtimeId: 'pi',
+    piModels: approved.piModels,
   });
 
   const observedStart = realAdapter.startSession.bind(realAdapter);
@@ -338,16 +395,19 @@ test('AC2 & AC4: Bounded live macOS Pi execution discovers and invokes controlle
     return;
   }
 
+  const approved = await explicitLivePiModel(installation, process.cwd());
   let readInvoked = false;
   let invokedPath = '';
 
   const adapter = new OarEngineAdapter({
     runtimeId: 'pi',
+    piModels: approved.piModels,
   });
 
   const session = await adapter.startSession({
     agentId: 'scout',
     workingDirectory: process.cwd(),
+    model: approved.model,
     remoteWorkspace: {
       binding: {
         projectId: 'live-proj-pi',
@@ -426,15 +486,18 @@ test('AC2 & AC4: Bounded live macOS Pi execution enforces binding-fence refusal 
     return;
   }
 
+  const approved = await explicitLivePiModel(installation, process.cwd());
   let readInvoked = false;
 
   const adapter = new OarEngineAdapter({
     runtimeId: 'pi',
+    piModels: approved.piModels,
   });
 
   const session = await adapter.startSession({
     agentId: 'scout',
     workingDirectory: process.cwd(),
+    model: approved.model,
     remoteWorkspace: {
       binding: {
         projectId: 'live-proj-pi-stale',

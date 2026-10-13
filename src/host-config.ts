@@ -115,8 +115,6 @@ export interface WorkerConfiguration {
   readonly environmentPlatform: string | undefined;
   /** Where the Pi engine keeps its sessions, when the host overrides the default. */
   readonly piSessionDirectory: string | undefined;
-  /** Host-approved Pi model/provider configuration for controlled OAR Pi sessions. */
-  readonly piModels?: Readonly<Record<string, unknown>>;
   /** Path the worker writes its readiness address to, when a carrier needs a file. */
   readonly readyFile: string | undefined;
   /** Explicit engine binary overrides, keyed by engine command (`SPROUT_<ENGINE>_BIN`). */
@@ -239,17 +237,6 @@ export function parseWorkerConfiguration(
       join(defaults.workingDirectory, '.sprout-workspaces'),
     environmentPlatform: environment['SPROUT_ENV_PLATFORM'],
     piSessionDirectory: environment['SPROUT_PI_SESSION_DIR'],
-    ...(environment['SPROUT_PI_MODELS']
-      ? {
-          piModels: (() => {
-            try {
-              return JSON.parse(environment['SPROUT_PI_MODELS']!);
-            } catch {
-              return undefined;
-            }
-          })(),
-        }
-      : {}),
     readyFile: environment['SPROUT_READY_FILE'],
     engineBinaries: engineBinaryOverrides(environment),
     enrollment: workerEnrollmentTarget(environment),
