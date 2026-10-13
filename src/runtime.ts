@@ -1494,6 +1494,22 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       },
       store: stores.collaboration,
       runs: orchestrator,
+      ...(environmentSource === 'enrollment' && executionStrategy.mode === 'environment-hosted' ? {
+        preflightRun: async (agentId: string, projectId: string) => {
+          const instanceIds = projects.get(projectId)?.availableEnvironmentInstanceIds ?? [];
+          const connected = instanceIds.filter((instanceId) => workerGateway.liveFor(instanceId) !== undefined);
+          // Keep the established disconnected failure and bounded reconnect retry path.
+          if (connected.length === 0) return { kind: 'unavailable' as const };
+          for (const environmentInstanceId of connected) {
+            const admission = await orchestrator.evaluateOptionAdmission(agentId, environmentInstanceId);
+            if (admission.ok) return { kind: 'ready' as const, environmentInstanceId };
+          }
+          return {
+            kind: 'failed' as const,
+            reason: `No connected Environment can admit work for agent ${agentId}; check Worker readiness and the Project's Environment access.`,
+          };
+        },
+      } : {}),
       ...(usageRoutingModel !== undefined ? { routingModel: usageRoutingModel } : {}),
       onRoutingAttempt: async (attempt, projectId) => {
         const telemetry = usageRoutingModel?.takeTelemetry(attempt.id);

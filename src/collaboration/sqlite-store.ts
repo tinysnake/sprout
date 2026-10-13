@@ -668,7 +668,20 @@ export class SqliteCollaborationStore implements CollaborationStore {
     readonly observation: WakeObservation;
     readonly now: number;
   }): Promise<void> {
-    this.#insertObservation(input.inputId, input.observation, input.now);
+    this.#db.exec('BEGIN');
+    try {
+      if (input.observation.status === 'failed') {
+        this.#db.prepare(
+          `UPDATE collaboration_wake_requests SET status = 'failed', detail = ?
+           WHERE input_id = ? AND agent_id = ? AND status = 'pending'`,
+        ).run(input.observation.detail, input.inputId, input.observation.agentId);
+      }
+      this.#insertObservation(input.inputId, input.observation, input.now);
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   async listObservations(inputId: string): Promise<readonly WakeObservation[]> {

@@ -41,6 +41,8 @@ function build(options: {
   turns: readonly ScriptedTurn[];
   /** Fixture Project lifecycle, projected into scope admission state. */
   statusOf?: (projectId: string) => 'active' | 'archived';
+  preflightRun?: (agentId: string, projectId: string) => Promise<import('./coordinator.ts').RunAdmissionPreflight>;
+  runAdmitter?: RunAdmitter;
 }) {
   const engine = new ScriptedEngineAdapter({ turns: options.turns });
   const pool = new EnvironmentPool({ definitions: [definition], instances: [instance] });
@@ -68,7 +70,8 @@ function build(options: {
   const coordinator = new CollaborationCoordinator({
     scopes: scopes.scopes,
     store,
-    runs: orchestrator,
+    runs: options.runAdmitter ?? orchestrator,
+    ...(options.preflightRun !== undefined ? { preflightRun: options.preflightRun } : {}),
   });
   return { coordinator, store, engine, orchestrator, scopes };
 }
@@ -99,6 +102,74 @@ test('origin-filtered event pages scan sparse history and resume at the matching
   assert.equal(older?.hasOlder, false);
   assert.equal(await coordinator.listEventsPage({ projectId: project.id, originScopeId: 'direct', limit: 2, before: 'unknown' }), undefined);
   assert.equal((await coordinator.listEvents(project.id)).length, count, 'unpaged Feed/audit reads retain all events');
+});
+
+test('a connected but unready pre-run admission is terminal, visible, and never retried after readiness changes', async () => {
+  let ready = false;
+  const { coordinator, orchestrator, scopes } = build({
+    turns: [completedTurn('must not run')],
+    preflightRun: async (agentId, projectId) => {
+      assert.equal(agentId, 'scout');
+      assert.equal(projectId, project.id);
+      return ready
+        ? { kind: 'ready', environmentInstanceId: instance.id }
+        : { kind: 'failed', reason: 'No connected Environment can admit work; check Worker readiness.' };
+    },
+  });
+  const scopeId = await directScope(scopes);
+  const first = await coordinator.deliver({
+    scopeId, author: { id: 'human-lead', kind: 'human' }, body: 'please run',
+    deliveryKey: 'pre-run-failure', awaitReply: true,
+  });
+  assert.deepEqual(first.admittedRunIds, []);
+  assert.equal(first.wakes[0]?.status, 'failed');
+  assert.equal(first.wakes[0]?.detail, 'No connected Environment can admit work; check Worker readiness.');
+  assert.equal((await orchestrator.list()).length, 0);
+  const event = (await coordinator.listEvents(project.id)).find((item) => item.kind === 'wake-admission-failure');
+  assert.ok(event, 'the existing Project event projection exposes the pre-run failure');
+  assert.equal(event.disposition, 'informational');
+  assert.match(event.detail ?? '', /Worker readiness/);
+  assert.deepEqual(event.originScopeIds, [scopeId]);
+
+  ready = true;
+  const duplicate = await coordinator.deliver({
+    scopeId, author: { id: 'human-lead', kind: 'human' }, body: 'please run',
+    deliveryKey: 'pre-run-failure', awaitReply: true,
+  });
+  assert.equal(duplicate.duplicate, true);
+  assert.equal(duplicate.wakes[0]?.status, 'failed');
+  assert.deepEqual(duplicate.admittedRunIds, []);
+  assert.equal((await orchestrator.list()).length, 0, 'terminal failure is not implicitly retried');
+  assert.equal((await coordinator.listEvents(project.id)).filter((item) => item.kind === 'wake-admission-failure').length, 1);
+});
+
+test('a multi-instance Project submits only to the instance selected by successful preflight', async () => {
+  let submittedPreference: { readonly kind: 'instance'; readonly id: string } | undefined;
+  const runAdmitter: RunAdmitter = {
+    async submit(request) {
+      submittedPreference = request.environmentPreference;
+      return { id: 'pinned-run' };
+    },
+    async waitFor(runId) {
+      return {
+        id: runId, agentId: 'scout', prompt: '', environmentInstanceId: 'instance-ready',
+        status: 'completed', events: [], createdAt: 1,
+        result: { status: 'completed', text: 'Pinned to the ready instance.' },
+      };
+    },
+  };
+  const { coordinator, scopes } = build({
+    turns: [],
+    runAdmitter,
+    preflightRun: async () => ({ kind: 'ready', environmentInstanceId: 'instance-ready' }),
+  });
+  const scopeId = await directScope(scopes);
+  const result = await coordinator.deliver({
+    scopeId, author: { id: 'human-lead', kind: 'human' }, body: 'use ready worker',
+    deliveryKey: 'multi-instance-ready', awaitReply: true,
+  });
+  assert.deepEqual(result.admittedRunIds, ['pinned-run']);
+  assert.deepEqual(submittedPreference, { kind: 'instance', id: 'instance-ready' });
 });
 
 function completedTurn(text: string): ScriptedTurn {

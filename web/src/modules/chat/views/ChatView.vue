@@ -1101,7 +1101,7 @@ onUnmounted(() => { window.removeEventListener('resize', onResize); generation++
             </div>
             <p v-if="entry.kind === 'event'" class="text-[10px] text-[var(--text-muted)]">{{ entry.event.kind }} · {{ entry.event.disposition }}</p>
             <p class="mt-1 whitespace-pre-wrap break-words leading-relaxed text-[var(--text-primary)]">{{ entry.kind === 'message' ? entry.message.body : entry.event.summary }}</p>
-            <p v-if="entry.kind === 'event' && (entry.event.kind === 'agent-run-failure' || entry.event.kind === 'agent-run-interruption')" class="mt-1 whitespace-pre-wrap break-words" :class="entry.event.kind === 'agent-run-failure' ? 'text-[var(--red-action)]' : 'text-[var(--text-secondary)]'">{{ entry.event.detail ?? (entry.event.kind === 'agent-run-failure' ? 'No error outcome was recorded.' : 'The interruption outcome is unavailable.') }}</p>
+            <p v-if="entry.kind === 'event' && entry.event.detail" class="mt-1 whitespace-pre-wrap break-words" :class="entry.event.kind === 'agent-run-failure' ? 'text-[var(--red-action)]' : 'text-[var(--text-secondary)]'">{{ entry.event.detail }}</p>
           </div>
           </template>
           </div>
