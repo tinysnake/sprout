@@ -30,6 +30,7 @@ export type RunnerMessage =
   | {
       readonly kind: 'event';
       readonly event: Event;
+      readonly activationId?: string | undefined;
     }
   | {
       readonly kind: 'prompt_accepted';

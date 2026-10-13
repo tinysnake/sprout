@@ -29,6 +29,7 @@ export const OAR_PACKAGE_VERSION = '0.59.1';
 /** Verified runtime facts; registration does not grant Host-run authority. */
 export const OAR_RUNTIME_REGISTRATIONS = {
   codex: { finalAnswer: 'turn-text', standingInstructions: 'out-of-band' },
+  pi: { finalAnswer: 'turn-text', standingInstructions: 'out-of-band' },
   claude: {
     finalAnswer: 'last-message',
     standingInstructions: 'out-of-band',
@@ -59,13 +60,17 @@ export interface OarRunnerProcess {
 }
 
 export interface OarAdapterOptions {
-  /** The OAR runtime identifier (e.g. 'codex', 'claude'). */
+  /** The OAR runtime identifier (e.g. 'codex', 'claude', 'pi'). */
   readonly runtimeId: string;
   /** Host-selected executable, passed as data rather than a process-wide override. */
   readonly binaryPath?: string;
   readonly capabilities?: Partial<EngineCapabilities>;
   /** Optional Codex sandbox posture ('read-only' vs 'danger-full-access'). */
   readonly sandbox?: CodexSandboxMode;
+  /** Optional Pi session directory (checked for bounded compatibility refusal). */
+  readonly sessionDirectory?: string;
+  /** Optional Pi agent directory (maps to OAR_PI_AGENT_DIR in runner). */
+  readonly agentDirectory?: string;
   /** Injectable process spawner for tests or customized environments. */
   readonly spawnProcess?: (
     command: string,
@@ -114,11 +119,21 @@ export class OarEngineAdapter implements EngineAdapter {
       throw new EngineStartError('OAR Claude Host-run authority is unproved; a validated host isolation policy is required');
     }
 
+    if (this.#options.runtimeId === 'pi' && this.#options.sessionDirectory !== undefined) {
+      const message =
+        `OAR Pi adapter does not support custom session directory (${this.#options.sessionDirectory}); ` +
+        `use native Pi adapter to preserve configured session storage location`;
+      if (request.resumeSessionKey) {
+        throw new EngineResumeRefusedError(request.resumeSessionKey, message);
+      }
+      throw new EngineStartError(message);
+    }
+
     // Build SessionOptions
     const sessionOptions: SessionOptions = {
       ...(this.id === 'claude' ? { disallowedTools: [...OAR_CLAUDE_DISALLOWED_TOOLS] } : {}),
       cwd: request.workingDirectory,
-      ...(request.projectWorkspacePath !== undefined
+      ...(request.projectWorkspacePath !== undefined && this.#options.runtimeId !== 'pi'
         ? { additionalDirectories: [request.projectWorkspacePath] }
         : {}),
       ...(request.instructions !== undefined
@@ -148,6 +163,7 @@ export class OarEngineAdapter implements EngineAdapter {
       policy = prepareOarRuntimePolicy(this.id, request.workingDirectory, {
         ...(mcpBridge ? { approvedMcp: mcpBridge.mcpServer } : {}),
         ...(this.#options.piModels ? { models: this.#options.piModels } : {}),
+        ...(request.model ? { targetModel: request.model } : {}),
       });
       if (policy) (sessionOptions as { cwd: string }).cwd = policy.descriptor.cwd;
     } catch (error) {
@@ -167,6 +183,7 @@ export class OarEngineAdapter implements EngineAdapter {
             ...process.env,
             ...(request.sessionEnvironment ?? {}),
             ...(this.#options.sandbox ? { OAR_CODEX_SANDBOX: this.#options.sandbox } : {}),
+            ...(this.#options.agentDirectory ? { OAR_PI_AGENT_DIR: this.#options.agentDirectory } : {}),
           },
           detached: true,
           stdio: ['pipe', 'pipe', 'pipe'],
@@ -177,6 +194,7 @@ export class OarEngineAdapter implements EngineAdapter {
             ...process.env,
             ...(request.sessionEnvironment ?? {}),
             ...(this.#options.sandbox ? { OAR_CODEX_SANDBOX: this.#options.sandbox } : {}),
+            ...(this.#options.agentDirectory ? { OAR_PI_AGENT_DIR: this.#options.agentDirectory } : {}),
           },
           detached: true,
           stdio: ['pipe', 'pipe', 'pipe'],
@@ -266,7 +284,9 @@ export class OarEngineAdapter implements EngineAdapter {
                       sanitized.includes('SessionNotFoundError') ||
                       sanitized.includes('session not found') ||
                       sanitized.includes('unknown thread') ||
-                      sanitized.includes('resume refused'))
+                      sanitized.includes('resume refused') ||
+                      /\bsession\b.*\bnot found\b/i.test(sanitized) ||
+                      sanitized.includes('no session file'))
                   ) {
                     failStart(new EngineResumeRefusedError(request.resumeSessionKey, sanitized));
                   } else {
@@ -478,6 +498,10 @@ export class OarEngineSession implements EngineSession {
       }
 
       case 'event': {
+        if (turn && msg.activationId !== undefined && msg.activationId !== turn.activationId) {
+          break;
+        }
+
         const ev = msg.event;
         const isRoot = (!ev.agentPath || ev.agentPath.length === 0) && ev.sessionId === this.sessionId;
 
@@ -491,6 +515,9 @@ export class OarEngineSession implements EngineSession {
               break;
             }
             if (boundSpanId === undefined && ev.spanId !== undefined) {
+              if (this.#runtimeId === 'pi') {
+                break;
+              }
               turn.setSpanId(ev.spanId);
             }
           }
@@ -553,7 +580,7 @@ export class OarEngineSession implements EngineSession {
             inputTokens: inputDelta,
             outputTokens: outputDelta,
             ...(usage.total.reasoning !== undefined
-              ? { reasoningTokens: Math.max(0, usage.total.reasoning - (this.#baselineUsage.reasoning ?? 0)) }
+              ? { reasoningOutputTokens: Math.max(0, usage.total.reasoning - (this.#baselineUsage.reasoning ?? 0)) }
               : {}),
             ...(usage.total.cacheRead !== undefined
               ? { cachedInputTokens: Math.max(0, usage.total.cacheRead - (this.#baselineUsage.cacheRead ?? 0)) }

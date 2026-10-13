@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import type { EngineAdapter } from '../engine/port.ts';
 import { CodexEngineAdapter, type CodexSandboxMode } from '../engine/codex.ts';
 import { OarEngineAdapter } from '../engine/oar.ts';
+import { resolveHostApprovedPiModels } from '../engine/oar-runtime-policy.ts';
 import { PiEngineAdapter } from '../engine/pi.ts';
 import { AgyEngineAdapter } from '../engine/agy.ts';
 import { OpenCodeEngineAdapter } from '../engine/opencode.ts';
@@ -32,7 +33,7 @@ import type { WorkerConfiguration } from '../host-config.ts';
 export interface EngineHostFacts {
   readonly configuration: Pick<
     WorkerConfiguration,
-    'environmentPlatform' | 'piSessionDirectory' | 'engineBinaries'
+    'environmentPlatform' | 'piSessionDirectory' | 'engineBinaries' | 'piModels'
   >;
   readonly platform: NodeJS.Platform;
   /**
@@ -66,6 +67,8 @@ export interface PiEngineConfiguration {
   readonly binaryPath: string;
   /** Keeps Sprout's sessions out of the machine-local default store. */
   readonly sessionDirectory?: string;
+  /** Host-owned provider configuration for controlled OAR Pi sessions. */
+  readonly models?: Readonly<Record<string, unknown>>;
 }
 
 export interface AgyEngineConfiguration {
@@ -136,13 +139,24 @@ const realFactories: EngineAdapterFactories = {
       sandbox: configuration.sandbox,
     });
   },
-  pi: (configuration) =>
-    new PiEngineAdapter({
+  pi: (configuration) => {
+    if (process.env['SPROUT_USE_OAR_ENGINE'] === 'pi' || process.env['SPROUT_USE_OAR_ENGINE'] === 'all') {
+      const models = configuration.models ?? resolveHostApprovedPiModels();
+      return new OarEngineAdapter({
+        runtimeId: 'pi',
+        ...(configuration.sessionDirectory !== undefined
+          ? { sessionDirectory: configuration.sessionDirectory }
+          : {}),
+        ...(models !== undefined ? { piModels: models } : {}),
+      });
+    }
+    return new PiEngineAdapter({
       binaryPath: configuration.binaryPath,
       ...(configuration.sessionDirectory !== undefined
         ? { sessionDirectory: configuration.sessionDirectory }
         : {}),
-    }),
+    });
+  },
   agy: (configuration) =>
     new AgyEngineAdapter({
       binaryPath: configuration.binaryPath,
@@ -179,10 +193,12 @@ export function describeEnvironmentWorkerEngines(
   const piBinary = resolveEngineBinary('pi', facts, { preferWindowsExecutable: true });
   if (piBinary !== undefined) {
     const sessionDirectory = configuration.piSessionDirectory;
+    const models = configuration.piModels;
     configurations.push({
       engine: 'pi',
       binaryPath: piBinary,
       ...(sessionDirectory !== undefined ? { sessionDirectory } : {}),
+      ...(models !== undefined ? { models } : {}),
     });
   }
 

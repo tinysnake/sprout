@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { PassThrough } from 'node:stream';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -189,6 +189,421 @@ test('AC2: Resume refusal error is properly classified so core can retry from a 
       assert.equal(err.sessionKey, 'stale-thread-1');
       return true;
     },
+  );
+});
+
+test('AC1 & AC2: Pi adapter maps cwd, instructions, model, effort, and resume correctly', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-oar-pi-test-'));
+  const canonicalDirectory = realpathSync(directory);
+  let startedCommand: RunnerCommand | undefined;
+  const runner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      startedCommand = cmd;
+      r.send({ kind: 'ready', sessionId: 'sess-pi-123', engineSessionKey: 'native-pi-key-1' });
+    }
+  });
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'pi',
+    spawnProcess: () => runner,
+  });
+
+  try {
+    const session = await adapter.startSession({
+      agentId: 'scout',
+      workingDirectory: directory,
+      projectWorkspacePath: 'src/sub',
+      instructions: 'Always use strict typing.',
+      model: 'openai-codex/gpt-6.1-sol',
+      effort: 'low',
+      resumeSessionKey: 'prior-pi-session-99',
+    });
+
+    assert.equal(session.sessionId, 'sess-pi-123');
+    assert.equal(session.engineSessionKey, 'native-pi-key-1');
+    assert.ok(startedCommand);
+    if (startedCommand.op === 'start') {
+      assert.equal(startedCommand.runtimeId, 'pi');
+      assert.equal(startedCommand.options.cwd, canonicalDirectory);
+      // Pi SDK configures one cwd; additionalDirectories is omitted
+      assert.equal(startedCommand.options.additionalDirectories, undefined);
+      assert.equal(startedCommand.options.appendSystemPrompt, 'Always use strict typing.');
+      assert.equal(startedCommand.options.model, 'openai-codex/gpt-6.1-sol');
+      assert.equal(startedCommand.options.effort, 'low');
+      assert.equal(startedCommand.options.resume, 'prior-pi-session-99');
+    }
+
+    await session.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('AC5: Configured custom sessionDirectory for Pi reports bounded compatibility refusal on session start', async () => {
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'pi',
+    sessionDirectory: '/var/sprout/pi-sessions',
+  });
+
+  await assert.rejects(
+    () => adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' }),
+    (err: Error) => {
+      assert.ok(err instanceof EngineStartError);
+      assert.match(err.message, /OAR Pi adapter does not support custom session directory/);
+      return true;
+    },
+  );
+});
+
+test('AC5: Configured custom sessionDirectory for Pi reports bounded compatibility refusal on session resume', async () => {
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'pi',
+    sessionDirectory: '/var/sprout/pi-sessions',
+  });
+
+  await assert.rejects(
+    () =>
+      adapter.startSession({
+        agentId: 'scout',
+        workingDirectory: '/tmp',
+        resumeSessionKey: 'prior-pi-key-1',
+      }),
+    (err: Error) => {
+      assert.ok(err instanceof EngineResumeRefusedError);
+      assert.equal(err.sessionKey, 'prior-pi-key-1');
+      assert.match(err.message, /OAR Pi adapter does not support custom session directory/);
+      return true;
+    },
+  );
+});
+
+test('AC5: Configured agentDirectory sets OAR_PI_AGENT_DIR in runner environment without mutating host Worker env', async () => {
+  let spawnedEnv: NodeJS.ProcessEnv | undefined;
+  const runner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      r.send({ kind: 'ready', sessionId: 'sess-agent-dir', engineSessionKey: 'sess-agent-dir' });
+    }
+  });
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'pi',
+    agentDirectory: '/var/sprout/custom-agent-dir',
+    spawnProcess: (_cmd, _args, options) => {
+      spawnedEnv = options.env;
+      return runner;
+    },
+  });
+
+  const hostBefore = process.env.OAR_PI_AGENT_DIR;
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  await session.close();
+
+  assert.equal(spawnedEnv?.OAR_PI_AGENT_DIR, '/var/sprout/custom-agent-dir');
+  assert.equal(process.env.OAR_PI_AGENT_DIR, hostBefore, 'Host Worker process.env must not be mutated');
+});
+
+test('AC5: Missing resume session for Pi classifies as EngineResumeRefusedError', async () => {
+  const runner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      r.send({
+        kind: 'error',
+        message:
+          'pi session missing-pi-session-99 not found: no session file with that id under /tmp/sessions (0 session(s) there for cwd /tmp)',
+      });
+    }
+  });
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'pi',
+    spawnProcess: () => runner,
+  });
+
+  await assert.rejects(
+    () =>
+      adapter.startSession({
+        agentId: 'scout',
+        workingDirectory: '/tmp',
+        resumeSessionKey: 'missing-pi-session-99',
+      }),
+    (err: Error) => {
+      assert.ok(err instanceof EngineResumeRefusedError);
+      assert.equal(err.sessionKey, 'missing-pi-session-99');
+      return true;
+    },
+  );
+});
+
+test('AC4: Concurrent Pi and Codex sessions run in isolated runner processes without cross-session env or auth mutation', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'oar-concurrent-test-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const scriptPath = join(dir, 'env-reporter-runner.mjs');
+  writeFileSync(
+    scriptPath,
+    `
+import { createInterface } from 'node:readline';
+
+const reportedEnv = {
+  SESSION_KIND: process.env.SESSION_KIND,
+  OAR_PI_AGENT_DIR: process.env.OAR_PI_AGENT_DIR,
+  OAR_CODEX_SANDBOX: process.env.OAR_CODEX_SANDBOX,
+};
+
+const rl = createInterface({ input: process.stdin });
+rl.on('line', (line) => {
+  const cmd = JSON.parse(line);
+  if (cmd.op === 'start') {
+    process.stdout.write(JSON.stringify({
+      kind: 'ready',
+      sessionId: 'sess-' + (process.env.SESSION_KIND ?? 'default'),
+      engineSessionKey: 'key-' + (process.env.SESSION_KIND ?? 'default'),
+    }) + '\\n');
+  } else if (cmd.op === 'prompt') {
+    process.stdout.write(JSON.stringify({
+      kind: 'event',
+      event: {
+        kind: 'text_delta',
+        text: JSON.stringify(reportedEnv),
+        sessionId: 'sess-' + (process.env.SESSION_KIND ?? 'default'),
+        agentPath: [],
+        seq: 1,
+        receivedAt: Date.now(),
+      },
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      kind: 'turn_ended',
+      outcome: { kind: 'completed' },
+    }) + '\\n');
+  } else if (cmd.op === 'dispose') {
+    process.exit(0);
+  }
+});
+`,
+  );
+
+  const piAgentDir = join(dir, 'pi-agent-isolate');
+  mkdirSync(piAgentDir);
+
+  const piAdapter = new OarEngineAdapter({
+    runtimeId: 'pi',
+    agentDirectory: piAgentDir,
+    runnerScriptPath: scriptPath,
+  });
+
+  const codexAdapter = new OarEngineAdapter({
+    runtimeId: 'codex',
+    sandbox: 'read-only',
+    runnerScriptPath: scriptPath,
+  });
+
+  // Start sessions concurrently in actual detached child processes
+  const [piSession, codexSession] = await Promise.all([
+    piAdapter.startSession({
+      agentId: 'scout',
+      workingDirectory: dir,
+      sessionEnvironment: { SESSION_KIND: 'pi-worker' },
+    }),
+    codexAdapter.startSession({
+      agentId: 'scout',
+      workingDirectory: dir,
+      sessionEnvironment: { SESSION_KIND: 'codex-worker' },
+    }),
+  ]);
+
+  // Run turns concurrently and receive child-reported environments
+  const [piTurn, codexTurn] = [piSession.run('Report Pi Env'), codexSession.run('Report Codex Env')];
+  const [piResult, codexResult] = await Promise.all([piTurn.completion, codexTurn.completion]);
+
+  assert.equal(piResult.status, 'completed');
+  assert.equal(codexResult.status, 'completed');
+
+  const piReported = JSON.parse(piResult.text);
+  const codexReported = JSON.parse(codexResult.text);
+
+  // Assert actual environment values observed inside the child processes
+  assert.equal(piReported.SESSION_KIND, 'pi-worker', 'Pi child observed its own session environment');
+  assert.equal(piReported.OAR_PI_AGENT_DIR, piAgentDir, 'Pi child observed its auth storage directory');
+  assert.equal(piReported.OAR_CODEX_SANDBOX, undefined, 'Codex sandbox must not exist in Pi child process');
+
+  assert.equal(codexReported.SESSION_KIND, 'codex-worker', 'Codex child observed its own session environment');
+  assert.equal(codexReported.OAR_CODEX_SANDBOX, 'read-only', 'Codex child observed its sandbox mode');
+  assert.equal(codexReported.OAR_PI_AGENT_DIR, undefined, 'Pi agent directory must not exist in Codex child process');
+
+  // Verify Host Worker environment was never mutated
+  assert.equal(process.env.SESSION_KIND, undefined, 'Host Worker process.env must not be mutated');
+  assert.equal(process.env.OAR_PI_AGENT_DIR, undefined, 'Host Worker process.env must not receive OAR_PI_AGENT_DIR');
+  assert.equal(process.env.OAR_CODEX_SANDBOX, undefined, 'Host Worker process.env must not receive OAR_CODEX_SANDBOX');
+
+  // Bounded close of both real child processes
+  await piSession.close();
+  await codexSession.close();
+});
+
+test('AC4 (F3): Blocked runner startup triggers 25s startup deadline and cleans up child process', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'oar-startup-timeout-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const scriptPath = join(dir, 'blocked-runner.mjs');
+  writeFileSync(
+    scriptPath,
+    `
+// Blocks startup by never responding to commands
+setInterval(() => {}, 10_000);
+`,
+  );
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'pi',
+    runnerScriptPath: scriptPath,
+  });
+
+  const startedAt = Date.now();
+  await assert.rejects(
+    adapter.startSession({
+      agentId: 'scout',
+      workingDirectory: dir,
+    }),
+    (err: any) => {
+      assert.ok(err instanceof EngineStartError);
+      assert.match(err.message, /within timeout/i);
+      return true;
+    },
+  );
+  const elapsedMs = Date.now() - startedAt;
+
+  // The deadline in oar.ts is 25_000 ms; assert measured bound
+  assert.ok(
+    elapsedMs >= 24_500 && elapsedMs <= 28_000,
+    `Startup timeout fired within expected ~25s bound: ${elapsedMs}ms`,
+  );
+});
+
+test('AC4 (F3): Non-cooperative interrupt escalates SIGINT -> SIGTERM -> SIGKILL with measured signal sequence and timing', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'oar-abort-escalate-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const logFile = join(dir, 'signals.log');
+  const scriptPath = join(dir, 'stubborn-runner.mjs');
+  writeFileSync(
+    scriptPath,
+    `
+import { createInterface } from 'node:readline';
+import { appendFileSync } from 'node:fs';
+
+const logFile = process.env.SIGNAL_LOG_FILE;
+
+process.on('SIGINT', () => {
+  appendFileSync(logFile, 'SIGINT\\n');
+});
+
+process.on('SIGTERM', () => {
+  appendFileSync(logFile, 'SIGTERM\\n');
+});
+
+const rl = createInterface({ input: process.stdin });
+rl.on('line', (line) => {
+  const cmd = JSON.parse(line);
+  if (cmd.op === 'start') {
+    process.stdout.write(JSON.stringify({ kind: 'ready', sessionId: 'sess-esc', engineSessionKey: 'sess-esc' }) + '\\n');
+  } else if (cmd.op === 'prompt') {
+    process.stdout.write(JSON.stringify({ kind: 'prompt_accepted', activationId: cmd.activationId, seq: 1 }) + '\\n');
+    process.stdout.write(JSON.stringify({
+      kind: 'event',
+      event: { kind: 'text_delta', text: 'Working...', sessionId: 'sess-esc', agentPath: [], seq: 1, receivedAt: Date.now() },
+    }) + '\\n');
+  } else if (cmd.op === 'abort') {
+    appendFileSync(logFile, 'OP_ABORT_RECEIVED\\n');
+    // Intentionally does NOT complete turn or exit, driving escalation
+  }
+});
+`,
+  );
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'codex',
+    runnerScriptPath: scriptPath,
+  });
+
+  const session = await adapter.startSession({
+    agentId: 'scout',
+    workingDirectory: dir,
+    sessionEnvironment: { SIGNAL_LOG_FILE: logFile },
+  });
+
+  const turn = session.run('Drive interrupt escalation');
+  // Wait briefly for prompt to be accepted and work started
+  await new Promise((resolve) => setTimeout(resolve, 200));
+
+  const interruptStartedAt = Date.now();
+  const interrupted = await session.interrupt();
+  assert.equal(interrupted, true, 'interrupt returned true');
+
+  const result = await turn.completion;
+  const elapsedMs = Date.now() - interruptStartedAt;
+
+  assert.equal(result.status, 'interrupted', 'Turn settled as interrupted upon escalation termination');
+
+  // Escalation timers in oar.ts:
+  // 4,000ms -> SIGINT, then 2,000ms -> SIGTERM, then 2,000ms -> SIGKILL
+  // Total elapsed should be around 8,000 ms (>= 7,800ms and <= 11_000ms)
+  assert.ok(
+    elapsedMs >= 7_800 && elapsedMs <= 11_000,
+    `Escalation elapsed within expected ~8s bound: ${elapsedMs}ms`,
+  );
+
+  // Assert the child-observed signal order from real process signals
+  assert.ok(existsSync(logFile), 'Signal log exists');
+  const logged = readFileSync(logFile, 'utf8').trim().split('\n');
+  assert.deepEqual(
+    logged,
+    ['OP_ABORT_RECEIVED', 'SIGINT', 'SIGTERM'],
+    'Observed exact signal escalation sequence: op:abort -> SIGINT -> SIGTERM (followed by SIGKILL exit)',
+  );
+
+  await session.close();
+});
+
+test('AC4 (F3): Bounded close of non-cooperative child process terminates via SIGKILL within 1-2.5s', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'oar-close-bound-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const scriptPath = join(dir, 'stubborn-close-runner.mjs');
+  writeFileSync(
+    scriptPath,
+    `
+import { createInterface } from 'node:readline';
+
+const rl = createInterface({ input: process.stdin });
+rl.on('line', (line) => {
+  const cmd = JSON.parse(line);
+  if (cmd.op === 'start') {
+    process.stdout.write(JSON.stringify({ kind: 'ready', sessionId: 'sess-close', engineSessionKey: 'sess-close' }) + '\\n');
+  } else if (cmd.op === 'dispose') {
+    // Intentionally ignores dispose
+  }
+});
+`,
+  );
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'pi',
+    runnerScriptPath: scriptPath,
+  });
+
+  const session = await adapter.startSession({
+    agentId: 'scout',
+    workingDirectory: dir,
+  });
+
+  const closeStartedAt = Date.now();
+  await session.close();
+  const elapsedMs = Date.now() - closeStartedAt;
+
+  // disposeTimer in oar.ts is 1_000 ms (sends SIGKILL)
+  // Process should terminate shortly after 1_000 ms, well before the 2_500 ms killTimer
+  assert.ok(
+    elapsedMs >= 950 && elapsedMs <= 2_400,
+    `Close bounded between 1s and 2.4s (terminated via SIGKILL): ${elapsedMs}ms`,
   );
 });
 
@@ -678,14 +1093,14 @@ test('AC7: Usage attribution preserves deltas across multiple turns and redacts 
   const result1 = await turn1.completion;
   assert.equal(result1.status, 'completed');
   assert.deepEqual(result1.tokenUsage, { promptTokens: 100, completionTokens: 20, totalTokens: 120 });
-  assert.deepEqual(result1.detailedTokens, { inputTokens: 100, outputTokens: 20, reasoningTokens: 5, cachedInputTokens: 10 });
+  assert.deepEqual(result1.detailedTokens, { inputTokens: 100, outputTokens: 20, reasoningOutputTokens: 5, cachedInputTokens: 10 });
 
   // Turn 2: verify delta attribution, not cumulative sum
   const turn2 = session.run('Second');
   const result2 = await turn2.completion;
   assert.equal(result2.status, 'completed');
   assert.deepEqual(result2.tokenUsage, { promptTokens: 150, completionTokens: 50, totalTokens: 200 });
-  assert.deepEqual(result2.detailedTokens, { inputTokens: 150, outputTokens: 50, reasoningTokens: 10, cachedInputTokens: 20 });
+  assert.deepEqual(result2.detailedTokens, { inputTokens: 150, outputTokens: 50, reasoningOutputTokens: 10, cachedInputTokens: 20 });
 
   await session.close();
 });
@@ -1080,4 +1495,684 @@ test('Authority boundary (F8): MCP bridge authenticates caller, rejects unauthen
   } finally {
     await bridge.close();
   }
+});
+
+// --- Pi Conformance Tests (AC6) ---
+
+test('AC3 & AC4 (pi): Root turn completion persists correct terminal answer and filters commentary/reasoning/child events', async () => {
+  const runner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      r.send({ kind: 'ready', sessionId: 'sess-root-pi', engineSessionKey: 'sess-root-pi' });
+    } else if (cmd.op === 'prompt') {
+      // 1. Tool call
+      r.send({
+        kind: 'event',
+        event: {
+          kind: 'tool_call_started',
+          callId: 'call-1',
+          tool: 'read',
+          input: '{"path":"file.txt"}',
+          sessionId: 'sess-root-pi',
+          agentPath: [],
+          seq: 1,
+          receivedAt: Date.now(),
+        },
+      });
+      // 2. Tool output
+      r.send({
+        kind: 'event',
+        event: {
+          kind: 'tool_call_ended',
+          callId: 'call-1',
+          content: [{ type: 'text', text: 'file content' }],
+          result: 'ok',
+          sessionId: 'sess-root-pi',
+          agentPath: [],
+          seq: 2,
+          receivedAt: Date.now(),
+        },
+      });
+      // 3. Private reasoning (MUST BE EXCLUDED)
+      r.send({
+        kind: 'event',
+        event: {
+          kind: 'reasoning',
+          content: { kind: 'text', text: 'internal secret thoughts' },
+          sessionId: 'sess-root-pi',
+          agentPath: [],
+          seq: 3,
+          receivedAt: Date.now(),
+        },
+      });
+      // 4. Subagent / child turn text (agentPath: ['subagent'], MUST BE EXCLUDED from root reply)
+      r.send({
+        kind: 'event',
+        event: {
+          kind: 'text_delta',
+          text: 'child subagent commentary',
+          sessionId: 'sess-root-pi',
+          agentPath: ['subagent'],
+          seq: 4,
+          receivedAt: Date.now(),
+        },
+      });
+      // 5. Root assistant response text
+      r.send({
+        kind: 'event',
+        event: {
+          kind: 'text_delta',
+          text: 'The terminal answer.',
+          sessionId: 'sess-root-pi',
+          agentPath: [],
+          seq: 5,
+          receivedAt: Date.now(),
+        },
+      });
+      // 6. Root turn ended
+      r.send({
+        kind: 'turn_ended',
+        outcome: { kind: 'completed' },
+        usage: {
+          total: { input: 120, output: 40, reasoning: 10, cacheRead: 20, cacheWrite: 0 },
+        },
+      });
+      // 7. Late runner event after turn ended (MUST BE IGNORED)
+      r.send({
+        kind: 'event',
+        event: {
+          kind: 'text_delta',
+          text: 'late leaked text',
+          sessionId: 'sess-root-pi',
+          agentPath: [],
+          seq: 6,
+          receivedAt: Date.now(),
+        },
+      });
+    }
+  });
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'pi',
+    spawnProcess: () => runner,
+  });
+
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const turn = session.run('Hello');
+
+  const observedEvents: any[] = [];
+  for await (const ev of turn.events) {
+    observedEvents.push(ev);
+  }
+
+  const result = await turn.completion;
+  assert.equal(result.status, 'completed');
+  assert.equal(result.text, 'The terminal answer.');
+  assert.equal(result.source, 'oar');
+
+  // Assert events streamed
+  assert.deepEqual(observedEvents, [
+    { type: 'tool-call', name: 'read', detail: '{"path":"<redacted-host>"}' },
+    { type: 'tool-output', text: 'file content' },
+    { type: 'message', text: 'The terminal answer.', final: false },
+  ]);
+
+  // Assert reasoning and child commentary never leaked into result or events
+  assert.ok(!observedEvents.some((e) => JSON.stringify(e).includes('internal secret thoughts')));
+  assert.ok(!observedEvents.some((e) => JSON.stringify(e).includes('child subagent commentary')));
+  assert.ok(!observedEvents.some((e) => JSON.stringify(e).includes('late leaked text')));
+  assert.ok(!result.text.includes('internal secret thoughts'));
+  assert.ok(!result.text.includes('child subagent commentary'));
+  assert.ok(!result.text.includes('late leaked text'));
+
+  // Assert truthful usage totals
+  assert.equal(result.tokenUsage?.promptTokens, 120);
+  assert.equal(result.tokenUsage?.completionTokens, 40);
+  assert.equal(result.tokenUsage?.totalTokens, 160);
+  assert.equal(result.detailedTokens?.reasoningOutputTokens, 10);
+  assert.equal(result.detailedTokens?.cachedInputTokens, 20);
+
+  await session.close();
+});
+
+test('AC5 (pi): Refused / busy prompt fails immediately without implicit queueing', async () => {
+  const runner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      r.send({ kind: 'ready', sessionId: 'sess-busy-pi', engineSessionKey: 'sess-busy-pi' });
+    } else if (cmd.op === 'prompt') {
+      r.send({ kind: 'prompt_rejected', code: 'busy', reason: 'Session is currently running another turn' });
+    }
+  });
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'pi',
+    spawnProcess: () => runner,
+  });
+
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const turn = session.run('Second prompt');
+
+  const result = await turn.completion;
+  assert.equal(result.status, 'failed');
+  assert.match(result.status === 'failed' ? result.message : '', /OAR prompt rejected \(busy\)/);
+
+  await session.close();
+});
+
+test('AC5 (pi): Empty successful output settles cleanly without hanging', async () => {
+  const runner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      r.send({ kind: 'ready', sessionId: 'sess-empty-pi', engineSessionKey: 'sess-empty-pi' });
+    } else if (cmd.op === 'prompt') {
+      // Completed with no text_delta
+      r.send({
+        kind: 'turn_ended',
+        outcome: { kind: 'completed' },
+      });
+    }
+  });
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'pi',
+    spawnProcess: () => runner,
+  });
+
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const turn = session.run('Silent turn');
+
+  const result = await turn.completion;
+  assert.equal(result.status, 'completed');
+  assert.equal(result.text, '');
+
+  await session.close();
+});
+
+test('AC5 (pi): Empty error output settles with sanitized failure text', async () => {
+  const runner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      r.send({ kind: 'ready', sessionId: 'sess-err-pi', engineSessionKey: 'sess-err-pi' });
+    } else if (cmd.op === 'prompt') {
+      r.send({
+        kind: 'turn_ended',
+        outcome: { kind: 'failed', failure: 'provider', reason: '' },
+      });
+    }
+  });
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'pi',
+    spawnProcess: () => runner,
+  });
+
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const turn = session.run('Failing turn');
+
+  const result = await turn.completion;
+  assert.equal(result.status, 'failed');
+  assert.equal(result.message, 'OAR turn failed');
+
+  await session.close();
+});
+
+test('AC5 (pi): Spawn or early-exit failure settles turn without hanging', async () => {
+  let activeRunner: FakeOarRunner | undefined;
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'pi',
+    spawnProcess: () => {
+      const r = new FakeOarRunner((cmd, runner) => {
+        if (cmd.op === 'start') {
+          runner.send({ kind: 'ready', sessionId: 'sess-exit-pi', engineSessionKey: 'sess-exit-pi' });
+        }
+      });
+      activeRunner = r;
+      return r;
+    },
+  });
+
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const turn = session.run('Early exit turn');
+
+  // Runner dies mid-turn
+  activeRunner?.exit(1);
+
+  const result = await turn.completion;
+  assert.equal(result.status, 'failed');
+  assert.match(result.status === 'failed' ? result.message : '', /OAR runner connection was lost/);
+
+  await session.close();
+});
+
+test('AC6 (pi): Bounded abort and close preserve uncertainty and settle turns as interrupted', async () => {
+  let abortReceived = false;
+  let disposeReceived = false;
+  const runner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      r.send({ kind: 'ready', sessionId: 'sess-int-pi', engineSessionKey: 'sess-int-pi' });
+    } else if (cmd.op === 'prompt') {
+      // Running indefinitely
+    } else if (cmd.op === 'abort') {
+      abortReceived = true;
+      r.send({ kind: 'abort_delivered' });
+      r.send({ kind: 'turn_ended', outcome: { kind: 'aborted' } });
+    } else if (cmd.op === 'dispose') {
+      disposeReceived = true;
+      r.send({ kind: 'disposed' });
+      r.exit(0);
+    }
+  });
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'pi',
+    spawnProcess: () => runner,
+  });
+
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const turn = session.run('Long run');
+
+  const interrupted = await session.interrupt();
+  assert.equal(interrupted, true);
+  assert.equal(abortReceived, true);
+
+  const result = await turn.completion;
+  assert.equal(result.status, 'interrupted');
+
+  await session.close();
+  assert.equal(disposeReceived, true);
+  assert.equal(runner.exitCode, 0);
+});
+
+test('AC5 (pi): Multiple events sharing a single record sequence are all processed without deduplication', async () => {
+  const runner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      r.send({ kind: 'ready', sessionId: 'sess-multi-seq-pi', engineSessionKey: 'sess-multi-seq-pi' });
+    } else if (cmd.op === 'prompt') {
+      // Frame containing multiple readings sharing seq 42
+      r.send({
+        kind: 'event',
+        event: {
+          kind: 'tool_call_ended',
+          callId: 'call-1',
+          content: [{ type: 'text', text: 'finished tool' }],
+          sessionId: 'sess-multi-seq-pi',
+          agentPath: [],
+          seq: 42,
+          receivedAt: 100,
+        },
+      });
+      r.send({
+        kind: 'event',
+        event: {
+          kind: 'text_delta',
+          text: 'shared seq text',
+          sessionId: 'sess-multi-seq-pi',
+          agentPath: [],
+          seq: 42,
+          receivedAt: 100,
+        },
+      });
+      r.send({
+        kind: 'turn_ended',
+        outcome: { kind: 'completed' },
+      });
+    }
+  });
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'pi',
+    spawnProcess: () => runner,
+  });
+
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const turn = session.run('Multi seq test');
+
+  const events: any[] = [];
+  for await (const ev of turn.events) {
+    events.push(ev);
+  }
+
+  const result = await turn.completion;
+  assert.equal(result.status, 'completed');
+  assert.equal(result.text, 'shared seq text');
+  assert.deepEqual(events, [
+    { type: 'tool-output', text: 'finished tool' },
+    { type: 'message', text: 'shared seq text', final: false },
+  ]);
+
+  await session.close();
+});
+
+test('AC2 & Substrate (pi): Remote workspace tools are exposed over MCP bridge to OAR Pi session', async () => {
+  let attachedMcpServers: readonly any[] | undefined;
+  const runner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      attachedMcpServers = cmd.options.mcpServers;
+      r.send({ kind: 'ready', sessionId: 'sess-mcp-pi', engineSessionKey: 'sess-mcp-pi' });
+    }
+  });
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'pi',
+    spawnProcess: () => runner,
+  });
+
+  const session = await adapter.startSession({
+    agentId: 'scout',
+    workingDirectory: '/tmp',
+    remoteWorkspace: {
+      binding: {
+        projectId: 'proj-pi-1',
+        environmentInstanceId: 'env-pi-1',
+        bindingId: 'bind-pi-1',
+        generation: 1,
+        connectionEpoch: 1,
+        workspaceId: 'ws-pi-1',
+      },
+      read: async (path) => ({
+        operationId: 'op-1',
+        projectId: 'proj-pi-1',
+        environmentInstanceId: 'env-pi-1',
+        bindingId: 'bind-pi-1',
+        generation: 1,
+        connectionEpoch: 1,
+        workspaceId: 'ws-pi-1',
+        operation: 'read',
+        status: 'completed',
+        content: `file content for ${path}`,
+      }),
+      search: async () => ({
+        operationId: 'op-2',
+        projectId: 'proj-pi-1',
+        environmentInstanceId: 'env-pi-1',
+        bindingId: 'bind-pi-1',
+        generation: 1,
+        connectionEpoch: 1,
+        workspaceId: 'ws-pi-1',
+        operation: 'search',
+        status: 'completed',
+      }),
+      inspect: async () => ({ status: 'completed' }),
+      cancel: async () => ({ accepted: true, status: 'cancelled' }),
+    },
+  });
+
+  assert.ok(attachedMcpServers);
+  assert.equal(attachedMcpServers.length, 1);
+  assert.equal(attachedMcpServers[0].name, 'sprout_workspace');
+  assert.equal(attachedMcpServers[0].type, 'http');
+  assert.ok(attachedMcpServers[0].headers?.authorization, 'MCP server must configure authorization header for OAR');
+
+  const authHeaders = {
+    'Content-Type': 'application/json',
+    authorization: attachedMcpServers[0].headers.authorization,
+  };
+
+  try {
+    const mcpUrl = attachedMcpServers[0].url;
+    const initRes = await fetch(mcpUrl, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }),
+    });
+    const initJson = (await initRes.json()) as any;
+    assert.equal(initJson.result?.serverInfo?.name, 'sprout_workspace');
+
+    const listRes = await fetch(mcpUrl, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }),
+    });
+    const listJson = (await listRes.json()) as any;
+    const toolNames = listJson.result?.tools?.map((t: any) => t.name);
+    assert.ok(toolNames.includes('read'));
+
+    const callRes = await fetch(mcpUrl, {
+      method: 'POST',
+      headers: authHeaders,
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: { name: 'read', arguments: { path: 'hello-pi.txt' } },
+      }),
+    });
+    const callJson = (await callRes.json()) as any;
+    assert.equal(callJson.result?.isError, false);
+    assert.ok(callJson.result?.content?.[0]?.text?.includes('file content for hello-pi.txt'));
+  } finally {
+    await session.close();
+  }
+});
+
+test('AC7 (pi): Usage attribution preserves deltas across multiple turns and redacts sensitive paths/credentials', async () => {
+  let turnNumber = 0;
+  const runner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      r.send({ kind: 'ready', sessionId: 'sess-usage-pi', engineSessionKey: 'sess-usage-pi' });
+    } else if (cmd.op === 'prompt') {
+      turnNumber++;
+      if (turnNumber === 1) {
+        r.send({
+          kind: 'event',
+          event: { kind: 'text_delta', text: 'turn 1 answer', sessionId: 'sess-usage-pi', agentPath: [], seq: 1, receivedAt: Date.now() },
+        });
+        r.send({
+          kind: 'turn_ended',
+          outcome: { kind: 'completed' },
+          usage: {
+            total: { input: 100, output: 20, reasoning: 5, cacheRead: 10, cacheWrite: 0 },
+          },
+        });
+      } else {
+        r.send({
+          kind: 'event',
+          event: { kind: 'text_delta', text: 'turn 2 answer', sessionId: 'sess-usage-pi', agentPath: [], seq: 2, receivedAt: Date.now() },
+        });
+        r.send({
+          kind: 'turn_ended',
+          outcome: { kind: 'completed' },
+          usage: {
+            total: { input: 250, output: 70, reasoning: 15, cacheRead: 30, cacheWrite: 0 },
+          },
+        });
+      }
+    }
+  });
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'pi',
+    spawnProcess: () => runner,
+  });
+
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+
+  // Turn 1
+  const turn1 = session.run('First');
+  const result1 = await turn1.completion;
+  assert.equal(result1.status, 'completed');
+  assert.deepEqual(result1.tokenUsage, { promptTokens: 100, completionTokens: 20, totalTokens: 120 });
+  assert.deepEqual(result1.detailedTokens, { inputTokens: 100, outputTokens: 20, reasoningOutputTokens: 5, cachedInputTokens: 10 });
+
+  // Turn 2: verify delta attribution, not cumulative sum
+  const turn2 = session.run('Second');
+  const result2 = await turn2.completion;
+  assert.equal(result2.status, 'completed');
+  assert.deepEqual(result2.tokenUsage, { promptTokens: 150, completionTokens: 50, totalTokens: 200 });
+  assert.deepEqual(result2.detailedTokens, { inputTokens: 150, outputTokens: 50, reasoningOutputTokens: 10, cachedInputTokens: 20 });
+
+  await session.close();
+});
+
+test('AC4 (F1) (pi): Background or stale root turn_ended during admitted prompt neither settles nor contributes text', async () => {
+  let promptCmd: any;
+  const runner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      r.send({ kind: 'ready', sessionId: 'sess-interleave-pi', engineSessionKey: 'sess-interleave-pi' });
+    } else if (cmd.op === 'prompt') {
+      promptCmd = cmd;
+      // 1. Runner accepts prompt with activationId
+      r.send({
+        kind: 'prompt_accepted',
+        activationId: cmd.activationId,
+        seq: 1,
+      });
+      // 2. Injected interleaving: background root text delta with different activationId/spanId
+      r.send({
+        kind: 'event',
+        event: {
+          kind: 'text_delta',
+          text: 'stale background text',
+          sessionId: 'sess-interleave-pi',
+          agentPath: [],
+          spanId: 'background-stale-span-99',
+          seq: 2,
+          receivedAt: Date.now(),
+        },
+      });
+      // 3. Injected interleaving: background root turn_ended with different activationId
+      r.send({
+        kind: 'turn_ended',
+        activationId: 'background-stale-activation-99',
+        outcome: { kind: 'completed' },
+      });
+    }
+  });
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'pi',
+    spawnProcess: () => runner,
+  });
+
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const turn = session.run('Prompt with background interference');
+
+  // Verify the turn is NOT settled by the background turn_ended
+  let settledPrematurely = false;
+  turn.completion.then(() => {
+    settledPrematurely = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(settledPrematurely, false, 'Admitted turn must not be settled by background root turn_ended');
+
+  // Now emit the real admitted turn events
+  runner.send({
+    kind: 'event',
+    event: {
+      kind: 'text_delta',
+      text: 'Admitted terminal answer.',
+      sessionId: 'sess-interleave-pi',
+      agentPath: [],
+      seq: 3,
+      receivedAt: Date.now(),
+    },
+  });
+  runner.send({
+    kind: 'turn_ended',
+    activationId: promptCmd.activationId,
+    outcome: { kind: 'completed' },
+  });
+
+  const result = await turn.completion;
+  assert.equal(result.status, 'completed');
+  assert.equal(result.text, 'Admitted terminal answer.');
+  assert.ok(!result.text.includes('stale background text'), 'Stale text must not be in reply');
+
+  await session.close();
+});
+
+test('AC7 (F5) (pi): Synthetic absolute paths and credentials in tool input and output are redacted from progress events', async () => {
+  const runner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      r.send({ kind: 'ready', sessionId: 'sess-privacy-pi', engineSessionKey: 'sess-privacy-pi' });
+    } else if (cmd.op === 'prompt') {
+      // 1. Tool call started containing host absolute path and bearer token
+      r.send({
+        kind: 'event',
+        event: {
+          kind: 'tool_call_started',
+          callId: 'call-priv-1',
+          tool: 'read',
+          input: '{"path":"/Users/user/secret-repo/config.json","token":"Bearer test-secret-token-token-12345"}',
+          sessionId: 'sess-privacy-pi',
+          agentPath: [],
+          seq: 1,
+          receivedAt: Date.now(),
+        },
+      });
+      // 2. Tool call ended containing Windows host path and secret auth key
+      r.send({
+        kind: 'event',
+        event: {
+          kind: 'tool_call_ended',
+          callId: 'call-priv-1',
+          content: [
+            {
+              type: 'text',
+              text: 'Error in C:\\Users\\user\\project: authorization token=test-auth-key-key-98765 failed',
+            },
+          ],
+          result: 'failed',
+          sessionId: 'sess-privacy-pi',
+          agentPath: [],
+          seq: 2,
+          receivedAt: Date.now(),
+        },
+      });
+      // 3. Root answer
+      r.send({
+        kind: 'event',
+        event: {
+          kind: 'text_delta',
+          text: 'Clean final reply.',
+          sessionId: 'sess-privacy-pi',
+          agentPath: [],
+          seq: 3,
+          receivedAt: Date.now(),
+        },
+      });
+      r.send({
+        kind: 'turn_ended',
+        outcome: { kind: 'completed' },
+      });
+    }
+  });
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'pi',
+    spawnProcess: () => runner,
+  });
+
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const turn = session.run('Privacy test');
+
+  const progressEvents: any[] = [];
+  for await (const ev of turn.events) {
+    progressEvents.push(ev);
+  }
+
+  const result = await turn.completion;
+  assert.equal(result.status, 'completed');
+
+  assert.equal(progressEvents.length, 3);
+  assert.equal(progressEvents[0]?.type, 'tool-call');
+  assert.match(progressEvents[0]?.detail ?? '', /<redacted-(?:path|credential)>/, 'Positive presence of redaction marker');
+  assert.ok(
+    !progressEvents[0]?.detail.includes('/Users/user/secret-repo'),
+    'Host path must be redacted from tool call detail',
+  );
+  assert.ok(
+    !progressEvents[0]?.detail.includes('test-secret-token-token-12345'),
+    'Bearer token must be redacted from tool call detail',
+  );
+
+  assert.equal(progressEvents[1]?.type, 'tool-output');
+  assert.match(progressEvents[1]?.text ?? '', /<redacted-(?:path|credential)>/, 'Positive presence of Windows redaction marker');
+  assert.ok(
+    !progressEvents[1]?.text.includes('C:\\Users\\user\\project'),
+    'Windows host path must be redacted from tool output',
+  );
+  assert.ok(
+    !progressEvents[1]?.text.includes('test-auth-key-key-98765'),
+    'Secret auth key must be redacted from tool output',
+  );
+
+  await session.close();
 });

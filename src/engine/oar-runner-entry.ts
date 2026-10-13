@@ -74,7 +74,7 @@ async function handleCommand(command: RunnerCommand): Promise<void> {
         session = activeSession;
 
         activeSession.events((ev) => {
-          send({ kind: 'event', event: ev });
+          send({ kind: 'event', event: ev, activationId: activeActivationId });
           if (ev.kind === 'turn_ended' && (!ev.agentPath || ev.agentPath.length === 0)) {
             try {
               const usage = activeSession.usage().value;
