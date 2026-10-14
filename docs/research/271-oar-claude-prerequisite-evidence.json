@@ -1,0 +1,54 @@
+{
+  "ticket": 271,
+  "evidenceClass": "scripted",
+  "pins": {
+    "oar": "0.59.1",
+    "cli": "2.1.294 (Claude Code)",
+    "node": "26.11.1",
+    "platform": "darwin",
+    "macOS": "27.0.1"
+  },
+  "engineAuth": {
+    "statusRan": true,
+    "reachable": true
+  },
+  "credentialFile": {
+    "present": true,
+    "openableWithoutIsolation": true,
+    "profileRunOk": true,
+    "openDeniedUnderDeclaredProfile": true
+  },
+  "toolSurface": {
+    "fresh": {
+      "turnCompleted": true,
+      "forcedReadAttemptObserved": true,
+      "providerReceivedToolResult": true,
+      "denied": true,
+      "credentialMaterialObserved": false
+    },
+    "resumed": {
+      "resumeAccepted": true,
+      "turnCompleted": true,
+      "forcedReadAttemptObserved": true,
+      "providerReceivedToolResult": true,
+      "denied": true,
+      "credentialMaterialObserved": false
+    },
+    "unrestrictedControl": {
+      "turnCompleted": true,
+      "providerReceivedToolResult": true,
+      "markerObserved": true
+    }
+  },
+  "supervisor": {
+    "preCloseRunnerAlive": true,
+    "preCloseDescendantCount": 3,
+    "freshTurnCompleted": true,
+    "runnerGoneAfterClose": true,
+    "descendantsTracked": 3,
+    "descendantsGoneAfterClose": 3,
+    "resumeRunnerGoneAfterClose": true
+  },
+  "providerRequests": 7,
+  "ok": true
+}

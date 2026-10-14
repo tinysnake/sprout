@@ -26,7 +26,7 @@ The measured combination is OAR 0.59.1, Claude Code 2.1.294, Node 26.11.1, macOS
 | LSP trigger / entry | Unproved | source-only; no LSP attempt in this round | Deny LSP executable entry and socket/network access; instrument a real trigger |
 | OS-managed policy | Unproved | source-only; no managed-policy host fixture | Dedicated host profile and an attempted managed-policy read/load denial |
 | Managed MCP | Unproved | source-only; no managed-MCP execution fixture | Managed-MCP deny policy and attempted process/transport denial |
-| Host-run remote authority | Refused by the candidate before runner spawn; OAR isolation itself remains unproved | scripted adapter contract test, zero spawns | Complete the placement/isolation proof under #225 before enabling Host-run |
+| Host-run remote authority | Refused by the candidate before runner spawn; OAR isolation itself remains unproved | scripted adapter contract test, zero spawns | Complete the placement/isolation proof under #271 before enabling Host-run |
 
 The Ticket's claim that the four missing flags are never passed needs a qualification: OAR does not automatically emit them, but `launchArgs` passes host-supplied flags verbatim unless managed-collision validation rejects them. The bare/empty-sources probe actually executes this passthrough. No executable wrapper or alternate Claude transport was introduced. Historical 0.35.0 comparisons were supplied by the Ticket and were not rerun here; conclusions above come from installed 0.59.1 source and executions.
 
@@ -41,7 +41,9 @@ Primary local sources: `node_modules/@botiverse/oar/dist/runtimes/claude/{launch
 
 Detailed usage keeps cache-read and cache-write input dimensions per turn. The existing normalized runner path, root/child attribution, error/tool sanitization and Worker result sanitization remain in use. No raw OAR record subscription is used by the production adapter.
 
-## Remaining Host-run prerequisites owned by #225
+## Remaining Host-run prerequisites (ownership moved to #271)
+
+#225 was CLOSED (COMPLETED) on 2026-10-10, before #268 was authored, so the prerequisite list below initially had no open owner. Ticket #271 now owns it and records one disposition per prerequisite — established with executed evidence, or outstanding with the exact remaining prerequisite and required host-side mechanism — in its Work record, with the additional baseline evidence in `docs/research/271-oar-claude-prerequisite-evidence.json`. #225 stays closed and unchanged.
 
 1. A declared host OS isolation profile for Claude and every descendant: deny host credentials, other sessions, unrelated files, loader roots, local fallback commands, and undeclared transports, while allowing only runtime necessities and the chosen authenticated provider route.
 2. A credential broker or equivalent host-local mechanism that lets the engine authenticate without exposing credential files/material to builtin tools, hooks, plugins, MCP children or remote tools. Environment marker cleanup does not supply this.
