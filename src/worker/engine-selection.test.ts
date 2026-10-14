@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 
 import type { EngineAdapter } from '../engine/port.ts';
+import { CodexEngineAdapter } from '../engine/codex.ts';
+import { OarEngineAdapter } from '../engine/oar.ts';
+import { PiEngineAdapter } from '../engine/pi.ts';
 import {
   createEnvironmentWorkerEngines,
   describeEnvironmentWorkerEngines,
@@ -166,6 +169,39 @@ test('every selected engine configuration becomes one adapter, keyed by its engi
     ['codex', 'pi'],
   );
   assert.equal(built[0]?.engine === 'codex' && built[0].sandbox, 'read-only');
+});
+
+test('the pre-rollout opt-in selects OAR while the default Codex and Pi adapters stay native', () => {
+  const previous = process.env['SPROUT_USE_OAR_ENGINE'];
+  const host = facts({ located: { codex: '/codex', pi: '/pi' } });
+  const restore = () => {
+    if (previous === undefined) delete process.env['SPROUT_USE_OAR_ENGINE'];
+    else process.env['SPROUT_USE_OAR_ENGINE'] = previous;
+  };
+
+  try {
+    delete process.env['SPROUT_USE_OAR_ENGINE'];
+    const native = createEnvironmentWorkerEngines(host);
+    assert.ok(native.get('codex') instanceof CodexEngineAdapter);
+    assert.ok(native.get('pi') instanceof PiEngineAdapter);
+
+    process.env['SPROUT_USE_OAR_ENGINE'] = 'codex';
+    const codexOptIn = createEnvironmentWorkerEngines(host);
+    assert.ok(codexOptIn.get('codex') instanceof OarEngineAdapter);
+    assert.ok(codexOptIn.get('pi') instanceof PiEngineAdapter);
+
+    process.env['SPROUT_USE_OAR_ENGINE'] = 'pi';
+    const piOptIn = createEnvironmentWorkerEngines(host);
+    assert.ok(piOptIn.get('codex') instanceof CodexEngineAdapter);
+    assert.ok(piOptIn.get('pi') instanceof OarEngineAdapter);
+
+    process.env['SPROUT_USE_OAR_ENGINE'] = 'all';
+    const allOptIn = createEnvironmentWorkerEngines(host);
+    assert.ok(allOptIn.get('codex') instanceof OarEngineAdapter);
+    assert.ok(allOptIn.get('pi') instanceof OarEngineAdapter);
+  } finally {
+    restore();
+  }
 });
 
 function stubAdapter(id: string): EngineAdapter {
