@@ -1,0 +1,33 @@
+{
+  "evidenceClass": "scripted",
+  "oar": "0.35.0",
+  "cases": [
+    {
+      "name": "original",
+      "pendingRootRemainsSteerableAfterBackground": false,
+      "pendingRootSettledByBackground": true,
+      "rootTextObservedAtSettlement": false,
+      "outcome": "completed",
+      "childResultSettledRoot": false
+    },
+    {
+      "name": "hooked",
+      "pendingRootRemainsSteerableAfterBackground": true,
+      "pendingRootSettledByBackground": false,
+      "rootTextObservedAtSettlement": true,
+      "outcome": "completed",
+      "childResultSettledRoot": false,
+      "rootUsageExcludesAutonomous": true
+    },
+    {
+      "name": "unknown-origin-hooked",
+      "pendingRootRemainsSteerableAfterBackground": true,
+      "pendingRootSettledByBackground": false,
+      "rootTextObservedAtSettlement": true,
+      "outcome": "completed",
+      "childResultSettledRoot": false,
+      "rootUsageExcludesAutonomous": true
+    }
+  ],
+  "autonomousResultPreservesPendingAbort": true
+}

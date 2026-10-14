@@ -19,7 +19,7 @@ import type { EngineConfiguration } from './engine-selection.ts';
 
 const configurations: readonly EngineConfiguration[] = [
   { engine: 'codex', binaryPath: '/synthetic/codex', args: [], sandbox: 'read-only' },
-  { engine: 'pi', binaryPath: '/synthetic/pi', sessionDirectory: '/synthetic/sessions' },
+  { engine: 'pi', binaryPath: '/synthetic/pi' },
 ];
 
 test('only Windows command-script shims require the shell readiness path', () => {
@@ -58,6 +58,33 @@ test('Codex and Pi readiness use only the #114 non-inference contract and keep m
   assert.equal(result.probe.source, 'worker');
   assert.equal(result.probe.latencyMs, 0);
   assert.throws(() => piAuthCheckArgs('print-bearer-token'));
+});
+
+test('unsupported OAR Pi configuration stays unavailable with an actionable product explanation', async () => {
+  const calls: string[] = [];
+  const result = await probeEnvironmentReadiness([
+    { engine: 'pi', binaryPath: 'pi', sessionDirectory: 'custom-session-store' },
+  ], {
+    nodeVersion: '24.0.0',
+    commandRunner: {
+      async run(_binary, args) {
+        calls.push(args.join(' '));
+        return { stdout: 'pi 0.86.1', exitCode: 0 };
+      },
+    },
+  });
+
+  const fact = result.readiness.engines[0]!;
+  assert.deepEqual(calls, []);
+  assert.equal(fact.readiness, 'unknown');
+  assert.equal(fact.source, 'unsupported-control');
+  assert.match(result.probe.summary, /uses the host Pi session store/);
+  const evaluation = evaluateEngineOption({ engine: 'pi', workModel: 'approved-model' }, {
+    engine: 'pi', installed: true, required: true, readiness: 'unknown',
+    models: { state: 'unknown', models: [] }, source: 'unsupported-control',
+  });
+  assert.equal(evaluation.state, 'unknown');
+  assert.match(evaluation.reason, /Remove the Worker session-directory override/);
 });
 
 test('malformed or credential-adjacent probe output is unknown and never persisted as a ready fact', async () => {
@@ -107,6 +134,46 @@ test('a version below the minimum supported floor stays unknown without running 
   assert.equal(codexResult.readiness.engines[0]?.readiness, 'unknown');
   assert.equal(codexResult.readiness.engines[0]?.version, '0.153.9');
   assert.deepEqual(codexCalls, [['--version']]);
+});
+
+test('the OAR Node floor applies to both accepted Codex and Pi runtimes without an environment gate', async () => {
+  const calls: string[] = [];
+  const commandRunner: ReadinessCommandRunner = {
+    async run(binary, args) {
+      calls.push(`${binary}:${args[0]}`);
+      if (args[0] === '--version') {
+        return { stdout: binary.endsWith('codex') ? 'codex-cli 0.154.0' : 'pi 0.86.1', exitCode: 0 };
+      }
+      return { stdout: JSON.stringify({ status: 'ready', provider: 'openai-codex', authType: 'oauth' }), exitCode: 0 };
+    },
+    async accountRead(binary) {
+      calls.push(`${binary}:account/read`);
+      return {
+        stdout: JSON.stringify({ account: { type: 'chatgpt', email: null, planType: 'plus' }, requiresOpenaiAuth: true }),
+        exitCode: 0,
+      };
+    },
+    async bundledModels() {
+      return { stdout: JSON.stringify({ models: [] }), exitCode: 0 };
+    },
+  };
+
+  const unsupported = await probeEnvironmentReadiness(configurations, {
+    commandRunner, nodeVersion: '23.4.0',
+  });
+  assert.equal(calls.length, 0);
+  assert.deepEqual(unsupported.readiness.engines.map(engine => engine.readiness), ['unknown', 'unknown']);
+  assert.match(unsupported.probe.summary, /Node\.js 24\+/);
+
+  calls.length = 0;
+  const supported = await probeEnvironmentReadiness(configurations, {
+    commandRunner, nodeVersion: '24.0.0',
+  });
+  assert.ok(calls.includes('/synthetic/codex:--version'));
+  assert.ok(calls.includes('/synthetic/codex:account/read'));
+  assert.ok(calls.includes('/synthetic/pi:--version'));
+  assert.ok(calls.includes('/synthetic/pi:auth'));
+  assert.deepEqual(supported.readiness.engines.map(engine => engine.readiness), ['ready', 'ready']);
 });
 
 test('malformed pinned auth schemas fail closed for both engines', async () => {
@@ -425,7 +492,7 @@ test('prerelease versions on higher cores reach the verified probes, but floor-c
           engine: configuration.engine, version, installed: true, readiness: 'unknown', required: true,
           models: { state: 'unknown', models: [] },
         });
-        assert.equal(evaluation.reason, `Engine "${configuration.engine}" readiness is unknown on this Environment.`);
+        assert.match(evaluation.reason, /Check that .* installed at a supported version.*fresh readiness probe/);
       }
     }
   }
@@ -450,7 +517,7 @@ test('SemVer prerelease identifiers and build metadata follow precedence, while 
   }
 });
 
-test('malformed version output stays unknown with a neutral reason and never invokes auth (#136)', async () => {
+test('malformed version output stays unknown with an actionable product explanation and never invokes auth (#136)', async () => {
   for (const configuration of configurations) {
     for (const version of ['0.154', '0.154.1-01', '0.154.1+bad..id']) {
       const calls: string[] = [];
@@ -474,7 +541,7 @@ test('malformed version output stays unknown with a neutral reason and never inv
         engine: configuration.engine, installed: true, readiness: fact.readiness, required: true,
         models: { state: 'unknown', models: [] },
       });
-      assert.equal(evaluation.reason, `Engine "${configuration.engine}" readiness is unknown on this Environment.`);
+      assert.match(evaluation.reason, /Check that .* installed at a supported version.*fresh readiness probe/);
     }
   }
 });
@@ -549,7 +616,7 @@ test('engine versions at or above minimum supported floors execute verified non-
   assert.equal(codexEval.reason, 'Engine "codex" is ready.');
 });
 
-test('a newer engine version whose probe output is malformed degrades to unknown with neutral reason (#136)', async () => {
+test('a newer engine version whose probe output is malformed degrades to unknown with an actionable product explanation (#136)', async () => {
   // Codex 0.160.0 with malformed account/read output
   const malformedCodexRunner: ReadinessCommandRunner = {
     async run(_binary, args) {
@@ -578,7 +645,7 @@ test('a newer engine version whose probe output is malformed degrades to unknown
     models: { state: 'unknown', models: [] },
   });
   assert.equal(codexEval.state, 'unknown');
-  assert.equal(codexEval.reason, 'Engine "codex" readiness is unknown on this Environment.');
+  assert.match(codexEval.reason, /Check that Codex is installed at a supported version.*fresh readiness probe/);
 
   // Pi 0.90.0 with unexpected auth check status
   const malformedPiRunner: ReadinessCommandRunner = {
@@ -605,5 +672,5 @@ test('a newer engine version whose probe output is malformed degrades to unknown
     models: { state: 'unknown', models: [] },
   });
   assert.equal(piEval.state, 'unknown');
-  assert.equal(piEval.reason, 'Engine "pi" readiness is unknown on this Environment.');
+  assert.match(piEval.reason, /Check that Pi is installed at a supported version.*fresh readiness probe/);
 });

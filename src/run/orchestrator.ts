@@ -11,7 +11,7 @@ import { sanitizeIdentifier } from '../environment/privacy.ts';
 import type { EnvironmentPool } from '../environment/pool.ts';
 import type { BindingGenerationFence } from '../environment/binding-generation-fence.ts';
 import type { AgentRunEvent, EngineAdapter, EngineSession, EngineTurnResult } from '../engine/port.ts';
-import { EngineResumeRefusedError, RemoteProjectMcpStartupError } from '../engine/port.ts';
+import { EngineResumeRefusedError, OarPolicyContentionError, RemoteProjectMcpStartupError } from '../engine/port.ts';
 import { HostPiEngineAdapter } from '../engine/pi-host.ts';
 import { HostCodexEngineAdapter } from '../engine/codex-host.ts';
 import type { HostClaudeEngineAdapter } from '../engine/claude-host.ts';
@@ -29,12 +29,14 @@ import { currentRunWorkspaceBinding, renderCurrentWorkspaceSnapshot } from './bi
 import type { AgentRun, AgentRunStatus, RunFailureClass, RunObserver, RunWorkspaceBinding } from './model.ts';
 import type { RunReplaySnapshot, RunStore } from './store.ts';
 import type { SessionKeyIdentity, SessionKeyStore } from './session-key-store.ts';
+import { workingDirectoryId } from './session-key-store.ts';
 import type { TaskContextProvider, TaskRunObserver } from './task-link.ts';
 import {
   engineHostProfileForPlatform,
   environmentEngineHost,
   executionModeMismatchReason,
   isEngineHostedPlacement,
+  legacySessionScope,
   type ExecutionPlacement,
   type SessionKeyScope,
 } from '../execution-placement.ts';
@@ -47,6 +49,21 @@ async function defaultEngineRetryBackoff(failedAttempt: number): Promise<void> {
   const jitter = Math.floor(Math.random() * 101);
   await new Promise<void>((resolve) => setTimeout(resolve, exponential + jitter));
 }
+
+async function hasUnscopedLegacySessionKey(store: SessionKeyStore, identity: SessionKeyIdentity): Promise<boolean> {
+  const legacyScope = legacySessionScope();
+  const directoryId = workingDirectoryId(identity.workingDirectory);
+  return (await store.list()).some((record) =>
+    record.agentId === identity.agentId &&
+    record.engine === identity.engine &&
+    record.environmentInstanceId === identity.environmentInstanceId &&
+    record.workingDirectoryId === directoryId &&
+    record.scope.kind === legacyScope.kind && record.scope.id === legacyScope.id,
+  );
+}
+
+const UNSCOPED_LEGACY_SESSION_MESSAGE =
+  'A previous native session key was preserved, but its legacy authorization scope is unknown. This run did not reuse it, and no new conversation was started.';
 
 /**
  * Run orchestration: the one place where agent identity, environment leases, and
@@ -125,6 +142,8 @@ export interface RunOrchestratorOptions {
    * stays ignorant of the Task service's shape.
    */
   readonly onTaskRunSettled?: TaskRunObserver;
+  /** Opens Environment recovery when a one-round run cannot prove engine cleanup. */
+  readonly onUncertainRunExecution?: (input: { readonly run: AgentRun; readonly leaseId: string }) => Promise<void>;
   readonly taskGroupPosts?: (run: AgentRun, assertActive: () => void) => NonNullable<import('../engine/port.ts').StartSessionRequest['postTaskGroupMessage']>;
   readonly leaseTtlMs?: number;
   /** Wait before a bounded engine retry; injectable for deterministic tests. */
@@ -256,6 +275,8 @@ type SessionAttempt =
       readonly progressEventCount: number;
       /** True only when the engine refused the supplied key and did no work. */
       readonly resumeRefused: boolean;
+      /** OAR policy contention is an Environment failure with a safe diagnosis. */
+      readonly failureClass?: RunFailureClass;
     };
 
 export class RunOrchestrator {
@@ -274,6 +295,7 @@ export class RunOrchestrator {
   readonly #tasks: TaskContextProvider | undefined;
   /** Told when a Task-linked run settles, so the Task can advance its state. */
   readonly #onTaskRunSettled: TaskRunObserver | undefined;
+  readonly #onUncertainRunExecution: RunOrchestratorOptions['onUncertainRunExecution'];
   readonly #leaseTtlMs: number;
   readonly #retryBackoff: (failedAttempt: number) => Promise<void>;
   readonly #clock: { now(): number };
@@ -322,6 +344,7 @@ export class RunOrchestrator {
     this.#runHistory = options.runs ?? (() => options.store.list());
     this.#tasks = options.tasks;
     this.#onTaskRunSettled = options.onTaskRunSettled;
+    this.#onUncertainRunExecution = options.onUncertainRunExecution;
     this.#leaseTtlMs = options.leaseTtlMs ?? 300_000;
     this.#retryBackoff = options.retryBackoff ?? defaultEngineRetryBackoff;
     this.#ids = options.ids ?? createIdFactory();
@@ -957,6 +980,10 @@ export class RunOrchestrator {
       const stored = this.#sessionKeys && identity !== undefined
         ? await this.#sessionKeys.get(identity)
         : undefined;
+      if (stored === undefined && this.#sessionKeys !== undefined && identity !== undefined &&
+          await hasUnscopedLegacySessionKey(this.#sessionKeys, identity)) {
+        return this.#finish(prepared, 'failed', { status: 'failed', message: UNSCOPED_LEGACY_SESSION_MESSAGE });
+      }
       const publishCatalog = async (): Promise<void> => {
         if (catalogPublished) return;
         bindingFence?.publish();
@@ -981,7 +1008,7 @@ export class RunOrchestrator {
         });
         outcome = await this.#finish(prepared, 'failed', attempt.result ?? {
           status: 'failed', message: attempt.message,
-        });
+        }, attempt.failureClass);
       } else {
         if (this.#sessionKeys && identity !== undefined && attempt.result.status === 'completed' && attempt.engineSessionKey) {
           await this.#sessionKeys.save({ ...identity, key: attempt.engineSessionKey, updatedAt: this.#clock.now() });
@@ -1478,6 +1505,10 @@ export class RunOrchestrator {
       const stored = this.#sessionKeys && identity !== undefined
         ? await this.#sessionKeys.get(identity)
         : undefined;
+      if (stored === undefined && this.#sessionKeys !== undefined && identity !== undefined &&
+          await hasUnscopedLegacySessionKey(this.#sessionKeys, identity)) {
+        return this.#finish(prepared, 'failed', { status: 'failed', message: UNSCOPED_LEGACY_SESSION_MESSAGE });
+      }
       let attempt = await this.#runSession(
         adapter,
         agent,
@@ -1567,7 +1598,7 @@ export class RunOrchestrator {
         return this.#finish(attempt.run, 'failed', result ?? {
           status: 'failed',
           message: attempt.message,
-        });
+        }, attempt.failureClass);
       }
 
       // Persist the key the run actually used, not the one it was handed. A
@@ -1586,7 +1617,22 @@ export class RunOrchestrator {
         message: error instanceof Error ? error.message : String(error),
       });
     } finally {
-      if (acquired !== undefined && acquired.ok) this.#pool.releaseLease(acquired.lease.id);
+      if (acquired !== undefined && acquired.ok) {
+        const settledRun = this.#runs.get(initial.id);
+        const uncertainExecution = settledRun?.result?.outcomeCertainty === 'uncertain' ||
+          settledRun?.result?.engineSessionTermination === 'uncertain';
+        if (uncertainExecution) {
+          this.#pool.markRecovering(acquired.lease.id);
+          try {
+            await this.#onUncertainRunExecution?.({ run: settledRun!, leaseId: acquired.lease.id });
+          } catch {
+            // The recovering lease remains the conservative durable boundary;
+            // restart reconciliation can restore its missing recovery record.
+          }
+        } else {
+          this.#pool.releaseLease(acquired.lease.id);
+        }
+      }
     }
   }
 
@@ -1655,11 +1701,13 @@ export class RunOrchestrator {
         // Only the engine's explicit refusal of the supplied key is retryable.
         // Any other start failure is a real failure and must not discard a key.
         resumeRefused: resumeKey !== undefined && error instanceof EngineResumeRefusedError,
+        ...(error instanceof OarPolicyContentionError ? { failureClass: 'environment' as const } : {}),
       };
     }
 
     this.#sessions.set(running.id, session);
     let current = running;
+    let terminalResult: EngineTurnResult | undefined;
     try {
       await beforePrompt?.();
       current = this.#runs.get(running.id) ?? current;
@@ -1680,6 +1728,7 @@ export class RunOrchestrator {
         streamError = error;
       }
       const result = await turn.completion;
+      terminalResult = result;
       if (result.status === 'failed') {
         // A turn-level failure is an attempt failure, not a completed run. It is
         // retryable only when the engine classified it as a refused resume;
@@ -1718,7 +1767,14 @@ export class RunOrchestrator {
       };
     } finally {
       this.#sessions.delete(running.id);
-      await session.close();
+      let closeError: unknown;
+      try { await session.close(); } catch (error) { closeError = error; }
+      if (terminalResult !== undefined &&
+          (closeError !== undefined || session.terminationEvidence === 'uncertain')) {
+        Object.assign(terminalResult, { engineSessionTermination: 'uncertain' as const });
+      } else if (closeError !== undefined) {
+        throw closeError;
+      }
     }
   }
 
@@ -1814,7 +1870,21 @@ export class RunOrchestrator {
   ): Promise<AgentRun> {
     const stopWins = this.#stopRequests.has(run.id) && status !== 'completed';
     const finalStatus = stopWins ? this.#stopOutcomes.get(run.id) ?? 'stopped' : status;
-    const finalResult: EngineTurnResult = stopWins ? { status: 'interrupted' } : result;
+    const finalResult: EngineTurnResult = stopWins
+      ? {
+          status: 'interrupted',
+          ...(result.outcomeCertainty === 'uncertain' ? { outcomeCertainty: 'uncertain' } : {}),
+          ...(result.engineSessionTermination === 'uncertain' ? { engineSessionTermination: 'uncertain' } : {}),
+          ...(result.tokenUsage !== undefined ? { tokenUsage: result.tokenUsage } : {}),
+          ...(result.detailedTokens !== undefined ? { detailedTokens: result.detailedTokens } : {}),
+          ...(result.engineTurnDurationMs !== undefined ? { engineTurnDurationMs: result.engineTurnDurationMs } : {}),
+          ...(result.costEstimate !== undefined ? { costEstimate: result.costEstimate } : {}),
+          ...(result.billingBasis !== undefined ? { billingBasis: result.billingBasis } : {}),
+          ...(result.source !== undefined ? { source: result.source } : {}),
+          ...(result.sourceVersion !== undefined ? { sourceVersion: result.sourceVersion } : {}),
+          ...(result.pricingContext !== undefined ? { pricingContext: result.pricingContext } : {}),
+        }
+      : result;
     const settled = await this.#advance(run, {
       status: finalStatus,
       result: finalResult,

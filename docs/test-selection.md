@@ -19,6 +19,34 @@ Privacy hardening and redaction are future work under [ADR-0020](adr/0020-defer-
 | Full | `npm test` | The complete default-glob inventory (quick ∪ extended) | Final composed result before integration into the target branch |
 | External conformance | hand-scheduled probes | Real engines, containers, and separately deployed Workers (`scripts/probe-*`, `scripts/*-conformance.*`); requires explicit prerequisites | Adapter/environment changes and the corresponding release acceptance |
 
+## Experiment and mutation runs
+
+A mutation or probe run exists to fail: it breaks a behaviour on purpose and
+expects the test to catch it. Its failures are evidence of a good test, never a
+regression, so the shared flake-history dataset must never receive them as if
+they were genuine. Two mechanisms, used together:
+
+1. **Redirect** — point `SPROUT_TEST_OBS_DIR` at a scratch directory for the
+   experiment, so its records never enter the shared dataset:
+
+   ```sh
+   SPROUT_TEST_OBS_DIR="$(mktemp -d)" SPROUT_TEST_OBS_EXPERIMENT=mutation \
+     node scripts/test-summary.ts src/path/to/file.test.ts
+   ```
+
+2. **Mark** — set `SPROUT_TEST_OBS_EXPERIMENT=<kind>` (`mutation`, `probe`, or
+   another short token). The run's `run_started` record then carries an
+   `experiment` field, and `node scripts/test-observations.ts` excludes that
+   run from every genuine-run statistic and reports it under `Experiment runs`.
+   The mark covers the forgotten redirect — records that land in a shared
+   dataset anyway — and whenever experiment records are worth keeping durably:
+   marked, they can never be mistaken for a flake.
+
+Reading the dataset: an unmarked run is genuine. Historical records predate
+the mark and carry no field; nothing is reclassified, only `run_started`
+carries the mark, and every record carries its `runId` within one run file.
+Ordinary runs are recorded exactly as before: set neither variable for them.
+
 ## Widening rules
 
 An affected selection widens to the full inventory when a changed file is a

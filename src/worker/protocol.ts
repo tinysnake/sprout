@@ -99,7 +99,7 @@ export interface WorkerEngineReadinessFact {
   readonly requirementRevision?: string;
   readonly probedAt?: number;
   readonly probeExitCode?: number;
-  readonly source?: 'codex-account-read' | 'pi-auth-check' | 'unknown';
+  readonly source?: 'codex-account-read' | 'pi-auth-check' | 'claude-auth-status' | 'unsupported-control' | 'unknown';
 }
 
 /** One Worker-measured non-inference readiness probe record. */
@@ -162,6 +162,10 @@ export interface WorkerReadinessProbeResult {
 export const WORKER_ERROR_CODES = {
   /** The engine explicitly refused the supplied resume key and did no work. */
   resumeRefused: -32_610,
+  /** A live OAR Pi agent-directory policy lease blocked session start. */
+  oarAgentPolicyLeaseContention: -32_620,
+  /** A live OAR Pi project-directory policy lease blocked session start. */
+  oarProjectPolicyLeaseContention: -32_621,
 } as const;
 
 export interface WorkerEngineDescription {
@@ -452,6 +456,11 @@ export interface InterruptResult {
 
 export interface CloseParams {
   readonly sessionId: string;
+}
+
+export interface CloseResult {
+  /** True only when the Worker observed its supervised engine tree stop. */
+  readonly stopped: boolean;
 }
 
 export interface TurnEventParams {

@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue';
 import Dialog from '../../../primitives/Dialog.vue';
 import Button from '../../../primitives/Button.vue';
+import { selectableEngineRuntimes } from '../../../../../src/engine/runtime-catalog.ts';
 
 /**
  * The Create Agent dialog (#91, ADR-0008).
@@ -26,6 +27,7 @@ const emit = defineEmits<{
   ): void;
 }>();
 
+const runtimeOptions = selectableEngineRuntimes();
 const displayName = ref('');
 const instructions = ref('');
 const engine = ref('pi');
@@ -102,10 +104,7 @@ function confirm() {
               v-model="engine"
               class="new-opt-engine px-2.5 py-1.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-[var(--text-primary)]"
             >
-              <option value="pi">pi</option>
-              <option value="codex">codex</option>
-              <option value="agy">agy</option>
-              <option value="opencode">opencode</option>
+              <option v-for="runtime in runtimeOptions" :key="runtime.id" :value="runtime.id">{{ runtime.label }}</option>
             </select>
           </div>
           <div class="flex flex-col gap-1">

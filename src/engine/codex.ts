@@ -20,6 +20,8 @@ import { EventQueue } from './event-queue.ts';
 import { mapCodexNotification, type CodexTurnState } from './codex-protocol.ts';
 import { createCodexDynamicToolBridge, type CodexDynamicToolSpec } from './codex-tools.ts';
 import { classifyEngineTurnFailure, isRetryableEngineTurnFailure, sanitizedTurnFailure } from './turn-failure.ts';
+import type { CodexSandboxMode } from './runtime-catalog.ts';
+export type { CodexSandboxMode } from './runtime-catalog.ts';
 
 /**
  * Codex engine adapter (ADR-0001).
@@ -69,8 +71,6 @@ export interface CodexAdapterOptions {
   /** Optional local observer for the opaque provider turn identity. */
   readonly onTurnStarted?: (turnId: string) => void;
 }
-
-export type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
 
 export interface CodexProcess {
   readonly stdin: Writable;

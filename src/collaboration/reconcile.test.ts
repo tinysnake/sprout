@@ -437,3 +437,67 @@ test('an addressed Project event wake recovers through the same reconcile pass',
     }
   });
 });
+
+test('a pre-run admission failure wake recovers across restart and republishes exactly once across multiple reconcile passes', async () => {
+  await withDatabase(async (filename) => {
+    const crashed = reopen(filename);
+    const message = inputMessage({ id: 'msg-pre-fail', deliveryKey: 'delivery-pre-fail' });
+    await crashed.sqlite.collaboration.postMessage({
+      message,
+      plan: {
+        inputId: message.id,
+        decisions: [{ agentId: 'scout', reason: 'direct-recipient' }],
+        observations: [],
+      },
+      now: 1,
+    });
+    // Crash between recording the failed observation and publishing the event.
+    await crashed.sqlite.collaboration.recordObservation({
+      inputId: message.id,
+      observation: {
+        agentId: 'scout',
+        status: 'failed',
+        reason: 'direct-recipient',
+        detail: 'No connected Environment can admit work; check Worker readiness.',
+      },
+      now: 2,
+    });
+    crashed.sqlite.close();
+
+    const restarted = reopen(filename);
+    try {
+      // First reconcile pass: republishes the failed wake event
+      await restarted.coordinator.reconcile();
+      const eventsPass1 = (await restarted.coordinator.listEvents('project-sprout')).filter(
+        (item) => item.kind === 'wake-admission-failure',
+      );
+      assert.equal(eventsPass1.length, 1, 'first pass publishes exactly one event');
+      assert.equal(eventsPass1[0]?.detail, 'No connected Environment can admit work; check Worker readiness.');
+      assert.equal(eventsPass1[0]?.disposition, 'informational');
+      assert.deepEqual(eventsPass1[0]?.originScopeIds, ['dm-test-1']);
+      assert.equal((await restarted.orchestrator.list()).length, 0, 'no run was submitted or admitted');
+
+      // Second reconcile pass: idempotent, does not duplicate the event
+      await restarted.coordinator.reconcile();
+      const eventsPass2 = (await restarted.coordinator.listEvents('project-sprout')).filter(
+        (item) => item.kind === 'wake-admission-failure',
+      );
+      assert.equal(eventsPass2.length, 1, 'second pass is idempotent and does not duplicate event');
+    } finally {
+      restarted.sqlite.close();
+    }
+
+    // A subsequent restart and third reconcile pass also remains strictly idempotent
+    const secondRestart = reopen(filename);
+    try {
+      await secondRestart.coordinator.reconcile();
+      const eventsPass3 = (await secondRestart.coordinator.listEvents('project-sprout')).filter(
+        (item) => item.kind === 'wake-admission-failure',
+      );
+      assert.equal(eventsPass3.length, 1, 'third pass after restart retains exactly one event');
+      assert.equal((await secondRestart.orchestrator.list()).length, 0);
+    } finally {
+      secondRestart.sqlite.close();
+    }
+  });
+});

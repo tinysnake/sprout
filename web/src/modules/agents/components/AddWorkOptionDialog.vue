@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue';
 import Dialog from '../../../primitives/Dialog.vue';
 import Button from '../../../primitives/Button.vue';
 import type { AgentInstance } from '../types.js';
+import { selectableEngineRuntimes } from '../../../../../src/engine/runtime-catalog.ts';
 
 /**
  * The Add Work Option dialog (#91, ADR-0008).
@@ -23,6 +24,7 @@ const emit = defineEmits<{
   (e: 'confirm', payload: { engine: string; workModel: string; effort: string }): void;
 }>();
 
+const runtimeOptions = selectableEngineRuntimes();
 const engine = ref('pi');
 const workModel = ref('');
 const effort = ref('medium');
@@ -62,10 +64,7 @@ function confirm() {
           v-model="engine"
           class="add-opt-engine px-2.5 py-1.5 rounded bg-[var(--bg-surface-elevated)] border border-[var(--border-subtle)] text-[var(--text-primary)]"
         >
-          <option value="pi">pi</option>
-          <option value="codex">codex</option>
-          <option value="agy">agy</option>
-          <option value="opencode">opencode</option>
+          <option v-for="runtime in runtimeOptions" :key="runtime.id" :value="runtime.id">{{ runtime.label }}</option>
         </select>
       </div>
 

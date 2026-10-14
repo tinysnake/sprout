@@ -66,6 +66,23 @@ function withDatabase(run: (store: SqliteCollaborationStore, path: string) => Pr
   });
 }
 
+test('a pre-run failure atomically settles its wake as failed with a durable reason', async () => {
+  await withDatabase(async (store) => {
+    await store.postMessage({ message: message(), plan: plan('msg-1', 'scout'), now: 1 });
+    await store.recordObservation({
+      inputId: 'msg-1',
+      observation: { agentId: 'scout', status: 'failed', reason: 'direct-recipient', detail: 'Worker is not ready.' },
+      now: 2,
+    });
+    const wake = await store.getWakeRequest(wakeIdempotencyKey('msg-1', 'scout'));
+    assert.equal(wake?.status, 'failed');
+    assert.equal(wake?.detail, 'Worker is not ready.');
+    assert.deepEqual(await store.listObservations('msg-1'), [
+      { agentId: 'scout', status: 'failed', reason: 'direct-recipient', detail: 'Worker is not ready.' },
+    ]);
+  });
+});
+
 test('a message and its wake requests become durable together', async () => {
   await withDatabase(async (store) => {
     const stored = await store.postMessage({ message: message(), plan: plan('msg-1', 'scout'), now: 1 });

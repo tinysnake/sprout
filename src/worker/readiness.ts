@@ -8,6 +8,15 @@ import type {
   WorkerReadinessProbeResult,
 } from './protocol.ts';
 import type { ReadinessRequirementScope } from '../environment/readiness.ts';
+import {
+  formatNodeUpgradeGuidance,
+  isSupportedNodeVersion,
+} from '../engine/oar-node-support.ts';
+import {
+  ENGINE_RUNTIME_CATALOG,
+  OAR_RUNTIME_VERSION_FLOORS,
+  runtimeConfigurationIssue,
+} from '../engine/runtime-catalog.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -95,6 +104,7 @@ async function defaultRun(
       ...(useShell ? { shell: true } : {}),
       ...(options?.env !== undefined ? { env: options.env } : {}),
       maxBuffer: 4 * 1024 * 1024,
+      timeout: 10_000,
       windowsHide: true,
     });
     return { stdout: String(result.stdout), exitCode: 0 };
@@ -143,13 +153,12 @@ export interface ReadinessProbeOptions {
    */
   readonly requiredModels?: readonly string[];
   readonly requirements?: ReadinessRequirementScope;
+  /** Explicit Node.js version string for testing version constraints. */
+  readonly nodeVersion?: string;
 }
 
-/** Minimum supported versions whose non-inference contracts were pinned and verified by #114. */
-export const SUPPORTED_READINESS_VERSION_FLOORS = {
-  codex: '0.154.0',
-  pi: '0.86.1',
-} as const;
+/** Minimum versions whose non-inference contracts were verified (#114; Claude #268). */
+export const SUPPORTED_READINESS_VERSION_FLOORS = OAR_RUNTIME_VERSION_FLOORS;
 
 export const SUPPORTED_READINESS_VERSIONS = SUPPORTED_READINESS_VERSION_FLOORS;
 
@@ -509,6 +518,38 @@ function codexBundledModels(stdout: string): { readonly slugs: readonly string[]
   return { slugs };
 }
 
+/** Non-inference auth observation; model entitlement remains independently unknown. */
+async function probeClaude(
+  configuration: Extract<EngineConfiguration, { readonly engine: 'claude' }>,
+  options: Required<Pick<ReadinessProbeOptions, 'clock' | 'commandRunner'>> & ReadinessProbeOptions,
+): Promise<WorkerEngineReadinessFact> {
+  const at = options.clock();
+  const result = await options.commandRunner.run(configuration.binaryPath, ['--version'], commandOptions(options.env));
+  const match = /^(\d+\.\d+\.\d+) \(Claude Code\)$/.exec(result.stdout.trim());
+  const version = result.exitCode === 0 ? match?.[1] : undefined;
+  if (version === undefined || !isAtLeastVersion(version, SUPPORTED_READINESS_VERSION_FLOORS.claude)) {
+    return unknownFact('claude', version, at, 'claude-auth-status', result.exitCode || 1);
+  }
+  const auth = await options.commandRunner.run(configuration.binaryPath, ['auth', 'status', '--json'], commandOptions(options.env));
+  let value: { loggedIn?: unknown; authMethod?: unknown };
+  try { value = JSON.parse(auth.stdout); } catch {
+    return unknownFact('claude', version, at, 'claude-auth-status', auth.exitCode || 1);
+  }
+  const methods = ['none', 'claude.ai', 'oauth_token', 'api_key', 'api_key_helper', 'third_party'];
+  if (value === null || typeof value !== 'object' || !methods.includes(String(value.authMethod)) ||
+      typeof value.loggedIn !== 'boolean' || auth.exitCode !== (value.loggedIn ? 0 : 1)) {
+    return unknownFact('claude', version, at, 'claude-auth-status', auth.exitCode || 1);
+  }
+  const revision = options.requirements?.revisionsByEngine?.claude ?? options.requirements?.revision;
+  return {
+    engine: 'claude', version, installed: true,
+    readiness: value.loggedIn ? 'ready' : 'login-required', authenticated: value.loggedIn,
+    modelAvailability: 'unknown', models: [], targetModels: [],
+    ...(revision !== undefined ? { requirementRevision: revision } : {}),
+    probedAt: at, probeExitCode: auth.exitCode, source: 'claude-auth-status',
+  };
+}
+
 /** Execute non-inference probes on the Worker host for the configured engines. */
 export async function probeEnvironmentReadiness(
   configurations: readonly EngineConfiguration[],
@@ -520,22 +561,57 @@ export async function probeEnvironmentReadiness(
   const requiredModels = (options.requiredModels ?? []).filter(
     (model): model is string => typeof model === 'string' && model !== '',
   );
+  const nodeVersion = options.nodeVersion ?? process.versions.node;
+  const oarNodeUnsupported = configurations.some(
+    configuration => ENGINE_RUNTIME_CATALOG[configuration.engine].adapter === 'oar',
+  ) && !isSupportedNodeVersion(nodeVersion);
+
   const engines: WorkerEngineReadinessFact[] = [];
+  let configurationIssue: string | undefined;
   for (const configuration of configurations) {
+    const runtime = ENGINE_RUNTIME_CATALOG[configuration.engine];
+    const unsupportedConfiguration = runtimeConfigurationIssue(
+      configuration.engine,
+      configuration as unknown as Readonly<Record<string, unknown>>,
+    );
+    if (unsupportedConfiguration !== undefined) {
+      configurationIssue ??= unsupportedConfiguration;
+      engines.push(unknownFact(configuration.engine, undefined, clock(), 'unsupported-control', 1));
+      continue;
+    }
+    if (runtime.adapter === 'oar' && !isSupportedNodeVersion(nodeVersion)) {
+      engines.push(unknownFact(configuration.engine, undefined, clock(), 'unknown', 1));
+      continue;
+    }
     const engineModels = options.requirements?.modelsByEngine?.[configuration.engine] ?? requiredModels;
     try {
-      engines.push(configuration.engine === 'codex'
-        ? await probeCodex(configuration, { ...options, clock, commandRunner, requiredModels: engineModels })
-        : configuration.engine === 'pi'
-          ? await probePi(configuration, { ...options, clock, commandRunner })
-          : unknownFact(configuration.engine, undefined, clock(), 'unknown', 1));
+      switch (runtime.readiness.probe) {
+        case 'codex-account-read':
+          engines.push(await probeCodex(configuration as Extract<EngineConfiguration, { readonly engine: 'codex' }>, {
+            ...options, clock, commandRunner, requiredModels: engineModels,
+          }));
+          break;
+        case 'pi-auth-check':
+          engines.push(await probePi(configuration as Extract<EngineConfiguration, { readonly engine: 'pi' }>, {
+            ...options, clock, commandRunner,
+          }));
+          break;
+        case 'claude-auth-status':
+          engines.push(await probeClaude(configuration as Extract<EngineConfiguration, { readonly engine: 'claude' }>, {
+            ...options, clock, commandRunner,
+          }));
+          break;
+        case 'unsupported':
+          engines.push(unknownFact(configuration.engine, undefined, clock(), 'unknown', 1));
+          break;
+      }
     } catch {
       engines.push(unknownFact(configuration.engine, undefined, clock(), 'unknown', 1));
     }
   }
   const at = clock();
   const version = engines.map((engine) => engine.version).filter((value): value is string => value !== undefined).join(', ');
-  const enginesOk = engines.length > 0 && engines.every((engine) => engine.installed && engine.readiness === 'ready');
+  const enginesOk = !oarNodeUnsupported && engines.length > 0 && engines.every((engine) => engine.installed && engine.readiness === 'ready');
   const probe = {
     at,
     latencyMs: Math.max(0, at - started),
@@ -543,9 +619,11 @@ export async function probeEnvironmentReadiness(
     enginesOk,
     source: 'worker' as const,
     version: version || 'unknown',
-    summary: enginesOk
+    summary: configurationIssue ?? (oarNodeUnsupported
+      ? formatNodeUpgradeGuidance(nodeVersion)
+      : enginesOk
       ? 'Worker non-inference readiness probe completed.'
-      : 'Worker non-inference readiness probe completed with unknown or unavailable facts.',
+      : 'Worker non-inference readiness probe completed with unknown or unavailable facts.'),
   };
   return {
     readiness: {

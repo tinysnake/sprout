@@ -377,7 +377,9 @@ test('a worker that dies mid-run interrupts the run instead of hanging it', asyn
 
   const run = await orchestrator.waitFor(id);
   assert.equal(run.status, 'interrupted');
-  assert.deepEqual(run.result, { status: 'interrupted' });
+  assert.deepEqual(run.result, {
+    status: 'interrupted', outcomeCertainty: 'uncertain', engineSessionTermination: 'uncertain',
+  });
 });
 
 

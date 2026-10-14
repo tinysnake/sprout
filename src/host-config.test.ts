@@ -462,6 +462,11 @@ test('a worker with no host settings takes exactly the documented defaults', () 
  * any `SPROUT_<ENGINE>_BIN` name is collected and keyed by engine command. Only
  * that pattern is collected, so an unrelated `SPROUT_*_BIN` does not leak in.
  */
+test('the worker does not treat deployment environment as Pi provider approval', () => {
+  const configuration = parseWorker({ SPROUT_PI_MODELS: '{"providers":{"fixture":{}}}' });
+  assert.equal('piModels' in configuration, false);
+});
+
 test('every generic engine binary override crosses the boundary, keyed by engine command', () => {
   const configuration = parseWorker({
     SPROUT_PI_BIN: '/synthetic/bin/pi',

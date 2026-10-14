@@ -12,6 +12,7 @@ import { EventQueue } from './event-queue.ts';
 import { mapOpenCodeEvent, newOpenCodeTurnState } from './opencode-protocol.ts';
 import { deliverContractToWorkingDirectory, type ContractDelivery } from './contract-file.ts';
 import { registerOpenCodeInstructionPath } from './opencode-instructions.ts';
+import { ENGINE_RUNTIME_CATALOG } from './runtime-catalog.ts';
 
 /**
  * `opencode` engine adapter — the deliberately **non-streaming** one.
@@ -81,13 +82,7 @@ export class OpenCodeEngineAdapter implements EngineAdapter {
    * ends. Declared `turn`, not `incremental`, and this is the adapter that makes
    * the declaration meaningful.
    */
-  readonly capabilities = {
-    streaming: 'turn',
-    supportsInterrupt: true,
-    // `opencode run` has no system-prompt flag; it reads `AGENTS.md` from the
-    // working directory, so the contract is delivered the same way as `agy`.
-    standingInstructions: 'working-directory',
-  } as const;
+  readonly capabilities = ENGINE_RUNTIME_CATALOG.opencode.capabilities;
   readonly #options: OpenCodeAdapterOptions;
   #sessionCounter = 0;
 

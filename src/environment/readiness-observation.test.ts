@@ -38,6 +38,22 @@ async function issued(store: EnvironmentReadinessStore, result: unknown,
 
 
 for (const backend of ['memory', 'sqlite'] as const) {
+  test(`${backend}: Claude context-qualified model scope preserves the exact model and refuses arbitrary brackets`, async (t) => {
+    const directory = mkdtempSync(join(tmpdir(), 'sprout-claude-model-scope-'));
+    const store = backend === 'memory' ? new InMemoryEnvironmentReadinessStore()
+      : new SqliteEnvironmentReadinessStore({ filename: join(directory, 'readiness.db') });
+    t.after(() => { if (store instanceof SqliteEnvironmentReadinessStore) store.close(); rmSync(directory, { recursive: true, force: true }); });
+    const authority = readinessAuthorityTestSeam.mint({ environmentInstanceId: 'env-1', enrollmentId: 'enroll-1', connectionEpoch: 1 });
+    for (const [model, accepted] of [['provider/claude-model[1m]', true], ['provider/claude-model[200k]', true], ['provider/claude-model[arbitrary]', false], ['provider/claude-model[0m]', false]] as const) {
+      const requirements = readinessRequirements([{ engine: 'claude', workModel: model }]);
+      const result = workerReadinessProbeFixture({ protocolVersion: '2', engines: [{ engine: 'claude', installed: true, readiness: 'ready', modelAvailability: 'unknown', models: [] }] });
+      const observation = await issued(store, result, { environmentInstanceId: 'env-1', authority, supported: { minMajor: 2, maxMajor: 3 }, at: 100,
+        verifyAuthority: readinessAuthorityTestSeam.verify, requirements });
+      assert.equal(observation !== undefined, accepted, model);
+      if (observation) assert.deepEqual(readReadinessObservation('env-1', observation, authority)?.requirements?.modelsByEngine?.claude, [model]);
+    }
+  });
+
   test(`${backend}: qualified Pi model requirements survive observation validation`, async (t) => {
     const directory = mkdtempSync(join(tmpdir(), 'sprout-pi-model-scope-'));
     const store = backend === 'memory'

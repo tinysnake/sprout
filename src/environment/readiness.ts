@@ -16,6 +16,7 @@
  */
 
 import { sanitizeProtocolVersion } from './privacy.ts';
+import { runtimeCatalogEntry } from '../engine/runtime-catalog.ts';
 
 export type EnrollmentStatus = 'pending' | 'approved' | 'revoked' | 'archived';
 export type ConnectionState = 'never-connected' | 'online' | 'reconnecting' | 'offline';
@@ -165,28 +166,49 @@ export function evaluateEngineOption(
   fact: EngineReadinessFact | undefined,
   requirementScope?: ReadinessRequirementScope,
 ): EngineOptionEvaluation {
+  const runtime = runtimeCatalogEntry(option.engine);
+  if (runtime === undefined || runtime.selection !== 'accepted') {
+    return {
+      state: 'unknown',
+      reason: runtime?.readiness.unknownAction ??
+        `Engine "${option.engine}" is not an accepted Sprout runtime. Choose an engine listed in the Agent work-option selector.`,
+    };
+  }
+  if (runtime.capabilities.standingInstructions === 'none') {
+    return {
+      state: 'unknown',
+      reason: `Engine "${runtime.label}" has no accepted standing-instructions channel. Choose a runtime that can receive the Project contract.`,
+    };
+  }
   if (fact === undefined) {
     return {
       state: 'unknown',
-      reason: `Engine "${option.engine}" has not been observed on this Environment.`,
+      reason: `Engine "${runtime.label}" has not been observed on this Environment. ${runtime.readiness.unknownAction}`,
+    };
+  }
+  if (fact.source === 'unsupported-control') {
+    return {
+      state: 'unknown',
+      reason: runtime.policy.unsupportedWorkerConfigurations?.[0]?.explanation ??
+        `Engine "${runtime.label}" has an unsupported Worker control. Remove the unsupported setting and run a fresh readiness probe.`,
     };
   }
   if (!fact.installed || fact.readiness === 'missing') {
     return {
       state: 'missing',
-      reason: `Engine "${option.engine}" is not installed on this Environment.`,
+      reason: `Engine "${runtime.label}" is not installed on this Environment. Install it on the Worker host, reconnect, then run a fresh readiness probe.`,
     };
   }
   if (fact.readiness === 'login-required') {
     return {
       state: 'login-required',
-      reason: `Engine "${option.engine}" requires a login on this Environment.`,
+      reason: `Engine "${runtime.label}" requires a login on this Environment. Sign in on the Worker host, then run a fresh readiness probe.`,
     };
   }
   if (fact.readiness !== 'ready') {
     return {
       state: 'unknown',
-      reason: `Engine "${option.engine}" readiness is unknown on this Environment.`,
+      reason: runtime.readiness.unknownAction,
     };
   }
 
@@ -221,7 +243,7 @@ export function evaluateEngineOption(
   if (fact.models.state === 'none') {
     return {
       state: 'model-unavailable',
-      reason: `Engine "${option.engine}" reports no available work models on this Environment.`,
+      reason: `Engine "${runtime.label}" reports no available work models on this Environment. Select a Human-approved model or establish model availability with the current readiness contract.`,
     };
   }
 
@@ -246,7 +268,7 @@ export function evaluateEngineOption(
       if (fact.modelIdPresent === false) {
         return {
           state: 'model-unavailable',
-          reason: `Work model "${workModel}" is not available for "${option.engine}" on this Environment.`,
+          reason: `Work model "${workModel}" is not available for "${runtime.label}" on this Environment. Choose a model reported by its current readiness facts or record Human approval, then probe again.`,
         };
       }
       return {
@@ -262,28 +284,28 @@ export function evaluateEngineOption(
     }
     return {
       state: 'unknown',
-      reason: `Work model "${workModel}" availability is unknown for "${option.engine}" on this Environment. Record the Human model authorization on the approved enrollment, then request a readiness probe.`,
+      reason: `Work model "${workModel}" availability is unknown for "${runtime.label}" on this Environment. Record Human model approval for this option, then run a fresh readiness probe.`,
     };
   }
 
   if (fact.models.models.length > 0 && !fact.models.models.includes(workModel)) {
     return {
       state: 'model-unavailable',
-      reason: `Work model "${workModel}" is not available for "${option.engine}" on this Environment.`,
+      reason: `Work model "${workModel}" is not available for "${runtime.label}" on this Environment. Choose a model reported by its current readiness facts or record Human approval, then probe again.`,
     };
   }
 
   if (fact.targetModels !== undefined && fact.targetModels.length > 0 && !fact.targetModels.includes(workModel)) {
     return {
       state: 'model-unavailable',
-      reason: `Work model "${workModel}" is not available for "${option.engine}" on this Environment.`,
+      reason: `Work model "${workModel}" is not available for "${runtime.label}" on this Environment. Choose a model reported by its current readiness facts or record Human approval, then probe again.`,
     };
   }
 
   if (fact.modelIdPresent === false) {
     return {
       state: 'model-unavailable',
-      reason: `Work model "${workModel}" is not available for "${option.engine}" on this Environment.`,
+      reason: `Work model "${workModel}" is not available for "${runtime.label}" on this Environment. Choose a model reported by its current readiness facts or record Human approval, then probe again.`,
     };
   }
 
@@ -432,7 +454,7 @@ export function protocolCompatibility(
  */
 export const READINESS_AUTH_MODES = new Set(['chatgpt', 'api_key', 'workload_identity']);
 export const READINESS_AUTH_TYPES = new Set(['oauth', 'api_key']);
-export const READINESS_SOURCES = new Set(['codex-account-read', 'pi-auth-check', 'human-approval', 'unknown']);
+export const READINESS_SOURCES = new Set(['codex-account-read', 'pi-auth-check', 'claude-auth-status', 'unsupported-control', 'human-approval', 'unknown']);
 
 /**
  * Reduce a Worker-declared auth/source field to the allowlisted enum, or drop it.

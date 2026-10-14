@@ -1,0 +1,699 @@
+{
+  "evidenceClass": "protocol-only synthetic provider responses; scripted native loader observations",
+  "cases": [
+    {
+      "source": "CLAUDE.md",
+      "mode": "positive",
+      "requests": [
+        {
+          "contextMarker": true,
+          "tools": [
+            "Agent",
+            "Bash",
+            "CronCreate",
+            "CronDelete",
+            "CronList",
+            "Edit",
+            "EnterWorktree",
+            "ExitWorktree",
+            "ListAgents",
+            "NotebookEdit",
+            "Read",
+            "ReportFindings",
+            "ScheduleWakeup",
+            "SendMessage",
+            "Skill",
+            "TaskStop",
+            "WebFetch",
+            "WebSearch",
+            "Workflow",
+            "Write"
+          ],
+          "rejectedAgent": false,
+          "rejectionText": []
+        }
+      ],
+      "nativeAttempt": false,
+      "nativeError": false,
+      "exitCode": 0,
+      "diagnosticLabels": [
+        "Unknown",
+        "plugin",
+        "permission",
+        "error"
+      ],
+      "timedOut": false,
+      "sentinelUnchanged": true,
+      "contextObserved": true,
+      "requestCount": 1
+    },
+    {
+      "source": "CLAUDE.md",
+      "mode": "restricted",
+      "requests": [
+        {
+          "contextMarker": false,
+          "tools": [],
+          "rejectedAgent": false,
+          "rejectionText": []
+        }
+      ],
+      "nativeAttempt": false,
+      "nativeError": false,
+      "exitCode": 0,
+      "diagnosticLabels": [
+        "Unknown",
+        "invalid",
+        "plugin",
+        "permission",
+        "error"
+      ],
+      "timedOut": false,
+      "sentinelUnchanged": true,
+      "contextObserved": false,
+      "requestCount": 1
+    },
+    {
+      "source": "rules",
+      "mode": "positive",
+      "requests": [
+        {
+          "contextMarker": true,
+          "tools": [
+            "Agent",
+            "Bash",
+            "CronCreate",
+            "CronDelete",
+            "CronList",
+            "Edit",
+            "EnterWorktree",
+            "ExitWorktree",
+            "ListAgents",
+            "NotebookEdit",
+            "Read",
+            "ReportFindings",
+            "ScheduleWakeup",
+            "SendMessage",
+            "Skill",
+            "TaskStop",
+            "WebFetch",
+            "WebSearch",
+            "Workflow",
+            "Write"
+          ],
+          "rejectedAgent": false,
+          "rejectionText": []
+        }
+      ],
+      "nativeAttempt": false,
+      "nativeError": false,
+      "exitCode": 0,
+      "diagnosticLabels": [
+        "Unknown",
+        "plugin",
+        "permission",
+        "error"
+      ],
+      "timedOut": false,
+      "sentinelUnchanged": true,
+      "contextObserved": true,
+      "requestCount": 1
+    },
+    {
+      "source": "rules",
+      "mode": "restricted",
+      "requests": [
+        {
+          "contextMarker": false,
+          "tools": [],
+          "rejectedAgent": false,
+          "rejectionText": []
+        }
+      ],
+      "nativeAttempt": false,
+      "nativeError": false,
+      "exitCode": 0,
+      "diagnosticLabels": [
+        "Unknown",
+        "invalid",
+        "plugin",
+        "permission",
+        "error"
+      ],
+      "timedOut": false,
+      "sentinelUnchanged": true,
+      "contextObserved": false,
+      "requestCount": 1
+    },
+    {
+      "source": "skills",
+      "mode": "positive",
+      "requests": [
+        {
+          "contextMarker": true,
+          "tools": [
+            "Agent",
+            "Bash",
+            "CronCreate",
+            "CronDelete",
+            "CronList",
+            "Edit",
+            "EnterWorktree",
+            "ExitWorktree",
+            "ListAgents",
+            "NotebookEdit",
+            "Read",
+            "ReportFindings",
+            "ScheduleWakeup",
+            "SendMessage",
+            "Skill",
+            "TaskStop",
+            "WebFetch",
+            "WebSearch",
+            "Workflow",
+            "Write"
+          ],
+          "rejectedAgent": false,
+          "rejectionText": []
+        }
+      ],
+      "nativeAttempt": false,
+      "nativeError": false,
+      "exitCode": 0,
+      "diagnosticLabels": [
+        "Unknown",
+        "plugin",
+        "permission",
+        "error"
+      ],
+      "timedOut": false,
+      "sentinelUnchanged": true,
+      "contextObserved": true,
+      "requestCount": 1
+    },
+    {
+      "source": "skills",
+      "mode": "restricted",
+      "requests": [
+        {
+          "contextMarker": false,
+          "tools": [],
+          "rejectedAgent": false,
+          "rejectionText": []
+        }
+      ],
+      "nativeAttempt": false,
+      "nativeError": false,
+      "exitCode": 0,
+      "diagnosticLabels": [
+        "Unknown",
+        "invalid",
+        "plugin",
+        "permission",
+        "error"
+      ],
+      "timedOut": false,
+      "sentinelUnchanged": true,
+      "contextObserved": false,
+      "requestCount": 1
+    },
+    {
+      "source": "plugin-agent",
+      "mode": "positive",
+      "requests": [
+        {
+          "contextMarker": true,
+          "tools": [
+            "Agent",
+            "Bash",
+            "CronCreate",
+            "CronDelete",
+            "CronList",
+            "Edit",
+            "EnterWorktree",
+            "ExitWorktree",
+            "ListAgents",
+            "NotebookEdit",
+            "Read",
+            "ReportFindings",
+            "ScheduleWakeup",
+            "SendMessage",
+            "Skill",
+            "TaskStop",
+            "WebFetch",
+            "WebSearch",
+            "Workflow",
+            "Write"
+          ],
+          "rejectedAgent": false,
+          "rejectionText": []
+        }
+      ],
+      "nativeAttempt": false,
+      "nativeError": false,
+      "exitCode": 0,
+      "diagnosticLabels": [
+        "Unknown",
+        "plugin",
+        "permission",
+        "error"
+      ],
+      "timedOut": false,
+      "sentinelUnchanged": true,
+      "contextObserved": true,
+      "requestCount": 1
+    },
+    {
+      "source": "plugin-agent",
+      "mode": "restricted",
+      "requests": [
+        {
+          "contextMarker": false,
+          "tools": [],
+          "rejectedAgent": false,
+          "rejectionText": []
+        }
+      ],
+      "nativeAttempt": false,
+      "nativeError": false,
+      "exitCode": 0,
+      "diagnosticLabels": [
+        "Unknown",
+        "invalid",
+        "plugin",
+        "permission",
+        "error"
+      ],
+      "timedOut": false,
+      "sentinelUnchanged": true,
+      "contextObserved": false,
+      "requestCount": 1
+    },
+    {
+      "source": "installed-plugin",
+      "mode": "positive",
+      "requests": [
+        {
+          "contextMarker": false,
+          "tools": [
+            "Agent",
+            "Bash",
+            "CronCreate",
+            "CronDelete",
+            "CronList",
+            "Edit",
+            "EnterWorktree",
+            "ExitWorktree",
+            "ListAgents",
+            "NotebookEdit",
+            "Read",
+            "ReportFindings",
+            "ScheduleWakeup",
+            "SendMessage",
+            "Skill",
+            "TaskStop",
+            "WebFetch",
+            "WebSearch",
+            "Workflow",
+            "Write"
+          ],
+          "rejectedAgent": false,
+          "rejectionText": []
+        }
+      ],
+      "nativeAttempt": false,
+      "nativeError": false,
+      "exitCode": 0,
+      "diagnosticLabels": [
+        "Unknown",
+        "plugin",
+        "permission",
+        "error"
+      ],
+      "timedOut": false,
+      "sentinelUnchanged": true,
+      "contextObserved": false,
+      "requestCount": 1
+    },
+    {
+      "source": "installed-plugin",
+      "mode": "restricted",
+      "requests": [
+        {
+          "contextMarker": false,
+          "tools": [],
+          "rejectedAgent": false,
+          "rejectionText": []
+        }
+      ],
+      "nativeAttempt": false,
+      "nativeError": false,
+      "exitCode": 0,
+      "diagnosticLabels": [
+        "Unknown",
+        "invalid",
+        "plugin",
+        "permission",
+        "error"
+      ],
+      "timedOut": false,
+      "sentinelUnchanged": true,
+      "contextObserved": false,
+      "requestCount": 1
+    },
+    {
+      "source": "add-dir",
+      "mode": "positive",
+      "requests": [
+        {
+          "contextMarker": true,
+          "tools": [
+            "Agent",
+            "Bash",
+            "CronCreate",
+            "CronDelete",
+            "CronList",
+            "Edit",
+            "EnterWorktree",
+            "ExitWorktree",
+            "ListAgents",
+            "NotebookEdit",
+            "Read",
+            "ReportFindings",
+            "ScheduleWakeup",
+            "SendMessage",
+            "Skill",
+            "TaskStop",
+            "WebFetch",
+            "WebSearch",
+            "Workflow",
+            "Write"
+          ],
+          "rejectedAgent": false,
+          "rejectionText": []
+        }
+      ],
+      "nativeAttempt": false,
+      "nativeError": false,
+      "exitCode": 0,
+      "diagnosticLabels": [
+        "Unknown",
+        "plugin",
+        "permission",
+        "error"
+      ],
+      "timedOut": false,
+      "sentinelUnchanged": true,
+      "contextObserved": true,
+      "requestCount": 1
+    },
+    {
+      "source": "add-dir",
+      "mode": "restricted",
+      "requests": [
+        {
+          "contextMarker": false,
+          "tools": [],
+          "rejectedAgent": false,
+          "rejectionText": []
+        }
+      ],
+      "nativeAttempt": false,
+      "nativeError": false,
+      "exitCode": 0,
+      "diagnosticLabels": [
+        "Unknown",
+        "invalid",
+        "plugin",
+        "permission",
+        "error"
+      ],
+      "timedOut": false,
+      "sentinelUnchanged": true,
+      "contextObserved": false,
+      "requestCount": 1
+    },
+    {
+      "source": "plugin-url",
+      "mode": "positive",
+      "requests": [
+        {
+          "contextMarker": true,
+          "tools": [
+            "Agent",
+            "Bash",
+            "CronCreate",
+            "CronDelete",
+            "CronList",
+            "Edit",
+            "EnterWorktree",
+            "ExitWorktree",
+            "ListAgents",
+            "NotebookEdit",
+            "Read",
+            "ReportFindings",
+            "ScheduleWakeup",
+            "SendMessage",
+            "Skill",
+            "TaskStop",
+            "WebFetch",
+            "WebSearch",
+            "Workflow",
+            "Write"
+          ],
+          "rejectedAgent": false,
+          "rejectionText": []
+        }
+      ],
+      "nativeAttempt": false,
+      "nativeError": false,
+      "exitCode": 0,
+      "diagnosticLabels": [
+        "Unknown",
+        "plugin",
+        "permission",
+        "error"
+      ],
+      "timedOut": false,
+      "sentinelUnchanged": true,
+      "contextObserved": true,
+      "requestCount": 1
+    },
+    {
+      "source": "plugin-url",
+      "mode": "restricted",
+      "requests": [
+        {
+          "contextMarker": false,
+          "tools": [],
+          "rejectedAgent": false,
+          "rejectionText": []
+        }
+      ],
+      "nativeAttempt": false,
+      "nativeError": false,
+      "exitCode": 0,
+      "diagnosticLabels": [
+        "Unknown",
+        "invalid",
+        "plugin",
+        "permission",
+        "error"
+      ],
+      "timedOut": false,
+      "sentinelUnchanged": true,
+      "contextObserved": false,
+      "requestCount": 1
+    },
+    {
+      "source": "agents",
+      "mode": "positive",
+      "requests": [
+        {
+          "contextMarker": true,
+          "tools": [
+            "Agent",
+            "Bash",
+            "CronCreate",
+            "CronDelete",
+            "CronList",
+            "Edit",
+            "EnterWorktree",
+            "ExitWorktree",
+            "ListAgents",
+            "NotebookEdit",
+            "Read",
+            "ReportFindings",
+            "ScheduleWakeup",
+            "SendMessage",
+            "Skill",
+            "TaskStop",
+            "WebFetch",
+            "WebSearch",
+            "Workflow",
+            "Write"
+          ],
+          "rejectedAgent": false,
+          "rejectionText": []
+        }
+      ],
+      "nativeAttempt": false,
+      "nativeError": false,
+      "exitCode": 0,
+      "diagnosticLabels": [
+        "Unknown",
+        "plugin",
+        "permission",
+        "error"
+      ],
+      "timedOut": false,
+      "sentinelUnchanged": true,
+      "contextObserved": true,
+      "requestCount": 1
+    },
+    {
+      "source": "agents",
+      "mode": "restricted",
+      "requests": [
+        {
+          "contextMarker": false,
+          "tools": [],
+          "rejectedAgent": false,
+          "rejectionText": []
+        }
+      ],
+      "nativeAttempt": false,
+      "nativeError": false,
+      "exitCode": 0,
+      "diagnosticLabels": [
+        "Unknown",
+        "invalid",
+        "plugin",
+        "permission",
+        "error"
+      ],
+      "timedOut": false,
+      "sentinelUnchanged": true,
+      "contextObserved": false,
+      "requestCount": 1
+    },
+    {
+      "source": "invalid-agent",
+      "mode": "restricted",
+      "requests": [
+        {
+          "contextMarker": false,
+          "tools": [
+            "mcp__origin__remote_command",
+            "mcp__origin__remote_read",
+            "mcp__origin__remote_write"
+          ],
+          "rejectedAgent": false,
+          "rejectionText": []
+        },
+        {
+          "contextMarker": false,
+          "tools": [
+            "mcp__origin__remote_command",
+            "mcp__origin__remote_read",
+            "mcp__origin__remote_write"
+          ],
+          "rejectedAgent": true,
+          "rejectionText": [
+            {
+              "isError": true,
+              "unknownTool": true
+            }
+          ]
+        }
+      ],
+      "nativeAttempt": true,
+      "nativeError": true,
+      "exitCode": 0,
+      "diagnosticLabels": [
+        "Unknown",
+        "invalid",
+        "plugin",
+        "permission",
+        "error"
+      ],
+      "timedOut": false,
+      "sentinelUnchanged": true,
+      "contextObserved": false,
+      "requestCount": 2
+    }
+  ],
+  "cli": "2.1.294 (Claude Code)",
+  "cliSha256": "def0d15e64dd7d89621f88d28214f885b1c38b0ddd69762fb8593e34915d6d53",
+  "help": {
+    "bare": "--bare                                Minimal mode: skip hooks (those defined\n                                        in settings and by installed plugins;\n                                        features built into Claude Code are\n                                        unaffected), LSP, plugin sync,\n                                        attribution, auto-memory, background\n                                        prefetches, keychain reads, and\n                                        CLAUDE.md auto-discovery. Sets\n                                        CLAUDE_CODE_SIMPLE=1. Anthropic auth is\n                                        strictly ANTHROPIC_API_KEY or\n                                        apiKeyHelper via --settings (OAuth and\n                                        keychain are never read). 3P providers\n                                        (Bedrock/Vertex/Foundry) use their own\n                                        credentials. Skills still resolve via\n                                        /skill-name. Explicitly provide context\n                                        via: --system-prompt[-file],\n                                        --append-system-prompt[-file], --add-dir\n                                        (CLAUDE.md dirs), --mcp-config,\n                                        --settings, --agents, --plugin-dir.",
+    "disableSkills": "--disable-slash-commands              Disable all skills",
+    "strictMcp": "--strict-mcp-config                   Only use MCP servers from --mcp-config,\n                                        ignoring all other MCP configurations"
+  },
+  "loaderPairs": [
+    {
+      "source": "CLAUDE.md",
+      "positiveChannelEstablished": true,
+      "restrictedRequestObserved": true,
+      "restrictedContextAbsent": true,
+      "sentinelUnchanged": true,
+      "disposition": "positive control and restricted context exclusion observed; explicit sources additionally require launch capture"
+    },
+    {
+      "source": "rules",
+      "positiveChannelEstablished": true,
+      "restrictedRequestObserved": true,
+      "restrictedContextAbsent": true,
+      "sentinelUnchanged": true,
+      "disposition": "positive control and restricted context exclusion observed; explicit sources additionally require launch capture"
+    },
+    {
+      "source": "skills",
+      "positiveChannelEstablished": true,
+      "restrictedRequestObserved": true,
+      "restrictedContextAbsent": true,
+      "sentinelUnchanged": true,
+      "disposition": "positive control and restricted context exclusion observed; explicit sources additionally require launch capture"
+    },
+    {
+      "source": "plugin-agent",
+      "positiveChannelEstablished": true,
+      "restrictedRequestObserved": true,
+      "restrictedContextAbsent": true,
+      "sentinelUnchanged": true,
+      "disposition": "positive control and restricted context exclusion observed; explicit sources additionally require launch capture"
+    },
+    {
+      "source": "installed-plugin",
+      "positiveChannelEstablished": false,
+      "restrictedRequestObserved": true,
+      "restrictedContextAbsent": true,
+      "sentinelUnchanged": true,
+      "disposition": "unproved: positive native source channel not established"
+    },
+    {
+      "source": "add-dir",
+      "positiveChannelEstablished": true,
+      "restrictedRequestObserved": true,
+      "restrictedContextAbsent": true,
+      "sentinelUnchanged": true,
+      "disposition": "positive control and restricted context exclusion observed; explicit sources additionally require launch capture"
+    },
+    {
+      "source": "plugin-url",
+      "positiveChannelEstablished": true,
+      "restrictedRequestObserved": true,
+      "restrictedContextAbsent": true,
+      "sentinelUnchanged": true,
+      "disposition": "positive control and restricted context exclusion observed; explicit sources additionally require launch capture"
+    },
+    {
+      "source": "agents",
+      "positiveChannelEstablished": true,
+      "restrictedRequestObserved": true,
+      "restrictedContextAbsent": true,
+      "sentinelUnchanged": true,
+      "disposition": "positive control and restricted context exclusion observed; explicit sources additionally require launch capture"
+    }
+  ]
+}

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 
 import type { EngineAdapter } from '../engine/port.ts';
+import { OarEngineAdapter } from '../engine/oar.ts';
 import {
   createEnvironmentWorkerEngines,
   describeEnvironmentWorkerEngines,
@@ -41,7 +42,7 @@ function facts(options: {
   };
 }
 
-test('a macOS host configures Codex read-only and Pi with the Sprout session store', () => {
+test('a macOS host configures Codex read-only and passes the legacy Pi session-directory override for refusal', () => {
   const configurations = describeEnvironmentWorkerEngines(
     facts({
       configuration: { piSessionDirectory: '/var/sprout/pi-sessions' },
@@ -166,6 +167,13 @@ test('every selected engine configuration becomes one adapter, keyed by its engi
     ['codex', 'pi'],
   );
   assert.equal(built[0]?.engine === 'codex' && built[0].sandbox, 'read-only');
+});
+
+test('accepted Codex and Pi selections always construct the shared OAR adapter', () => {
+  const host = facts({ located: { codex: '/codex', pi: '/pi' } });
+  const engines = createEnvironmentWorkerEngines(host);
+  assert.ok(engines.get('codex') instanceof OarEngineAdapter);
+  assert.ok(engines.get('pi') instanceof OarEngineAdapter);
 });
 
 function stubAdapter(id: string): EngineAdapter {

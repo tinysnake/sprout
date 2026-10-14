@@ -547,6 +547,13 @@ export class InMemoryCollaborationStore implements CollaborationStore {
     readonly now: number;
   }): Promise<void> {
     if (input.observation.status === 'failed') this.#observationTimes.set(input.inputId, input.now);
+    if (input.observation.status === 'failed') {
+      for (const [key, wake] of this.#wakes) {
+        if (wake.inputId === input.inputId && wake.agentId === input.observation.agentId && wake.status === 'pending') {
+          this.#wakes.set(key, { ...wake, status: 'failed', detail: input.observation.detail });
+        }
+      }
+    }
     this.#observations.set(input.inputId, [
       ...(this.#observations.get(input.inputId) ?? []),
       input.observation,

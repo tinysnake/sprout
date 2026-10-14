@@ -1,0 +1,32 @@
+{
+  "ticket": 229,
+  "fixedBase": "6fe675fe77f46403eabf623c5e6300d3ab4e0a3c",
+  "commandTimeoutSeconds": 180,
+  "checks": {
+    "quickInitialMissingDependencies": { "tests": 1781, "pass": 1694, "fail": 87, "classification": "missing-ws-dependency" },
+    "quick": { "exitCode": 0, "tests": 2131, "pass": 2131, "fail": 0, "cancelled": 0, "skipped": 0, "todo": 0 },
+    "affectedConcurrent": { "classification": "outer-timeout", "timeoutSeconds": 180, "finalCounters": null },
+    "affectedIsolated": { "exitCode": 1, "tests": 2131, "pass": 2128, "fail": 3, "cancelled": 0, "skipped": 0, "todo": 0, "failures": [
+      { "file": "src/test-summary.test.ts", "line": 37, "classification": "timeout-reported-fixture-name-instead-of-test-name" },
+      { "file": "src/test-summary.test.ts", "line": 75, "classification": "concurrent-timeouts-reported-fixture-names-instead-of-test-names" },
+      { "file": "src/test-summary.test.ts", "line": 180, "classification": "completed-results-not-observed-before-external-kill" }
+    ] },
+    "full": { "classification": "internal-suite-timeout", "internalTimeoutSeconds": 175, "outerTimeoutSeconds": 180, "finalCounters": null },
+    "typecheck": { "exitCode": 2, "diagnostics": 7, "sourceDiagnostics": [
+      { "file": "scripts/scratch/post-project-test-message.ts", "line": 24, "code": "TS2741" },
+      { "file": "scripts/scratch/post-project-test-message.ts", "line": 34, "code": "TS2353" }
+    ], "dependencyDiagnostics": { "missingPackage": "playwright", "file": "scripts/tasks-layout.browser.test.ts", "count": 5 } },
+    "attributionProbe": { "exitCode": 0, "evidenceClass": "scripted", "cases": 3, "pendingAbortPreserved": true },
+    "originProbe": { "exitCode": 0, "completedTurns": 3, "modelIssuedCalls": 9, "boundedLivePredicatesPassed": 6 },
+    "syntax": "pass",
+    "diffCheck": "pass",
+    "productionAndManifestsDiff": "empty",
+    "sharedOriginFixtureDiff": "empty"
+  },
+  "limits": [
+    "No baseline reproduction of the affected timeout-observation failures in this session.",
+    "Existing repository dependencies reused without installation; Playwright unavailable.",
+    "No full-suite passing result or final counters claimed.",
+    "Typecheck is not green."
+  ]
+}

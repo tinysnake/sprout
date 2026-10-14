@@ -15,8 +15,11 @@ import { projectAgentCompatibility, type AgentCompatibilityProjection, type Opti
 import {
   CollaborationCoordinator,
   type CollaborationCoordinatorOptions,
+  type RunAdmissionPreflight,
 } from './collaboration/coordinator.ts';
 import type { CollaborationStore } from './collaboration/store.ts';
+import type { AdmissibleOptionDecision } from './agent/admission.ts';
+import { sanitizeProjectEventDetail } from './collaboration/events.ts';
 import type { EngineAdapter } from './engine/port.ts';
 import { createProductionHostPiAdapter, isHostPiEffortSupported, type HostPiEngineAdapter, type HostPiReadiness } from './engine/pi-host.ts';
 import {
@@ -1339,6 +1342,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         link: (input) => tasks.link(input),
       },
       onTaskRunSettled: (input) => tasks.onRunSettled(input),
+      onUncertainRunExecution: async ({ run, leaseId }) => {
+        if (run.taskId !== undefined) return;
+        await recovery.open({ leaseId, cause: 'cleanup-failed', hadActiveRun: true, runId: run.id });
+      },
       leaseTtlMs,
     });
 
@@ -1494,6 +1501,14 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
       },
       store: stores.collaboration,
       runs: orchestrator,
+      ...(environmentSource === 'enrollment' && executionStrategy.mode === 'environment-hosted' ? {
+        preflightRun: (agentId: string, projectId: string) =>
+          preflightRunAdmission(agentId, projectId, {
+            getProjectAvailableInstances: (id) => projects.get(id)?.availableEnvironmentInstanceIds ?? [],
+            isInstanceConnected: (id) => workerGateway.liveFor(id) !== undefined,
+            evaluateOptionAdmission: (agent, instance) => orchestrator.evaluateOptionAdmission(agent, instance),
+          }),
+      } : {}),
       ...(usageRoutingModel !== undefined ? { routingModel: usageRoutingModel } : {}),
       onRoutingAttempt: async (attempt, projectId) => {
         const telemetry = usageRoutingModel?.takeTelemetry(attempt.id);
@@ -2768,5 +2783,53 @@ function defaultProject(input: {
           'Collaborate through the project channel and keep results concise.',
       },
     ],
+  };
+}
+
+export interface PreflightRunAdmissionDependencies {
+  readonly getProjectAvailableInstances: (projectId: string) => readonly string[];
+  readonly isInstanceConnected: (instanceId: string) => boolean;
+  readonly evaluateOptionAdmission: (
+    agentId: string,
+    environmentInstanceId: string,
+  ) => Promise<AdmissibleOptionDecision>;
+}
+
+/**
+ * Preflight an Agent's work admission across a Project's connected Environments
+ * before submitting a run (#269).
+ *
+ * When any connected Environment can admit work, it is returned to pin the run.
+ * When connected Environments exist but all reject admission, a terminal failed
+ * decision is produced carrying the most informative sanitized refusal reason.
+ * When no Environment is connected, unavailable is returned so the established
+ * failed-run and reconnect-retry loop handles the disconnected carrier.
+ */
+export async function preflightRunAdmission(
+  agentId: string,
+  projectId: string,
+  deps: PreflightRunAdmissionDependencies,
+): Promise<RunAdmissionPreflight> {
+  const instanceIds = deps.getProjectAvailableInstances(projectId);
+  const connected = instanceIds.filter((instanceId) => deps.isInstanceConnected(instanceId));
+  // Keep the established disconnected failure and bounded reconnect retry path.
+  if (connected.length === 0) return { kind: 'unavailable' };
+
+  let specificReason: string | undefined;
+  for (const environmentInstanceId of connected) {
+    const admission = await deps.evaluateOptionAdmission(agentId, environmentInstanceId);
+    if (admission.ok) return { kind: 'ready', environmentInstanceId };
+    if (admission.reason) {
+      const sanitized = sanitizeProjectEventDetail(admission.reason);
+      if (sanitized && (!specificReason || sanitized.length > specificReason.length)) {
+        specificReason = sanitized;
+      }
+    }
+  }
+
+  const defaultReason = `No connected Environment can admit work for agent ${agentId}; check Worker readiness and the Project's Environment access.`;
+  return {
+    kind: 'failed',
+    reason: specificReason ?? defaultReason,
   };
 }

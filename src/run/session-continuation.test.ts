@@ -163,7 +163,7 @@ function build(options: {
     ...request,
     sessionKeyScope: request.sessionKeyScope ?? { kind: 'conversation', id: 'test-conversation' },
   });
-  return { orchestrator, adapter, sessionKeys, store, agent };
+  return { orchestrator, adapter, sessionKeys, store, agent, pool };
 }
 
 
@@ -354,6 +354,55 @@ test('a key stored by a previous process is used after a restart', async () => {
 });
 
 
+test('a native session key in the SQLite slot is observed by a returning run after store reopen', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-session-key-reopen-'));
+  const filename = join(directory, 'sprout.db');
+  let database = new DatabaseSync(filename);
+  let sessionKeys = new SqliteSessionKeyStore({ db: database });
+  try {
+    const first = build({ sessionKeys });
+    const firstRun = await first.orchestrator.submit({ agentId: 'agent-scout', prompt: 'before store reopen' });
+    await first.orchestrator.waitFor(firstRun.id);
+    assert.equal((await sessionKeys.get(continuationIdentity()))?.key, 'scripted-key-1');
+    sessionKeys.close();
+    database.close();
+
+    database = new DatabaseSync(filename);
+    sessionKeys = new SqliteSessionKeyStore({ db: database });
+    const returning = build({ sessionKeys });
+    const returningRun = await returning.orchestrator.submit({ agentId: 'agent-scout', prompt: 'after store reopen' });
+    await returning.orchestrator.waitFor(returningRun.id);
+    assert.equal(returning.adapter.requests.length, 1);
+    assert.equal(returning.adapter.requests[0]?.resumeSessionKey, 'scripted-key-1');
+    assert.equal((await sessionKeys.get(continuationIdentity()))?.key, 'scripted-key-1');
+  } finally {
+    sessionKeys.close();
+    database.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a recovering lease refuses work and preserves the stored native session key', async () => {
+  const sessionKeys = new InMemorySessionKeyStore();
+  await sessionKeys.save({ ...continuationIdentity(), key: 'recovering-lease-native-key', updatedAt: 1_000 });
+  const { orchestrator, adapter, pool } = build({ sessionKeys });
+  const acquired = pool.acquireLease({
+    instanceId: 'mac-mini-1', capability: 'agent-run', mode: 'read-write',
+    holderId: 'recovering-holder', ttlMs: 60_000,
+  });
+  assert.equal(acquired.ok, true);
+  if (!acquired.ok) return;
+  assert.equal(pool.markRecovering(acquired.lease.id)?.state, 'recovering');
+
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'continue after recovery' });
+  const run = await orchestrator.waitFor(id);
+  assert.equal(run.status, 'failed');
+  assert.match(run.failure ?? '', /recover/i);
+  assert.equal(adapter.requests.length, 0, 'the recovering environment never starts another native run');
+  assert.equal((await sessionKeys.get(continuationIdentity()))?.key, 'recovering-lease-native-key');
+  assert.equal(pool.getLease(acquired.lease.id)?.state, 'recovering');
+});
+
 test('a migrated unscoped SQLite session key is retained but never crosses into an authorized conversation', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-session-key-migration-'));
   const filename = join(directory, 'sprout.db');
@@ -409,9 +458,10 @@ test('a migrated unscoped SQLite session key is retained but never crosses into 
       const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'continue' });
       const run = await orchestrator.waitFor(id);
 
-      assert.equal(run.status, 'completed');
-      assert.equal(adapter.requests[0]?.resumeSessionKey, undefined, 'legacy scope is unknown and cannot authorize continuation');
-      assert.equal(adapter.sessions[0]?.engineSessionKey, 'scripted-key-1');
+      assert.equal(run.status, 'failed');
+      assert.equal(run.result?.status, 'failed');
+      assert.match(run.result?.status === 'failed' ? run.result.message : '', /legacy authorization scope is unknown/i);
+      assert.equal(adapter.requests.length, 0, 'an incompatible legacy key does not start a new native conversation silently');
       assert.equal((await sessionKeys.get(identity))?.key, legacyKey, 'the historical key remains in its legacy scope');
       sessionKeys.close();
     } finally {

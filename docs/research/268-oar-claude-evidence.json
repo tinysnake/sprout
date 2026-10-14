@@ -1,0 +1,107 @@
+{
+  "boundaries": {
+    "evidenceClass": "scripted",
+    "oar": "0.59.1",
+    "cli": "2.1.294 (Claude Code)",
+    "parentMarkersRemoved": true,
+    "explicitEnvCanRestoreElevenMarkers": true,
+    "permissionOverrideRefusedBeforeChildEffect": true,
+    "outcome": "completed",
+    "forcedToolAttemptObserved": true,
+    "providerReceivedDeniedToolResult": true,
+    "deniedToolResourceEffectAbsent": true,
+    "bashAdvertised": false,
+    "ambientOutcome": "completed",
+    "rulesLoadedDespiteToolExclusion": true,
+    "hookExecutedDespiteToolExclusion": true,
+    "unboundedOutcome": "completed",
+    "localBashExecutedWithoutApproval": true,
+    "addDirDoesNotConfineWrites": true,
+    "bareSuppressedAmbientHookInFixture": true,
+    "explicitHostFlagsOutcome": "completed",
+    "explicitToolsEmptyDeniesForcedBash": true,
+    "explicitToolsEmptyAdvertisesNoBash": true,
+    "providerRequests": 8
+  },
+  "liveMessage": {
+    "evidenceClass": "model-issued",
+    "mode": "environment-hosted",
+    "oar": "0.59.1",
+    "nonInferenceReadiness": [
+      {
+        "version": "2.1.294",
+        "readiness": "ready",
+        "modelAvailability": "unknown"
+      }
+    ],
+    "projectInstructionsReceived": true,
+    "projectModelReceived": true,
+    "projectEffortReceived": true,
+    "nativeModelMatchesRequested": true,
+    "runStatus": "completed",
+    "replyCount": 1,
+    "finalAnswerMatches": true,
+    "projectedAnswerMatches": true,
+    "realProgressCount": 2,
+    "persistedRunMatches": true,
+    "tokenUsagePresent": true,
+    "detailedUsagePresent": true,
+    "replyCountAfterReconcile": 1
+  },
+  "checks": {
+    "focused": {
+      "tests": 90,
+      "pass": 90,
+      "fail": 0,
+      "skipped": 0,
+      "durationMs": 18810.922125,
+      "wallSeconds": 21.392
+    },
+    "quick": {
+      "files": 283,
+      "exitCode": 124,
+      "wallSeconds": 176.4,
+      "internalDeadlineMs": 175000,
+      "disposition": "incomplete",
+      "skipStatus": "aggregate unavailable"
+    },
+    "affected": {
+      "files": 284,
+      "exitCode": 124,
+      "wallSeconds": 176.86,
+      "internalDeadlineMs": 175000,
+      "disposition": "incomplete",
+      "skipStatus": "aggregate unavailable"
+    },
+    "typecheck": {
+      "exitCode": 2,
+      "wallSeconds": 26.4,
+      "nodeDiagnostics": 2,
+      "diagnosticFile": "scripts/scratch/post-project-test-message.ts",
+      "webExecuted": false
+    },
+    "audit": {
+      "files": 305,
+      "missing": 0,
+      "extra": 0,
+      "duplicate": 0,
+      "wallSeconds": 1.3
+    }
+  },
+  "unproved": [
+    "Universal builtin exclusion beyond forced Bash cases",
+    "Rules-file denied open (default actually loads rules)",
+    "Automatic plugin discovery denial",
+    "LSP trigger/entry denial",
+    "OS-managed policy denial",
+    "Managed MCP denial",
+    "Host-run OS isolation and remote resource authority",
+    "Claude Windows/Linux execution",
+    "Historical 0.35.0 source/behavior comparison not rerun",
+    "Broad suites incomplete; web typecheck not executed"
+  ],
+  "probeWallSeconds": {
+    "boundaries": 7.2,
+    "liveMessage": 17.7
+  }
+}
