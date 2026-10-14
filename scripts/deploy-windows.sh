@@ -46,7 +46,6 @@ WORKER_FILES=(
   src/engine/jsonrpc.ts
   src/engine/codex.ts
   src/engine/codex-protocol.ts
-  src/engine/pi.ts
   src/engine/pi-protocol.ts
   src/engine/agy.ts
   src/engine/agy-protocol.ts

@@ -99,7 +99,7 @@ export interface WorkerEngineReadinessFact {
   readonly requirementRevision?: string;
   readonly probedAt?: number;
   readonly probeExitCode?: number;
-  readonly source?: 'codex-account-read' | 'pi-auth-check' | 'claude-auth-status' | 'unknown';
+  readonly source?: 'codex-account-read' | 'pi-auth-check' | 'claude-auth-status' | 'unsupported-control' | 'unknown';
 }
 
 /** One Worker-measured non-inference readiness probe record. */

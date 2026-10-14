@@ -113,7 +113,7 @@ export interface WorkerConfiguration {
   readonly workspaceRoot: string;
   /** Platform the worker runs on when its carrier declares one (`container` inside a container). */
   readonly environmentPlatform: string | undefined;
-  /** Where the Pi engine keeps its sessions, when the host overrides the default. */
+  /** Legacy Pi session-directory override, refused by the OAR Pi readiness policy. */
   readonly piSessionDirectory: string | undefined;
   /** Path the worker writes its readiness address to, when a carrier needs a file. */
   readonly readyFile: string | undefined;

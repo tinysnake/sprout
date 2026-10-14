@@ -27,22 +27,16 @@ import { createOarMcpBridge, type OarMcpBridgeHandle } from './oar-mcp-bridge.ts
 import type { RunnerCommand, RunnerMessage } from './oar-runner-protocol.ts';
 import type { SessionOptions, SessionUsage, TokenTotals } from '@botiverse/oar';
 import { redactSensitiveText } from '../environment/privacy.ts';
-import type { CodexSandboxMode } from './codex.ts';
+import { runtimeCatalogEntry, OAR_ADAPTER_VERSION, ENGINE_RUNTIME_CATALOG } from './runtime-catalog.ts';
+import type { CodexSandboxMode } from './runtime-catalog.ts';
 
-export const OAR_PACKAGE_VERSION = '0.59.1';
+export const OAR_PACKAGE_VERSION = OAR_ADAPTER_VERSION;
 
-/** Verified runtime facts; registration does not grant Host-run authority. */
+/** Verified OAR behavior projected from the shared runtime catalog. */
 export const OAR_RUNTIME_REGISTRATIONS = {
-  codex: { finalAnswer: 'turn-text', standingInstructions: 'out-of-band' },
-  pi: { finalAnswer: 'turn-text', standingInstructions: 'out-of-band' },
-  claude: {
-    finalAnswer: 'last-message',
-    standingInstructions: 'out-of-band',
-    verifiedPlatforms: ['darwin'],
-    verifiedCliVersion: '2.1.294',
-    readiness: 'non-inference-auth-status',
-    hostRun: 'unproved',
-  },
+  codex: ENGINE_RUNTIME_CATALOG.codex,
+  pi: ENGINE_RUNTIME_CATALOG.pi,
+  claude: ENGINE_RUNTIME_CATALOG.claude,
 } as const;
 
 /** Builtins excluded from the Claude candidate; this is not an OS sandbox. */
@@ -101,9 +95,11 @@ export class OarEngineAdapter implements EngineAdapter {
     this.#options = options;
     this.id = options.runtimeId;
     this.capabilities = {
-      streaming: 'incremental',
-      supportsInterrupt: true,
-      standingInstructions: 'out-of-band',
+      ...(runtimeCatalogEntry(options.runtimeId)?.capabilities ?? {
+        streaming: 'incremental',
+        supportsInterrupt: true,
+        standingInstructions: 'out-of-band',
+      }),
       ...options.capabilities,
     };
   }
@@ -124,7 +120,7 @@ export class OarEngineAdapter implements EngineAdapter {
 
     if (this.#options.runtimeId === 'pi' && this.#options.sessionDirectory !== undefined) {
       throw new EngineStartError(
-        'OAR Pi cannot use the configured Pi session directory on this route. This run did not start and any saved session key was preserved; use the native Pi adapter for this configuration.',
+        runtimeCatalogEntry('pi')!.policy.unsupportedWorkerConfigurations![0]!.explanation,
       );
     }
 

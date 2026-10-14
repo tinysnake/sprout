@@ -30,25 +30,14 @@ import { waitFor } from '../runtime-test-harness.ts';
 
 async function listenOnReservedPort(runtime: any): Promise<number> {
   let lastError: unknown;
-  for (let port = 46510; port <= 46519; port += 1) {
+  for (let port = 47605; port <= 47609; port += 1) {
     try {
       return (await runtime.api.listen(port, '127.0.0.1')).port;
     } catch (error) {
       lastError = error;
     }
   }
-  throw new Error('No port in the reserved 46510–46519 block was available', { cause: lastError });
-}
-
-function withOarOptIn<T>(selection: 'codex' | 'pi' | 'all', action: () => T): T {
-  const previous = process.env['SPROUT_USE_OAR_ENGINE'];
-  process.env['SPROUT_USE_OAR_ENGINE'] = selection;
-  try {
-    return action();
-  } finally {
-    if (previous === undefined) delete process.env['SPROUT_USE_OAR_ENGINE'];
-    else process.env['SPROUT_USE_OAR_ENGINE'] = previous;
-  }
+  throw new Error('No port in the reserved 47605–47609 block was available', { cause: lastError });
 }
 
 async function liveCodexModel(installation: any, cwd: string): Promise<string> {
@@ -62,7 +51,7 @@ async function liveCodexModel(installation: any, cwd: string): Promise<string> {
   }
 }
 
-test('AC8: Production Worker selects the shared OAR Codex adapter through the pre-rollout opt-in', () => {
+test('the production Worker selects the shared OAR Codex adapter', () => {
   const facts: EngineHostFacts = {
     configuration: {
       environmentPlatform: 'host',
@@ -73,7 +62,7 @@ test('AC8: Production Worker selects the shared OAR Codex adapter through the pr
     locate: () => '/synthetic/bin/codex',
   };
 
-  const codex = withOarOptIn('codex', () => createEnvironmentWorkerEngines(facts).get('codex'));
+  const codex = createEnvironmentWorkerEngines(facts).get('codex');
   assert.ok(codex instanceof OarEngineAdapter);
   assert.equal(codex.id, 'codex');
 });
@@ -139,7 +128,7 @@ test('AC2: Live Codex Message continuation through an authenticated enrolled Wor
     .filter(configuration => configuration.engine === 'codex');
   assert.equal(engineConfigurations[0]?.engine === 'codex' ? engineConfigurations[0].sandbox : undefined, 'read-only',
     'the current host sandbox selection remains read-only');
-  const adapter = withOarOptIn('codex', () => createEnvironmentWorkerEngines(hostFacts).get('codex'));
+  const adapter = createEnvironmentWorkerEngines(hostFacts).get('codex');
   assert.ok(adapter instanceof OarEngineAdapter, 'the production Worker selection is OAR Codex');
   const engines = new Map([['codex', adapter]]);
   const startRequests: Array<{ readonly model: string | undefined; readonly effort: string | undefined; readonly instructions: string | undefined }> = [];

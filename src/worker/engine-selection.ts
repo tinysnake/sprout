@@ -1,9 +1,9 @@
 import { execFileSync } from 'node:child_process';
 
 import type { EngineAdapter } from '../engine/port.ts';
-import { CodexEngineAdapter, type CodexSandboxMode } from '../engine/codex.ts';
 import { OarEngineAdapter } from '../engine/oar.ts';
-import { PiEngineAdapter } from '../engine/pi.ts';
+import type { CodexSandboxMode, EngineRuntimeId, RuntimeCatalogEntry } from '../engine/runtime-catalog.ts';
+import { ENGINE_RUNTIME_CATALOG } from '../engine/runtime-catalog.ts';
 import { AgyEngineAdapter } from '../engine/agy.ts';
 import { OpenCodeEngineAdapter } from '../engine/opencode.ts';
 import type { WorkerConfiguration } from '../host-config.ts';
@@ -64,7 +64,7 @@ export interface CodexEngineConfiguration {
 export interface PiEngineConfiguration {
   readonly engine: 'pi';
   readonly binaryPath: string;
-  /** Keeps Sprout's sessions out of the machine-local default store. */
+  /** A legacy override reported as unsupported by the OAR Pi route. */
   readonly sessionDirectory?: string;
 }
 
@@ -123,31 +123,18 @@ export interface EngineAdapterFactories {
 
 const realFactories: EngineAdapterFactories = {
   claude: configuration => new OarEngineAdapter({ runtimeId: 'claude', binaryPath: configuration.binaryPath }),
-  codex: configuration => process.env['SPROUT_USE_OAR_ENGINE'] === 'codex' || process.env['SPROUT_USE_OAR_ENGINE'] === 'all'
-    ? new OarEngineAdapter({
-      runtimeId: 'codex',
-      binaryPath: configuration.binaryPath,
-      sandbox: configuration.sandbox,
-    })
-    : new CodexEngineAdapter({
-      binaryPath: configuration.binaryPath,
-      args: [...configuration.args],
-      sandbox: configuration.sandbox,
-    }),
-  pi: configuration => process.env['SPROUT_USE_OAR_ENGINE'] === 'pi' || process.env['SPROUT_USE_OAR_ENGINE'] === 'all'
-    ? new OarEngineAdapter({
-      // OAR Pi uses its bundled SDK; the CLI path is for the native Pi adapter and readiness probe.
-      runtimeId: 'pi',
-      ...(configuration.sessionDirectory !== undefined
-        ? { sessionDirectory: configuration.sessionDirectory }
-        : {}),
-    })
-    : new PiEngineAdapter({
-      binaryPath: configuration.binaryPath,
-      ...(configuration.sessionDirectory !== undefined
-        ? { sessionDirectory: configuration.sessionDirectory }
-        : {}),
-    }),
+  codex: configuration => new OarEngineAdapter({
+    runtimeId: 'codex',
+    binaryPath: configuration.binaryPath,
+    sandbox: configuration.sandbox,
+  }),
+  pi: configuration => new OarEngineAdapter({
+    // OAR Pi uses its bundled SDK; the CLI path remains for discovery/readiness.
+    runtimeId: 'pi',
+    ...(configuration.sessionDirectory !== undefined
+      ? { sessionDirectory: configuration.sessionDirectory }
+      : {}),
+  }),
   agy: (configuration) =>
     new AgyEngineAdapter({
       binaryPath: configuration.binaryPath,
@@ -171,46 +158,53 @@ export function describeEnvironmentWorkerEngines(
   const configuration = facts.configuration;
   const configurations: EngineConfiguration[] = [];
 
-  const codexBinary = resolveEngineBinary('codex', facts, { preferWindowsExecutable: false });
-  if (codexBinary !== undefined) {
-    configurations.push({
-      engine: 'codex',
-      binaryPath: codexBinary,
-      args: ['--strict-config'],
-      sandbox: configuration.environmentPlatform === 'container' ? 'danger-full-access' : 'read-only',
+  const runtimeIds = Object.keys(ENGINE_RUNTIME_CATALOG) as EngineRuntimeId[];
+  runtimeIds.sort((left, right) =>
+    ENGINE_RUNTIME_CATALOG[left].workerOrder - ENGINE_RUNTIME_CATALOG[right].workerOrder,
+  );
+  for (const engine of runtimeIds) {
+    const runtime: RuntimeCatalogEntry = ENGINE_RUNTIME_CATALOG[engine];
+    if (runtime.selection !== 'accepted' && !(engine === 'claude' && candidates.claude)) continue;
+    if (runtime.selection === 'candidate' && !runtime.platform.verified.includes(facts.platform as 'darwin' | 'linux' | 'win32')) continue;
+    const binaryPath = resolveEngineBinary(runtime.command, facts, {
+      preferWindowsExecutable: runtime.preferWindowsExecutable,
     });
-  }
+    if (binaryPath === undefined) continue;
 
-  const piBinary = resolveEngineBinary('pi', facts, { preferWindowsExecutable: true });
-  if (piBinary !== undefined) {
-    const sessionDirectory = configuration.piSessionDirectory;
-    configurations.push({
-      engine: 'pi',
-      binaryPath: piBinary,
-      ...(sessionDirectory !== undefined ? { sessionDirectory } : {}),
-    });
+    switch (engine) {
+      case 'codex':
+        configurations.push({
+          engine,
+          binaryPath,
+          args: [...(runtime.startupArgs ?? [])],
+          sandbox: configuration.environmentPlatform === 'container' ? 'danger-full-access' : 'read-only',
+        });
+        break;
+      case 'pi':
+        configurations.push({
+          engine,
+          binaryPath,
+          ...(configuration.piSessionDirectory !== undefined
+            ? { sessionDirectory: configuration.piSessionDirectory }
+            : {}),
+        });
+        break;
+      case 'agy':
+        configurations.push({
+          engine,
+          binaryPath,
+          skipPermissions: true,
+          hookPlatform: facts.platform === 'win32' ? 'windows' : 'posix',
+        });
+        break;
+      case 'opencode':
+        configurations.push({ engine, binaryPath });
+        break;
+      case 'claude':
+        configurations.push({ engine, binaryPath });
+        break;
+    }
   }
-
-  const agyBinary = resolveEngineBinary('agy', facts, { preferWindowsExecutable: true });
-  if (agyBinary !== undefined) {
-    configurations.push({
-      engine: 'agy',
-      binaryPath: agyBinary,
-      skipPermissions: true,
-      hookPlatform: facts.platform === 'win32' ? 'windows' : 'posix',
-    });
-  }
-
-  const opencodeBinary = resolveEngineBinary('opencode', facts, { preferWindowsExecutable: true });
-  if (opencodeBinary !== undefined) {
-    configurations.push({ engine: 'opencode', binaryPath: opencodeBinary });
-  }
-
-  if (candidates.claude && facts.platform === 'darwin') {
-    const binaryPath = resolveEngineBinary('claude', facts, { preferWindowsExecutable: false });
-    if (binaryPath !== undefined) configurations.push({ engine: 'claude', binaryPath });
-  }
-
   return configurations;
 }
 

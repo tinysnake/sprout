@@ -11,7 +11,7 @@ This record covers the macOS host and platform portable checks. It does not esta
 - Native CLIs: Codex CLI `0.159.3` and Pi CLI `1.2.0` (`codex --version`, `pi --version`). They are host installations; these are the exact versions exercised, not versions installed by the repository lockfile.
 - Readiness floors in `src/worker/readiness.ts`: Codex `0.154.0`, Pi `0.86.1`.
 
-The runner entry exists at `src/engine/oar-runner-entry.ts`; the live model-issued journeys below opened OAR sessions through that runner. Production Worker selection preserves native Codex/Pi by default and selects OAR only through `SPROUT_USE_OAR_ENGINE=codex|pi|all`. The selected Codex host sandbox remains `read-only`. OAR Pi uses the bundled Pi SDK; the host Pi executable path is used by native Pi selection and readiness probes, not passed as an OAR executable installation.
+The runner entry exists at `src/engine/oar-runner-entry.ts`; the live model-issued journeys below opened OAR sessions through that runner. At the time of these #235 observations, production Worker selection still defaulted to native Codex/Pi and selected OAR only through the pre-rollout `SPROUT_USE_OAR_ENGINE=codex|pi|all` opt-in. Ticket #236 removes that opt-in and makes OAR the default after this acceptance closed. The selected Codex host sandbox remains `read-only`. OAR Pi uses the bundled Pi SDK; the host Pi executable path is used for discovery/readiness, not passed as an OAR executable installation.
 
 ## Model-issued journeys
 
