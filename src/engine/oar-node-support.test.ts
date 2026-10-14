@@ -106,7 +106,7 @@ OarEngineAdapter.prototype.startSession = async function (...args) {
   const child = spawn(node.executable, ['--experimental-strip-types', '--js-regexp-modifiers', '--import', pathToFileURL(preload).href, new URL('../worker/main.ts', import.meta.url).pathname], {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {
-      ...process.env, SPROUT_USE_OAR_ENGINE: 'codex',
+      ...process.env,
       SPROUT_CODEX_BIN: '/synthetic/bin/codex', SPROUT_ENV_INSTANCE: INSTANCE_ID,
       SPROUT_ENROLLMENT_ID: enrollment.id, SPROUT_CORE_HOST: '127.0.0.1', SPROUT_CORE_PORT: String(port),
       SPROUT_WORKER_KEY: keyPath, SPROUT_WORKSPACE_ROOT: directory,
@@ -140,7 +140,7 @@ OarEngineAdapter.prototype.startSession = async function (...args) {
     assert.deepEqual(delivered.admittedRunIds, []);
     assert.equal(delivered.wakes.length, 1, 'the addressed Agent has a real durable wake');
     assert.equal(delivered.wakes[0]?.status, 'failed', 'unsupported readiness is a terminal pre-run failure');
-    const refusal = 'Engine "codex" readiness is unknown on this Environment.';
+    const refusal = 'Check that Codex is installed at a supported version and signed in on this Environment, then run a fresh readiness probe. The option stays unavailable until readiness is established.';
     assert.equal(delivered.wakes[0]?.detail, refusal);
     const failureEvents = (await runtime.collaboration.listEvents(PROJECT_ID))
       .filter((event) => event.kind === 'wake-admission-failure');

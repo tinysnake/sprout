@@ -22,7 +22,7 @@ Ticket #273's scripted probes prove unrestricted positive controls for all nine 
 
 OAR stores the runtime-native `Session.id` as the Sprout continuation key and offers it back through `SessionOptions.resume`. The key remains in the existing Agent, engine, host/Environment, working-directory, and authorized conversation-scope slot. A migrated pre-scope key is retained in its legacy slot; because its authorization scope is unknown, a returning run reports that it did not reuse the key and did not start a replacement conversation.
 
-OAR Pi cannot honor a separately configured Pi session directory on this route. When that unsupported configuration is selected, the run fails before runner startup with a user-facing explanation that the run did not start and any saved key was preserved. The native Pi adapter remains the supported route for that configuration.
+OAR Pi cannot honor a separately configured Pi session directory on this route. When that unsupported configuration is selected, the run fails before runner startup with a user-facing explanation that the host Pi session store must be used, the run did not start, and any saved key was preserved. The superseded Environment Worker native Pi adapter has been removed; this setting is no longer an alternate production route.
 
 Resumed usage is reported only as a delta from the native session's usage baseline observed when OAR opens it. If the runtime cannot provide that baseline, usage for the resumed turn remains unavailable; the adapter does not infer zero or count old history as current work. Fresh sessions use their known zero baseline. Usage source and OAR version remain attached to settled results.
 

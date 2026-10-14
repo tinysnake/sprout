@@ -19,6 +19,7 @@ import {
   removeAgyContractPayload,
   type AgyContractDelivery,
 } from './agy-contract-hook.ts';
+import { ENGINE_RUNTIME_CATALOG } from './runtime-catalog.ts';
 
 /**
  * `agy` (Antigravity) engine adapter.
@@ -108,15 +109,7 @@ export interface AgyAdapterOptions {
 
 export class AgyEngineAdapter implements EngineAdapter {
   readonly id = 'agy';
-  readonly capabilities = {
-    streaming: 'incremental',
-    supportsInterrupt: true,
-    // `agy` has no system-prompt flag, but it does read a `SessionStart` hook
-    // from its global customization root, which injects a system message before
-    // the model runs. That is an out-of-band channel: the contract is delivered
-    // as engine-side instructions, never as part of the user prompt.
-    standingInstructions: 'out-of-band',
-  } as const;
+  readonly capabilities = ENGINE_RUNTIME_CATALOG.agy.capabilities;
   readonly #options: AgyAdapterOptions;
   #sessionCounter = 0;
 

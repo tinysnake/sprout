@@ -210,6 +210,7 @@ test('a Worker readiness declaration maps to independent observed facts without 
     engines: [
       { engine: 'codex', installed: true, readiness: 'ready', modelAvailability: 'available', models: ['gpt-5-codex'] },
       { engine: 'pi', installed: true, readiness: 'weird-value', modelAvailability: 'whatever', models: [] },
+      { engine: 'codex', installed: true, readiness: 'unknown', modelAvailability: 'unknown', models: [], source: 'unsupported-control' },
     ],
     at: 5_000,
     supported: { minMajor: 2, maxMajor: 2 },
@@ -222,6 +223,7 @@ test('a Worker readiness declaration maps to independent observed facts without 
   // An unrecognized value becomes `unknown` rather than being trusted.
   assert.equal(observed.engines[1]?.readiness, 'unknown');
   assert.equal(observed.engines[1]?.models.state, 'unknown');
+  assert.equal(observed.engines[2]?.source, 'unsupported-control');
 });
 
 function enrollmentWith(platform: string, capabilityRequests: readonly string[]) {
@@ -320,7 +322,7 @@ test('#129: evaluateEngineOption interprets committed evidence consistently acro
   };
   const unknownEngine = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, unknownEngineFact);
   assert.equal(unknownEngine.state, 'unknown');
-  assert.match(unknownEngine.reason, /readiness is unknown/);
+  assert.match(unknownEngine.reason, /Check that Codex is installed at a supported version.*fresh readiness probe/);
 
   // 5. Empty workModel on ready engine
   const readyFact: EngineReadinessFact = {
@@ -356,7 +358,7 @@ test('#129: evaluateEngineOption interprets committed evidence consistently acro
   };
   const unknownModel = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, unknownModelFact);
   assert.equal(unknownModel.state, 'unknown');
-  assert.match(unknownModel.reason, /availability is unknown for "codex"/);
+  assert.match(unknownModel.reason, /availability is unknown for "Codex"/);
 
   // 8. Model not in available models list
   const otherModelFact: EngineReadinessFact = {
@@ -368,7 +370,7 @@ test('#129: evaluateEngineOption interprets committed evidence consistently acro
   };
   const otherModel = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, otherModelFact);
   assert.equal(otherModel.state, 'model-unavailable');
-  assert.match(otherModel.reason, /is not available for "codex"/);
+  assert.match(otherModel.reason, /is not available for "Codex"/);
 
   // 9. Local catalog modelIdPresent === false
   const notInCatalogFact: EngineReadinessFact = {
@@ -447,7 +449,7 @@ test('#129: evaluateEngineOption interprets committed evidence consistently acro
   };
   const unauthOption = evaluateEngineOption({ engine: 'codex', workModel: 'gpt-5' }, unauthUnknownFact, scope);
   assert.equal(unauthOption.state, 'unknown');
-  assert.match(unauthOption.reason, /availability is unknown for "codex"/);
+  assert.match(unauthOption.reason, /availability is unknown for "Codex"/);
 
   // 14. #138: Authorization for different model does not authorize unselected model
   const wrongModelAuthFact: EngineReadinessFact = {

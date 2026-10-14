@@ -22,6 +22,7 @@ import { createServer, type ViteDevServer } from 'vite';
 
 import type { AgentBrowserAdapter, AgentView } from '../../../adapters/agent-api.ts';
 import type { RunView } from '../../../../../src/web/views.ts';
+import { selectableEngineRuntimes } from '../../../../src/engine/runtime-catalog.ts';
 
 
 const repoRoot = process.cwd();
@@ -366,6 +367,42 @@ test('a refused add-option renders an inline validation-error without changing t
     const unchanged = (await fixture.getAgent('programmer'))!;
     assert.equal(unchanged.currentVersion, before.currentVersion, 'a refusal appends nothing');
     assert.equal(unchanged.workOptions.length, before.workOptions.length);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('create, add, and edit runtime selectors expose only the accepted catalog entries', async () => {
+  const { doc, mount, vite, cleanup } = await setupHarness();
+  try {
+    await mountedPage(vite, mount);
+    const expected = selectableEngineRuntimes().map(({ id, label }) => [id, label]);
+    const assertCatalogOptions = (selector: string) => {
+      const select = doc.querySelector(selector) as HTMLSelectElement | null;
+      assert.ok(select, `${selector} renders`);
+      assert.deepEqual(
+        [...select.options].map((option) => [option.value, option.textContent]),
+        expected,
+      );
+    };
+
+    (doc.querySelector('.create-agent-btn') as HTMLButtonElement).click();
+    await settle(200);
+    assertCatalogOptions('#new-opt-engine');
+    (doc.querySelector('.cancel-create-agent-btn') as HTMLButtonElement).click();
+    await settle(160);
+
+    (doc.querySelector('[data-agent="programmer"]') as HTMLButtonElement).click();
+    await settle(120);
+    (doc.querySelector('.add-option-btn') as HTMLButtonElement).click();
+    await settle(320);
+    assertCatalogOptions('#add-opt-engine');
+    (doc.querySelector('.cancel-add-option-btn') as HTMLButtonElement).click();
+    await settle(160);
+
+    (doc.querySelector('.agent-option-row .edit-opt-btn') as HTMLButtonElement).click();
+    await settle(320);
+    assertCatalogOptions('#edit-opt-engine');
   } finally {
     await cleanup();
   }

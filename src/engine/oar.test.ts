@@ -290,6 +290,25 @@ test('AC1 & AC2: Pi adapter maps cwd, instructions, model, effort, and resume co
   }
 });
 
+test('OAR Pi leaves model and effort unconfigured so host Pi configuration supplies defaults', async () => {
+  let startedCommand: RunnerCommand | undefined;
+  const runner = new FakeOarRunner((cmd, currentRunner) => {
+    if (cmd.op === 'start') {
+      startedCommand = cmd;
+      currentRunner.send({ kind: 'ready', sessionId: 'sess-pi-defaults', engineSessionKey: 'native-pi-defaults' });
+    }
+  });
+  const adapter = new OarEngineAdapter({ runtimeId: 'pi', spawnProcess: () => runner });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
+
+  assert.equal(startedCommand?.op, 'start');
+  if (startedCommand?.op === 'start') {
+    assert.equal(startedCommand.options.model, undefined);
+    assert.equal(startedCommand.options.effort, undefined);
+  }
+  await session.close();
+});
+
 test('AC5: Configured custom sessionDirectory for Pi reports bounded compatibility refusal on session start', async () => {
   const adapter = new OarEngineAdapter({
     runtimeId: 'pi',
@@ -300,7 +319,7 @@ test('AC5: Configured custom sessionDirectory for Pi reports bounded compatibili
     () => adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory }),
     (err: Error) => {
       assert.ok(err instanceof EngineStartError);
-      assert.match(err.message, /configured Pi session directory/);
+      assert.match(err.message, /OAR Pi uses the host Pi session store/);
       return true;
     },
   );
@@ -321,7 +340,7 @@ test('AC5: Configured custom sessionDirectory for Pi refuses reuse without delet
       }),
     (err: Error) => {
       assert.ok(err instanceof EngineStartError, 'unsupported storage is not a stale-key refusal');
-      assert.match(err.message, /this run did not start and any saved session key was preserved/i);
+      assert.match(err.message, /this run did not start.*saved Sprout session key is preserved/i);
       assert.doesNotMatch(err.message, /pi-sessions|\/var\//, 'the user-facing error does not expose a host path');
       return true;
     },
@@ -858,12 +877,13 @@ test('AC5: Refused / busy prompt fails immediately without implicit queueing', a
   await session.close();
 });
 
-test('AC5: Empty successful output settles cleanly without hanging', async () => {
+test('OAR ignores a non-JSON runner line and settles empty success', async () => {
   const runner = new FakeOarRunner((cmd, r) => {
     if (cmd.op === 'start') {
       r.send({ kind: 'ready', sessionId: 'sess-empty', engineSessionKey: 'sess-empty' });
     } else if (cmd.op === 'prompt') {
-      // Completed with no text_delta
+      // The retired Pi adapter accepted protocol-channel noise before settlement.
+      r.stdout.write('non-JSON runner line\n');
       r.send({
         kind: 'turn_ended',
         outcome: { kind: 'completed' },
@@ -872,7 +892,7 @@ test('AC5: Empty successful output settles cleanly without hanging', async () =>
   });
 
   const adapter = new OarEngineAdapter({
-    runtimeId: 'codex',
+    runtimeId: 'pi',
     spawnProcess: () => runner,
   });
 

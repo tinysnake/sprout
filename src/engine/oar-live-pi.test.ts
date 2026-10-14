@@ -6,7 +6,7 @@ import test from 'node:test';
 import { defaultRuntimes } from '@botiverse/oar';
 
 import { OarEngineAdapter } from './oar.ts';
-import { EngineStartError, type EngineAdapter } from './port.ts';
+import { type EngineAdapter } from './port.ts';
 import {
   createRuntime,
   hostConfiguration,
@@ -52,28 +52,16 @@ function sanitizedExtensionId(resolvedPath: string): string {
 
 async function listenOnReservedPort(runtime: any): Promise<number> {
   let lastError: unknown;
-  for (let port = 46500; port <= 46509; port += 1) {
+  for (let port = 47600; port <= 47604; port += 1) {
     try {
       return (await runtime.api.listen(port)).port;
     } catch (error) {
       lastError = error;
     }
   }
-  throw new Error('No port in the reserved 46500–46509 block was available', { cause: lastError });
+  throw new Error('No port in the reserved 47600–47604 block was available', { cause: lastError });
 }
 
-function withOarOptIn<T>(selection: 'pi' | 'all', action: () => T): T {
-  const previous = process.env['SPROUT_USE_OAR_ENGINE'];
-  process.env['SPROUT_USE_OAR_ENGINE'] = selection;
-  try {
-    return action();
-  } finally {
-    if (previous === undefined) delete process.env['SPROUT_USE_OAR_ENGINE'];
-    else process.env['SPROUT_USE_OAR_ENGINE'] = previous;
-  }
-}
-
-/** Resolve the live model and tool inventory from the host's published Pi configuration. */
 async function livePiConfiguration(installation: any, cwd: string): Promise<{
   readonly model: string;
   readonly extensions: readonly string[];
@@ -112,7 +100,7 @@ async function livePiConfiguration(installation: any, cwd: string): Promise<{
     session.dispose();
   }
 }
-test('AC7: Production Worker selects the shared OAR Pi adapter through the pre-rollout opt-in', () => {
+test('the production Worker selects the shared OAR Pi adapter', () => {
   const facts: EngineHostFacts = {
     configuration: {
       environmentPlatform: 'host',
@@ -123,12 +111,12 @@ test('AC7: Production Worker selects the shared OAR Pi adapter through the pre-r
     locate: () => '/synthetic/bin/pi',
   };
 
-  const pi = withOarOptIn('pi', () => createEnvironmentWorkerEngines(facts).get('pi'));
+  const pi = createEnvironmentWorkerEngines(facts).get('pi');
   assert.ok(pi instanceof OarEngineAdapter);
   assert.equal(pi.id, 'pi');
 });
 
-test('AC5 scripted: configured Pi session-directory refusal follows an admitted Message on a replaced enrolled Worker', async () => {
+test('AC5 scripted: unsupported Pi session-directory setting blocks admission on a replaced enrolled Worker', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'sprout-pi-storage-message-'));
   const instanceId = 'pi-storage-refusal-worker';
   const model = 'openai-codex/gpt-6.1-sol';
@@ -152,18 +140,16 @@ test('AC5 scripted: configured Pi session-directory refusal follows an admitted 
     },
   });
   const readinessFor = (requirements?: WorkerReadinessProbeParams['requirements']) => {
-    const models = requirements?.modelsByEngine?.pi ?? [model];
     const requirementRevision = requirements?.revisionsByEngine?.pi;
     return workerReadinessProbeFixture({
       protocolVersion: '3',
       observedAt: Date.now(),
       engines: [{
-        engine: 'pi', version: '1.2.0', installed: true, readiness: 'ready', authenticated: true,
-        modelAvailability: 'available', models, modelIdPresent: models.includes(model), targetModels: models,
+        engine: 'pi', version: '1.2.0', installed: true, readiness: 'unknown', authenticated: true,
+        modelAvailability: 'unknown', models: [], source: 'unsupported-control',
         ...(requirementRevision !== undefined ? { requirementRevision } : {}),
-        source: 'pi-auth-check',
       }],
-    }, { version: 'scripted Pi readiness', summary: 'Scripted readiness for storage refusal test.' });
+    }, { version: 'scripted Pi readiness', summary: 'Pi session-directory control is unsupported on the OAR route.' });
   };
   const facts: EngineHostFacts = {
     configuration: {
@@ -174,19 +160,13 @@ test('AC5 scripted: configured Pi session-directory refusal follows an admitted 
     platform: 'darwin',
     locate: () => '/synthetic/bin/pi',
   };
-  const adapter = withOarOptIn('pi', () => createEnvironmentWorkerEngines(facts).get('pi'));
+  const adapter = createEnvironmentWorkerEngines(facts).get('pi');
   assert.ok(adapter instanceof OarEngineAdapter);
   let sessionStarts = 0;
-  let observedStorageRefusal = false;
   const startSession = adapter.startSession.bind(adapter);
   adapter.startSession = async (request) => {
     sessionStarts += 1;
-    try {
-      return await startSession(request);
-    } catch (error) {
-      observedStorageRefusal = error instanceof EngineStartError && /configured Pi session directory/i.test(error.message);
-      throw error;
-    }
+    return startSession(request);
   };
 
   let runtime: any;
@@ -271,13 +251,11 @@ test('AC5 scripted: configured Pi session-directory refusal follows an admitted 
       deliveryKey: 'pi-storage-refusal-admitted-message',
       awaitReply: true,
     });
-    assert.equal(delivered.admittedRunIds.length, 1,
-      `the Runtime Message was admitted before storage refusal: ${delivered.wakes.map((wake: any) => wake.detail).join('; ')}`);
-    const run = await runtime.orchestrator.waitFor(delivered.admittedRunIds[0]!);
-    assert.equal(run.status, 'failed', 'the admitted Runtime Message reports the Worker session-start refusal');
-    assert.equal(observedStorageRefusal, true, 'the selected OAR adapter refused the configured Pi session directory');
-    assert.equal(sessionStarts, 1, 'the admitted Worker Message reached the selected OAR adapter');
-    assert.deepEqual(await runtime.stores.sessionKeys.list(), [], 'storage refusal creates no saved session key');
+    assert.equal(delivered.admittedRunIds.length, 0, 'unsupported Worker control blocks before run admission');
+    assert.equal(delivered.wakes[0]?.status, 'failed');
+    assert.match(delivered.wakes[0]?.detail ?? '', /OAR Pi uses the host Pi session store/);
+    assert.equal(sessionStarts, 0, 'the blocked option never starts an OAR session');
+    assert.deepEqual(await runtime.stores.sessionKeys.list(), [], 'blocked admission creates no saved session key');
 
     await runtime.enrollments.revoke(enrollment.enrollment.id, 'scripted live revocation');
     await waitFor(() => runtime.workerGateway.liveFor(instanceId) === undefined, 'revoked Worker disconnect');
@@ -349,8 +327,8 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
     platform: process.platform,
     locate: (command, options) => lookupCommand(command, process.platform, options.preferWindowsExecutable),
   };
-  const realAdapter = withOarOptIn('pi', () => createEnvironmentWorkerEngines(piHostFacts).get('pi'));
-  assert.ok(realAdapter instanceof OarEngineAdapter, 'the enrolled Worker uses the opted-in production OAR selection');
+  const realAdapter = createEnvironmentWorkerEngines(piHostFacts).get('pi');
+  assert.ok(realAdapter instanceof OarEngineAdapter, 'the enrolled Worker uses the shared OAR selection');
   const observedStart = realAdapter.startSession.bind(realAdapter);
 
   realAdapter.startSession = async (request) => {

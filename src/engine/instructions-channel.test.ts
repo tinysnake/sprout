@@ -7,23 +7,16 @@ import { PassThrough } from 'node:stream';
 
 import { AgyEngineAdapter } from './agy.ts';
 import { AGY_CONTRACT_PAYLOAD_ENV } from './agy-contract-hook.ts';
-import { PiEngineAdapter } from './pi.ts';
 import { OpenCodeEngineAdapter } from './opencode.ts';
 import { OPENCODE_CONFIG_CONTENT_ENV } from './opencode-instructions.ts';
 import { renderProjectContract, assembleProjectContract } from '../project/contract.ts';
 import { CONTRACT_FILE_MARKER, CONTRACT_FILE_NAME } from './contract-file.ts';
 
 /**
- * Contract delivery through the engine fakes, for engines with **different**
- * instruction channels (#21 acceptance).
- *
- * Pi takes standing instructions out-of-band on argv (`--append-system-prompt`);
- * `agy` takes them out-of-band as an injected system message through its config
- * hook (it has no system-prompt flag); `opencode` has no system-prompt surface at
- * all and reads `AGENTS.md` from the working directory. All must receive the
- * *same* assembled contract, each through its own channel, which is what proves
- * the seam delivers per-engine rather than assuming one uniform surface (the fog
- * #17 exists to resolve).
+ * Contract delivery through the retained engine fakes, for engines with
+ * different instruction channels (#21 acceptance). `agy` injects the contract
+ * through its config hook; `opencode` reads it from the working directory.
+ * Codex and Pi Environment delivery is covered by the shared OAR adapter tests.
  */
 
 /** The real assembled contract, not a hand-written stand-in. */
@@ -46,56 +39,6 @@ const PROJECT_CONTRACT = renderProjectContract(
     agentInstructions: 'You are Scout.',
   }),
 );
-
-/** Pi streams a terminal `agent_settled`; the fake only needs to settle the turn. */
-function fakePiProcess(onRun: (line: (value: unknown) => void) => void) {
-  const stdout = new PassThrough();
-  const stderr = new PassThrough();
-  return {
-    stdout,
-    stderr,
-    kill: () => undefined,
-    onExit: () => undefined,
-    onSpawnError: () => undefined,
-    emit: () => {
-      onRun((value) => stdout.write(`${JSON.stringify(value)}\n`));
-      stdout.write(
-        `${JSON.stringify({ type: 'agent_settled' })}\n`,
-      );
-    },
-  };
-}
-
-test('Pi receives the assembled contract out-of-band, never in the prompt', async () => {
-  const argv: string[][] = [];
-  const adapter = new PiEngineAdapter({
-    binaryPath: '/usr/bin/true',
-    spawnProcess: (_binary, args) => {
-      argv.push([...args]);
-      const process = fakePiProcess(() => undefined);
-      queueMicrotask(() => process.emit());
-      return process;
-    },
-  });
-
-  const session = await adapter.startSession({
-    agentId: 'scout',
-    workingDirectory: '/tmp',
-    instructions: PROJECT_CONTRACT,
-  });
-  session.run('do the task');
-  await session.close();
-
-  const args = argv[0] ?? [];
-  assert.ok(args.includes('--append-system-prompt'), 'Pi delivers out-of-band');
-  assert.equal(args[args.indexOf('--append-system-prompt') + 1], PROJECT_CONTRACT);
-  assert.equal(
-    args.at(-1),
-    'do the task',
-    'the contract is not duplicated into the prompt it is delivered out-of-band from',
-  );
-  assert.ok(!args.includes(PROJECT_CONTRACT) || args.indexOf(PROJECT_CONTRACT) !== args.length - 1);
-});
 
 test('opencode receives the assembled contract through the working directory', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sprout-oc-contract-'));
@@ -346,27 +289,9 @@ test('agy receives the same contract out-of-band through its config hook', async
   assert.equal(existsSync(payloadPath), false, 'the per-run payload is cleaned up on close');
 });
 
-test('every channel receives the same contract content, so delivery is per-engine but not per-content', async () => {
+test('the retained native channels receive the same contract content', async () => {
   const collected: string[] = [];
   let agyEnv: NodeJS.ProcessEnv | undefined;
-
-  const piArgv: string[][] = [];
-  const pi = new PiEngineAdapter({
-    binaryPath: '/usr/bin/true',
-    spawnProcess: (_binary, args) => {
-      piArgv.push([...args]);
-      const process = fakePiProcess(() => undefined);
-      queueMicrotask(() => process.emit());
-      return process;
-    },
-  });
-  const piSession = await pi.startSession({
-    agentId: 'scout',
-    workingDirectory: '/tmp',
-    instructions: PROJECT_CONTRACT,
-  });
-  piSession.run('go');
-  await piSession.close();
 
   const dir = mkdtempSync(join(tmpdir(), 'sprout-same-contract-'));
   const oc = new OpenCodeEngineAdapter({
@@ -426,7 +351,6 @@ test('every channel receives the same contract content, so delivery is per-engin
   });
   await agySession.run('go').completion;
 
-  collected.push((piArgv[0] ?? [])[((piArgv[0] ?? []).indexOf('--append-system-prompt') + 1)] ?? '');
   collected.push(readFileSync(join(dir, 'AGENTS.md'), 'utf8'));
   const agyPayloadPath = agyEnv?.[AGY_CONTRACT_PAYLOAD_ENV] ?? '';
   collected.push(
@@ -436,7 +360,6 @@ test('every channel receives the same contract content, so delivery is per-engin
   );
   await agySession.close();
 
-  assert.equal(collected[0], PROJECT_CONTRACT);
-  assert.ok(collected[1]?.includes(PROJECT_CONTRACT));
-  assert.equal(collected[2], PROJECT_CONTRACT);
+  assert.ok(collected[0]?.includes(PROJECT_CONTRACT));
+  assert.equal(collected[1], PROJECT_CONTRACT);
 });

@@ -45,7 +45,7 @@ These behaviors are documented in the article, README, and normative specificati
 
 ## Fit with Sprout's existing architecture
 
-Sprout's current `PiEngineAdapter` starts one CLI process per turn, consumes JSON events, and continues later runs through an engine session key. It preserves conversation context, but the adapter itself does not expose Pi Durable's internal model/tool checkpoints. The common engine port deliberately hides provider protocols. [S1, S2]
+At the time of this research, Sprout's `PiEngineAdapter` started one CLI process per turn, consumed JSON events, and continued later runs through an engine session key. Ticket #236 has since retired that Environment Worker adapter in favor of the shared OAR adapter. The common engine port still deliberately hides provider protocols, and Host-run Pi remains on its separate `pi-host.ts` path. [S1, S2]
 
 The Worker already journals run events and settlement evidence with sequence acknowledgements, guards recovery epochs, and retains uncertainty about an unfenced predecessor. On channel shutdown, the Worker closes the sessions it owns. These are product recovery and execution-ownership responsibilities that a Pi Durable store would complement rather than eliminate. [S3, S4]
 
@@ -122,7 +122,7 @@ The go/no-go criterion is whether these fit the existing EngineAdapter and Worke
 ### Sprout baseline
 
 - **S1 — Engine-neutral contract:** [src/engine/port.ts](../../src/engine/port.ts)
-- **S2 — Existing Pi CLI adapter:** [src/engine/pi.ts](../../src/engine/pi.ts)
+- **S2 — Historical Environment Pi CLI adapter:** retired by Ticket #236; the current shared Environment route is [src/engine/oar.ts](../../src/engine/oar.ts).
 - **S3 — Worker recovery outbox:** [src/worker/recovery-journal.ts](../../src/worker/recovery-journal.ts)
 - **S4 — Worker execution lifecycle:** [src/worker/server.ts](../../src/worker/server.ts)
 - **S5 — Recovery and credential ownership:** [ADR-0009](../adr/0009-self-hosted-operation-and-recovery-promises.md)

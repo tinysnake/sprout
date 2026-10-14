@@ -5,7 +5,9 @@
  * must refuse work before admission with actionable, sanitized guidance.
  */
 
-export const MINIMUM_NODE_MAJOR = 24;
+import { OAR_MINIMUM_NODE_MAJOR } from './runtime-catalog.ts';
+
+export const MINIMUM_NODE_MAJOR = OAR_MINIMUM_NODE_MAJOR;
 
 export function normalizeNodeVersion(version: string): string | undefined {
   const match = /^v?((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$/.exec(version);
@@ -21,8 +23,8 @@ export function parseNodeMajor(version = process.versions.node): number {
 export function formatNodeUpgradeGuidance(currentVersion = process.versions.node): string {
   const version = normalizeNodeVersion(currentVersion) ?? 'unknown';
   return (
-    `Node.js 24+ is required by OAR (detected Node.js ${version}). ` +
-    `Please upgrade Node.js to version 24.0.0 or later before admitting work.`
+    `Node.js ${MINIMUM_NODE_MAJOR}+ is required by OAR (detected Node.js ${version}). ` +
+    `Please upgrade Node.js to version ${MINIMUM_NODE_MAJOR}.0.0 or later before admitting work.`
   );
 }
 
