@@ -8,7 +8,7 @@ import type {
   StandingInstructionsChannel,
   StreamingGranularity,
 } from '../engine/port.ts';
-import { EngineResumeRefusedError } from '../engine/port.ts';
+import { EngineResumeRefusedError, OarPolicyContentionError } from '../engine/port.ts';
 import { EventQueue } from '../engine/event-queue.ts';
 import { redactSensitiveText } from '../environment/privacy.ts';
 import { JsonRpcError, type JsonRpcTransport } from '../engine/jsonrpc.ts';
@@ -210,6 +210,14 @@ export class WorkerClient implements EngineAdapter {
         request.resumeSessionKey !== undefined
       ) {
         throw new EngineResumeRefusedError(request.resumeSessionKey, WORKER_DIAGNOSTICS.resumeRefused);
+      }
+      if (error instanceof JsonRpcError) {
+        if (error.code === WORKER_ERROR_CODES.oarAgentPolicyLeaseContention) {
+          throw new OarPolicyContentionError('agent');
+        }
+        if (error.code === WORKER_ERROR_CODES.oarProjectPolicyLeaseContention) {
+          throw new OarPolicyContentionError('project');
+        }
       }
       throw new Error(WORKER_DIAGNOSTICS.sessionStartFailed);
     }

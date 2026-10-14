@@ -12,6 +12,7 @@ import { EnvironmentPool } from '../environment/pool.ts';
 import { ScriptedEngineAdapter, type ScriptedTurn } from '../engine/scripted.ts';
 
 import type { AgentRunEvent, ContractDelivery } from '../engine/port.ts';
+import { OarPolicyContentionError, OAR_POLICY_CONTENTION_MESSAGES } from '../engine/port.ts';
 
 import { LineJsonRpcTransport } from '../engine/jsonrpc.ts';
 
@@ -32,6 +33,7 @@ import { EnvironmentWorker } from './server.ts';
 import { WorkerClient } from './client.ts';
 
 import { WORKER_DIAGNOSTICS } from './diagnostics.ts';
+import { runFailureReason } from '../run/failure-reason.ts';
 
 
 const definition: EnvironmentDefinition = {
@@ -93,6 +95,7 @@ interface ConnectedWorker {
   readonly workerFrames: readonly string[];
   /** Lines the worker reported through `onLog`. */
   readonly logs: readonly string[];
+  readonly startAttempts: () => number;
   /** Simulates the carrier's channel dying. */
   killChannel(): void;
 }
@@ -116,6 +119,7 @@ async function connectedWorker(options: {
   refuseStartKey?: string;
   knownSessionKeys?: readonly string[];
   staleResumeKey?: 'fresh' | 'fail' | 'fail-turn';
+  policyContentionScope?: 'agent' | 'project';
   contractDelivery?: ContractDelivery;
 }): Promise<ConnectedWorker> {
   const coreToWorker = new PassThrough();
@@ -137,10 +141,20 @@ async function connectedWorker(options: {
       ? { contractDelivery: options.contractDelivery }
       : {}),
   });
+  let startAttempts = 0;
+  const workerEngine = {
+    id: engine.id,
+    capabilities: engine.capabilities,
+    startSession: async (request: Parameters<ScriptedEngineAdapter['startSession']>[0]) => {
+      startAttempts += 1;
+      if (options.policyContentionScope !== undefined) throw new OarPolicyContentionError(options.policyContentionScope);
+      return engine.startSession(request);
+    },
+  };
 
   const worker = new EnvironmentWorker({
     environmentInstanceId: 'mac-mini-1',
-    engines: new Map([['scripted', engine]]),
+    engines: new Map([['scripted', workerEngine]]),
     input: coreToWorker,
     output: workerToCore,
     onLog: (line) => logs.push(line),
@@ -183,6 +197,7 @@ async function connectedWorker(options: {
     sessionStartParams,
     workerFrames,
     logs,
+    startAttempts: () => startAttempts,
     killChannel: () => {
       workerToCore.destroy();
       coreToWorker.destroy();
@@ -201,6 +216,7 @@ function buildOrchestrator(
     instances: [instance],
     clock: { now: () => 1_000 },
   });
+  const store = new InMemoryRunStore();
   const orchestrator = new RunOrchestrator({
     engines: adapters,
     agents: new AgentRegistry([
@@ -226,13 +242,13 @@ function buildOrchestrator(
       },
     ]),
     pool,
-    store: new InMemoryRunStore(),
+    store,
     ...(sessionKeys !== undefined ? { sessionKeys } : {}),
     leaseTtlMs: 60_000,
   });
   const submit = orchestrator.submit.bind(orchestrator);
   orchestrator.submit = (request) => submit({ ...request, sessionKeyScope: continuationSlot.scope });
-  return { orchestrator, pool };
+  return { orchestrator, pool, store };
 }
 
 
@@ -285,6 +301,45 @@ test('an unrelated start failure through the worker keeps the stored key and is 
     workingDirectory: '/tmp',
   });
   assert.equal(stored?.key, 'a-valid-key', 'the key survives across the worker boundary');
+});
+
+
+test('a live OAR policy lease diagnosis survives the enrolled Worker and Orchestrator', async (t) => {
+  const worker = await connectedWorker({ policyContentionScope: 'agent' });
+  t.after(() => worker.killChannel());
+  const sessionKeys = new InMemorySessionKeyStore();
+  await sessionKeys.save({
+    agentId: 'agent-scout',
+    engine: 'scripted',
+    environmentInstanceId: 'mac-mini-1',
+    workingDirectory: '/tmp',
+    key: 'a-valid-key',
+    updatedAt: 1_000,
+  });
+  const { orchestrator, store } = buildOrchestrator(worker.adapters, sessionKeys);
+  const { id } = await orchestrator.submit({ agentId: 'agent-scout', prompt: 'start once' });
+  const run = await orchestrator.waitFor(id);
+  const persisted = await store.get(id);
+  const diagnosis = OAR_POLICY_CONTENTION_MESSAGES.agent;
+
+  assert.equal(run.status, 'failed');
+  assert.equal(run.failureClass, 'environment');
+  assert.equal(run.failure, diagnosis);
+  assert.equal(run.result?.status, 'failed');
+  assert.equal(run.result?.message, diagnosis);
+  assert.deepEqual(
+    { failure: persisted?.failure, failureClass: persisted?.failureClass, result: persisted?.result },
+    { failure: diagnosis, failureClass: 'environment', result: { status: 'failed', message: diagnosis } },
+  );
+  assert.equal(runFailureReason(run), diagnosis, 'the user-facing failure explanation retains the safe contention diagnosis');
+  assert.equal(worker.startAttempts(), 1, 'the worker attempted session acquisition exactly once');
+  assert.equal(worker.requests.filter((method) => method === WORKER_METHODS.startSession).length, 1,
+    'the contention code is not interpreted as a resume refusal or retried');
+  assert.equal(worker.sessionStartParams[0]?.resumeSessionKey, 'a-valid-key');
+  assert.match(worker.workerFrames.join(''), /OAR Pi policy lease contention/);
+  assert.equal((await sessionKeys.get({
+    agentId: 'agent-scout', engine: 'scripted', environmentInstanceId: 'mac-mini-1', workingDirectory: '/tmp',
+  }))?.key, 'a-valid-key', 'the valid continuation key remains stored');
 });
 
 

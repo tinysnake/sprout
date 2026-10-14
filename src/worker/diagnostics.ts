@@ -1,4 +1,5 @@
 import type { ContractDelivery, EngineTurnResult } from '../engine/port.ts';
+import { OAR_POLICY_CONTENTION_MESSAGES as OAR_POLICY_MESSAGES } from '../engine/port.ts';
 import { classifyEngineTurnFailure, isRetryableEngineTurnFailure, sanitizedTurnFailure, trustedTurnFailureCause, trustedTurnFailureMessage } from '../engine/turn-failure.ts';
 import { PROTOCOL_INCOMPATIBLE_DETAIL } from '../environment/readiness.ts';
 import { WORKER_TRANSPORT_REFUSAL_REASON } from '../environment/worker-transport.ts';
@@ -30,6 +31,8 @@ export const WORKER_DIAGNOSTICS = {
   methodUnsupported: 'the requested Worker method is not supported',
   requestFailed: 'the Worker request could not be completed',
   sessionStartFailed: 'the engine session could not be started',
+  oarAgentPolicyLeaseContention: OAR_POLICY_MESSAGES.agent,
+  oarProjectPolicyLeaseContention: OAR_POLICY_MESSAGES.project,
   resumeRefused: 'the engine refused the saved session',
   turnFailed: 'the engine turn failed',
   channelClosed: 'the Environment Worker channel closed',

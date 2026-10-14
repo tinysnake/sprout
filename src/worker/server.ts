@@ -6,7 +6,7 @@ import type {
   EngineSession,
   EngineTurnResult,
 } from '../engine/port.ts';
-import { EngineResumeRefusedError } from '../engine/port.ts';
+import { EngineResumeRefusedError, OarPolicyContentionError } from '../engine/port.ts';
 import { UnsupportedOarNodeVersionError } from '../engine/oar-node-support.ts';
 import { LineJsonRpcTransport, type JsonRpcTransport } from '../engine/jsonrpc.ts';
 import {
@@ -253,10 +253,22 @@ export class EnvironmentWorker {
           this.#transport.respondError(id, -32_601, WORKER_DIAGNOSTICS.methodUnsupported);
       }
     } catch (error) {
-      // An engine's rejected resume is a classifyable failure, not a generic
-      // worker error: it is carried as a neutral code so the core can distinguish
-      // "the engine refused this key" from "this worker failed". Everything else
-      // is reported as an ordinary worker error and is never retried.
+      // These two product-owned start classifications cross the Worker boundary
+      // by code and allowlisted message only. Arbitrary adapter/vendor text is
+      // never forwarded, and only a refused resume participates in retry logic.
+      if (error instanceof OarPolicyContentionError) {
+        const agentLease = error.scope === 'agent';
+        this.#transport.respondError(
+          id,
+          agentLease
+            ? WORKER_ERROR_CODES.oarAgentPolicyLeaseContention
+            : WORKER_ERROR_CODES.oarProjectPolicyLeaseContention,
+          agentLease
+            ? WORKER_DIAGNOSTICS.oarAgentPolicyLeaseContention
+            : WORKER_DIAGNOSTICS.oarProjectPolicyLeaseContention,
+        );
+        return;
+      }
       if (error instanceof EngineResumeRefusedError) {
         this.#transport.respondError(id, WORKER_ERROR_CODES.resumeRefused, WORKER_DIAGNOSTICS.resumeRefused);
         return;

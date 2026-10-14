@@ -1,3 +1,4 @@
+import { OAR_POLICY_CONTENTION_MESSAGES } from '../engine/port.ts';
 import type { AgentRun } from './model.ts';
 import { sanitizeIdentifier } from '../environment/privacy.ts';
 import { trustedTurnFailureMessage } from '../engine/turn-failure.ts';
@@ -19,6 +20,10 @@ export function runFailureReason(run: Pick<AgentRun, 'result' | 'workOption' | '
     return `No error outcome was recorded.${model !== undefined ? ` Configured model: ${model}.` : ''}`;
   }
   const result = run.result;
+  if (result.message === OAR_POLICY_CONTENTION_MESSAGES.agent ||
+      result.message === OAR_POLICY_CONTENTION_MESSAGES.project) {
+    return result.message;
+  }
   if (run.failureClass === 'environment') {
     // Only the Environment admission class may admit this exact product grammar.
     // An engine cannot opt its arbitrary prose into this boundary by imitating it.

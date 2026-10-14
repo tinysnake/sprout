@@ -9,14 +9,28 @@ import { OarEngineAdapter } from './oar.ts';
 import { EngineStartError } from './port.ts';
 import { OarPolicyContentionError } from './port.ts';
 import { assertOarRuntimePolicy, hostPiConfigurationProvider, OAR_POLICY_LOCK_NAME, prepareOarRuntimePolicy } from './oar-runtime-policy.ts';
+import {
+  CONTENTION_SKIP_MESSAGE,
+  attemptLivePiStart,
+  skipIfLivePiContention,
+} from './oar-live-pi-test-support.ts';
+
+function assertPolicyDefectRefusal(action: () => unknown): void {
+  assert.throws(action, (error: unknown) =>
+    error instanceof EngineStartError &&
+    !(error instanceof OarPolicyContentionError) &&
+    /OAR Pi route is blocked/.test(error.message) &&
+    !/another OAR Pi session/.test(error.message));
+}
 
 // Risk: a failed overlay silently starts an uncontrolled vendor loader.
 test('OAR Pi refuses fresh and resumed sessions when project settings cannot be controlled', async () => {
   const root = mkdtempSync(join(tmpdir(), 'sprout-pi-refused-'));
   mkdirSync(join(root, '.pi'));
   writeFileSync(join(root, '.pi', 'settings.json'), 'invalid JSON');
+  const agentDir = join(root, 'isolated-agent');
   let spawns = 0;
-  const adapter = new OarEngineAdapter({ runtimeId: 'pi', spawnProcess: () => {
+  const adapter = new OarEngineAdapter({ runtimeId: 'pi', piConfigurationProvider: { resolve: () => ({ agentDir }) }, spawnProcess: () => {
     spawns++;
     throw new Error('uncontrolled runner reached');
   } });
@@ -112,18 +126,67 @@ test('Pi policy refuses stale host and project leases without changing either se
   writeFileSync(agentSettings, originalAgent);
   try {
     mkdirSync(join(agentDir, '.sprout-oar-policy'));
-    // A held lease directory is contention (#276): the distinct class, not the
-    // generic policy-defect refusal. Both refusal paths still fail closed.
-    assert.throws(() => prepareOarRuntimePolicy('pi', cwd, { agentDir }), OarPolicyContentionError);
+    // A stale directory has no verified live owner. It remains fail-closed but
+    // is not reported as another session's contention.
+    assertPolicyDefectRefusal(() => prepareOarRuntimePolicy('pi', cwd, { agentDir }));
     assert.equal(readFileSync(projectSettings, 'utf8'), originalProject);
     assert.equal(readFileSync(agentSettings, 'utf8'), originalAgent);
     rmSync(join(agentDir, '.sprout-oar-policy'), { recursive: true, force: true });
     mkdirSync(join(cwd, '.pi', '.sprout-oar-policy'));
-    assert.throws(() => prepareOarRuntimePolicy('pi', cwd, { agentDir }), OarPolicyContentionError);
+    assertPolicyDefectRefusal(() => prepareOarRuntimePolicy('pi', cwd, { agentDir }));
     assert.equal(readFileSync(projectSettings, 'utf8'), originalProject);
     assert.equal(readFileSync(agentSettings, 'utf8'), originalAgent);
     assert.equal(existsSync(join(agentDir, '.sprout-oar-policy')), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// A malformed agent directory and a regular file at the lock path are policy
+// defects, not proof that another live session owns a lease.
+test('malformed policy paths fail closed without being reported as contention', () => {
+  const root = mkdtempSync(join(tmpdir(), 'sprout-pi-lock-defect-'));
+  const cwd = join(root, 'project');
+  const regularAgentDir = join(root, 'regular-agent');
+  const invalidAgentDir = join(root, 'agent-dir-file');
+  mkdirSync(cwd);
+  mkdirSync(regularAgentDir);
+  writeFileSync(invalidAgentDir, 'not a directory');
+  writeFileSync(join(regularAgentDir, OAR_POLICY_LOCK_NAME), 'not a lock directory');
+  try {
+    assertPolicyDefectRefusal(() => prepareOarRuntimePolicy('pi', cwd, { agentDir: invalidAgentDir }));
+    assertPolicyDefectRefusal(() => prepareOarRuntimePolicy('pi', cwd, { agentDir: regularAgentDir }));
+    assert.equal(readFileSync(join(regularAgentDir, OAR_POLICY_LOCK_NAME), 'utf8'), 'not a lock directory');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a lease acquired between observation and OAR start becomes a labeled contention skip', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sprout-pi-contention-race-'));
+  const agentDir = join(root, 'isolated-agent');
+  const holderCwd = join(root, 'holder-project');
+  const testCwd = join(root, 'live-test-project');
+  mkdirSync(agentDir);
+  mkdirSync(holderCwd);
+  mkdirSync(testCwd);
+  const lockPath = join(agentDir, OAR_POLICY_LOCK_NAME);
+  let holder: ReturnType<typeof prepareOarRuntimePolicy> = undefined;
+  try {
+    assert.equal(existsSync(lockPath), false, 'the observation sees a free path');
+    holder = prepareOarRuntimePolicy('pi', holderCwd, { agentDir });
+    assert.ok(holder, 'the competing lease acquires after the observation');
+    const attempt = await attemptLivePiStart(async () => {
+      const acquired = prepareOarRuntimePolicy('pi', testCwd, { agentDir });
+      if (!acquired) throw new Error('Pi policy acquisition unexpectedly returned no lease');
+      return acquired;
+    });
+    if (attempt.kind === 'started') attempt.value.close();
+    assert.equal(attempt.kind, 'contention', 'actual acquisition sees the intervening live holder');
+    if (attempt.kind !== 'contention') throw new Error('expected the live acquisition to report contention');
+    const skips: string[] = [];
+    assert.equal(skipIfLivePiContention((message) => skips.push(message), attempt), true);
+    assert.deepEqual(skips, [CONTENTION_SKIP_MESSAGE]);
+  } finally {
+    holder?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // Risk: a reader could not tell lease contention from a policy defect without
@@ -171,6 +234,8 @@ test('a held lease reports distinguishable contention, not a bare policy refusal
     assert.ok(contention instanceof OarPolicyContentionError, `expected OarPolicyContentionError, got ${String((contention as Error)?.name)}: ${(contention as Error)?.message}`);
     assert.match((contention as OarPolicyContentionError).message, /lease contention/);
     assert.match((contention as OarPolicyContentionError).message, /already held by another OAR Pi session/);
+    assert.match((contention as OarPolicyContentionError).message, /<agentDir>\/.sprout-oar-policy/);
+    assert.equal((contention as OarPolicyContentionError).scope, 'agent');
     assert.match((contention as OarPolicyContentionError).message, /global to the machine/);
     assert.doesNotMatch((contention as OarPolicyContentionError).message, /route is blocked/);
     // Neither settings file was touched by the refused attempt.
@@ -199,6 +264,8 @@ test('a held lease reports distinguishable contention, not a bare policy refusal
     })();
     assert.ok(projectContention instanceof OarPolicyContentionError, `expected OarPolicyContentionError, got ${String((projectContention as Error)?.name)}: ${(projectContention as Error)?.message}`);
     assert.match((projectContention as OarPolicyContentionError).message, /lease contention/);
+    assert.match((projectContention as OarPolicyContentionError).message, /<cwd>\/.pi\/.sprout-oar-policy/);
+    assert.equal((projectContention as OarPolicyContentionError).scope, 'project');
     assert.doesNotMatch((projectContention as OarPolicyContentionError).message, /route is blocked/);
     projectHolder.close();
     assert.equal(existsSync(projectLock), false);
