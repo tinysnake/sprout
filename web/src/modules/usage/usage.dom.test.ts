@@ -561,6 +561,22 @@ test('Usage regression: incomplete aggregate responses show an explicit error in
   } finally { await cleanup(); }
 });
 
+// F4 protects three contracts of the Manage / Usage page, all decided by the
+// query authority and never by the (truncated) list or by display buckets:
+//   1. every tab scope and every filter change issues aggregate queries that
+//      carry the filter (kind/groupBy/projectId and the half-open [from, to)
+//      bounds) to the authority;
+//   2. constituents the truncated list omits are recovered from the authority
+//      and still render (act-204 under the project + 30-day scope);
+//   3. displayed totals come from the per-identity authority queries, so a
+//      "today" constituent still counts inside a bounded scope (946,788).
+// Determinism precondition: the fixture anchors activity instants at
+// construction (FixtureUsageService), so bounded membership is a pure function
+// of (anchor, caller bounds) and never of the wall clock at query time. Before
+// #278 the fixture re-read Date.now() per query, so a "today" activity raced
+// the view's `to = Date.now() + 1` bound across a 1 ms tick and bounded
+// authority queries could silently drop it; that nondeterminism is removed at
+// the cause, not retried or loosened.
 test('Usage F4: scopes query authoritative aggregates with filters; truncated lists are not full totals', async () => {
   const { doc, mount, vite, cleanup } = await setupHarness();
   try {
@@ -594,6 +610,13 @@ test('Usage F4: scopes query authoritative aggregates with filters; truncated li
       && filter.to - filter.from === 30 * 86400000;
     assert.ok(await waitFor(() => calls.some(filteredQuery)), 'filtered aggregate query starts');
     assert.ok(await waitFor(() => !(doc.body.textContent ?? '').includes('Loading authoritative usage…')), 'filtered aggregate request settles');
+    // The bounded scope's finalized summary must still count its "today"
+    // constituents: act-203 (authority total 888,888) + act-204 (41,900) +
+    // act-202 (16,000). This pins the per-identity authority queries against
+    // the same [from, to) bounds: a today constituent silently dropped by the
+    // window shows here as a smaller total or "Unavailable".
+    assert.match(doc.querySelector('[data-usage-summary-kind="agent_run"]')?.textContent ?? '',
+      /946,788 tokens/, 'bounded scope summary counts today constituents from per-identity authority queries');
     assert.ok(doc.querySelector('.usage-tab-surface [data-usage-activity="act-204"]'), `query constituent survives stale display bucket; bounds belong to the authority; results: ${JSON.stringify(calls.filter(filteredQuery))}`);
     app.unmount();
   } finally { await cleanup(); }

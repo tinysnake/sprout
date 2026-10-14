@@ -477,6 +477,14 @@ export class FixtureUsageService implements UsageManagementService {
   readonly #activities: UsageActivityItem[];
   readonly #projects: UsageProjectOption[];
   readonly #agents: UsageAgentOption[];
+  // Activity instants are anchored once, at construction. The fixture data
+  // describes fixed ages relative to this anchor, exactly as a real store holds
+  // stored timestamps; membership under caller-supplied [from, to) bounds is a
+  // pure function of (anchor, bounds) and never of when the query runs. Reading
+  // the wall clock per query instead made every "today" activity race the
+  // caller's `to = Date.now() + 1` bound across a 1 ms tick, so bounded
+  // authority queries could silently drop today constituents (Usage F4, #278).
+  readonly #anchoredNow: number;
 
   constructor(options?: {
     activities?: UsageActivityItem[];
@@ -486,6 +494,7 @@ export class FixtureUsageService implements UsageManagementService {
     this.#activities = options?.activities ? [...options.activities] : [...initialActivities];
     this.#projects = options?.projects ? [...options.projects] : [...initialProjects];
     this.#agents = options?.agents ? [...options.agents] : [...initialAgents];
+    this.#anchoredNow = Date.now();
   }
 
   get rawActivities(): UsageActivityItem[] {
@@ -498,7 +507,7 @@ export class FixtureUsageService implements UsageManagementService {
       if (filter.runId && `run-${activity.id}` !== filter.runId) return false;
       if (filter.attemptId && `att-${activity.id}` !== filter.attemptId) return false;
       const ageDays = { today: 0, '7d': 3, '30d': 15, older: 60 }[activity.settlementRange];
-      const instant = Date.now() - ageDays * 86400000;
+      const instant = this.#anchoredNow - ageDays * 86400000;
       if (filter.from !== undefined && instant < filter.from) return false;
       if (filter.to !== undefined && instant >= filter.to) return false;
       if (filter.projectId && filter.projectId !== 'all' && activity.projectId !== filter.projectId) return false;
