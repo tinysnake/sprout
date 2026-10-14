@@ -56,6 +56,28 @@ test('missing settlement leaves the run explicitly pending and cannot compact it
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('an uncertain terminal observation remains pending and is never projected as settled', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'recovery-uncertain-settlement-'));
+  try {
+    const store = new SqliteRecoveryStore({ filename: join(dir, 'store.db') });
+    const turn: JournalTurn = {
+      sessionId: 's', turnId: 'uncertain-turn', runId: 'run-uncertain', acknowledged: 0,
+      settlementAcknowledged: false,
+      events: [{ sequence: 1, event: { type: 'notice', text: 'retained before uncertainty' } }],
+      settlement: { status: 'interrupted', outcomeCertainty: 'uncertain' },
+    };
+    assert.deepEqual(await store.receiveWorkerTurn('enroll', turn), {
+      sequence: 1, settlement: false, eventCount: 1,
+    });
+    await store.acknowledgeWorkerTurn('enroll', turn.turnId, 1, false);
+    assert.deepEqual(await store.workerRunReceipt('enroll', 'run-uncertain'), {
+      eventCount: 1, terminal: false, pending: true,
+    });
+    assert.equal((await store.workerRunEvents('enroll', 'run-uncertain')).length, 1);
+    store.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('a legacy unbound turn prunes payload only after durable full ack', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'recovery-unbound-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

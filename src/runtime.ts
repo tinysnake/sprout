@@ -1342,6 +1342,10 @@ async function composeSproutRuntime(options: SproutRuntimeOptions,
         link: (input) => tasks.link(input),
       },
       onTaskRunSettled: (input) => tasks.onRunSettled(input),
+      onUncertainRunExecution: async ({ run, leaseId }) => {
+        if (run.taskId !== undefined) return;
+        await recovery.open({ leaseId, cause: 'cleanup-failed', hadActiveRun: true, runId: run.id });
+      },
       leaseTtlMs,
     });
 

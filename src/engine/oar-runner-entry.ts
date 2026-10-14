@@ -182,9 +182,11 @@ async function handleCommand(command: RunnerCommand): Promise<void> {
 
       case 'abort': {
         if (session) {
-          await session.abort();
+          const outcome = await session.abort();
+          send({ kind: 'abort_result', activationId: command.activationId, accepted: outcome.kind === 'accepted' });
+        } else {
+          send({ kind: 'abort_result', activationId: command.activationId, accepted: false });
         }
-        send({ kind: 'abort_delivered' });
         break;
       }
 

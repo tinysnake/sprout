@@ -146,7 +146,8 @@ export class SqliteRecoveryStore implements RecoveryStore {
       }
       // A settlement may follow only a contiguous event prefix. An absent
       // settlement is never inferred from a closed transport.
-      const settlement = (prior?.settlement ?? false) || turn.settlement !== undefined;
+      const certainSettlement = turn.settlement !== undefined && turn.settlement.outcomeCertainty !== 'uncertain';
+      const settlement = (prior?.settlement ?? false) || certainSettlement;
       const previousSettlement = this.#db.prepare(`SELECT settlement_payload AS payload FROM worker_recovery_receipts
         WHERE enrollment_id = ? AND turn_id = ?`).get(enrollmentId, turn.turnId) as { payload: string | null } | undefined;
       const payload = turn.settlement === undefined ? (previousSettlement?.payload ?? null) : JSON.stringify(turn.settlement);

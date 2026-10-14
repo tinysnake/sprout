@@ -17,6 +17,7 @@ import {
   WORKER_METHODS,
   WORKER_NOTIFICATIONS,
   type RunResult,
+  type CloseResult,
   type StartSessionResult,
   type PrepareTaskContextResult,
   type RecycleTaskContextParams,
@@ -351,6 +352,7 @@ class WorkerEngineSession implements EngineSession {
   readonly #watchChannel: (handler: ChannelClosedHandler) => () => void;
   #settle: ((result: EngineTurnResult) => void) | undefined;
   #closed = false;
+  terminationEvidence: 'proved' | 'uncertain' | undefined;
 
   constructor(
     options: WorkerSessionOptions,
@@ -400,14 +402,14 @@ class WorkerEngineSession implements EngineSession {
     // Core's wait without claiming the remote engine stopped; recovery still
     // requires the Worker's retained settlement and engine fence.
     const offClosed = this.#watchChannel(() => {
-      finish({ status: 'interrupted' });
+      finish({ status: 'interrupted', outcomeCertainty: 'uncertain' });
     });
 
     void this.#transport
       .request<RunResult>(WORKER_METHODS.run, { sessionId: this.sessionId, prompt })
       .catch(() => {
         finish({
-          status: 'failed',
+          status: 'failed', outcomeCertainty: 'uncertain',
           message: WORKER_DIAGNOSTICS.requestFailed,
         });
       });
@@ -430,11 +432,12 @@ class WorkerEngineSession implements EngineSession {
    * not depend on a worker answering, and `finish` is idempotent.
    */
   async interrupt(): Promise<boolean> {
-    this.#settle?.({ status: 'interrupted' });
-    if (this.#closed || !this.#supportsInterrupt) return false;
+    if (this.#closed || this.#settle === undefined || !this.#supportsInterrupt) return false;
     try {
-      await this.#transport.request(WORKER_METHODS.interrupt, { sessionId: this.sessionId });
-      return true;
+      const result = await this.#transport.request<{ readonly interrupted: boolean }>(
+        WORKER_METHODS.interrupt, { sessionId: this.sessionId },
+      );
+      return result.interrupted;
     } catch {
       return false;
     }
@@ -443,10 +446,17 @@ class WorkerEngineSession implements EngineSession {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
-    this.#settle?.({ status: 'interrupted' });
-    await this.#transport
-      .request(WORKER_METHODS.close, { sessionId: this.sessionId })
-      .catch(() => undefined);
+    let stopped = false;
+    try {
+      const result = await this.#transport.request<CloseResult>(WORKER_METHODS.close, { sessionId: this.sessionId });
+      stopped = result.stopped;
+    } catch {
+      // A disconnected Worker cannot prove that its engine tree stopped.
+    }
+    this.terminationEvidence = stopped ? 'proved' : 'uncertain';
+    if (this.#settle !== undefined) {
+      this.#settle({ status: 'interrupted', outcomeCertainty: 'uncertain' });
+    }
   }
 }
 

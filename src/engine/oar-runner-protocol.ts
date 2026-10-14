@@ -16,6 +16,7 @@ export type RunnerCommand =
     }
   | {
       readonly op: 'abort';
+      readonly activationId: string;
     }
   | {
       readonly op: 'dispose';
@@ -64,7 +65,10 @@ export type RunnerMessage =
       readonly usage?: SessionUsage | null | undefined;
     }
   | {
-      readonly kind: 'abort_delivered';
+      /** The OAR runtime's typed abort response for the requested activation. */
+      readonly kind: 'abort_result';
+      readonly activationId: string;
+      readonly accepted: boolean;
     }
   | {
       readonly kind: 'error';
