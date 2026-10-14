@@ -448,7 +448,7 @@ rl.on('line', (line) => {
         text: JSON.stringify(reportedEnv),
         sessionId: 'sess-' + (process.env.SESSION_KIND ?? 'default'),
         agentPath: [],
-        seq: 1,
+        seq: 2,
         receivedAt: Date.now(),
       },
     }) + '\\n');
@@ -1234,6 +1234,46 @@ test('AC7: Cumulative snapshots settle once, and zero-sequence stale data is ign
   });
   assert.equal(result.source, 'oar');
   assert.equal(result.sourceVersion, '0.59.1');
+  await session.close();
+});
+
+test('AC4: Resumed sequence-zero opening activity is not attributed without native turn evidence', async () => {
+  const runner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      r.send({
+        kind: 'ready', sessionId: 'sess-resumed-sequence-zero', engineSessionKey: 'native-sequence-zero-key',
+        freshSession: false, usageBaseline: { total: { input: 100, output: 20 } },
+      });
+    } else if (cmd.op === 'prompt') {
+      r.send({ kind: 'prompt_accepted', activationId: cmd.activationId, seq: 0 });
+      r.send({
+        kind: 'event', activationId: cmd.activationId,
+        event: { kind: 'text_delta', text: 'queued opening notification', sessionId: 'sess-resumed-sequence-zero', agentPath: [], seq: 0, receivedAt: Date.now() },
+      });
+      r.send({
+        kind: 'usage_snapshot', activationId: cmd.activationId, seq: 0,
+        usage: { total: { input: 900, output: 900 } },
+      });
+      r.send({
+        kind: 'turn_ended', activationId: cmd.activationId, seq: 0,
+        outcome: { kind: 'completed' }, usage: { total: { input: 900, output: 900 } },
+      });
+      r.send({
+        kind: 'event', activationId: cmd.activationId,
+        event: { kind: 'text_delta', text: 'PONG', sessionId: 'sess-resumed-sequence-zero', agentPath: [], seq: 1, receivedAt: Date.now() },
+      });
+      r.send({
+        kind: 'turn_ended', activationId: cmd.activationId, seq: 2,
+        outcome: { kind: 'completed' }, usage: { total: { input: 140, output: 30 } },
+      });
+    }
+  });
+  const session = await new OarEngineAdapter({ runtimeId: 'codex', spawnProcess: () => runner })
+    .startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory, resumeSessionKey: 'native-sequence-zero-key' });
+  const result = await session.run('continue').completion;
+  assert.equal(result.status, 'completed');
+  assert.equal(result.text, 'PONG');
+  assert.deepEqual(result.tokenUsage, { promptTokens: 40, completionTokens: 10, totalTokens: 50 });
   await session.close();
 });
 
@@ -2291,6 +2331,7 @@ test('AC4 (F1) (pi): Background or stale root turn_ended during admitted prompt 
   runner.send({
     kind: 'turn_ended',
     activationId: promptCmd.activationId,
+    seq: 4,
     outcome: { kind: 'completed' },
   });
 

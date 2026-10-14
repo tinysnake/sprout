@@ -37,7 +37,7 @@ function sendSessionEvent(event: Event, activationId: string | undefined): void 
       send({
         kind: 'turn_ended',
         ...(activationId !== undefined ? { activationId } : {}),
-        spanId: event.spanId ?? activeSpanId,
+        spanId: event.spanId,
         seq: event.seq,
         outcome: event.outcome,
         ...(usage !== undefined ? { usage } : {}),
@@ -46,7 +46,7 @@ function sendSessionEvent(event: Event, activationId: string | undefined): void 
       send({
         kind: 'turn_ended',
         ...(activationId !== undefined ? { activationId } : {}),
-        spanId: event.spanId ?? activeSpanId,
+        spanId: event.spanId,
         seq: event.seq,
         outcome: event.outcome,
       });

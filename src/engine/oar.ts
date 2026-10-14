@@ -586,20 +586,24 @@ export class OarEngineSession implements EngineSession {
         }
 
         const ev = msg.event;
-        if (turn && turn.getSequenceFloor() !== undefined && ev.seq < turn.getSequenceFloor()!) {
-          break;
+        if (turn) {
+          const boundSpanId = turn.getSpanId();
+          const matchingNativeSpan = boundSpanId !== undefined && ev.spanId === boundSpanId;
+          if (boundSpanId !== undefined && ev.spanId !== undefined && ev.spanId !== boundSpanId) {
+            break;
+          }
+          const sequenceFloor = turn.getSequenceFloor();
+          if (sequenceFloor !== undefined && !matchingNativeSpan && ev.seq <= sequenceFloor) {
+            break;
+          }
         }
         const isRoot = (!ev.agentPath || ev.agentPath.length === 0) && ev.sessionId === this.sessionId;
 
         if (isRoot) {
-          // If turn is active, enforce span attribution:
-          // A background or stale root event must NOT contribute text or progress to the active turn.
+          // A span matching the accepted native turn is direct attribution. Without
+          // it, only events after the prompt request's stream position are eligible.
           if (turn) {
             const boundSpanId = turn.getSpanId();
-            if (boundSpanId !== undefined && ev.spanId !== undefined && ev.spanId !== boundSpanId) {
-              // Stale or background root event — do NOT attribute to active turn
-              break;
-            }
             if (boundSpanId === undefined && ev.spanId !== undefined) {
               if (this.#runtimeId === 'pi') {
                 break;
@@ -637,7 +641,7 @@ export class OarEngineSession implements EngineSession {
       case 'usage_snapshot': {
         if (!turn || msg.activationId !== turn.activationId) break;
         const sequenceFloor = turn.getSequenceFloor();
-        if (sequenceFloor !== undefined && msg.seq < sequenceFloor) break;
+        if (sequenceFloor === undefined || msg.seq <= sequenceFloor) break;
         this.#observeUsage(msg.usage);
         break;
       }
@@ -647,10 +651,14 @@ export class OarEngineSession implements EngineSession {
 
         // Background or stale root endings cannot settle the current activation.
         if (msg.activationId !== turn.activationId) return;
-        const sequenceFloor = turn.getSequenceFloor();
-        if (sequenceFloor !== undefined && msg.seq !== undefined && msg.seq < sequenceFloor) return;
         const boundSpanId = turn.getSpanId();
+        const matchingNativeSpan = boundSpanId !== undefined && msg.spanId === boundSpanId;
         if (boundSpanId !== undefined && msg.spanId !== undefined && msg.spanId !== boundSpanId) {
+          return;
+        }
+        const sequenceFloor = turn.getSequenceFloor();
+        if (sequenceFloor !== undefined && !matchingNativeSpan &&
+            (msg.seq === undefined || msg.seq <= sequenceFloor)) {
           return;
         }
 

@@ -22,6 +22,8 @@ OAR Pi cannot honor a separately configured Pi session directory on this route. 
 
 Resumed usage is reported only as a delta from the native session's usage baseline observed when OAR opens it. If the runtime cannot provide that baseline, usage for the resumed turn remains unavailable; the adapter does not infer zero or count old history as current work. Fresh sessions use their known zero baseline. Usage source and OAR version remain attached to settled results.
 
+For event attribution, the wrapper activation ID alone does not relabel an opening or queued native event as new work. An event without a matching native turn span must have a sequence strictly after the accepted prompt request; sequence-zero opening activity without a matching span is ignored. The same boundary applies to usage snapshots and turn completion.
+
 ## Historical delivered control (superseded for the OAR Pi route by #273)
 
 A fresh host-owned agent directory contained only suppression settings and optional host-supplied `OarAdapterOptions.piModels` provider configuration. No ambient auth, models, packages or extensions were copied. Global settings used `defaultTools: []`, `extensions: ['!**/*']` and `packages: []`. The same suppression overrides were applied in `<cwd>/.pi/settings.json`: project exclusion was essential; global exclusion alone did not exclude project discovery. `!` was a normal exclusion pattern; `-` exact-path force exclusion was deliberately not used. OAR pre-trusted cwd; this control did not alter trust.
