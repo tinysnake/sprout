@@ -228,6 +228,39 @@ test('external path case', () => {});
   }
 });
 
+test('experiment tag marks run_started only; ordinary runs carry no experiment field', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sprout-obs-experiment-'));
+  try {
+    const fixture = join(dir, 'fixture.test.mjs');
+    await writeFile(fixture, `import { test } from 'node:test';
+test('ordinary case', () => {});
+`);
+    // Ordinary run: no experiment mark anywhere — the historical record shape.
+    await exec(process.execPath, [runner, fixture], {
+      timeout: 15_000,
+      env: { ...standaloneEnv, SPROUT_TEST_OBS_DIR: join(dir, 'obs-plain') },
+    });
+    const plain = readRun(join(dir, 'obs-plain'));
+    assert.equal('experiment' in plain[0]!, false, 'ordinary run_started carries no experiment field');
+    assert.ok(plain.every((record) => !('experiment' in record)), 'no record of an ordinary run carries the mark');
+
+    // Experiment run: marked on run_started only; test_result shape unchanged.
+    await exec(process.execPath, [runner, fixture], {
+      timeout: 15_000,
+      env: { ...standaloneEnv, SPROUT_TEST_OBS_DIR: join(dir, 'obs-tag'), SPROUT_TEST_OBS_EXPERIMENT: '  probe run  ' },
+    });
+    const tagged = readRun(join(dir, 'obs-tag'));
+    assert.equal((tagged[0] as { experiment?: string }).experiment, 'probe-run', 'tag is sanitized to a token');
+    const result = tagged.find((record) => record.record === 'test_result')!;
+    assert.equal('experiment' in result, false, 'test_result records are unchanged');
+    const summary = tagged.at(-1)!;
+    assert.equal(summary.record, 'run_summary');
+    assert.equal('experiment' in summary, false, 'run_summary records are unchanged');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('repeated invocations keep every attempt without overwriting the first failure', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'sprout-obs-retry-'));
   try {

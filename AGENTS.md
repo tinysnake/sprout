@@ -28,6 +28,8 @@ Filter large command output at the shell (`... | tail -40`, `rg -n 'fail|Error|n
 
 Each `npm test` run streams sanitized per-run records (results, durations, disposition) to the Git common directory's `observations/test-runs/` and survives worktree reclamation. Inspect them with `node scripts/test-observations.ts`; override the location with `SPROUT_TEST_OBS_DIR`.
 
+Before a mutation or probe experiment, redirect its observations and mark the run so its expected failures never pollute the flake history; the convention is in `docs/test-selection.md`.
+
 ## Agent skills
 
 ### Issue tracker

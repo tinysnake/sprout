@@ -23,6 +23,14 @@ export type RunStartedRecord = {
   node: string;
   concurrency: number;
   timeoutMs: number;
+  /**
+   * Present only when the run is a deliberate experiment (mutation, probe)
+   * whose failures are expected, stamped from SPROUT_TEST_OBS_EXPERIMENT.
+   * Absent on every genuine run — including every historical record, which
+   * predates the field — so an unmarked run is read as genuine history and
+   * nothing in the existing dataset is invalidated.
+   */
+  experiment?: string;
 };
 
 export type TestResultRecord = {

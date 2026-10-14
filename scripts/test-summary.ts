@@ -55,6 +55,17 @@ mkdirSync(obsDir, { recursive: true, mode: 0o700 });
 pruneObservationRuns(obsDir, OBS_RETENTION);
 const runId = `${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}`;
 const runPath = join(obsDir, `${runId}.jsonl`);
+// Deliberate experiment (mutation, probe): stamp the run so a later reader can
+// never mistake its expected failures for a genuine flake. Convention
+// (docs/test-selection.md): such runs also redirect with SPROUT_TEST_OBS_DIR;
+// the mark is the belt-and-braces for records that land in a shared dataset
+// anyway. Only run_started carries it; test_result records are unchanged.
+const experiment = (() => {
+  const raw = (process.env.SPROUT_TEST_OBS_EXPERIMENT ?? '').trim();
+  if (raw === '') return undefined;
+  const token = raw.replace(/[^A-Za-z0-9._-]+/g, '-').slice(0, 64);
+  return token === '' ? undefined : token;
+})();
 const sha256 = (data: string | Buffer): string => createHash('sha256').update(data).digest('hex');
 const appendRun = (record: ObservationRecord): void => appendObservation(runPath, record);
 appendRun({
@@ -71,6 +82,7 @@ appendRun({
   node: process.version,
   concurrency: TEST_CONCURRENCY,
   timeoutMs,
+  ...(experiment === undefined ? {} : { experiment }),
 });
 
 const child = spawn(
