@@ -1,8 +1,10 @@
 ---
-Status: accepted
+Status: accepted, not yet in force — activation waits for the pipeline's final-review default
 ---
 
 # Independent review concentrates on the assembled scope
+
+> **Adoption:** this decision is agreed but not activated. It takes effect together with the generic pipeline's final-review default; until then the pipeline still gates each Ticket and the revised flow is not the currently executing one. The Sprout-side implementation carries an "Adoption status — not yet in force" banner for the same reason.
 
 Sprout's development loop assembles a scope's work and then runs one independent final review over the assembled result, followed by repair, reassembly, and re-review when it fails. The previous default ran an independent work–review loop for every ticket before assembly, repeating context acquisition, checks, verdict recording, and orchestration; small corrections could trigger another complete ticket gate even when their impact was already understood.
 

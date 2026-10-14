@@ -4,6 +4,8 @@ Use this loop to evaluate what Sprout should do next, assign work, define accept
 
 This file is the single source of truth for the development process. `AGENTS.md`, the outcome map, and issue-tracker documentation may point here but must not restate this workflow.
 
+> **Adoption status — not yet in force.** This revision introduces the default flow where independent review concentrates on the assembled scope. The generic pipeline that runs this loop still gates each Ticket, and this revision takes effect only when the pipeline's final-review default lands. Until then the active loop continues to gate each Ticket as the pipeline requires; the default execution model, required reviews, and adjustment authority below describe the intended state, not the currently executing one.
+
 ## Sources of truth
 
 Read these in order:
@@ -212,7 +214,7 @@ rather than reading the whole log into context.
 
 ## Default execution model
 
-A **scope** is the bounded set of work selected for one development pass: a map or spec and the tickets that implement it. Independent review concentrates on the assembled result of that scope, not on each ticket.
+A **scope** is the bounded set of work selected for one development pass: a map or spec and the tickets that implement it. Independent review concentrates on the assembled result of that scope, not on each ticket. This is the only meaning of "scope" used for the work selection; elsewhere in this file "review scope" names the boundary a single review covers, and "scope-level findings" are findings about the assembled scope rather than a second kind of scope.
 
 ```text
 Select scope
@@ -329,7 +331,7 @@ Completion criterion: every acceptance item points to evidence, and every deviat
 
 Compare the outcome and evidence against each original acceptance item. Verify both the ticket's new behavior and the relevant existing behavior named in its constraints; a passing test that expects behavior contrary to an approved rule is evidence of a conflict to resolve, not acceptance.
 
-Closing a child issue proves that the ticket's own acceptance and evidence are met. It does not assert an independent review verdict, and it does not mean the scope is accepted. Under the default flow a ticket may be accepted and closed without any independent ticket review; independent review happens on the assembled scope (see Default execution model). Downstream work proceeds once the ticket is ready for assembly and dependent work, not once the scope has passed final review.
+Closing a child issue proves that the ticket's own acceptance and evidence are met. It does not assert an independent review verdict, and it does not mean the scope is accepted. Under the default flow a ticket may be accepted and closed without any independent ticket review; independent review happens on the assembled scope (see Default execution model). Downstream work proceeds once the ticket is ready for assembly and dependent work, not once the scope has passed final review. Closing the issue does not waive a required independent review: if the change triggered one of the reviews above, that review must still complete before the downstream use or delivery it governs.
 
 - If all pass, add an acceptance comment, close the ticket, and append its durable result to the map's `Decisions so far`.
 - If any fail, comment with the exact unmet criterion and return the ticket to the appropriate ready state.
@@ -364,6 +366,8 @@ Before assigning another implementation attempt after an acceptance failure, rou
 Cite the evidence for the route and retain uncertainty where attribution is incomplete. A demonstrated specification conflict is decided, not repaired; an ordinary defect with a known cause still proceeds directly to proportionate rework.
 
 A final-review FAIL is routed through the same judgement. Findings are attributed to the work and requirements they support, repair work is dispatched to the affected tickets or created as bounded repair tickets, and the corrected result is reassembled and re-reviewed. A repair does not automatically acquire its own ticket-review gate. One composed requirement failing does not mark every contributing worker as failed.
+
+Scope repair is bounded by the pipeline's repair-attempt budget. Sprout keeps no second budget for the repair → reassemble → re-review cycle: the pipeline's counters and attribution govern, and when that budget is exhausted the scope stops for a human decision instead of looping between repair and re-review.
 
 When a single ticket keeps failing acceptance past its repairs, do not just re-evaluate the map: diagnose that ticket (step 8) before assigning more work to it.
 

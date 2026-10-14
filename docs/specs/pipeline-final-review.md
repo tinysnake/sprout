@@ -130,7 +130,7 @@ Retain truthful evidence, preserved behavior, requirement-change authority, unfi
 
 [ADR-0020](../adr/0020-defer-privacy-hardening-and-redaction.md) defers privacy hardening and content redaction to future work. Privacy-only gaps must not trigger mandatory intermediate reviews or block final acceptance in the current stage. Authentication, access permissions, Human authority, and execution/recovery safety retain their independent requirements.
 
-Define the following required focused reviews in [the development control loop](../agents/development-loop.md). A review is triggered when a change alters a listed behavioral boundary and downstream work or delivery will rely on it; merely touching a related file does not trigger a gate. Ground each review in the current authoritative decision, including approved amendments and accepted limitations. When a cited decision is superseded or amended, the row's source pointer updates in the same change rather than being left stale.
+Define the following required focused reviews in [the development control loop](../agents/development-loop.md). A review is triggered when a change alters a listed behavioral boundary and downstream work or delivery will rely on it; merely touching a related file does not trigger a gate. Ground each review in the current authoritative decision, including approved amendments and accepted limitations.
 
 | Commitment and source | Trigger | Review scope and continuation evidence | Blocking effect |
 | --- | --- | --- | --- |
