@@ -1,5 +1,7 @@
 # Message and wake-routing semantics
 
+> Current scope: [ADR-0020](0020-defer-privacy-hardening-and-redaction.md) supersedes this decision's privacy-specific guarantees and redaction requirements. Authentication, access permissions, execution controls, and other independent requirements remain effective.
+
 The Local Operator MVP needs routine direct and Project-channel communication
 without either unexplained silence or uncontrolled Agent wakes. M1 proved the
 durable write path: persist a `Message` and its per-recipient `WakeRequest`
@@ -22,8 +24,7 @@ choices proved the path, but they would make a larger Project noisy and make a
 low-cost routing failure create uncontrolled fan-out. The product owner settled
 the M2 semantics in #51. This decision deepens the proven path rather than
 replacing its persistence-before-wake, idempotency, or reply-projection
-boundaries. The wake-model privacy guarantee below records the later owner
-amendment to value-level detection in routing text.
+boundaries. The privacy and redaction decisions below are historical and are superseded by ADR-0020.
 
 ## Project wake policies
 
@@ -188,6 +189,10 @@ Candidate inputs have priority, followed by their direct thread ancestors and
 then recent shared channel context within the remaining bound. Automatic retry
 uses exactly the same frozen snapshot.
 
+## Historical privacy and redaction decisions
+
+The following guarantee and model-visible file-reference rules record earlier decisions and implementation behavior. ADR-0020 supersedes their privacy-specific source exclusions, producer obligations, redaction requirements, and verification commitments. They are not current acceptance or preservation requirements. Relevant, bounded context and existing conversation access permissions retain their independent purposes.
+
 ### Wake-model privacy guarantee (amended 2026-10-07)
 
 The routing builder admits only the Project-shared sources listed above. Direct
@@ -255,6 +260,8 @@ satisfies #179 AC4's reconciliation trigger by recording the accepted risk;
 shape-independent sanitization is not implemented or required by this decision.
 
 ## Model-visible Project file references
+
+Historical redaction behavior, superseded as a requirement by ADR-0020.
 
 Project and Task prose can name files the Agent must inspect. The shared contextual
 redactor preserves a relative reference when it is a slash-separated path with
@@ -338,8 +345,8 @@ without consulting internal logs. The evidence includes:
   assignments, and each input's selected, suppressed, or failed result;
 - concise model rationale labelled as model judgement rather than fact;
 - the frozen context manifest and all truncation markers;
-- timeouts, exceptions, invalid output, and validation errors, without raw
-  private reasoning;
+- timeouts, exceptions, invalid output, and validation errors with enough bounded
+  detail to explain the outcome;
 - WakeRequest pending, waiting, admitted, or failed outcomes and admission
   blockers; and
 - linked Agent runs, run outcomes, and projected replies.
@@ -362,9 +369,9 @@ uncontrolled cost. Durable failure evidence prevents that safer fallback from
 becoming unexplained silence.
 
 Non-routing projection and explicit Agent sends separate an answer from an
-intentional delegation. Bounded Project-shared context gives the model useful
-collaboration facts while preserving the established rule that private raw
-reasoning is never routing context.
+intentional delegation. Bounded, relevant context gives the model useful
+collaboration facts without replaying unnecessary history. Privacy-specific
+source exclusions and redaction are future work under ADR-0020.
 
 ## Rejected alternatives
 
@@ -388,9 +395,9 @@ reasoning is never routing context.
   decision.
 - **Automatically rerun a failed Agent run.** Tools may already have produced
   side effects, so replay is not generally safe.
-- **Give the wake model direct conversations, private sessions, or raw run
-  evidence.** Those facts are unnecessary for Project routing and violate the
-  privacy boundary.
+- **Replay unrelated conversations or complete engine histories for routing.**
+  They add irrelevant context and token cost. Conversation access permissions
+  still apply; privacy-specific filtering is deferred under ADR-0020.
 
 ## Consequences
 

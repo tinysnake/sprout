@@ -9,6 +9,8 @@ withdraw even while their historical Project membership remains recorded. The op
 mounts `createTaskProposalRouter`; the typed Web port is
 `createTaskProposalBrowserAdapter`.
 
+Privacy hardening and content redaction are deferred under [ADR-0020](adr/0020-defer-privacy-hardening-and-redaction.md). Existing redaction behavior below is an implementation observation, not a preservation or acceptance requirement. Membership, Human authority, content bounds, and lifecycle correctness retain their contracts.
+
 ## Contract
 
 - `propose(projectId, actor, content + origin?)` records one Human- or
@@ -20,7 +22,8 @@ mounts `createTaskProposalRouter`; the typed Web port is
   when it was sent. Direct creation stores `origin: null` explicitly. This
   provenance does not grant authority or affect validation.
 - `validate(projectId, actor, content)` checks membership, Project writability,
-  and bounded content, returning sanitized content. It writes nothing.
+  and bounded content. The current implementation returns redacted content;
+  ADR-0020 removes redaction as a required contract. It writes nothing.
 - `get(id)` and `list(projectId)` preserve history, including rejected/withdrawn
   proposals and proposals in archived Projects.
 - `revise(id, actor, content + reason + expectedRevision)` appends one full
@@ -35,7 +38,8 @@ mounts `createTaskProposalRouter`; the typed Web port is
 
 Content contains `title`, non-empty `goal`, `constraints`, and
 `validationCriteria`. Both arrays are required and may explicitly be empty.
-Text and reasons pass the shared privacy boundary before persistence. Limits:
+The current implementation redacts text and reasons before persistence; this is
+not a preservation or acceptance requirement under ADR-0020. Content limits:
 200 title characters, 16,000 goal characters, 100 entries per array, 4,000
 characters per entry, and 2,000 reason characters. Empty/all-withheld content
 is refused rather than replaced with invented goals or reasons.
@@ -137,10 +141,11 @@ Force Release remains the risk-acknowledged emergency action in recovery
 (ADR-0009). This check is demand-driven at competing acquisition, not a periodic
 heartbeat or a release-on-block policy.
 
-Environment-class run-failure notices disclose only bounded, sanitized
-product-owned lease-conflict reasons. They direct the Human to Environments
+Environment-class run-failure notices currently present bounded, product-owned
+lease-conflict reasons. They direct the Human to Environments
 recovery or to Tasks → select the holding Task → enter a reason → Discard Task.
-Arbitrary engine diagnostics remain withheld. The active Task lease panel also
+The current implementation withholds arbitrary engine diagnostics; ADR-0020
+removes privacy-specific withholding as a requirement. The active Task lease panel also
 links directly to the holding Task's Human controls; Force Release stays gated
 on recovery rather than becoming ordinary active-work preemption.
 

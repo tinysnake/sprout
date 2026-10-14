@@ -2,7 +2,7 @@
 
 This roadmap bridges the durable product direction in `docs/goal.md` and the current short-term development map in GitHub Issues. It records the current medium-term goal and the outcomes needed to prove it, not a fixed implementation plan.
 
-Future outcomes may be split, merged, reordered, or removed when evidence changes the plan. Evidence for completed outcomes remains linked as construction history.
+Future outcomes may be split, merged, reordered, or removed when evidence changes the plan. Evidence for completed outcomes remains linked as construction history. Historical privacy checks and guarantees in that evidence do not create current obligations; [ADR-0020](adr/0020-defer-privacy-hardening-and-redaction.md) governs current privacy scope.
 
 ## Status vocabulary
 
@@ -48,11 +48,12 @@ Turn Sprout's evidenced coordination foundation into a self-hosted product that 
 - An active Task never moves between Environment instances.
 - Core modules remain independently testable and verifiable.
 - Individual capabilities use observable acceptance checks even though overall MVP readiness is a Human product decision.
-- The product decisions settled by [Map #44](https://github.com/tinysnake/sprout/issues/44), ADR-0006 through ADR-0010, and the retained #61–#68 prototype artifacts are constraints for implementation rather than details for implementation workers to reinvent.
+- The product decisions settled by [Map #44](https://github.com/tinysnake/sprout/issues/44), ADR-0006 through ADR-0010, and the retained #61–#68 prototype artifacts are constraints for implementation, subject to later accepted decisions. [ADR-0020](adr/0020-defer-privacy-hardening-and-redaction.md) supersedes their privacy-specific requirements.
 - The retained prototype is the Production Web structural baseline, not its implementation or backend baseline. ADR-0011 fixes the production Web foundation while Map #70 makes the inheritance contract and M1 starting point explicit before specification.
 
 **Non-goals for M2**:
 
+- Privacy hardening, content redaction, and dedicated privacy reviews; these are future work under ADR-0020, not M2 or early-use gates.
 - Cloud multi-tenant SaaS.
 - Multiple human users and complex team authorization.
 - A complete workflow or project-management system.
@@ -126,7 +127,7 @@ Project-scoped direct messages, Project channels, Working group channels, and op
 
 - Each Project has an explicit wake policy.
 - Addressing, routing, suppression, failure, and retry outcomes are durable and understandable to the Human operator.
-- Routing shares no private raw reasoning and prevents accidental wake loops.
+- Routing uses bounded, relevant context and prevents accidental wake loops. Privacy filtering and redaction are deferred under ADR-0020.
 
 ### M2-O4 — Self-hosted macOS and Windows operation
 
@@ -189,7 +190,7 @@ The completed product capabilities hold up in routine Sprout, lightweight-game, 
 
 Before claiming the complete M2 Local Operator MVP, run a bounded, Human-authorized Sprout-on-Sprout change through the production collaboration path: configure a Project and Agent on an enrolled Environment, propose or receive work, approve Task begin as the operator, run and observe the Agent, correct or stop it if needed, inspect the change and evidence, and accept or reject the result. A restart or disconnect must not silently release unfinished work. Use the smallest real production controls needed for this journey; deterministic addressed communication is sufficient. Wake-model batching, comprehensive page state matrices, cross-page polish, and full Usage/Costs views are not prerequisites for this checkpoint.
 
-This checkpoint is **not** evidence that M2-O1 through M2-O7 or #77 are complete. The full M2 checks above still apply. A bounded non-blocking edge case may be tracked as an issue while this journey continues, using `docs/agents/development-loop.md`'s stage-gate classification. Privacy, Human authority, recoverability, and truthful state remain hard gates. Re-evaluate the M2 outcome frontier after the real journey rather than treating this checkpoint as a fixed implementation waterfall.
+This checkpoint is **not** evidence that M2-O1 through M2-O7 or #77 are complete. The full M2 checks above still apply. A bounded non-blocking edge case may be tracked as an issue while this journey continues, using `docs/agents/development-loop.md`'s stage-gate classification. Authentication, access permissions, Human authority, recoverability, and truthful state remain hard gates. Privacy hardening and content redaction are deferred under ADR-0020 and do not block this checkpoint or full M2 acceptance. Re-evaluate the M2 outcome frontier after the real journey rather than treating this checkpoint as a fixed implementation waterfall.
 
 Maps #44 and #70 settled product direction and the production foundation. Spec
 [#77](https://github.com/tinysnake/sprout/issues/77) tracks the remaining M2

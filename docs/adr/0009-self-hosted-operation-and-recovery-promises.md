@@ -1,5 +1,7 @@
 # Self-hosted operation and recovery promises
 
+> Current scope: [ADR-0020](0020-defer-privacy-hardening-and-redaction.md) supersedes this decision's privacy-specific guarantees and redaction requirements. Authentication, access permissions, execution controls, and other independent requirements remain effective.
+
 The Local Operator MVP turns Sprout's durable coordination foundation into a
 self-hosted product for one technical lead. The foundation already persists
 Messages, Tasks, Agent runs, leases, and Project state in SQLite, reconciles
@@ -34,10 +36,9 @@ Operator credentials are initialized and recovered on the Sprout host, have no
 default value, and never appear as durable URL credentials. Web can list and
 revoke browser sessions or revoke all other sessions. Host-local credential
 recovery or rotation invalidates existing sessions. Agents, Environment
-Workers, and wake models are not supplied the operator credential by Sprout.
-It must never be copied into shared prose; detection of arbitrary values in
-wake-model routing text has the [limited guarantee in ADR-0007](0007-message-and-wake-routing-semantics.md#wake-model-privacy-guarantee-amended-2026-10-07),
-reconciled by #220 Option A on 2026-10-07.
+Workers, and wake models have no operator authority. Operator credentials remain
+host-owned authentication material. Content privacy and redaction are deferred
+under [ADR-0020](0020-defer-privacy-hardening-and-redaction.md).
 
 The Web experience has mobile and desktop capability parity. A browser that
 cannot reach the Sprout instance may show its last observed state as stale, but
@@ -276,11 +277,11 @@ required, but Web restore, arbitrary historical upgrades, and downgrade are not.
 
 This safety copy is a migration guard, not a product backup system.
 
-## Sanitized operational diagnostics
+## Operational diagnostics
 
 The operator can diagnose both a reachable and an unreachable installation:
 
-- Web provides current health and a sanitized diagnostic export containing
+- Web provides current health and a diagnostic export containing
   Sprout, Worker, protocol, and schema versions; startup and migration outcomes;
   Environment connection, compatibility, capability, and engine-readiness
   facts; Task, Agent-run, and lease outcomes; recovery causes; times; and durable
@@ -296,12 +297,13 @@ are not permanent history; a readiness fact records its current value, latest
 probe time, and latest change. High-volume process logs are bounded host-local
 troubleshooting data rather than product audit history.
 
-Durable diagnostics and Web exports never contain credentials, tokens, provider
-or account identity, hostnames, network addresses or topology, absolute host
-paths, Message or prompt content, private reasoning, commands, tool output, or
-unsanitized stderr. M2 has no content-rich or opt-in "advanced" diagnostic
-bundle that bypasses this rule. Facts needed to explain unresolved recovery are
-not removed merely to satisfy a high-volume log bound.
+Diagnostic content is selected for troubleshooting value, understandable
+operational history, bounded size, and authenticated access. ADR-0020 supersedes
+the former privacy exclusions and mandatory sanitization of exports and logs;
+privacy scanners and privacy-specific export restrictions are future work. This
+decision does not itself add raw-log exports or change the existing DTOs. Facts
+needed to explain unresolved recovery are not removed merely to satisfy a
+high-volume log bound.
 
 ## Production deployment governance is later work
 
@@ -372,9 +374,9 @@ become a backup scheduler or software deployment manager.
   recovery into routine preemption and weaken the Task authority model.
 - **Call a migration safety copy a backup system.** It would imply scheduling,
   retention, restoration, and disaster-recovery promises M2 does not make.
-- **Export raw logs or an opt-in content-rich diagnostic bundle.** Such an export
-  cannot reliably preserve the prohibition on credentials and private
-  infrastructure details.
+- **Treat process logs as permanent operational history.** High-volume logs
+  cannot replace durable authority and recovery facts. The earlier rejection of
+  richer exports solely for privacy is superseded by ADR-0020.
 
 ## Consequences
 
@@ -393,8 +395,8 @@ become a backup scheduler or software deployment manager.
 - Persistence needs explicit schema versions, compatibility refusal,
   transactional migrations, one consistent safety copy, and failure-before-serve
   behaviour.
-- Diagnostics need a structured redaction boundary; raw host logs cannot become
-  the Web diagnostic contract.
+- Diagnostics need useful bounded facts and a stable Web contract. Privacy
+  hardening and structured redaction are deferred under ADR-0020.
 - `docs/roadmap.md` needs no change: M2-O4 already requires explicit host-local
   setup, routine Web operation, observable compatibility and health, restart
   durability, diagnostics, and safe recovery. This decision makes those checks

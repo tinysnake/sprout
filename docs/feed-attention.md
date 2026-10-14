@@ -67,10 +67,12 @@ conversation scope, Message, and Project-event records:
   test pins those templates to the shipped route table in
   `web/src/router/index.ts`. Projectless Agent runs link to their authoritative
   Agent detail page.
-- **Privacy.** Interpolated source text passes `redactSensitiveText` and is
-  length-bounded (400 for reasons, 300 for activity summaries). Engine prose,
-  prompts, raw run events/results/failures, frozen routing context, and claim
-  text never cross the projection.
+- **Bounded presentation.** Reasons are bounded to 400 characters and activity
+  summaries to 300. The current implementation redacts interpolated source text
+  and excludes rich run/context records. These privacy-specific restrictions
+  are implementation observations, not current acceptance requirements under
+  [ADR-0020](adr/0020-defer-privacy-hardening-and-redaction.md). Select content for
+  useful action summaries and stable links rather than building privacy filters.
 
 ## Collaboration resolution and clearing audit
 
@@ -108,9 +110,9 @@ Message failures link to Project Chat; event failures link to Project Overview.
 ## Evidence
 
 - `src/web/feed-projection.test.ts` — derivation, filtering, transcolation,
-  referential integrity, privacy, clearing.
+  referential integrity, existing projection behavior, clearing.
 - `src/web/feed-collaboration.test.ts` — unknown/ended-member wake failures,
-  privacy, Human-only resolution, session/CSRF, batch clearing, idempotency,
+  existing projection behavior, Human-only resolution, session/CSRF, batch clearing, idempotency,
   new-failure resurfacing, and unchanged facts across SQLite reopen.
 - `src/web/feed-restart.test.ts` — identical snapshot across a SQLite reopen.
 - `src/web/feed-router.test.ts` — HTTP contract, filters, 401/400/404 matrix.

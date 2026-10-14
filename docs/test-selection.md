@@ -7,11 +7,13 @@ the observation dataset (see `AGENTS.md`). Every tier runs through
 `scripts/test-summary.ts`, so no invocation exceeds the 180-second command
 limit.
 
+Privacy hardening and redaction are future work under [ADR-0020](adr/0020-defer-privacy-hardening-and-redaction.md). Existing privacy tests remain part of the current inventory until an implementation change updates or prunes them; do not add privacy-only coverage or preserve a superseded privacy assertion as a product gate. Required checks still run and failures are reported truthfully.
+
 ## Tiers
 
 | Tier | Command | Contents | Trigger |
 | --- | --- | --- | --- |
-| Quick core | `npm run test:quick` | All default-glob test files except `.dom.test.ts` suites and `src/worker/cli/worker-cli.macos.test.ts`: cheap logic, parsing, state machines, memory/SQLite database contracts, and the compact critical authority, lease, privacy, and recovery regressions | Meaningful implementation edits |
+| Quick core | `npm run test:quick` | All default-glob test files except `.dom.test.ts` suites and `src/worker/cli/worker-cli.macos.test.ts`: cheap logic, parsing, state machines, memory/SQLite database contracts, and the compact critical authority, lease, and recovery regressions | Meaningful implementation edits |
 | Affected behavior | `npm run test:affected` | Quick core plus the tests under each changed file's directory; any `web/` change also activates `web/src/modules/tasks/tasks.dom.test.ts` (permissions, stop confirmation, recovery) | Implementation completion and ticket review |
 | Extended regression | `npm run test:extended` | The 20 remaining `*.dom.test.ts` suites (full DOM matrices, real rendering paths) plus `src/worker/cli/worker-cli.macos.test.ts` (platform startup) | Related DOM/platform changes; change-request or final integration; periodic regression |
 | Full | `npm test` | The complete default-glob inventory (quick ∪ extended) | Final composed result before integration into the target branch |

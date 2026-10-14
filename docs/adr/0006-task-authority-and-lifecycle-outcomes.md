@@ -1,5 +1,7 @@
 # Task authority and lifecycle outcomes
 
+> Current scope: [ADR-0020](0020-defer-privacy-hardening-and-redaction.md) supersedes this decision's privacy-specific guarantees and redaction requirements. Authentication, access permissions, execution controls, and other independent requirements remain effective.
+
 M2 allows Humans and Agents to propose durable work, but only a Human may
 authorize a Task to acquire a scarce Environment instance. Once approved, a
 Task must be able to make useful multi-Agent progress without asking the Human
@@ -160,8 +162,7 @@ A completion claim contains a fact-form outcome summary, acceptance or
 validation evidence, durable changes or artifacts, known limitations and
 remaining risks, and a recommended disposition. An Agent-led Task may receive a
 Human-substituted claim when its lead has not filed one; the claim records both
-the Human actor and substituted Agent lead. Claims exclude private reasoning and
-raw transcripts. The Task then awaits Human validation with its lease held.
+the Human actor and substituted Agent lead. Claims use bounded, relevant validation facts. Privacy-specific content exclusion is deferred under ADR-0020. The Task then awaits Human validation with its lease held.
 
 The Human may accept the claim or record a correction. Correction returns the
 Task to deliberate advancement on the same Environment instance and lease.
@@ -242,7 +243,7 @@ Every proposal, revision, authority decision, run request and settlement,
 pause, stop, resume, blocker, completion claim, validation, correction, end, and
 recovery action records its actor, time, reason or input, Task content version,
 and relevant Task, Agent run, Environment instance, and lease identifiers. Audit
-facts remain curated and never include an Agent's private raw reasoning.
+facts remain relevant and bounded so the Human can understand and correct work; privacy-specific filtering is deferred under ADR-0020.
 
 ## Reference
 
