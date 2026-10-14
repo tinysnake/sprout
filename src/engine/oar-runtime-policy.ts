@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, rmdirSync, 
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { McpServer, SessionOptions } from '@botiverse/oar';
-import { EngineStartError } from './port.ts';
+import { EngineStartError, OarPolicyContentionError } from './port.ts';
 
 export interface OarPiPolicy {
   readonly agentDir: string;
@@ -49,12 +49,27 @@ export interface OarRuntimePolicyLease {
 export const OAR_PI_DISALLOWED_BUILTIN_TOOLS = [
   'read', 'bash', 'edit', 'write', 'grep', 'find', 'ls', 'powershell', 'codemode',
 ] as const;
+/**
+ * Lock-directory name for the exclusive OAR Pi policy lease. Contention for
+ * either directory is reported as an {@link OarPolicyContentionError} naming
+ * the held directory, so a reader can tell a held lease (another session on
+ * this machine) from a policy defect (the message below).
+ */
+export const OAR_POLICY_LOCK_NAME = '.sprout-oar-policy';
 const builtinToolPolicy = { defaultTools: [] } as const;
 function settingsHash(settings: string): string {
   return createHash('sha256').update(settings).digest('hex');
 }
 function refused(): never {
   throw new EngineStartError('OAR Pi route is blocked: empty built-in tools and Worker-origin-only MCP could not be established; see #270 and #273');
+}
+
+/** Contention message; names the condition without any host-specific path. */
+function contentionMessage(scope: 'agent' | 'project'): string {
+  const held = scope === 'agent'
+    ? `the exclusive lock directory <agentDir>/${OAR_POLICY_LOCK_NAME} is already held by another OAR Pi session on this machine`
+    : `the exclusive lock directory <cwd>/.pi/${OAR_POLICY_LOCK_NAME} is already held by another OAR Pi session for this project directory`;
+  return `OAR Pi policy lease contention: ${held}, so no session was started. The agent-directory lease is global to the machine and not per worktree: one live OAR Pi session at a time. Wait for the other session to exit and retry; this is contention, not a policy defect. See #270, #273 and #276.`;
 }
 
 /** One policy point: host Pi configuration supplies providers/extensions; built-in tools stay empty. */
@@ -102,10 +117,10 @@ export function prepareOarRuntimePolicy(runtimeId: string, cwd: string, input: {
   const agentDir = resolve(input.agentDir);
   const pi = join(canonical, '.pi');
   const projectSettingsPath = join(pi, 'settings.json');
-  const projectLock = join(pi, '.sprout-oar-policy');
+  const projectLock = join(pi, OAR_POLICY_LOCK_NAME);
   const projectBackup = join(projectLock, 'settings.json');
   const agentSettingsPath = join(agentDir, 'settings.json');
-  const agentLock = join(agentDir, '.sprout-oar-policy');
+  const agentLock = join(agentDir, OAR_POLICY_LOCK_NAME);
   const agentBackup = join(agentLock, 'settings.json');
   let closed = false;
   const close = () => {
@@ -139,8 +154,18 @@ export function prepareOarRuntimePolicy(runtimeId: string, cwd: string, input: {
     if (!existsSync(pi)) { mkdirSync(pi); createdPi = true; }
     if (lstatSync(pi).isSymbolicLink() || !lstatSync(pi).isDirectory()) refused();
     // Separate locks serialize sessions across workspaces sharing one host Pi directory.
-    mkdirSync(agentLock, { mode: 0o700 }); agentLocked = true;
-    mkdirSync(projectLock, { mode: 0o700 }); projectLocked = true;
+    try {
+      mkdirSync(agentLock, { mode: 0o700 });
+    } catch {
+      throw new OarPolicyContentionError(contentionMessage('agent'));
+    }
+    agentLocked = true;
+    try {
+      mkdirSync(projectLock, { mode: 0o700 });
+    } catch {
+      throw new OarPolicyContentionError(contentionMessage('project'));
+    }
+    projectLocked = true;
     let originalProject: Record<string, unknown> = {};
     if (existsSync(projectSettingsPath)) {
       const projectStat = lstatSync(projectSettingsPath);
@@ -183,8 +208,10 @@ export function prepareOarRuntimePolicy(runtimeId: string, cwd: string, input: {
       ...(input.approvedMcp ? { approvedMcp: input.approvedMcp } : {}),
     };
     return { descriptor, close };
-  } catch {
+  } catch (error) {
     close();
+    // Contention is reported by class, not folded into the generic policy refusal.
+    if (error instanceof OarPolicyContentionError) throw error;
     refused();
   }
 }

@@ -7,7 +7,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { OarEngineAdapter } from './oar.ts';
 import { EngineStartError } from './port.ts';
-import { assertOarRuntimePolicy, hostPiConfigurationProvider, prepareOarRuntimePolicy } from './oar-runtime-policy.ts';
+import { OarPolicyContentionError } from './port.ts';
+import { assertOarRuntimePolicy, hostPiConfigurationProvider, OAR_POLICY_LOCK_NAME, prepareOarRuntimePolicy } from './oar-runtime-policy.ts';
 
 // Risk: a failed overlay silently starts an uncontrolled vendor loader.
 test('OAR Pi refuses fresh and resumed sessions when project settings cannot be controlled', async () => {
@@ -70,7 +71,9 @@ test('Pi policy empties built-in tools, preserves host configuration, and restor
   try {
     const lease = prepareOarRuntimePolicy('pi', root, { agentDir })!;
     assertOarRuntimePolicy('pi', { cwd: lease.descriptor.cwd, disallowedTools: lease.descriptor.disallowedTools }, lease.descriptor);
-    assert.throws(() => prepareOarRuntimePolicy('pi', root, { agentDir }), /route is blocked/);
+    // A second concurrent acquisition is contention (#276): the distinct class,
+    // not the generic policy-defect refusal.
+    assert.throws(() => prepareOarRuntimePolicy('pi', root, { agentDir }), OarPolicyContentionError);
     assert.deepEqual(JSON.parse(readFileSync(settings, 'utf8')).defaultTools, []);
     assert.equal(JSON.parse(readFileSync(settings, 'utf8')).theme, 'dark');
     assert.equal(statSync(settings).mode & 0o777, 0o600);
@@ -109,15 +112,139 @@ test('Pi policy refuses stale host and project leases without changing either se
   writeFileSync(agentSettings, originalAgent);
   try {
     mkdirSync(join(agentDir, '.sprout-oar-policy'));
-    assert.throws(() => prepareOarRuntimePolicy('pi', cwd, { agentDir }), /route is blocked/);
+    // A held lease directory is contention (#276): the distinct class, not the
+    // generic policy-defect refusal. Both refusal paths still fail closed.
+    assert.throws(() => prepareOarRuntimePolicy('pi', cwd, { agentDir }), OarPolicyContentionError);
     assert.equal(readFileSync(projectSettings, 'utf8'), originalProject);
     assert.equal(readFileSync(agentSettings, 'utf8'), originalAgent);
     rmSync(join(agentDir, '.sprout-oar-policy'), { recursive: true, force: true });
     mkdirSync(join(cwd, '.pi', '.sprout-oar-policy'));
-    assert.throws(() => prepareOarRuntimePolicy('pi', cwd, { agentDir }), /route is blocked/);
+    assert.throws(() => prepareOarRuntimePolicy('pi', cwd, { agentDir }), OarPolicyContentionError);
     assert.equal(readFileSync(projectSettings, 'utf8'), originalProject);
     assert.equal(readFileSync(agentSettings, 'utf8'), originalAgent);
     assert.equal(existsSync(join(agentDir, '.sprout-oar-policy')), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// Risk: a reader could not tell lease contention from a policy defect without
+// inspecting the filesystem (#276). Contention — a held lease directory — must
+// produce the distinguishable OarPolicyContentionError, not the generic
+// policy-blocked refusal. The held lease here is created under an ISOLATED
+// agent directory in a temp path: this test never touches the host's real Pi
+// agent directory or its settings, so it cannot disturb a concurrently running
+// live OAR Pi session (the lock path is derived from the agent directory).
+test('a held lease reports distinguishable contention, not a bare policy refusal', () => {
+  const root = mkdtempSync(join(tmpdir(), 'sprout-pi-contention-'));
+  const cwd = join(root, 'project');
+  const agentDir = join(root, 'isolated-agent');
+  mkdirSync(join(cwd, '.pi'), { recursive: true });
+  mkdirSync(agentDir);
+  mkdirSync(join(root, 'other-project'), { recursive: true });
+  const projectSettings = join(cwd, '.pi', 'settings.json');
+  const agentSettings = join(agentDir, 'settings.json');
+  const originalProject = '{ "theme": "project" }\n';
+  const originalAgent = '{ "theme": "host" }\n';
+  writeFileSync(projectSettings, originalProject);
+  writeFileSync(agentSettings, originalAgent);
+  const agentLock = join(agentDir, OAR_POLICY_LOCK_NAME);
+  const projectLock = join(cwd, '.pi', OAR_POLICY_LOCK_NAME);
+  try {
+    // Another live session holds the agent-directory lease (an exclusive lock
+    // directory owned by a different lease, in an isolated agent directory).
+    const holder = prepareOarRuntimePolicy('pi', join(root, 'other-project'), { agentDir });
+    assert.ok(holder, 'the holding lease was acquired');
+    assert.equal(existsSync(agentLock), true);
+    assert.equal(existsSync(join(root, 'other-project', '.pi', OAR_POLICY_LOCK_NAME)), true);
+    // While the holder lease is live the agent settings show its overlay; the
+    // refused attempt below must leave exactly this content.
+    const heldAgentSettings = readFileSync(agentSettings, 'utf8');
+
+    let contention: unknown;
+    try {
+      prepareOarRuntimePolicy('pi', cwd, { agentDir });
+      assert.fail('a held agent lease must refuse acquisition');
+    } catch (error) {
+      contention = error;
+    }
+    // The distinguishing outcome: a distinct contention class whose message
+    // names the condition — not the generic "route is blocked" policy defect.
+    assert.ok(contention instanceof OarPolicyContentionError, `expected OarPolicyContentionError, got ${String((contention as Error)?.name)}: ${(contention as Error)?.message}`);
+    assert.match((contention as OarPolicyContentionError).message, /lease contention/);
+    assert.match((contention as OarPolicyContentionError).message, /already held by another OAR Pi session/);
+    assert.match((contention as OarPolicyContentionError).message, /global to the machine/);
+    assert.doesNotMatch((contention as OarPolicyContentionError).message, /route is blocked/);
+    // Neither settings file was touched by the refused attempt.
+    assert.equal(readFileSync(projectSettings, 'utf8'), originalProject);
+    assert.equal(readFileSync(agentSettings, 'utf8'), heldAgentSettings);
+    holder.close();
+    assert.equal(existsSync(agentLock), false);
+    assert.equal(readFileSync(agentSettings, 'utf8'), originalAgent);
+    // Control: with the lease free, the exact same inputs acquire cleanly —
+    // proving the failure above came from the held lease, not the inputs.
+    const control = prepareOarRuntimePolicy('pi', cwd, { agentDir });
+    assert.ok(control, 'the same inputs acquire once the lease is released');
+    control.close();
+    assert.equal(readFileSync(projectSettings, 'utf8'), originalProject);
+
+    // The same distinguishability holds when the PROJECT lease is the held one:
+    // a second session for the same cwd collides only on the project lock.
+    const projectHolder = prepareOarRuntimePolicy('pi', cwd, { agentDir: join(root, 'other-agent') });
+    assert.ok(projectHolder, 'the project-holding lease was acquired');
+    assert.equal(existsSync(projectLock), true);
+    const projectContention = (() => {
+      try {
+        prepareOarRuntimePolicy('pi', cwd, { agentDir: join(root, 'third-agent') });
+        return undefined;
+      } catch (error) { return error; }
+    })();
+    assert.ok(projectContention instanceof OarPolicyContentionError, `expected OarPolicyContentionError, got ${String((projectContention as Error)?.name)}: ${(projectContention as Error)?.message}`);
+    assert.match((projectContention as OarPolicyContentionError).message, /lease contention/);
+    assert.doesNotMatch((projectContention as OarPolicyContentionError).message, /route is blocked/);
+    projectHolder.close();
+    assert.equal(existsSync(projectLock), false);
+    const projectControl = prepareOarRuntimePolicy('pi', cwd, { agentDir: join(root, 'third-agent') });
+    assert.ok(projectControl, 'the same inputs acquire once the project lease is released');
+    projectControl.close();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// Risk: the adapter could swallow the contention class at the start seam, so a
+// caller (and the composition suite) would see a bare policy error again.
+test('OarEngineAdapter propagates the distinguishable contention error from a held lease', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sprout-pi-contention-adapter-'));
+  const cwd = join(root, 'project');
+  const agentDir = join(root, 'isolated-agent');
+  mkdirSync(join(cwd, '.pi'), { recursive: true });
+  mkdirSync(agentDir);
+  mkdirSync(join(root, 'other-project'), { recursive: true });
+  const originalAgent = '{ "theme": "host" }\n';
+  writeFileSync(join(agentDir, 'settings.json'), originalAgent);
+  const agentLock = join(agentDir, OAR_POLICY_LOCK_NAME);
+  try {
+    const holder = prepareOarRuntimePolicy('pi', join(root, 'other-project'), { agentDir });
+    assert.ok(holder, 'the holding lease was acquired');
+    assert.equal(existsSync(agentLock), true);
+    const heldAgentSettings = readFileSync(join(agentDir, 'settings.json'), 'utf8');
+    let spawns = 0;
+    const adapter = new OarEngineAdapter({ runtimeId: 'pi', piConfigurationProvider: { resolve: () => ({ agentDir }) }, spawnProcess: () => {
+      spawns++;
+      throw new Error('uncontrolled runner reached');
+    } });
+    let thrown: unknown;
+    try {
+      await adapter.startSession({ agentId: 'fixture', workingDirectory: cwd });
+      assert.fail('a held agent lease must refuse startSession');
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(thrown instanceof OarPolicyContentionError, `expected OarPolicyContentionError, got ${String((thrown as Error)?.name)}: ${(thrown as Error)?.message}`);
+    assert.match((thrown as OarPolicyContentionError).message, /lease contention/);
+    assert.doesNotMatch((thrown as OarPolicyContentionError).message, /route is blocked/);
+    assert.equal(spawns, 0, 'no runner was spawned under a held lease');
+    assert.equal(existsSync(join(cwd, '.pi', OAR_POLICY_LOCK_NAME)), false, 'the refused attempt left no project lock');
+    assert.equal(readFileSync(join(agentDir, 'settings.json'), 'utf8'), heldAgentSettings);
+    holder.close();
+    assert.equal(readFileSync(join(agentDir, 'settings.json'), 'utf8'), originalAgent);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

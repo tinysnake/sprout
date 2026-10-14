@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -29,7 +29,11 @@ import {
   type EngineHostFacts,
 } from '../worker/engine-selection.ts';
 import { probeEnvironmentReadiness } from '../worker/readiness.ts';
-import { hostPiConfigurationProvider, OAR_PI_DISALLOWED_BUILTIN_TOOLS } from './oar-runtime-policy.ts';
+import {
+  hostPiConfigurationProvider,
+  OAR_PI_DISALLOWED_BUILTIN_TOOLS,
+  OAR_POLICY_LOCK_NAME,
+} from './oar-runtime-policy.ts';
 import { redactSensitiveText } from '../environment/privacy.ts';
 
 /** Turn a loaded extension path into a stable identifier without exposing its host path. */
@@ -37,6 +41,20 @@ function sanitizedExtensionId(resolvedPath: string): string {
   const segments = resolvedPath.split(/[\\/]+/).filter(Boolean);
   const marker = Math.max(...['extensions', 'node_modules', 'packages'].map((name) => segments.lastIndexOf(name)));
   return (marker >= 0 ? segments.slice(marker + 1) : segments.slice(-2)).join('/');
+}
+
+/**
+ * The OAR Pi policy lease is exclusive and, when the agent directory is the
+ * host's own, global to the machine — not per worktree and not per test
+ * process. Two concurrent runs in different worktrees contend, and one live
+ * OAR Pi session at a time is the documented constraint (see
+ * `docs/research/270-oar-pi-policy.md`, #273 and #276).
+ *
+ * This probe never creates or removes a lock: it only observes whether another
+ * session already holds one, so it cannot sabotage a concurrent live run.
+ */
+function agentLeaseHeld(): boolean {
+  return existsSync(join(hostPiConfigurationProvider.resolve().agentDir, OAR_POLICY_LOCK_NAME));
 }
 
 async function listenOnReservedPort(runtime: any): Promise<number> {
@@ -152,6 +170,13 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
 
   if (installation?.kind !== 'available') {
     t.skip('Pi runtime is not available on this host');
+    return;
+  }
+
+  // Lease pre-flight: the agent-directory lock is machine-global (#276). Skip
+  // explicitly, and never silently, when another session holds it.
+  if (agentLeaseHeld()) {
+    t.skip('[CONTENTION SKIP] another OAR Pi session holds the machine-global agent-directory policy lease; this test does not run concurrently with it');
     return;
   }
 
@@ -403,6 +428,13 @@ test('AC2: Bounded live Pi Runtime Message continuation and usage survive SQLite
     return;
   }
 
+  // Lease pre-flight: the agent-directory lock is machine-global (#276). Skip
+  // explicitly, and never silently, when another session holds it.
+  if (agentLeaseHeld()) {
+    t.skip('[CONTENTION SKIP] another OAR Pi session holds the machine-global agent-directory policy lease; this test does not run concurrently with it');
+    return;
+  }
+
   const liveModel = (await livePiConfiguration(installation, process.cwd())).model;
   const directory = mkdtempSync(join(tmpdir(), 'sprout-oar-pi-reopen-'));
   const databasePath = join(directory, 'runtime.db');
@@ -536,6 +568,13 @@ test('AC2 & AC4: Bounded live macOS Pi execution discovers and invokes controlle
     return;
   }
 
+  // Lease pre-flight: the agent-directory lock is machine-global (#276). Skip
+  // explicitly, and never silently, when another session holds it.
+  if (agentLeaseHeld()) {
+    t.skip('[CONTENTION SKIP] another OAR Pi session holds the machine-global agent-directory policy lease; this test does not run concurrently with it');
+    return;
+  }
+
   const liveModel = (await livePiConfiguration(installation, process.cwd())).model;
   let readInvoked = false;
   let invokedPath = '';
@@ -630,6 +669,13 @@ test('AC2 & AC4: Bounded live macOS Pi execution enforces binding-fence refusal 
   }
   if (installation?.kind !== 'available') {
     t.skip('Pi runtime is not available on this host');
+    return;
+  }
+
+  // Lease pre-flight: the agent-directory lock is machine-global (#276). Skip
+  // explicitly, and never silently, when another session holds it.
+  if (agentLeaseHeld()) {
+    t.skip('[CONTENTION SKIP] another OAR Pi session holds the machine-global agent-directory policy lease; this test does not run concurrently with it');
     return;
   }
 

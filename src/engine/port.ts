@@ -416,6 +416,16 @@ export class EngineStartError extends Error {
 }
 
 /**
+ * Thrown when an exclusive engine-policy lease is already held by another live
+ * session on the same machine. This is a distinct class so a caller — and a
+ * test suite reading its output — can tell contention for a machine-global
+ * lease from a policy defect that fails closed. No work was started.
+ */
+export class OarPolicyContentionError extends Error {
+  override readonly name: string = 'OarPolicyContentionError';
+}
+
+/**
  * Raised by `startSession` when the engine explicitly refused the supplied
  * `resumeSessionKey` and performed no work.
  *
