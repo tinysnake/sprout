@@ -4,10 +4,12 @@ Ticket #108 implements a read-only backend Module. Settings presentation belongs
 in the separate production Settings page ticket; these contracts are available
 without completing that page.
 
+Privacy hardening and redaction are future work under [ADR-0020](adr/0020-defer-privacy-hardening-and-redaction.md). The projection restrictions below describe the current implementation, not privacy acceptance or preservation requirements. Authentication, operational attribution, bounded data, and truthful state remain required.
+
 ## Public contracts
 
 - `src/operations/contract.ts`: browser-safe DTOs, finite operational event
-  vocabulary, host-local observations, and structural privacy projections.
+  vocabulary, host-local observations, and structural projections.
 - `OperatorDiagnostics`: composed session/settings and diagnostic reads over
   enrollment, current Worker authority, recovery history, and an operational
   journal. It never starts an engine probe, runs inference, admits work, or
@@ -97,9 +99,10 @@ including unresolved recovery and permanent Force Release history; there is no
 raw-log retention facility. A historical observation without a current accepted
 Worker is offline, never an online Worker inherited across restart.
 
-## Privacy boundary
+## Current projection implementation
 
-Privacy is field selection, not regular-expression redaction. Export DTOs have no
+The current implementation uses field selection rather than regular-expression
+redaction. Export DTOs have no
 slots for credentials, provider/account identity, hostnames, addresses/topology,
 absolute paths, Messages/prompts, private reasoning, commands, tool output, raw
 stderr, operator-authored reasons or engine-authored detail. Engine names are
@@ -127,10 +130,11 @@ observations remain unknown rather than guessed from raw command output.
 ## Test risks
 
 - Lost facts or duplicate noise: SQLite reopen plus concurrent repeated states.
-- Privacy escape through legacy rows or rich domain records: hostile-row and
-  structural field-selection tests, including credential and reason sentinels.
-- Restart confusion and anonymous disclosure: real runtime HTTP with enrollment,
+- Existing field-selection behavior: hostile-row and structural projection
+  tests describe the current implementation. Their privacy-only assertions may
+  be updated or pruned when implementation changes under ADR-0020.
+- Restart confusion and unauthenticated access: real runtime HTTP with enrollment,
   restart, session authentication and cache headers.
 - Browser contract drift: typed adapter routes and inherited transport state.
-- Host diagnostics leaking local state: real CLI status export over temporary
-  host-local configuration with an untrusted detail sentinel.
+- Host diagnostic contract: real CLI status export over temporary host-local
+  configuration; privacy-only detail exclusions are deferred under ADR-0020.

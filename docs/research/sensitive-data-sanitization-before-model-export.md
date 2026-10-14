@@ -9,7 +9,7 @@ document; all quoted values are synthetic fixtures, regex patterns, or placehold
 
 ---
 
-**Status: HISTORICAL (reconciled 2026-10-07).** This document preserves the research evidence and alternatives gathered for the earlier routing-text sanitization decision. The owner chose #220 Option A after full M2 acceptance reached #179’s revisit trigger. [ADR-0007 now records the active limited guarantee](../adr/0007-message-and-wake-routing-semantics.md#wake-model-privacy-guarantee-amended-2026-10-07): private sources remain excluded and recognized patterns are redacted, while unlabelled opaque values in free text may reach the wake model. This research is retained as decision history, not as the active privacy contract or a requirement to implement the superseded shape-independent sanitizer.
+**Status: HISTORICAL.** This document preserves the research evidence and alternatives gathered for the earlier routing-text sanitization decision, reconciled on 2026-10-07 after the owner chose #220 Option A. [ADR-0007 records that historical limited guarantee](../adr/0007-message-and-wake-routing-semantics.md#wake-model-privacy-guarantee-amended-2026-10-07). [ADR-0020](../adr/0020-defer-privacy-hardening-and-redaction.md) now supersedes its privacy-specific source exclusions and redaction requirements and defers privacy hardening to future work. This research creates no current implementation, preservation, review, or acceptance obligation.
 
 ## 1. The historical problem this research addressed
 

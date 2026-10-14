@@ -15,6 +15,8 @@ Read these in order:
 5. Child tickets and their work records — specifications and implementation evidence.
 6. The repository and test results — the actual current state.
 
+Privacy scope for current work, review, and acceptance is governed by [ADR-0020](../adr/0020-defer-privacy-hardening-and-redaction.md). Privacy hardening and content redaction are future work. Do not initiate or expand privacy-only features or tests, insert privacy-only review gates, or block assembly, dependent work, or delivery on a privacy-only gap. Authentication, access permissions, Human authority, and execution/recovery safety retain their independent requirements. Earlier privacy requirements do not reactivate through a preservation clause or milestone.
+
 The goal is not a backlog. The outcome map is not a fixed sequence of tasks. A development map is a temporary hypothesis about how to evidence one frontier outcome. Replace it when evidence changes that hypothesis.
 
 ## Artifacts
@@ -146,7 +148,7 @@ A session that claimed a ticket may end without posting its Work record: the pro
 Before the session context is discarded, preserve what exists:
 
 - the branch and commits produced so far, and the workspace state;
-- evidence already gathered (test runs, probes, links), sanitized under the privacy rules in `AGENTS.md`;
+- evidence already gathered (test runs, probes, links), prepared under the repository/issue-tracker publishing hygiene in `AGENTS.md`;
 - the ticket's current state and the exact unmet acceptance condition, when it is known;
 - an explicit note that no completion claim was posted — a missing Work record is recorded as missing, never inferred from pane state or silence.
 
@@ -364,8 +366,8 @@ When a map has an explicitly approved early-use milestone before its full outcom
 
 Classify each finding by **impact on the next real operator journey**, not by the presence of a bug or a severity label alone:
 
-- **Blocking**: a broken required journey; a credible breach of privacy, authentication, Human authority, or other trust boundaries; possible loss, duplication, or unsafe reassignment of unfinished work; an unobservable or misleading failure that prevents safe correction; or a regression that defeats the milestone's stated evidence. Stop and fix or narrow the milestone transparently. An uncertain impact in these categories is blocking until investigated.
+- **Blocking**: a broken required journey; a credible breach of authentication, access permissions, Human authority, or execution authority; possible loss, duplication, or unsafe reassignment of unfinished work; an unobservable or misleading failure that prevents safe correction; or a regression that defeats the milestone's stated evidence. Stop and fix or narrow the milestone transparently. An uncertain impact in these categories is blocking until investigated.
 - **Non-blocking defect or risk**: an edge case outside the milestone's required journey with bounded, known impact, no credible path to the blocking categories, and a usable workaround or explicit limitation. Open a linked issue with reproduction or evidence, affected scope, impact, workaround/limitation, and a proposed revisit trigger. It does not block unrelated frontier work or the early-use milestone merely because the issue is open.
-- **Deferred breadth or polish**: a capability, state matrix, visual refinement, or broader platform check not promised by the early-use milestone. Keep its original full-outcome ticket or create a bounded follow-up; do not describe it as implemented or evidenced.
+- **Deferred breadth or polish**: privacy hardening and content redaction under ADR-0020, or a capability, state matrix, visual refinement, or broader platform check not promised by the early-use milestone. Keep its original full-outcome ticket or create a bounded follow-up; do not describe it as implemented or evidenced.
 
 At acceptance, record the classification and links in the work record or acceptance comment. Reassess a non-blocking finding if it occurs on the real journey, recurs, compounds with another issue, loses its workaround, or changes impact. Do not mark an unmet original acceptance criterion as passed: amend the criterion before work proceeds, split out a follow-up, or leave the ticket open. The full outcome still requires its own checks and Human acceptance.

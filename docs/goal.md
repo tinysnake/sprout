@@ -44,7 +44,7 @@ When a convention is defined in more than one place, the precedence is "project 
 
 Messages, project facts, decisions, task state, run results, hand-off summaries, and agent-private memory can persist across runs. Sprout trims and assembles context according to the current work, avoiding replaying all history on every wake-up.
 
-Agents share curated project facts, decisions, progress, and results with one another, and do not directly share each other's uncurated private memory or raw reasoning.
+Agents share relevant project facts, decisions, progress, and results with one another through bounded context. Privacy hardening, private-content protection, and content redaction are future product plans under [ADR-0020](adr/0020-defer-privacy-hardening-and-redaction.md); they are not current-stage acceptance requirements.
 
 ### Natural and restrained multi-agent communication
 

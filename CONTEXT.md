@@ -2,6 +2,8 @@
 
 Sprout coordinates persistent agents, collaborative projects, and heterogeneous work environments while keeping those concepts independent from one another.
 
+Privacy-specific guarantees in earlier terminology and decisions are superseded by [ADR-0020](docs/adr/0020-defer-privacy-hardening-and-redaction.md). Current terms describe identity, ownership, authority, and product behavior; they do not require privacy hardening or content redaction.
+
 ## Language
 
 **Sprout instance**:
@@ -341,7 +343,7 @@ The current, live status of one Project's authorized workspace on an enrolled En
 _Avoid_: Environment readiness, engine login
 
 **Readiness observation receipt**:
-A core-issued opaque identity for one atomic, sanitized facts-and-probe commit. The durable receipt snapshots the verified connection identity, epoch, enrollment, lifecycle generation, and optional requirement scope. The scope is a validated plain object containing only optional `revision`, `requiredEngines`, `requiredModels`, and `modelsByEngine` fields; malformed or extra fields refuse the observation before persistence. Historical retrieval preserves that scope and facts but does not grant current authority: current status requires the live enrollment and connection fence. The connection identifier is an internal correlation identity, never a Worker credential. Issue-order precedence and identical redelivery are governed by #127.
+A core-issued opaque identity for one atomic facts-and-probe commit. The durable receipt snapshots the verified connection identity, epoch, enrollment, lifecycle generation, and optional requirement scope. The scope is a validated plain object containing only optional `revision`, `requiredEngines`, `requiredModels`, and `modelsByEngine` fields; malformed or extra fields refuse the observation before persistence. Historical retrieval preserves that scope and facts but does not grant current authority: current status requires the live enrollment and connection fence. The connection identifier is an internal correlation identity, never a Worker credential. Issue-order precedence and identical redelivery are governed by #127.
 _Avoid_: Browser authority token, current-ready assertion, Worker-supplied identity
 
 **Environment lease**:
@@ -365,5 +367,5 @@ The Human-only emergency recovery decision that makes an Environment instance re
 _Avoid_: Automatic expiry, normal release, lease steal
 
 **Operational event**:
-A compact durable fact needed to explain Sprout startup, schema migration, Environment enrollment or connectivity, interruption, reconciliation, recovery, or release without retaining credentials, private infrastructure details, conversation content, or raw logs.
+A compact durable fact needed to explain Sprout startup, schema migration, Environment enrollment or connectivity, interruption, reconciliation, recovery, or release. It supports operational attribution and understandable history; content redaction is not part of its definition.
 _Avoid_: Log line, Message, Project event

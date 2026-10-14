@@ -2,9 +2,13 @@
 
 ## Development stage: aggressive restructuring is allowed
 
-The project is in its **initial development stage**. Aggressive refactoring and replacement are acceptable: prefer the clean design over preserving legacy behavior, and do not spend effort on backward compatibility with old features. Breaking changes to internal APIs, storage shapes, and prototypes are expected; make the change that leaves the simplest correct result, and update tests and docs to match. (Do not break privacy, authority, and safety guarantees documented elsewhere in this file and in `docs/adr/`.)
+The project is in its **initial development stage**. Aggressive refactoring and replacement are acceptable: prefer the clean design over preserving legacy behavior, and do not spend effort on backward compatibility with old features. Breaking changes to internal APIs, storage shapes, and prototypes are expected; make the change that leaves the simplest correct result, and update tests and docs to match. (Preserve authentication, authority, and execution/recovery safety guarantees documented elsewhere in this file and in `docs/adr/`.)
 
-## Privacy and sensitive information
+## Current product scope
+
+[ADR-0020](docs/adr/0020-defer-privacy-hardening-and-redaction.md) defers privacy hardening and content redaction to future work. Do not add or expand privacy filtering, masking, sanitization, redaction, or privacy-only tests without a later explicit product decision. Privacy-only gaps are not current acceptance criteria or review blockers. Existing mechanisms do not create a preservation obligation solely for privacy. Authentication, access permissions, Human authority, and execution/recovery safety remain required.
+
+## Repository and issue-tracker publishing hygiene
 
 Never commit or write any personal or sensitive information into the Git repository or issue tracker (including commit messages, issue bodies, issue comments, pull requests, work records, and documentation).
 
@@ -14,7 +18,7 @@ This rule applies strictly to:
 - **Network infrastructure**: Private/local IP addresses (e.g. `10.x.x.x`, `192.168.x.x`), internal domain names, port bindings, and LAN topology.
 - **Credentials and secrets**: API keys, authentication tokens, passwords, private keys, and session cookies.
 
-When recording command outputs, probe results, test transcripts, or error logs, always sanitize them before writing: replace specific identities, IPs, and host paths with generic placeholders (such as `<user>@<windows-host>`, `~/.local/bin/...`).
+Prepare published command excerpts, probe results, test transcripts, and error logs using generic identities, addresses, and paths (such as `<user>@<windows-host>`, `~/.local/bin/...`), and omit actual secrets. This publishing rule does not require developing or preserving product redaction features.
 
 ## Tests and command output
 
