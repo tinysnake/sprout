@@ -10,6 +10,7 @@ node_modules
 web/dist/
 
 # Local runtime state
+/.scratch/
 /test-timeout.jsonl
 /.preview-data/
 # Codex auth is never copied into an image or committed; it is mounted read-only
