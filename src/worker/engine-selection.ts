@@ -1,9 +1,8 @@
 import { execFileSync } from 'node:child_process';
 
 import type { EngineAdapter } from '../engine/port.ts';
-import { CodexEngineAdapter, type CodexSandboxMode } from '../engine/codex.ts';
+import type { CodexSandboxMode } from '../engine/codex.ts';
 import { OarEngineAdapter } from '../engine/oar.ts';
-import { PiEngineAdapter } from '../engine/pi.ts';
 import { AgyEngineAdapter } from '../engine/agy.ts';
 import { OpenCodeEngineAdapter } from '../engine/opencode.ts';
 import type { WorkerConfiguration } from '../host-config.ts';
@@ -123,35 +122,18 @@ export interface EngineAdapterFactories {
 
 const realFactories: EngineAdapterFactories = {
   claude: configuration => new OarEngineAdapter({ runtimeId: 'claude', binaryPath: configuration.binaryPath }),
-  codex: (configuration) => {
-    if (process.env['SPROUT_USE_OAR_ENGINE'] === 'codex' || process.env['SPROUT_USE_OAR_ENGINE'] === 'all') {
-      return new OarEngineAdapter({
-        runtimeId: 'codex',
-        sandbox: configuration.sandbox,
-      });
-    }
-    return new CodexEngineAdapter({
-      binaryPath: configuration.binaryPath,
-      args: [...configuration.args],
-      sandbox: configuration.sandbox,
-    });
-  },
-  pi: (configuration) => {
-    if (process.env['SPROUT_USE_OAR_ENGINE'] === 'pi' || process.env['SPROUT_USE_OAR_ENGINE'] === 'all') {
-      return new OarEngineAdapter({
-        runtimeId: 'pi',
-        ...(configuration.sessionDirectory !== undefined
-          ? { sessionDirectory: configuration.sessionDirectory }
-          : {}),
-      });
-    }
-    return new PiEngineAdapter({
-      binaryPath: configuration.binaryPath,
-      ...(configuration.sessionDirectory !== undefined
-        ? { sessionDirectory: configuration.sessionDirectory }
-        : {}),
-    });
-  },
+  codex: configuration => new OarEngineAdapter({
+    runtimeId: 'codex',
+    binaryPath: configuration.binaryPath,
+    sandbox: configuration.sandbox,
+  }),
+  pi: configuration => new OarEngineAdapter({
+    runtimeId: 'pi',
+    binaryPath: configuration.binaryPath,
+    ...(configuration.sessionDirectory !== undefined
+      ? { sessionDirectory: configuration.sessionDirectory }
+      : {}),
+  }),
   agy: (configuration) =>
     new AgyEngineAdapter({
       binaryPath: configuration.binaryPath,

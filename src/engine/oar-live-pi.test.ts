@@ -6,7 +6,6 @@ import test from 'node:test';
 import { defaultRuntimes } from '@botiverse/oar';
 
 import { OarEngineAdapter } from './oar.ts';
-import { PiEngineAdapter } from './pi.ts';
 import type { EngineAdapter } from './port.ts';
 import {
   createRuntime,
@@ -15,6 +14,7 @@ import {
   scriptedEnvironment,
   INSTANCE_ID,
   PROJECT_ID,
+  waitFor,
 } from '../runtime-test-harness.ts';
 import {
   loadOrCreateWorkerIdentity,
@@ -41,14 +41,14 @@ function sanitizedExtensionId(resolvedPath: string): string {
 
 async function listenOnReservedPort(runtime: any): Promise<number> {
   let lastError: unknown;
-  for (let port = 41010; port <= 41019; port += 1) {
+  for (let port = 41020; port <= 41029; port += 1) {
     try {
       return (await runtime.api.listen(port)).port;
     } catch (error) {
       lastError = error;
     }
   }
-  throw new Error('No port in the reserved 41010–41019 block was available', { cause: lastError });
+  throw new Error('No port in the reserved 41020–41029 block was available', { cause: lastError });
 }
 
 /** Resolve the live model and tool inventory from the host's published Pi configuration. */
@@ -90,49 +90,20 @@ async function livePiConfiguration(installation: any, cwd: string): Promise<{
     session.dispose();
   }
 }
-test('AC7: Native production default is preserved for Pi when OAR opt-in is not active', () => {
-  const previousEnv = process.env['SPROUT_USE_OAR_ENGINE'];
-  try {
-    delete process.env['SPROUT_USE_OAR_ENGINE'];
+test('AC7: Production Worker selects the shared OAR Pi adapter without a deployment gate', () => {
+  const facts: EngineHostFacts = {
+    configuration: {
+      environmentPlatform: 'host',
+      engineBinaries: { pi: '/synthetic/bin/pi' },
+      piSessionDirectory: undefined,
+    },
+    platform: 'darwin',
+    locate: () => '/synthetic/bin/pi',
+  };
 
-    const fakeFacts: EngineHostFacts = {
-      configuration: {
-        environmentPlatform: 'host',
-        engineBinaries: { pi: '/usr/local/bin/pi' },
-        piSessionDirectory: undefined,
-      },
-      platform: 'darwin',
-      locate: () => '/usr/local/bin/pi',
-    };
-
-    const engines = createEnvironmentWorkerEngines(fakeFacts);
-    const pi = engines.get('pi');
-    assert.ok(pi, 'pi engine is configured');
-    assert.ok(
-      pi instanceof PiEngineAdapter,
-      'production default remains native PiEngineAdapter when opt-in is not active',
-    );
-    assert.ok(
-      !(pi instanceof OarEngineAdapter),
-      'OarEngineAdapter is not used by default for Pi',
-    );
-
-    // Now test with opt-in active
-    process.env['SPROUT_USE_OAR_ENGINE'] = 'pi';
-    const oarEngines = createEnvironmentWorkerEngines(fakeFacts);
-    const oarPi = oarEngines.get('pi');
-    assert.ok(oarPi, 'pi engine is configured with opt-in');
-    assert.ok(
-      oarPi instanceof OarEngineAdapter,
-      'opt-in successfully selects OarEngineAdapter for Pi',
-    );
-  } finally {
-    if (previousEnv === undefined) {
-      delete process.env['SPROUT_USE_OAR_ENGINE'];
-    } else {
-      process.env['SPROUT_USE_OAR_ENGINE'] = previousEnv;
-    }
-  }
+  const pi = createEnvironmentWorkerEngines(facts).get('pi');
+  assert.ok(pi instanceof OarEngineAdapter);
+  assert.equal(pi.id, 'pi');
 });
 
 test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enrolled path', async (t) => {
@@ -174,11 +145,13 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
   let projectInstructionsReceived = false;
   let projectModelReceived = false;
   let projectEffortReceived = false;
+  let sessionStartCount = 0;
 
   const realAdapter = new OarEngineAdapter({ runtimeId: 'pi' });
   const observedStart = realAdapter.startSession.bind(realAdapter);
 
   realAdapter.startSession = async (request) => {
+    sessionStartCount += 1;
     projectInstructionsReceived = request.instructions?.includes(marker) === true;
     projectModelReceived = request.model === liveModel;
     projectEffortReceived = request.effort === liveEffort;
@@ -247,18 +220,7 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
       modelAuthorizations: { pi: [liveModel] },
     });
 
-    connection = await connectWorkerEnrollment({
-      target: {
-        enrollmentId: enrollment.enrollment.id,
-        host: '127.0.0.1',
-        port: await listenOnReservedPort(runtime),
-        claimSecret: undefined,
-        identityKeyPath: identityPath,
-      },
-      protocolVersion: '3',
-      engineFacts: [{ engine: 'pi', installed: true, authenticated: true, models: [liveModel] }],
-    });
-
+    const workerPort = await listenOnReservedPort(runtime);
     const hostFacts = {
       configuration: {
         environmentPlatform: 'macos' as const,
@@ -274,20 +236,40 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
     );
     current = await probeEnvironmentReadiness(configurations);
 
-    worker = new EnvironmentWorker({
-      environmentInstanceId: instanceId,
-      engines,
-      input: connection.stream,
-      output: connection.stream,
-      workspaceRoot: directory,
-      readiness: () => current.readiness,
-      readinessProbe: async (params) => {
-        current = await probeEnvironmentReadiness(configurations, {
-          ...(params.requirements !== undefined ? { requirements: params.requirements } : {}),
-        });
-        return current;
-      },
-    });
+    const connectWorker = async () => {
+      connection = await connectWorkerEnrollment({
+        target: {
+          enrollmentId: enrollment.enrollment.id,
+          host: '127.0.0.1',
+          port: workerPort,
+          claimSecret: undefined,
+          identityKeyPath: identityPath,
+        },
+        protocolVersion: '3',
+        engineFacts: [{ engine: 'pi', installed: true, authenticated: true, models: [liveModel] }],
+      });
+
+      worker = new EnvironmentWorker({
+        environmentInstanceId: instanceId,
+        engines,
+        input: connection.stream,
+        output: connection.stream,
+        workspaceRoot: directory,
+        readiness: () => current.readiness,
+        readinessProbe: async (params) => {
+          current = await probeEnvironmentReadiness(configurations, {
+            ...(params.requirements !== undefined ? { requirements: params.requirements } : {}),
+          });
+          return current;
+        },
+      });
+      await waitFor(async () =>
+        (await runtime.enrollments.readiness(enrollment.enrollment.id)).receipt !== undefined,
+      'Pi enrolled Worker readiness receipt');
+    };
+
+    await connectWorker();
+
 
     // Evaluate admission
     let decision;
@@ -299,6 +281,7 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
       await new Promise((resolve) => setTimeout(resolve, 100));
     } while (Date.now() < admissionDeadline);
     assert.ok(decision?.ok, `Admission refused: ${decision?.reason}`);
+    assert.equal(sessionStartCount, 0, 'readiness probes and admission did not start a Pi model session');
 
     // Grant workspace access
     mkdirSync(join(directory, 'candidate-project'));
@@ -377,6 +360,55 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
     assert.equal(firstUsageView.effectiveObservation?.sourceVersion, '0.59.1');
     assert.deepEqual(firstUsageView.effectiveObservation?.tokens, run.result?.detailedTokens);
 
+    assert.equal(sessionStartCount, 1, 'the first admitted Message started one Pi model session');
+    await worker?.shutdown();
+    worker = undefined;
+    connection.close();
+    connection = undefined;
+    await connectWorker();
+    assert.equal(sessionStartCount, 1, 'reconnect and readiness probes did not start inference');
+
+    await runtime.refreshEnvironmentCatalog();
+    const continuedAdmission = await runtime.orchestrator.evaluateOptionAdmission('scout', instanceId);
+    assert.ok(continuedAdmission.ok, `continued Pi admission refused: ${continuedAdmission.reason}`);
+    const continued = await runtime.collaboration.deliver({
+      scopeId: `channel-${PROJECT_ID}`,
+      author: { id: 'operator', kind: 'human' },
+      body: '@scout What word did I ask you to remember? Reply with only that word.',
+      deliveryKey: `live-pi-enrolled-continuation-${Date.now()}`,
+      awaitReply: true,
+    });
+    assert.equal(continued.admittedRunIds.length, 1);
+    const continuedRun = await runtime.orchestrator.waitFor(continued.admittedRunIds[0]!);
+    assert.equal(continuedRun.status, 'completed', continuedRun.failure === undefined
+      ? 'continued enrolled Pi run completed'
+      : `continued enrolled Pi run failed: ${redactSensitiveText(continuedRun.failure)}`);
+    assert.match(continuedRun.result?.status === 'completed' ? continuedRun.result.text : '', /VIOLET/i,
+      'the enrolled Worker continued the authorized native conversation after reconnect');
+    assert.equal(continuedRun.result?.source, 'oar');
+    assert.equal(sessionStartCount, 2, 'the continuation started exactly one new OAR session');
+    assert.equal(projectInstructionsReceived, true);
+    assert.equal(projectModelReceived, true);
+    assert.equal(projectEffortReceived, true);
+    const continuedTokens = continuedRun.result?.tokenUsage;
+    if (continuedTokens === undefined) {
+      assert.equal(continuedRun.result?.detailedTokens, undefined,
+        'usage without a verified resumed-session baseline remains unavailable');
+    } else {
+      assert.ok(continuedTokens.promptTokens > 0);
+      assert.ok(continuedTokens.completionTokens > 0);
+    }
+    const savedKeysAfterResume = await runtime.stores.sessionKeys.list();
+    assert.equal(savedKeysAfterResume.length, 1);
+    assert.equal(savedKeysAfterResume[0]?.key, savedKeysBeforeResume[0]?.key,
+      'the enrolled continuation reused the saved native key for the same Project conversation');
+    const continuedUsageView = await runtime.usage.getRunUsage(continuedRun.id);
+    assert.ok(continuedUsageView);
+    assert.equal(continuedUsageView.effectiveObservation?.completeness,
+      continuedTokens === undefined ? 'unavailable' : 'complete');
+    assert.equal(continuedUsageView.effectiveObservation?.source, 'oar');
+    assert.equal(continuedUsageView.effectiveObservation?.sourceVersion, '0.59.1');
+
     const interruption = await runtime.collaboration.deliver({
       scopeId: `channel-${PROJECT_ID}`,
       author: { id: 'operator', kind: 'human' },
@@ -400,6 +432,7 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
     const interruptedRun = await runtime.orchestrator.interrupt(interruptionRunId);
     assert.equal(interruptedRun.status, 'interrupted');
     assert.equal(interruptedRun.result?.status, 'interrupted');
+    assert.equal(sessionStartCount, 3);
     const interruptionLease = runtime.pool.getLease(interruptedRun.leaseId!);
     assert.equal(interruptionLease?.state,
       interruptedRun.result?.outcomeCertainty === 'uncertain' || interruptedRun.result?.engineSessionTermination === 'uncertain'
