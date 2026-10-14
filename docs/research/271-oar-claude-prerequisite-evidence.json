@@ -18,6 +18,55 @@
     "profileRunOk": true,
     "openDeniedUnderDeclaredProfile": true
   },
+  "childAccess": {
+    "unrestrictedPositiveControl": {
+      "attempted": true,
+      "readSucceeded": true
+    },
+    "hook": {
+      "processLaunched": true,
+      "exitCode": 0,
+      "attempted": true,
+      "readSucceeded": true,
+      "denied": false,
+      "timedOut": false,
+      "descendantsTracked": 0,
+      "descendantsGone": 0
+    },
+    "plugin": {
+      "processLaunched": true,
+      "exitCode": 0,
+      "attempted": true,
+      "readSucceeded": true,
+      "denied": false,
+      "timedOut": false,
+      "descendantsTracked": 0,
+      "descendantsGone": 0
+    },
+    "mcp": {
+      "processLaunched": true,
+      "exitCode": 0,
+      "attempted": true,
+      "readSucceeded": true,
+      "denied": false,
+      "initializeObserved": true,
+      "launchContext": "standalone-stdio-mcp-harness",
+      "protocolHandshakeEvidenceClass": "protocol-only",
+      "timedOut": false,
+      "descendantsTracked": 0,
+      "descendantsGone": 0
+    }
+  },
+  "brokerPresenceCheck": {
+    "processScanExecuted": true,
+    "processRowsScanned": 628,
+    "brokerNamePatternProcessRows": 0,
+    "credentialRelatedBrokerNamePatternProcessRows": 0,
+    "launchdScanExecuted": true,
+    "launchdRowsScanned": 572,
+    "brokerNamePatternServiceRows": 2,
+    "credentialRelatedBrokerNamePatternServiceRows": 1
+  },
   "toolSurface": {
     "fresh": {
       "turnCompleted": true,
@@ -49,6 +98,10 @@
     "descendantsGoneAfterClose": 3,
     "resumeRunnerGoneAfterClose": true
   },
-  "providerRequests": 7,
-  "ok": true
+  "providerRequests": 9,
+  "ok": true,
+  "providerListener": {
+    "bound": true,
+    "allocation": "environment-range"
+  }
 }
