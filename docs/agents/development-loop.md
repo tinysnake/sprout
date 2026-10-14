@@ -191,6 +191,16 @@ These terms are used by step 8 and by the coding pipeline that runs this loop au
 - **Amended acceptance** — the `## Acceptance` a diagnosis rewrites when the remedy is an over-strict or mis-scoped criterion. The amended list is what the next accept step verifies against; the original is preserved in the ticket's history. The amendment distinguishes a verification correction that retains the product commitment from a change to the commitment itself, which requires the project's designated decision-maker.
 - **Decision request** — a self-contained, six-part explanation ending in one concrete question with an explicit scope, used when feasible alternatives require choosing product behavior, investment, or an accepted limitation. It is distinct from `needs-info` (missing reporter information) and from step 8's *a human decides* outcome (a diagnosis's conclusion).
 
+### Lifecycle distinctions
+
+These are the states of work in this loop and in the coding pipeline that runs it. They keep assignment completion, readiness, assembly, acceptance, and delivery from being conflated.
+
+- **Worker assignment complete** — the assignment has a durable outcome and evidence; this alone is not a review verdict.
+- **Ready for assembly and dependent work** — the relevant delivery checks and this file's required-review conditions are met; an independent ticket PASS is not universally required.
+- **Work assembled** — its changes are present in the recorded integration revision and the required integration checks are accounted for.
+- **Scope accepted** — the composed requirements have passed final review and applicable project acceptance.
+- **Scope delivered** — the normal publication/merge and completion steps have succeeded.
+
 ### Verification commands
 
 `npm test` and `npm run typecheck` are the standard evidence. `npm test` prints a
@@ -199,6 +209,60 @@ adds only the failing tests with their reason and location. Do not paste a whole
 passing run into a work record; quote the counters. When a large command output
 is genuinely needed, filter it at the shell (for example `npm test 2>&1 | tail -40`)
 rather than reading the whole log into context.
+
+## Default execution model
+
+A **scope** is the bounded set of work selected for one development pass: a map or spec and the tickets that implement it. Independent review concentrates on the assembled result of that scope, not on each ticket.
+
+```text
+Select scope
+    ↓
+Execute work in dependency order, with parallel work where possible
+    ↓
+Run required checks and progressively assemble the integration branch
+    ↓
+Independent final review of the assembled scope
+    ├─ PASS → deliver through the normal publication/merge process
+    └─ FAIL → route findings → repair affected work → reassemble
+                                                    ↓
+                                             final review again
+```
+
+Worker checks and integration checks continue throughout execution; the final review does not replace them. The integration branch is where work is composed before final acceptance, and merging into it is distinct from publishing the completed scope to the delivery target. A blocked implementation remains unfinished; "all work" is not satisfied by declaring it complete. A research or prototype ticket may finish with a supported negative conclusion when its own acceptance permits that result.
+
+The default requires no additional review policy. A project may direct an earlier or focused review under its own instructions; in Sprout those insertions are exactly the required reviews below.
+
+## Required independent reviews
+
+[ADR-0020](../adr/0020-defer-privacy-hardening-and-redaction.md) defers privacy hardening and content redaction to future work. Privacy-only gaps must not trigger mandatory intermediate reviews or block final acceptance in the current stage. Authentication, access permissions, Human authority, and execution/recovery safety retain their independent requirements.
+
+Sprout requires four focused reviews in addition to the final review of the assembled scope. They are Sprout-owned requirements; the generic pipeline neither selects them nor knows their domain. A review is triggered when a change alters a listed behavioral boundary and downstream work or delivery will rely on it; merely touching a related file does not trigger a gate. Ground each review in the current authoritative decision, including approved amendments and accepted limitations.
+
+| Commitment and source | Trigger | Review scope and continuation evidence | Blocking effect |
+| --- | --- | --- | --- |
+| **Human, Agent, and Worker authority** — [ADR-0006](../adr/0006-task-authority-and-lifecycle-outcomes.md), [ADR-0009](../adr/0009-self-hosted-operation-and-recovery-promises.md), [ADR-0012](../adr/0012-production-workers-use-enrollment-backed-outbound-connections.md) | Changes to Task approval, advancement, validation or recovery permissions; Project/WG access; Worker enrollment, revocation or command authorization. | Verify authorization at the side-effect boundary. Require executed evidence that permitted actions work and unauthorized actions are refused without effects, including relevant membership changes, revocation and stale connection epochs. | Before dependent work consumes the changed authority contract or the affected path is delivered. |
+| **Leases, recovery, and unfinished work** — [ADR-0005](../adr/0005-task-held-environment-lease.md), ADR-0006, ADR-0009 | Changes to lease acquisition/release, Task/Run settlement, disconnect/reconnect, Force Release or workspace/context cleanup. | Verify that nested Run settlement preserves the Task lease; interruption, timeout and restart do not silently replay work or select another Environment; uncertain remote outcomes remain protected under recovery. Exercise relevant failure and cleanup paths and verify that persistent Project work survives. | Before dependent execution uses the changed lifecycle or an affected Environment becomes reassignable under it. |
+| **Engine, Host-run, Worker, and MCP execution boundaries** — ADR-0012, [ADR-0017](../adr/0017-durable-execution-placement.md) as amended by [ADR-0018](../adr/0018-host-run-tasks-retain-task-environment-lease.md), [ADR-0019](../adr/0019-project-mcp-tools-run-on-the-environment-worker.md), and the affected route's current approved acceptance | Adapter additions/replacements or changes to tool admission, configuration sources, execution placement, workspace bindings, session ownership or transports. | Verify actual execution origin, granted tools and binding/session ownership; exercise stale-tool or stale-session refusal and relevant failure paths without unauthorized local, model or Environment fallback. Prove bounded startup, interruption and close where affected. Keep model-issued, protocol-only, scripted and source-only evidence distinct. | Before downstream work relies on the new route, it becomes a production default, or the affected path is delivered. |
+| **Durability, migrations, and idempotency** — ADR-0009, [ADR-0007](../adr/0007-message-and-wake-routing-semantics.md), and affected storage/operation contracts | Changes to schema migrations, transaction boundaries, operation identities, reply projection, recovery retries or routing deduplication. | Exercise relevant crash, partial-commit, lost-response and retry cases. Verify recoverable durable facts, migration atomicity and absence of duplicate remote execution, projected replies or wakes; preserve unknown outcomes where execution cannot be established. | Before dependent work consumes the changed storage/operation contract or a migration is applied to data that must be retained. |
+
+Record each insertion's source, reason, reviewed revision, scope, affected downstream/integration step, verdict and continuation evidence in the existing ticket or run record. Block only the named dependent use or delivery step; independent work and assembly needed to produce the review revision may continue. Overlapping triggers may share one focused review. Ordinary presentation changes and local refactors that preserve these boundaries remain under final review.
+
+When a cited decision is superseded or amended — for example the Task/WG and lease changes tracked by the active development map — the row's source pointer updates in the same change, and the boundary contract is re-grounded rather than silently dropped.
+
+A focused PASS requires evidence for the changed boundary and its relevant rejection/recovery paths; a green suite alone does not establish that an unexercised path works. It establishes only the reviewed boundary and revision, not final composed acceptance. Reassess that verdict when subsequent changes affect the reviewed behavior. Unrelated suggestions do not become blockers, and approved requirement changes or accepted limitations must not be silently reversed by a reviewer.
+
+## Orchestrator adjustment authority
+
+The flow in this file is the default. The orchestrator may adjust execution under existing authorization when the adjustment is scheduling or composition only:
+
+- reordering or grouping work;
+- changing concurrency;
+- inserting a focused review job required by this file or requested under existing authorization;
+- choosing where in the flow an existing required step runs, provided its evidence is still produced.
+
+Every material adjustment is recorded with its source, reason, affected work, and continuation condition in an existing durable record — the map's `Decisions so far`, the ticket, or the run record — so a replacement orchestrator can resume the same plan. Affected active assignments receive an explicit change notice through step 7 when their governing decision changes.
+
+A change that alters **acceptance, product behavior, permissions, or an accepted limitation** is not an execution adjustment. It follows the project's decision rules (Decision requests above; step 8 acceptance amendments), normally with the Human as the designated decision-maker. Authority over execution never implies authority to change requirements.
 
 ## Loop
 
@@ -265,6 +329,8 @@ Completion criterion: every acceptance item points to evidence, and every deviat
 
 Compare the outcome and evidence against each original acceptance item. Verify both the ticket's new behavior and the relevant existing behavior named in its constraints; a passing test that expects behavior contrary to an approved rule is evidence of a conflict to resolve, not acceptance.
 
+Closing a child issue proves that the ticket's own acceptance and evidence are met. It does not assert an independent review verdict, and it does not mean the scope is accepted. Under the default flow a ticket may be accepted and closed without any independent ticket review; independent review happens on the assembled scope (see Default execution model). Downstream work proceeds once the ticket is ready for assembly and dependent work, not once the scope has passed final review.
+
 - If all pass, add an acceptance comment, close the ticket, and append its durable result to the map's `Decisions so far`.
 - If any fail, comment with the exact unmet criterion and return the ticket to the appropriate ready state.
 - If the result invalidates the map, update `Fog` and re-evaluate before assigning more downstream work.
@@ -297,6 +363,8 @@ Before assigning another implementation attempt after an acceptance failure, rou
 
 Cite the evidence for the route and retain uncertainty where attribution is incomplete. A demonstrated specification conflict is decided, not repaired; an ordinary defect with a known cause still proceeds directly to proportionate rework.
 
+A final-review FAIL is routed through the same judgement. Findings are attributed to the work and requirements they support, repair work is dispatched to the affected tickets or created as bounded repair tickets, and the corrected result is reassembled and re-reviewed. A repair does not automatically acquire its own ticket-review gate. One composed requirement failing does not mark every contributing worker as failed.
+
 When a single ticket keeps failing acceptance past its repairs, do not just re-evaluate the map: diagnose that ticket (step 8) before assigning more work to it.
 
 Close the map only when its exit criteria are evidenced. Link that evidence to `docs/roadmap.md` and determine whether the current outcome is evidenced or needs another map. When an outcome is complete, recompute the outcome frontier and create a map for the next selected outcome.
@@ -306,6 +374,8 @@ After the current medium-term goal is evidenced, return to `docs/goal.md` and re
 ### 8. Diagnose a ticket that will not pass
 
 A ticket that fails acceptance repeatedly is not making progress, however many times it is repaired. When its repairs have climbed as far as the available capability goes and it still fails, stop repairing and diagnose: the question is no longer "how do we satisfy this acceptance" but "why does this acceptance keep failing".
+
+Scope-level findings from the final review are not this step: they are attributed to their supported requirements and repaired through step 7, and they require neither per-ticket diagnosis nor a ticket-review round.
 
 This is the automatic coding-pipeline path (Dev Pipeline's escalation-exhaustion diagnosis); when working the loop by hand, treat the same signals — a ticket whose rework has run out of stronger workers, or whose budget is spent — as the trigger.
 
@@ -345,6 +415,8 @@ Completion criterion: the ticket carries an attribution with evidence and exactl
 ## Composition of settled slices
 
 Independently accepted slices can still fail when they first meet. When completed slices first combine use of the same resource, authority, or lifecycle, verify one coherent path through their composition before treating integration as complete. Prefer existing high-level test interfaces and expand only to the affected behavior. A clean merge is not evidence of correct composition, and a full independent repository review is not required by default.
+
+Composition verification is part of assembly and final review rather than an extra mandatory reviewer gate. When a change alters one of the required-review boundaries above, that focused review covers the boundary instead. Otherwise a resolved merge proceeds to final review without a separate reviewer.
 
 Before integration is recorded complete, compare the assignment's captured constraint sources with current project decisions. If relevant behavior changed, reassess the implementation and evidence first; formatting-only source changes do not invalidate dependent work.
 

@@ -14,9 +14,9 @@ Privacy hardening and redaction are future work under [ADR-0020](adr/0020-defer-
 | Tier | Command | Contents | Trigger |
 | --- | --- | --- | --- |
 | Quick core | `npm run test:quick` | All default-glob test files except `.dom.test.ts` suites and `src/worker/cli/worker-cli.macos.test.ts`: cheap logic, parsing, state machines, memory/SQLite database contracts, and the compact critical authority, lease, and recovery regressions | Meaningful implementation edits |
-| Affected behavior | `npm run test:affected` | Quick core plus the tests under each changed file's directory; any `web/` change also activates `web/src/modules/tasks/tasks.dom.test.ts` (permissions, stop confirmation, recovery) | Implementation completion and ticket review |
+| Affected behavior | `npm run test:affected` | Quick core plus the tests under each changed file's directory; any `web/` change also activates `web/src/modules/tasks/tasks.dom.test.ts` (permissions, stop confirmation, recovery) | Implementation completion |
 | Extended regression | `npm run test:extended` | The 20 remaining `*.dom.test.ts` suites (full DOM matrices, real rendering paths) plus `src/worker/cli/worker-cli.macos.test.ts` (platform startup) | Related DOM/platform changes; change-request or final integration; periodic regression |
-| Full | `npm test` | The complete default-glob inventory (quick ∪ extended) | Final composed result before integration into the target branch |
+| Full | `npm test` | The complete default-glob inventory (quick ∪ extended) | Final composed result before integration and before the independent final review of an assembled scope |
 | External conformance | hand-scheduled probes | Real engines, containers, and separately deployed Workers (`scripts/probe-*`, `scripts/*-conformance.*`); requires explicit prerequisites | Adapter/environment changes and the corresponding release acceptance |
 
 ## Widening rules
