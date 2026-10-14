@@ -29,7 +29,15 @@ import {
   type EngineHostFacts,
 } from '../worker/engine-selection.ts';
 import { probeEnvironmentReadiness } from '../worker/readiness.ts';
-import { hostPiConfigurationProvider, OAR_PI_DISALLOWED_BUILTIN_TOOLS } from './oar-runtime-policy.ts';
+import {
+  hostPiConfigurationProvider,
+  OAR_PI_DISALLOWED_BUILTIN_TOOLS,
+} from './oar-runtime-policy.ts';
+import {
+  CONTENTION_SKIP_MESSAGE,
+  attemptLivePiStart,
+  startLivePiSession,
+} from './oar-live-pi-test-support.ts';
 import { redactSensitiveText } from '../environment/privacy.ts';
 
 /** Turn a loaded extension path into a stable identifier without exposing its host path. */
@@ -174,6 +182,7 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
   let projectInstructionsReceived = false;
   let projectModelReceived = false;
   let projectEffortReceived = false;
+  let leaseContentionObserved = false;
 
   const realAdapter = new OarEngineAdapter({ runtimeId: 'pi' });
   const observedStart = realAdapter.startSession.bind(realAdapter);
@@ -182,7 +191,12 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
     projectInstructionsReceived = request.instructions?.includes(marker) === true;
     projectModelReceived = request.model === liveModel;
     projectEffortReceived = request.effort === liveEffort;
-    return observedStart(request);
+    const attempt = await attemptLivePiStart(() => observedStart(request));
+    if (attempt.kind === 'contention') {
+      leaseContentionObserved = true;
+      throw attempt.error;
+    }
+    return attempt.value;
   };
 
   const engines = new Map<string, EngineAdapter>([['pi', realAdapter]]);
@@ -320,6 +334,10 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
     assert.equal(delivered.admittedRunIds.length, 1);
 
     const run = await runtime.orchestrator.waitFor(delivered.admittedRunIds[0]!);
+    if (leaseContentionObserved) {
+      t.skip(CONTENTION_SKIP_MESSAGE);
+      return;
+    }
     assert.equal(run.status, 'completed', 'Admitted run settled as completed');
     assert.equal(run.result?.status, 'completed', 'Turn result completed');
     assert.match(run.result?.status === 'completed' ? run.result.text : '', /PONG/i, 'Terminal answer contains PONG');
@@ -439,6 +457,16 @@ test('AC2: Bounded live Pi Runtime Message continuation and usage survive SQLite
   const directory = mkdtempSync(join(tmpdir(), 'sprout-oar-pi-reopen-'));
   const databasePath = join(directory, 'runtime.db');
   const adapter = new OarEngineAdapter({ runtimeId: 'pi' });
+  const adapterStart = adapter.startSession.bind(adapter);
+  let leaseContentionObserved = false;
+  adapter.startSession = async (request) => {
+    const attempt = await attemptLivePiStart(() => adapterStart(request));
+    if (attempt.kind === 'contention') {
+      leaseContentionObserved = true;
+      throw attempt.error;
+    }
+    return attempt.value;
+  };
   const collaborationInstructions = 'Follow the Project rule for the current request.';
   const runtimeConfiguration = hostConfiguration({
     databasePath,
@@ -482,6 +510,10 @@ test('AC2: Bounded live Pi Runtime Message continuation and usage survive SQLite
     });
     assert.equal(firstDelivery.admittedRunIds.length, 1);
     const firstRun = await runtime.orchestrator.waitFor(firstDelivery.admittedRunIds[0]!);
+    if (leaseContentionObserved) {
+      t.skip(CONTENTION_SKIP_MESSAGE);
+      return;
+    }
     assert.equal(firstRun.status, 'completed');
     assert.match(firstRun.result?.status === 'completed' ? firstRun.result.text : '', /PONG/i);
     assert.equal(firstRun.result?.source, 'oar');
@@ -508,6 +540,10 @@ test('AC2: Bounded live Pi Runtime Message continuation and usage survive SQLite
     });
     assert.equal(continuedDelivery.admittedRunIds.length, 1);
     const continuedRun = await runtime.orchestrator.waitFor(continuedDelivery.admittedRunIds[0]!);
+    if (leaseContentionObserved) {
+      t.skip(CONTENTION_SKIP_MESSAGE);
+      return;
+    }
     assert.equal(continuedRun.status, 'completed', continuedRun.failure === undefined
       ? 'The returning Pi run did not complete.'
       : `The returning Pi run failed: ${redactSensitiveText(continuedRun.failure)}`);
@@ -574,7 +610,7 @@ test('AC2 & AC4: Bounded live macOS Pi execution discovers and invokes controlle
 
   const adapter = new OarEngineAdapter({ runtimeId: 'pi' });
 
-  const session = await adapter.startSession({
+  const session = await startLivePiSession(adapter, {
     agentId: 'scout',
     workingDirectory: process.cwd(),
     model: liveModel,
@@ -622,7 +658,8 @@ test('AC2 & AC4: Bounded live macOS Pi execution discovers and invokes controlle
       inspect: async () => ({ status: 'completed' }),
       cancel: async () => ({ accepted: true, status: 'cancelled' }),
     },
-  });
+  }, message => t.skip(message));
+  if (!session) return;
 
   try {
     const turn = session.run('Please call the tool mcp__sprout_workspace__read with path "probe-target.txt" and report its content.');
@@ -670,7 +707,7 @@ test('AC2 & AC4: Bounded live macOS Pi execution enforces binding-fence refusal 
 
   const adapter = new OarEngineAdapter({ runtimeId: 'pi' });
 
-  const session = await adapter.startSession({
+  const session = await startLivePiSession(adapter, {
     agentId: 'scout',
     workingDirectory: process.cwd(),
     model: liveModel,
@@ -718,7 +755,8 @@ test('AC2 & AC4: Bounded live macOS Pi execution enforces binding-fence refusal 
       inspect: async () => ({ status: 'completed' }),
       cancel: async () => ({ accepted: true, status: 'cancelled' }),
     },
-  });
+  }, message => t.skip(message));
+  if (!session) return;
 
   try {
     const turn = session.run('Please call the tool mcp__sprout_workspace__read with path "probe-target.txt" and report its content.');

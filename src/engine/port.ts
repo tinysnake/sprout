@@ -423,6 +423,27 @@ export class EngineStartError extends Error {
   override readonly name: string = 'EngineStartError';
 }
 
+export const OAR_POLICY_CONTENTION_MESSAGES = {
+  agent: 'OAR Pi policy lease contention: the exclusive lock directory <agentDir>/.sprout-oar-policy is already held by another OAR Pi session on this machine, so no session was started. The agent-directory lease is global to the machine and not per worktree: one live OAR Pi session at a time. Wait for the other session to exit and retry; this is contention, not a policy defect. See #270, #273 and #276.',
+  project: 'OAR Pi policy lease contention: the exclusive lock directory <cwd>/.pi/.sprout-oar-policy is already held by another OAR Pi session for this project directory, so no session was started. The agent-directory lease is global to the machine and not per worktree: one live OAR Pi session at a time. Wait for the other session to exit and retry; this is contention, not a policy defect. See #270, #273 and #276.',
+} as const;
+export type OarPolicyContentionScope = keyof typeof OAR_POLICY_CONTENTION_MESSAGES;
+
+/**
+ * Thrown only when an exclusive engine-policy lease has a verified live owner.
+ * The scope and message are Sprout-owned facts; no vendor diagnostic is carried.
+ */
+export class OarPolicyContentionError extends Error {
+  override readonly name: string = 'OarPolicyContentionError';
+  readonly scope: OarPolicyContentionScope;
+
+  constructor(scope: OarPolicyContentionScope) {
+    super(OAR_POLICY_CONTENTION_MESSAGES[scope]);
+    this.scope = scope;
+  }
+}
+
+
 /**
  * Raised by `startSession` when the engine explicitly refused the supplied
  * `resumeSessionKey` and performed no work.

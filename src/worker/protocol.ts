@@ -162,6 +162,10 @@ export interface WorkerReadinessProbeResult {
 export const WORKER_ERROR_CODES = {
   /** The engine explicitly refused the supplied resume key and did no work. */
   resumeRefused: -32_610,
+  /** A live OAR Pi agent-directory policy lease blocked session start. */
+  oarAgentPolicyLeaseContention: -32_620,
+  /** A live OAR Pi project-directory policy lease blocked session start. */
+  oarProjectPolicyLeaseContention: -32_621,
 } as const;
 
 export interface WorkerEngineDescription {

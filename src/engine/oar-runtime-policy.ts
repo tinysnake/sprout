@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, rmdirSync, 
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { McpServer, SessionOptions } from '@botiverse/oar';
-import { EngineStartError } from './port.ts';
+import { EngineStartError, OarPolicyContentionError, type OarPolicyContentionScope } from './port.ts';
 
 export interface OarPiPolicy {
   readonly agentDir: string;
@@ -49,13 +49,68 @@ export interface OarRuntimePolicyLease {
 export const OAR_PI_DISALLOWED_BUILTIN_TOOLS = [
   'read', 'bash', 'edit', 'write', 'grep', 'find', 'ls', 'powershell', 'codemode',
 ] as const;
+/**
+ * Lock-directory name for the exclusive OAR Pi policy lease. Contention for
+ * either directory is reported as an {@link OarPolicyContentionError} naming
+ * the held directory, so a reader can tell a held lease (another session on
+ * this machine) from a policy defect (the message below).
+ */
+export const OAR_POLICY_LOCK_NAME = '.sprout-oar-policy';
+const OAR_POLICY_OWNER_FILE = 'owner.json';
 const builtinToolPolicy = { defaultTools: [] } as const;
+
 function settingsHash(settings: string): string {
   return createHash('sha256').update(settings).digest('hex');
 }
+
+function errorCode(error: unknown): unknown {
+  return typeof error === 'object' && error !== null && 'code' in error
+    ? (error as { code?: unknown }).code
+    : undefined;
+}
+
+/** A lock collision is contention only when its Sprout owner record names a live process. */
+function hasVerifiedLiveLeaseOwner(lockPath: string): boolean {
+  try {
+    const lockStat = lstatSync(lockPath);
+    if (!lockStat.isDirectory() || lockStat.isSymbolicLink()) return false;
+    const ownerPath = join(lockPath, OAR_POLICY_OWNER_FILE);
+    const ownerStat = lstatSync(ownerPath);
+    if (!ownerStat.isFile() || ownerStat.isSymbolicLink()) return false;
+    const owner = JSON.parse(readFileSync(ownerPath, 'utf8')) as { version?: unknown; pid?: unknown };
+    if (owner.version !== 1 || !Number.isSafeInteger(owner.pid) || (owner.pid as number) <= 0) return false;
+    try {
+      process.kill(owner.pid as number, 0);
+      return true;
+    } catch (error) {
+      return errorCode(error) === 'EPERM';
+    }
+  } catch {
+    return false;
+  }
+}
+
+/** Atomically create a lock, then record enough owner evidence for later classification. */
+function acquirePolicyLock(lockPath: string, scope: OarPolicyContentionScope, markLocked: () => void): void {
+  try {
+    mkdirSync(lockPath, { mode: 0o700 });
+  } catch (error) {
+    if (errorCode(error) === 'EEXIST' && hasVerifiedLiveLeaseOwner(lockPath)) {
+      throw new OarPolicyContentionError(scope);
+    }
+    throw error;
+  }
+  markLocked();
+  writeFileSync(join(lockPath, OAR_POLICY_OWNER_FILE), JSON.stringify({ version: 1, pid: process.pid }), {
+    flag: 'wx',
+    mode: 0o600,
+  });
+}
+
 function refused(): never {
   throw new EngineStartError('OAR Pi route is blocked: empty built-in tools and Worker-origin-only MCP could not be established; see #270 and #273');
 }
+
 
 /** One policy point: host Pi configuration supplies providers/extensions; built-in tools stay empty. */
 export function assertOarRuntimePolicy(runtimeId: string, options?: SessionOptions, policy?: OarPiPolicy): void {
@@ -102,10 +157,10 @@ export function prepareOarRuntimePolicy(runtimeId: string, cwd: string, input: {
   const agentDir = resolve(input.agentDir);
   const pi = join(canonical, '.pi');
   const projectSettingsPath = join(pi, 'settings.json');
-  const projectLock = join(pi, '.sprout-oar-policy');
+  const projectLock = join(pi, OAR_POLICY_LOCK_NAME);
   const projectBackup = join(projectLock, 'settings.json');
   const agentSettingsPath = join(agentDir, 'settings.json');
-  const agentLock = join(agentDir, '.sprout-oar-policy');
+  const agentLock = join(agentDir, OAR_POLICY_LOCK_NAME);
   const agentBackup = join(agentLock, 'settings.json');
   let closed = false;
   const close = () => {
@@ -139,8 +194,8 @@ export function prepareOarRuntimePolicy(runtimeId: string, cwd: string, input: {
     if (!existsSync(pi)) { mkdirSync(pi); createdPi = true; }
     if (lstatSync(pi).isSymbolicLink() || !lstatSync(pi).isDirectory()) refused();
     // Separate locks serialize sessions across workspaces sharing one host Pi directory.
-    mkdirSync(agentLock, { mode: 0o700 }); agentLocked = true;
-    mkdirSync(projectLock, { mode: 0o700 }); projectLocked = true;
+    acquirePolicyLock(agentLock, 'agent', () => { agentLocked = true; });
+    acquirePolicyLock(projectLock, 'project', () => { projectLocked = true; });
     let originalProject: Record<string, unknown> = {};
     if (existsSync(projectSettingsPath)) {
       const projectStat = lstatSync(projectSettingsPath);
@@ -183,8 +238,10 @@ export function prepareOarRuntimePolicy(runtimeId: string, cwd: string, input: {
       ...(input.approvedMcp ? { approvedMcp: input.approvedMcp } : {}),
     };
     return { descriptor, close };
-  } catch {
+  } catch (error) {
     close();
+    // Contention is reported by class, not folded into the generic policy refusal.
+    if (error instanceof OarPolicyContentionError) throw error;
     refused();
   }
 }

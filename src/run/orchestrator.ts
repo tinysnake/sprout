@@ -11,7 +11,7 @@ import { sanitizeIdentifier } from '../environment/privacy.ts';
 import type { EnvironmentPool } from '../environment/pool.ts';
 import type { BindingGenerationFence } from '../environment/binding-generation-fence.ts';
 import type { AgentRunEvent, EngineAdapter, EngineSession, EngineTurnResult } from '../engine/port.ts';
-import { EngineResumeRefusedError, RemoteProjectMcpStartupError } from '../engine/port.ts';
+import { EngineResumeRefusedError, OarPolicyContentionError, RemoteProjectMcpStartupError } from '../engine/port.ts';
 import { HostPiEngineAdapter } from '../engine/pi-host.ts';
 import { HostCodexEngineAdapter } from '../engine/codex-host.ts';
 import type { HostClaudeEngineAdapter } from '../engine/claude-host.ts';
@@ -275,6 +275,8 @@ type SessionAttempt =
       readonly progressEventCount: number;
       /** True only when the engine refused the supplied key and did no work. */
       readonly resumeRefused: boolean;
+      /** OAR policy contention is an Environment failure with a safe diagnosis. */
+      readonly failureClass?: RunFailureClass;
     };
 
 export class RunOrchestrator {
@@ -1006,7 +1008,7 @@ export class RunOrchestrator {
         });
         outcome = await this.#finish(prepared, 'failed', attempt.result ?? {
           status: 'failed', message: attempt.message,
-        });
+        }, attempt.failureClass);
       } else {
         if (this.#sessionKeys && identity !== undefined && attempt.result.status === 'completed' && attempt.engineSessionKey) {
           await this.#sessionKeys.save({ ...identity, key: attempt.engineSessionKey, updatedAt: this.#clock.now() });
@@ -1596,7 +1598,7 @@ export class RunOrchestrator {
         return this.#finish(attempt.run, 'failed', result ?? {
           status: 'failed',
           message: attempt.message,
-        });
+        }, attempt.failureClass);
       }
 
       // Persist the key the run actually used, not the one it was handed. A
@@ -1699,6 +1701,7 @@ export class RunOrchestrator {
         // Only the engine's explicit refusal of the supplied key is retryable.
         // Any other start failure is a real failure and must not discard a key.
         resumeRefused: resumeKey !== undefined && error instanceof EngineResumeRefusedError,
+        ...(error instanceof OarPolicyContentionError ? { failureClass: 'environment' as const } : {}),
       };
     }
 
