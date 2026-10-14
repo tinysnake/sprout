@@ -6,8 +6,7 @@ import test from 'node:test';
 import { defaultRuntimes } from '@botiverse/oar';
 
 import { OarEngineAdapter } from './oar.ts';
-import { PiEngineAdapter } from './pi.ts';
-import type { EngineAdapter } from './port.ts';
+import { EngineStartError, type EngineAdapter } from './port.ts';
 import {
   createRuntime,
   hostConfiguration,
@@ -15,11 +14,13 @@ import {
   scriptedEnvironment,
   INSTANCE_ID,
   PROJECT_ID,
+  waitFor,
 } from '../runtime-test-harness.ts';
 import {
   loadOrCreateWorkerIdentity,
   workerPublicKey,
   connectWorkerEnrollment,
+  WorkerEnrollmentRefusedError,
 } from '../worker/enrollment-connector.ts';
 import { EnvironmentWorker } from '../worker/server.ts';
 import {
@@ -29,6 +30,7 @@ import {
   type EngineHostFacts,
 } from '../worker/engine-selection.ts';
 import { probeEnvironmentReadiness } from '../worker/readiness.ts';
+import { workerReadinessProbeFixture } from '../worker/readiness-fixture.ts';
 import {
   hostPiConfigurationProvider,
   OAR_PI_DISALLOWED_BUILTIN_TOOLS,
@@ -39,6 +41,7 @@ import {
   startLivePiSession,
 } from './oar-live-pi-test-support.ts';
 import { redactSensitiveText } from '../environment/privacy.ts';
+import type { WorkerReadinessProbeParams } from '../worker/protocol.ts';
 
 /** Turn a loaded extension path into a stable identifier without exposing its host path. */
 function sanitizedExtensionId(resolvedPath: string): string {
@@ -49,14 +52,25 @@ function sanitizedExtensionId(resolvedPath: string): string {
 
 async function listenOnReservedPort(runtime: any): Promise<number> {
   let lastError: unknown;
-  for (let port = 41010; port <= 41019; port += 1) {
+  for (let port = 46500; port <= 46509; port += 1) {
     try {
       return (await runtime.api.listen(port)).port;
     } catch (error) {
       lastError = error;
     }
   }
-  throw new Error('No port in the reserved 41010–41019 block was available', { cause: lastError });
+  throw new Error('No port in the reserved 46500–46509 block was available', { cause: lastError });
+}
+
+function withOarOptIn<T>(selection: 'pi' | 'all', action: () => T): T {
+  const previous = process.env['SPROUT_USE_OAR_ENGINE'];
+  process.env['SPROUT_USE_OAR_ENGINE'] = selection;
+  try {
+    return action();
+  } finally {
+    if (previous === undefined) delete process.env['SPROUT_USE_OAR_ENGINE'];
+    else process.env['SPROUT_USE_OAR_ENGINE'] = previous;
+  }
 }
 
 /** Resolve the live model and tool inventory from the host's published Pi configuration. */
@@ -98,48 +112,193 @@ async function livePiConfiguration(installation: any, cwd: string): Promise<{
     session.dispose();
   }
 }
-test('AC7: Native production default is preserved for Pi when OAR opt-in is not active', () => {
-  const previousEnv = process.env['SPROUT_USE_OAR_ENGINE'];
-  try {
-    delete process.env['SPROUT_USE_OAR_ENGINE'];
+test('AC7: Production Worker selects the shared OAR Pi adapter through the pre-rollout opt-in', () => {
+  const facts: EngineHostFacts = {
+    configuration: {
+      environmentPlatform: 'host',
+      engineBinaries: { pi: '/synthetic/bin/pi' },
+      piSessionDirectory: undefined,
+    },
+    platform: 'darwin',
+    locate: () => '/synthetic/bin/pi',
+  };
 
-    const fakeFacts: EngineHostFacts = {
-      configuration: {
-        environmentPlatform: 'host',
-        engineBinaries: { pi: '/usr/local/bin/pi' },
-        piSessionDirectory: undefined,
+  const pi = withOarOptIn('pi', () => createEnvironmentWorkerEngines(facts).get('pi'));
+  assert.ok(pi instanceof OarEngineAdapter);
+  assert.equal(pi.id, 'pi');
+});
+
+test('AC5 scripted: configured Pi session-directory refusal follows an admitted Message on a replaced enrolled Worker', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-pi-storage-message-'));
+  const instanceId = 'pi-storage-refusal-worker';
+  const model = 'openai-codex/gpt-6.1-sol';
+  const sessionDirectory = join(directory, 'legacy-pi-sessions');
+  const runtimeConfiguration = hostConfiguration({
+    environmentSource: 'enrollment',
+    engineId: 'pi',
+    executionMode: 'environment-hosted',
+    databasePath: join(directory, 'runtime.db'),
+    workingDirectory: directory,
+    runtimeConfiguration: {
+      agents: [{
+        id: 'scout', name: 'Pi Storage Agent', engine: 'pi', capability: 'agent-run', model, effort: 'low',
+        workOptions: [{ id: 'pi-storage', engine: 'pi', workModel: model, effort: 'low' }],
+      }],
+      project: {
+        ...project(),
+        availableEnvironmentInstanceIds: [instanceId],
+        memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }],
       },
-      platform: 'darwin',
-      locate: () => '/usr/local/bin/pi',
+    },
+  });
+  const readinessFor = (requirements?: WorkerReadinessProbeParams['requirements']) => {
+    const models = requirements?.modelsByEngine?.pi ?? [model];
+    const requirementRevision = requirements?.revisionsByEngine?.pi;
+    return workerReadinessProbeFixture({
+      protocolVersion: '3',
+      observedAt: Date.now(),
+      engines: [{
+        engine: 'pi', version: '1.2.0', installed: true, readiness: 'ready', authenticated: true,
+        modelAvailability: 'available', models, modelIdPresent: models.includes(model), targetModels: models,
+        ...(requirementRevision !== undefined ? { requirementRevision } : {}),
+        source: 'pi-auth-check',
+      }],
+    }, { version: 'scripted Pi readiness', summary: 'Scripted readiness for storage refusal test.' });
+  };
+  const facts: EngineHostFacts = {
+    configuration: {
+      environmentPlatform: 'macos',
+      piSessionDirectory: sessionDirectory,
+      engineBinaries: { pi: '/synthetic/bin/pi' },
+    },
+    platform: 'darwin',
+    locate: () => '/synthetic/bin/pi',
+  };
+  const adapter = withOarOptIn('pi', () => createEnvironmentWorkerEngines(facts).get('pi'));
+  assert.ok(adapter instanceof OarEngineAdapter);
+  let sessionStarts = 0;
+  let observedStorageRefusal = false;
+  const startSession = adapter.startSession.bind(adapter);
+  adapter.startSession = async (request) => {
+    sessionStarts += 1;
+    try {
+      return await startSession(request);
+    } catch (error) {
+      observedStorageRefusal = error instanceof EngineStartError && /configured Pi session directory/i.test(error.message);
+      throw error;
+    }
+  };
+
+  let runtime: any;
+  const workers: EnvironmentWorker[] = [];
+  const connections: Array<{ close(): void; connectionId: string; epoch: number }> = [];
+  try {
+    runtime = await createRuntime({ configuration: runtimeConfiguration, projectRoot: directory });
+    await runtime.projectService.create({
+      id: PROJECT_ID,
+      displayName: 'Pi Storage Refusal Project',
+      rules: [],
+      agentMemberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }],
+    });
+    const workerPort = await listenOnReservedPort(runtime);
+    const identityPath = join(directory, 'worker-identity.pem');
+    const identity = loadOrCreateWorkerIdentity(identityPath);
+    const enrollment = await runtime.enrollments.requestEnrollment({
+      environmentInstanceId: instanceId,
+      displayName: 'Pi Storage Refusal Worker',
+      publicKey: workerPublicKey(identity.privateKey),
+      platform: 'macos',
+      protocolVersion: '3',
+      capabilityRequests: ['agent-run'],
+      engineFacts: [{ engine: 'pi', installed: true, authenticated: true, models: [model] }],
+    });
+    await runtime.enrollments.approve(enrollment.enrollment.id, {
+      capabilityPermissions: { 'agent-run': true },
+      modelAuthorizations: { pi: [model] },
+    });
+
+    const currentReadiness = { value: readinessFor() };
+    const connectWorker = async () => {
+      const connection = await connectWorkerEnrollment({
+        target: {
+          enrollmentId: enrollment.enrollment.id,
+          host: '127.0.0.1',
+          port: workerPort,
+          claimSecret: undefined,
+          identityKeyPath: identityPath,
+        },
+        protocolVersion: '3',
+        engineFacts: [{ engine: 'pi', installed: true, authenticated: true, models: [model] }],
+      });
+      connections.push(connection);
+      const worker = new EnvironmentWorker({
+        environmentInstanceId: instanceId,
+        engines: new Map([['pi', adapter]]),
+        input: connection.stream,
+        output: connection.stream,
+        workspaceRoot: directory,
+        readiness: () => currentReadiness.value.readiness,
+        readinessProbe: async (params) => {
+          currentReadiness.value = readinessFor(params.requirements);
+          return currentReadiness.value;
+        },
+      });
+      workers.push(worker);
+      await waitFor(async () =>
+        (await runtime.enrollments.readiness(enrollment.enrollment.id)).receipt !== undefined,
+      'Pi storage Worker readiness receipt');
+      return connection;
     };
 
-    const engines = createEnvironmentWorkerEngines(fakeFacts);
-    const pi = engines.get('pi');
-    assert.ok(pi, 'pi engine is configured');
-    assert.ok(
-      pi instanceof PiEngineAdapter,
-      'production default remains native PiEngineAdapter when opt-in is not active',
-    );
-    assert.ok(
-      !(pi instanceof OarEngineAdapter),
-      'OarEngineAdapter is not used by default for Pi',
-    );
+    const firstConnection = await connectWorker();
+    const firstEpoch = firstConnection.epoch;
+    const secondConnection = await connectWorker();
+    assert.ok(secondConnection.epoch > firstEpoch, 'a connected Worker replacement advances the enrollment epoch');
+    assert.equal(runtime.workerGateway.isCurrentConnection(enrollment.enrollment.id, firstConnection.connectionId), false);
+    assert.equal(runtime.workerGateway.isCurrentConnection(enrollment.enrollment.id, secondConnection.connectionId), true);
 
-    // Now test with opt-in active
-    process.env['SPROUT_USE_OAR_ENGINE'] = 'pi';
-    const oarEngines = createEnvironmentWorkerEngines(fakeFacts);
-    const oarPi = oarEngines.get('pi');
-    assert.ok(oarPi, 'pi engine is configured with opt-in');
-    assert.ok(
-      oarPi instanceof OarEngineAdapter,
-      'opt-in successfully selects OarEngineAdapter for Pi',
-    );
+    mkdirSync(join(directory, 'candidate-project'));
+    await runtime.projectAccess.grant({
+      projectId: PROJECT_ID,
+      environmentInstanceId: instanceId,
+      selection: { kind: 'relative', path: 'candidate-project' },
+    });
+    await runtime.refreshEnvironmentCatalog();
+    const delivered = await runtime.collaboration.deliver({
+      scopeId: `channel-${PROJECT_ID}`,
+      author: { id: 'operator', kind: 'human' },
+      body: '@scout start the configured Pi session',
+      deliveryKey: 'pi-storage-refusal-admitted-message',
+      awaitReply: true,
+    });
+    assert.equal(delivered.admittedRunIds.length, 1,
+      `the Runtime Message was admitted before storage refusal: ${delivered.wakes.map((wake: any) => wake.detail).join('; ')}`);
+    const run = await runtime.orchestrator.waitFor(delivered.admittedRunIds[0]!);
+    assert.equal(run.status, 'failed', 'the admitted Runtime Message reports the Worker session-start refusal');
+    assert.equal(observedStorageRefusal, true, 'the selected OAR adapter refused the configured Pi session directory');
+    assert.equal(sessionStarts, 1, 'the admitted Worker Message reached the selected OAR adapter');
+    assert.deepEqual(await runtime.stores.sessionKeys.list(), [], 'storage refusal creates no saved session key');
+
+    await runtime.enrollments.revoke(enrollment.enrollment.id, 'scripted live revocation');
+    await waitFor(() => runtime.workerGateway.liveFor(instanceId) === undefined, 'revoked Worker disconnect');
+    assert.equal(runtime.workerGateway.isCurrentConnection(enrollment.enrollment.id, secondConnection.connectionId), false);
+    await assert.rejects(connectWorkerEnrollment({
+      target: {
+        enrollmentId: enrollment.enrollment.id,
+        host: '127.0.0.1',
+        port: workerPort,
+        claimSecret: undefined,
+        identityKeyPath: identityPath,
+      },
+      protocolVersion: '3',
+      engineFacts: [{ engine: 'pi', installed: true, authenticated: true, models: [model] }],
+    }), (error: unknown) => error instanceof WorkerEnrollmentRefusedError && error.code === 'revoked',
+    'a revoked live enrollment cannot reconnect');
   } finally {
-    if (previousEnv === undefined) {
-      delete process.env['SPROUT_USE_OAR_ENGINE'];
-    } else {
-      process.env['SPROUT_USE_OAR_ENGINE'] = previousEnv;
-    }
+    for (const worker of workers) await worker.shutdown().catch(() => undefined);
+    for (const connection of connections) connection.close();
+    await runtime?.close();
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 
@@ -183,11 +342,19 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
   let projectModelReceived = false;
   let projectEffortReceived = false;
   let leaseContentionObserved = false;
+  let sessionStartCount = 0;
 
-  const realAdapter = new OarEngineAdapter({ runtimeId: 'pi' });
+  const piHostFacts: EngineHostFacts = {
+    configuration: { environmentPlatform: 'macos', piSessionDirectory: undefined, engineBinaries: {} },
+    platform: process.platform,
+    locate: (command, options) => lookupCommand(command, process.platform, options.preferWindowsExecutable),
+  };
+  const realAdapter = withOarOptIn('pi', () => createEnvironmentWorkerEngines(piHostFacts).get('pi'));
+  assert.ok(realAdapter instanceof OarEngineAdapter, 'the enrolled Worker uses the opted-in production OAR selection');
   const observedStart = realAdapter.startSession.bind(realAdapter);
 
   realAdapter.startSession = async (request) => {
+    sessionStartCount += 1;
     projectInstructionsReceived = request.instructions?.includes(marker) === true;
     projectModelReceived = request.model === liveModel;
     projectEffortReceived = request.effort === liveEffort;
@@ -261,18 +428,7 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
       modelAuthorizations: { pi: [liveModel] },
     });
 
-    connection = await connectWorkerEnrollment({
-      target: {
-        enrollmentId: enrollment.enrollment.id,
-        host: '127.0.0.1',
-        port: await listenOnReservedPort(runtime),
-        claimSecret: undefined,
-        identityKeyPath: identityPath,
-      },
-      protocolVersion: '3',
-      engineFacts: [{ engine: 'pi', installed: true, authenticated: true, models: [liveModel] }],
-    });
-
+    const workerPort = await listenOnReservedPort(runtime);
     const hostFacts = {
       configuration: {
         environmentPlatform: 'macos' as const,
@@ -288,20 +444,40 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
     );
     current = await probeEnvironmentReadiness(configurations);
 
-    worker = new EnvironmentWorker({
-      environmentInstanceId: instanceId,
-      engines,
-      input: connection.stream,
-      output: connection.stream,
-      workspaceRoot: directory,
-      readiness: () => current.readiness,
-      readinessProbe: async (params) => {
-        current = await probeEnvironmentReadiness(configurations, {
-          ...(params.requirements !== undefined ? { requirements: params.requirements } : {}),
-        });
-        return current;
-      },
-    });
+    const connectWorker = async () => {
+      connection = await connectWorkerEnrollment({
+        target: {
+          enrollmentId: enrollment.enrollment.id,
+          host: '127.0.0.1',
+          port: workerPort,
+          claimSecret: undefined,
+          identityKeyPath: identityPath,
+        },
+        protocolVersion: '3',
+        engineFacts: [{ engine: 'pi', installed: true, authenticated: true, models: [liveModel] }],
+      });
+
+      worker = new EnvironmentWorker({
+        environmentInstanceId: instanceId,
+        engines,
+        input: connection.stream,
+        output: connection.stream,
+        workspaceRoot: directory,
+        readiness: () => current.readiness,
+        readinessProbe: async (params) => {
+          current = await probeEnvironmentReadiness(configurations, {
+            ...(params.requirements !== undefined ? { requirements: params.requirements } : {}),
+          });
+          return current;
+        },
+      });
+      await waitFor(async () =>
+        (await runtime.enrollments.readiness(enrollment.enrollment.id)).receipt !== undefined,
+      'Pi enrolled Worker readiness receipt');
+    };
+
+    await connectWorker();
+
 
     // Evaluate admission
     let decision;
@@ -313,6 +489,7 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
       await new Promise((resolve) => setTimeout(resolve, 100));
     } while (Date.now() < admissionDeadline);
     assert.ok(decision?.ok, `Admission refused: ${decision?.reason}`);
+    assert.equal(sessionStartCount, 0, 'readiness probes and admission did not start a Pi model session');
 
     // Grant workspace access
     mkdirSync(join(directory, 'candidate-project'));
@@ -338,7 +515,7 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
       t.skip(CONTENTION_SKIP_MESSAGE);
       return;
     }
-    assert.equal(run.status, 'completed', 'Admitted run settled as completed');
+    assert.equal(run.status, 'completed', `Admitted run settled as completed: ${run.failure === undefined ? 'no failure detail' : redactSensitiveText(run.failure)}`);
     assert.equal(run.result?.status, 'completed', 'Turn result completed');
     assert.match(run.result?.status === 'completed' ? run.result.text : '', /PONG/i, 'Terminal answer contains PONG');
     assert.equal(run.result?.source, 'oar', 'Result source is oar');
@@ -395,6 +572,55 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
     assert.equal(firstUsageView.effectiveObservation?.sourceVersion, '0.59.1');
     assert.deepEqual(firstUsageView.effectiveObservation?.tokens, run.result?.detailedTokens);
 
+    assert.equal(sessionStartCount, 1, 'the first admitted Message started one Pi model session');
+    await worker?.shutdown();
+    worker = undefined;
+    connection.close();
+    connection = undefined;
+    await connectWorker();
+    assert.equal(sessionStartCount, 1, 'reconnect and readiness probes did not start inference');
+
+    await runtime.refreshEnvironmentCatalog();
+    const continuedAdmission = await runtime.orchestrator.evaluateOptionAdmission('scout', instanceId);
+    assert.ok(continuedAdmission.ok, `continued Pi admission refused: ${continuedAdmission.reason}`);
+    const continued = await runtime.collaboration.deliver({
+      scopeId: `channel-${PROJECT_ID}`,
+      author: { id: 'operator', kind: 'human' },
+      body: '@scout What word did I ask you to remember? Reply with only that word.',
+      deliveryKey: `live-pi-enrolled-continuation-${Date.now()}`,
+      awaitReply: true,
+    });
+    assert.equal(continued.admittedRunIds.length, 1);
+    const continuedRun = await runtime.orchestrator.waitFor(continued.admittedRunIds[0]!);
+    assert.equal(continuedRun.status, 'completed', continuedRun.failure === undefined
+      ? 'continued enrolled Pi run completed'
+      : `continued enrolled Pi run failed: ${redactSensitiveText(continuedRun.failure)}`);
+    assert.match(continuedRun.result?.status === 'completed' ? continuedRun.result.text : '', /VIOLET/i,
+      'the enrolled Worker continued the authorized native conversation after reconnect');
+    assert.equal(continuedRun.result?.source, 'oar');
+    assert.equal(sessionStartCount, 2, 'the continuation started exactly one new OAR session');
+    assert.equal(projectInstructionsReceived, true);
+    assert.equal(projectModelReceived, true);
+    assert.equal(projectEffortReceived, true);
+    const continuedTokens = continuedRun.result?.tokenUsage;
+    if (continuedTokens === undefined) {
+      assert.equal(continuedRun.result?.detailedTokens, undefined,
+        'usage without a verified resumed-session baseline remains unavailable');
+    } else {
+      assert.ok(continuedTokens.promptTokens > 0);
+      assert.ok(continuedTokens.completionTokens > 0);
+    }
+    const savedKeysAfterResume = await runtime.stores.sessionKeys.list();
+    assert.equal(savedKeysAfterResume.length, 1);
+    assert.equal(savedKeysAfterResume[0]?.key, savedKeysBeforeResume[0]?.key,
+      'the enrolled continuation reused the saved native key for the same Project conversation');
+    const continuedUsageView = await runtime.usage.getRunUsage(continuedRun.id);
+    assert.ok(continuedUsageView);
+    assert.equal(continuedUsageView.effectiveObservation?.completeness,
+      continuedTokens === undefined ? 'unavailable' : 'complete');
+    assert.equal(continuedUsageView.effectiveObservation?.source, 'oar');
+    assert.equal(continuedUsageView.effectiveObservation?.sourceVersion, '0.59.1');
+
     const interruption = await runtime.collaboration.deliver({
       scopeId: `channel-${PROJECT_ID}`,
       author: { id: 'operator', kind: 'human' },
@@ -418,6 +644,7 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
     const interruptedRun = await runtime.orchestrator.interrupt(interruptionRunId);
     assert.equal(interruptedRun.status, 'interrupted');
     assert.equal(interruptedRun.result?.status, 'interrupted');
+    assert.equal(sessionStartCount, 3);
     const interruptionLease = runtime.pool.getLease(interruptedRun.leaseId!);
     assert.equal(interruptionLease?.state,
       interruptedRun.result?.outcomeCertainty === 'uncertain' || interruptedRun.result?.engineSessionTermination === 'uncertain'

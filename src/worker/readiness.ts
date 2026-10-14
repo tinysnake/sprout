@@ -569,18 +569,16 @@ export async function probeEnvironmentReadiness(
     options.env?.SPROUT_USE_OAR_ENGINE === 'all' ||
     process.env['SPROUT_USE_OAR_ENGINE'] === 'pi' ||
     process.env['SPROUT_USE_OAR_ENGINE'] === 'all';
-  const isOarActive = isCodexOarActive || isPiOarActive;
-  const oarNodeUnsupported = (isOarActive || configurations.some(configuration => configuration.engine === 'claude')) && !isSupportedNodeVersion(nodeVersion);
+  const usesOarRuntime = (engine: EngineConfiguration['engine']) =>
+    engine === 'claude' ||
+    (engine === 'codex' && isCodexOarActive) ||
+    (engine === 'pi' && isPiOarActive);
+  const oarNodeUnsupported = configurations.some(configuration => usesOarRuntime(configuration.engine)) &&
+    !isSupportedNodeVersion(nodeVersion);
 
   const engines: WorkerEngineReadinessFact[] = [];
   for (const configuration of configurations) {
-    const isEngineOarUnsupported =
-      !isSupportedNodeVersion(nodeVersion) && (
-        (configuration.engine === 'codex' && isCodexOarActive) ||
-        (configuration.engine === 'pi' && isPiOarActive) ||
-        configuration.engine === 'claude'
-      );
-    if (isEngineOarUnsupported) {
+    if (usesOarRuntime(configuration.engine) && !isSupportedNodeVersion(nodeVersion)) {
       engines.push(unknownFact(configuration.engine, undefined, clock(), 'unknown', 1));
       continue;
     }

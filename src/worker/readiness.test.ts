@@ -109,6 +109,59 @@ test('a version below the minimum supported floor stays unknown without running 
   assert.deepEqual(codexCalls, [['--version']]);
 });
 
+test('the OAR Node floor applies only to runtimes selected through the pre-rollout opt-in', async () => {
+  const previous = process.env['SPROUT_USE_OAR_ENGINE'];
+  const calls: string[] = [];
+  const commandRunner: ReadinessCommandRunner = {
+    async run(binary, args) {
+      calls.push(`${binary}:${args[0]}`);
+      if (args[0] === '--version') {
+        return { stdout: binary.endsWith('codex') ? 'codex-cli 0.154.0' : 'pi 0.86.1', exitCode: 0 };
+      }
+      return { stdout: JSON.stringify({ status: 'ready', provider: 'openai-codex', authType: 'oauth' }), exitCode: 0 };
+    },
+    async accountRead() {
+      return {
+        stdout: JSON.stringify({ account: { type: 'chatgpt', email: null, planType: 'plus' }, requiresOpenaiAuth: true }),
+        exitCode: 0,
+      };
+    },
+    async bundledModels() {
+      return { stdout: JSON.stringify({ models: [] }), exitCode: 0 };
+    },
+  };
+
+  try {
+    delete process.env['SPROUT_USE_OAR_ENGINE'];
+    await probeEnvironmentReadiness(configurations, { commandRunner, nodeVersion: '23.4.0' });
+    assert.ok(calls.includes('/synthetic/codex:--version'));
+    assert.ok(calls.includes('/synthetic/pi:--version'));
+
+    calls.length = 0;
+    await probeEnvironmentReadiness(configurations, {
+      commandRunner, env: { SPROUT_USE_OAR_ENGINE: 'codex' }, nodeVersion: '23.4.0',
+    });
+    assert.equal(calls.some(call => call.startsWith('/synthetic/codex:')), false);
+    assert.ok(calls.includes('/synthetic/pi:--version'));
+
+    calls.length = 0;
+    await probeEnvironmentReadiness(configurations, {
+      commandRunner, env: { SPROUT_USE_OAR_ENGINE: 'pi' }, nodeVersion: '23.4.0',
+    });
+    assert.ok(calls.includes('/synthetic/codex:--version'));
+    assert.equal(calls.some(call => call.startsWith('/synthetic/pi:')), false);
+
+    calls.length = 0;
+    await probeEnvironmentReadiness(configurations, {
+      commandRunner, env: { SPROUT_USE_OAR_ENGINE: 'all' }, nodeVersion: '23.4.0',
+    });
+    assert.deepEqual(calls, []);
+  } finally {
+    if (previous === undefined) delete process.env['SPROUT_USE_OAR_ENGINE'];
+    else process.env['SPROUT_USE_OAR_ENGINE'] = previous;
+  }
+});
+
 test('malformed pinned auth schemas fail closed for both engines', async () => {
   const malformedPi = [
     {},

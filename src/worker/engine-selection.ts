@@ -123,35 +123,31 @@ export interface EngineAdapterFactories {
 
 const realFactories: EngineAdapterFactories = {
   claude: configuration => new OarEngineAdapter({ runtimeId: 'claude', binaryPath: configuration.binaryPath }),
-  codex: (configuration) => {
-    if (process.env['SPROUT_USE_OAR_ENGINE'] === 'codex' || process.env['SPROUT_USE_OAR_ENGINE'] === 'all') {
-      return new OarEngineAdapter({
-        runtimeId: 'codex',
-        sandbox: configuration.sandbox,
-      });
-    }
-    return new CodexEngineAdapter({
+  codex: configuration => process.env['SPROUT_USE_OAR_ENGINE'] === 'codex' || process.env['SPROUT_USE_OAR_ENGINE'] === 'all'
+    ? new OarEngineAdapter({
+      runtimeId: 'codex',
+      binaryPath: configuration.binaryPath,
+      sandbox: configuration.sandbox,
+    })
+    : new CodexEngineAdapter({
       binaryPath: configuration.binaryPath,
       args: [...configuration.args],
       sandbox: configuration.sandbox,
-    });
-  },
-  pi: (configuration) => {
-    if (process.env['SPROUT_USE_OAR_ENGINE'] === 'pi' || process.env['SPROUT_USE_OAR_ENGINE'] === 'all') {
-      return new OarEngineAdapter({
-        runtimeId: 'pi',
-        ...(configuration.sessionDirectory !== undefined
-          ? { sessionDirectory: configuration.sessionDirectory }
-          : {}),
-      });
-    }
-    return new PiEngineAdapter({
+    }),
+  pi: configuration => process.env['SPROUT_USE_OAR_ENGINE'] === 'pi' || process.env['SPROUT_USE_OAR_ENGINE'] === 'all'
+    ? new OarEngineAdapter({
+      // OAR Pi uses its bundled SDK; the CLI path is for the native Pi adapter and readiness probe.
+      runtimeId: 'pi',
+      ...(configuration.sessionDirectory !== undefined
+        ? { sessionDirectory: configuration.sessionDirectory }
+        : {}),
+    })
+    : new PiEngineAdapter({
       binaryPath: configuration.binaryPath,
       ...(configuration.sessionDirectory !== undefined
         ? { sessionDirectory: configuration.sessionDirectory }
         : {}),
-    });
-  },
+    }),
   agy: (configuration) =>
     new AgyEngineAdapter({
       binaryPath: configuration.binaryPath,
