@@ -26,7 +26,7 @@ Every command must be run with an explicit timeout, and no command may run longe
 
 Run the test suite with `npm test` and an explicit **180-second command timeout**, never with a raw `node --test ...` invocation. `npm test` prints the pass/fail counters and, only when something fails, the failing tests with their reason and location. A raw `node --test` prints every passing test, which floods an agent's context with material it already knows. Use `npm run test:full` only when every test name is genuinely needed, and redirect it to a file instead of reading all of it.
 
-For routine local edits a full run is unnecessary: use `npm run test:quick` after meaningful implementation edits, `npm run test:affected` when implementation work completes, and the full `npm test` on the final composed result before integration and before the independent final review of an assembled scope. Membership, triggers, and widening rules are project-owned in `docs/test-selection.md`; `npm run test:audit` proves the tiers still cover the full inventory exactly.
+For routine local edits a full run is unnecessary: use `npm run test:quick` after meaningful implementation edits, `npm run test:affected` when implementation work completes or a ticket is reviewed, and the full `npm test` on the final composed result before integration. Membership, triggers, and widening rules are project-owned in `docs/test-selection.md`; `npm run test:audit` proves the tiers still cover the full inventory exactly.
 
 Filter large command output at the shell (`... | tail -40`, `rg -n 'fail|Error|not ok'`) rather than loading the whole output into context.
 
