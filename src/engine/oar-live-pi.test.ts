@@ -12,7 +12,8 @@ import {
   createRuntime,
   hostConfiguration,
   project,
-  runtimePort,
+  scriptedEnvironment,
+  INSTANCE_ID,
   PROJECT_ID,
 } from '../runtime-test-harness.ts';
 import {
@@ -29,12 +30,25 @@ import {
 } from '../worker/engine-selection.ts';
 import { probeEnvironmentReadiness } from '../worker/readiness.ts';
 import { hostPiConfigurationProvider, OAR_PI_DISALLOWED_BUILTIN_TOOLS } from './oar-runtime-policy.ts';
+import { redactSensitiveText } from '../environment/privacy.ts';
 
 /** Turn a loaded extension path into a stable identifier without exposing its host path. */
 function sanitizedExtensionId(resolvedPath: string): string {
   const segments = resolvedPath.split(/[\\/]+/).filter(Boolean);
   const marker = Math.max(...['extensions', 'node_modules', 'packages'].map((name) => segments.lastIndexOf(name)));
   return (marker >= 0 ? segments.slice(marker + 1) : segments.slice(-2)).join('/');
+}
+
+async function listenOnReservedPort(runtime: any): Promise<number> {
+  let lastError: unknown;
+  for (let port = 41000; port <= 41009; port += 1) {
+    try {
+      return (await runtime.api.listen(port)).port;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw new Error('No port in the reserved 41000–41009 block was available', { cause: lastError });
 }
 
 /** Resolve the live model and tool inventory from the host's published Pi configuration. */
@@ -150,16 +164,20 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
   const directory = mkdtempSync(join(tmpdir(), 'sprout-oar-pi-live-'));
   const instanceId = 'pi-enrolled-live-worker';
   const marker = 'PONG';
-  const rules = [`Reply with only the word ${marker}. Do not use tools.`];
-  const collaborationInstructions = 'Follow the Project reply rule and say PONG.';
+  const rules = [
+    'On the first request, remember the word VIOLET and reply with only PONG.',
+    'On a later request asking what word was remembered, reply with only that word.',
+    'Do not use tools.',
+  ];
+  const collaborationInstructions = 'Follow the Project reply rule for the current request.';
 
   let projectInstructionsReceived = false;
   let projectModelReceived = false;
   let projectEffortReceived = false;
 
   const realAdapter = new OarEngineAdapter({ runtimeId: 'pi' });
-
   const observedStart = realAdapter.startSession.bind(realAdapter);
+
   realAdapter.startSession = async (request) => {
     projectInstructionsReceived = request.instructions?.includes(marker) === true;
     projectModelReceived = request.model === liveModel;
@@ -172,44 +190,34 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
   let runtime: any;
   let worker: EnvironmentWorker | undefined;
   let connection: any;
+  let current: any;
+  const runtimeConfiguration = hostConfiguration({
+    environmentSource: 'enrollment',
+    engineId: 'pi',
+    executionMode: 'environment-hosted',
+    databasePath: join(directory, 'runtime.db'),
+    workingDirectory: directory,
+    runtimeConfiguration: {
+      agents: [{
+        id: 'scout',
+        name: 'Live Pi Agent',
+        engine: 'pi',
+        capability: 'agent-run',
+        model: liveModel,
+        effort: liveEffort,
+        workOptions: [{ id: 'pi-live-opt', engine: 'pi', workModel: liveModel, effort: liveEffort }],
+      }],
+      project: {
+        ...project(),
+        availableEnvironmentInstanceIds: [instanceId],
+        rules,
+        memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions }],
+      },
+    },
+  });
 
   try {
-    runtime = await createRuntime({
-      configuration: hostConfiguration({
-        environmentSource: 'enrollment',
-        engineId: 'pi',
-        executionMode: 'environment-hosted',
-        databasePath: join(directory, 'runtime.db'),
-        workingDirectory: directory,
-        runtimeConfiguration: {
-          agents: [{
-            id: 'scout',
-            name: 'Live Pi Agent',
-            engine: 'pi',
-            capability: 'agent-run',
-            model: liveModel,
-            effort: liveEffort,
-            workOptions: [{
-              id: 'pi-live-opt',
-              engine: 'pi',
-              workModel: liveModel,
-              effort: liveEffort,
-            }],
-          }],
-          project: {
-            ...project(),
-            availableEnvironmentInstanceIds: [instanceId],
-            rules,
-            memberships: [{
-              agentId: 'scout',
-              responsibilities: [],
-              collaborationInstructions,
-            }],
-          },
-        },
-      }),
-      projectRoot: directory,
-    });
+    runtime = await createRuntime({ configuration: runtimeConfiguration, projectRoot: directory });
 
     await runtime.projectService.create({
       id: PROJECT_ID,
@@ -243,7 +251,7 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
       target: {
         enrollmentId: enrollment.enrollment.id,
         host: '127.0.0.1',
-        port: await runtimePort(runtime),
+        port: await listenOnReservedPort(runtime),
         claimSecret: undefined,
         identityKeyPath: identityPath,
       },
@@ -264,7 +272,7 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
     const configurations = describeEnvironmentWorkerEngines(hostFacts).filter(
       (c) => c.engine === 'pi',
     );
-    let current = await probeEnvironmentReadiness(configurations);
+    current = await probeEnvironmentReadiness(configurations);
 
     worker = new EnvironmentWorker({
       environmentInstanceId: instanceId,
@@ -303,7 +311,7 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
     const delivered = await runtime.collaboration.deliver({
       scopeId: `channel-${PROJECT_ID}`,
       author: { id: 'operator', kind: 'human' },
-      body: `@scout Follow the Project rule and answer now with ${marker}.`,
+      body: `@scout Remember the word VIOLET. Reply with only ${marker}.`,
       deliveryKey: `live-pi-enrolled-${Date.now()}`,
       awaitReply: true,
     });
@@ -355,9 +363,155 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
     const persisted = await runtime.stores.runs.get(run.id);
     assert.equal(persisted?.result?.status, 'completed');
     assert.match(persisted?.result?.text ?? '', /PONG/i);
+
+    const savedKeysBeforeResume = await runtime.stores.sessionKeys.list();
+    assert.equal(savedKeysBeforeResume.length, 1, 'the completed native run persisted one scoped continuation key');
+    assert.ok(savedKeysBeforeResume[0]?.key.length > 0);
+    assert.equal(savedKeysBeforeResume[0]?.scope.kind, 'conversation');
+    assert.equal(savedKeysBeforeResume[0]?.scope.id, `channel-${PROJECT_ID}`);
+
+    const firstUsageView = await runtime.usage.getRunUsage(run.id);
+    assert.ok(firstUsageView, 'the live runtime exposes a persisted usage view for the admitted run');
+    assert.equal(firstUsageView.effectiveObservation?.completeness, 'complete');
+    assert.equal(firstUsageView.effectiveObservation?.source, 'oar');
+    assert.equal(firstUsageView.effectiveObservation?.sourceVersion, '0.59.1');
+    assert.deepEqual(firstUsageView.effectiveObservation?.tokens, run.result?.detailedTokens);
   } finally {
     await worker?.shutdown();
     connection?.close();
+    await runtime?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('AC2: Bounded live Pi Runtime Message continuation and usage survive SQLite runtime reopen', async (t) => {
+  if (process.platform !== 'darwin') {
+    t.skip('Live demonstration requires macOS host');
+    return;
+  }
+
+  const piRuntime = defaultRuntimes.require('pi');
+  let installation: any;
+  try {
+    installation = await piRuntime.installation?.();
+  } catch {
+    t.skip('Pi installation probe failed');
+    return;
+  }
+  if (installation?.kind !== 'available') {
+    t.skip('Pi runtime is not available on this host');
+    return;
+  }
+
+  const liveModel = (await livePiConfiguration(installation, process.cwd())).model;
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-oar-pi-reopen-'));
+  const databasePath = join(directory, 'runtime.db');
+  const adapter = new OarEngineAdapter({ runtimeId: 'pi' });
+  const collaborationInstructions = 'Follow the Project rule for the current request.';
+  const runtimeConfiguration = hostConfiguration({
+    databasePath,
+    workingDirectory: directory,
+    engineId: 'pi',
+    runtimeConfiguration: {
+      agents: [{
+        id: 'scout', name: 'Live Pi Agent', engine: 'pi', capability: 'agent-run',
+        model: liveModel, effort: 'low',
+        workOptions: [{ id: 'pi-live-reopen', engine: 'pi', workModel: liveModel, effort: 'low' }],
+      }],
+      project: {
+        ...project(),
+        id: PROJECT_ID,
+        goal: 'Continue the same native Pi conversation after runtime restart.',
+        availableEnvironmentInstanceIds: [INSTANCE_ID],
+        rules: [
+          'On the first request, remember the word VIOLET and reply with only PONG.',
+          'On a later request asking what word was remembered, reply with only that word.',
+          'Do not use tools.',
+        ],
+        memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions }],
+      },
+    },
+  });
+  const createLiveRuntime = () => createRuntime({
+    configuration: runtimeConfiguration,
+    projectRoot: directory,
+    environment: scriptedEnvironment({ adapters: new Map([['pi', adapter]]) }),
+  });
+  let runtime: any;
+
+  try {
+    runtime = await createLiveRuntime();
+    const firstDelivery = await runtime.collaboration.deliver({
+      scopeId: `channel-${PROJECT_ID}`,
+      author: { id: 'operator', kind: 'human' },
+      body: '@scout Remember the word VIOLET. Reply with only PONG.',
+      deliveryKey: `live-pi-reopen-first-${Date.now()}`,
+      awaitReply: true,
+    });
+    assert.equal(firstDelivery.admittedRunIds.length, 1);
+    const firstRun = await runtime.orchestrator.waitFor(firstDelivery.admittedRunIds[0]!);
+    assert.equal(firstRun.status, 'completed');
+    assert.match(firstRun.result?.status === 'completed' ? firstRun.result.text : '', /PONG/i);
+    assert.equal(firstRun.result?.source, 'oar');
+    assert.ok(firstRun.result?.tokenUsage?.promptTokens && firstRun.result.tokenUsage.promptTokens > 0);
+    assert.ok(firstRun.result?.tokenUsage?.completionTokens && firstRun.result.tokenUsage.completionTokens > 0);
+    const firstKeys = await runtime.stores.sessionKeys.list();
+    assert.equal(firstKeys.length, 1);
+    assert.equal(firstKeys[0]?.scope.kind, 'conversation');
+    assert.equal(firstKeys[0]?.scope.id, `channel-${PROJECT_ID}`);
+
+    await runtime.close();
+    runtime = await createLiveRuntime();
+    const reopenedKeys = await runtime.stores.sessionKeys.list();
+    assert.equal(reopenedKeys.length, 1);
+    assert.equal(reopenedKeys[0]?.key, firstKeys[0]?.key,
+      'the native Pi session key survives SQLite runtime reopen in the authorized conversation scope');
+
+    const continuedDelivery = await runtime.collaboration.deliver({
+      scopeId: `channel-${PROJECT_ID}`,
+      author: { id: 'operator', kind: 'human' },
+      body: '@scout What word did I ask you to remember? Reply with only that word.',
+      deliveryKey: `live-pi-reopen-second-${Date.now()}`,
+      awaitReply: true,
+    });
+    assert.equal(continuedDelivery.admittedRunIds.length, 1);
+    const continuedRun = await runtime.orchestrator.waitFor(continuedDelivery.admittedRunIds[0]!);
+    assert.equal(continuedRun.status, 'completed', continuedRun.failure === undefined
+      ? 'The returning Pi run did not complete.'
+      : `The returning Pi run failed: ${redactSensitiveText(continuedRun.failure)}`);
+    assert.match(continuedRun.result?.status === 'completed' ? continuedRun.result.text : '', /VIOLET/i,
+      'the model recalls the first run fact after the runtime and database were reopened');
+    assert.equal(continuedRun.result?.source, 'oar');
+    const continuedTokens = continuedRun.result?.tokenUsage;
+    if (continuedTokens === undefined) {
+      assert.equal(continuedRun.result?.detailedTokens, undefined,
+        'usage without a verified resumed-session baseline remains unavailable');
+    } else {
+      assert.ok(continuedTokens.promptTokens > 0);
+      assert.ok(continuedTokens.completionTokens > 0);
+    }
+    assert.ok(continuedRun.result?.sourceVersion);
+    const reply = (await runtime.collaboration.listMessages()).filter(
+      (message: any) => message.author.kind === 'agent' && message.inReplyTo === continuedDelivery.message.id,
+    );
+    assert.equal(reply.length, 1);
+    assert.match(reply[0]?.body ?? '', /VIOLET/i);
+    const persistedRun = await runtime.stores.runs.get(continuedRun.id);
+    assert.equal(persistedRun?.result?.status, 'completed');
+    assert.deepEqual(persistedRun?.result?.tokenUsage, continuedRun.result?.tokenUsage);
+    const usageView = await runtime.usage.getRunUsage(continuedRun.id);
+    assert.ok(usageView);
+    assert.equal(usageView.effectiveObservation?.completeness, continuedTokens === undefined ? 'unavailable' : 'complete');
+    assert.equal(usageView.effectiveObservation?.source, 'oar');
+    assert.equal(usageView.effectiveObservation?.sourceVersion, '0.59.1');
+    assert.deepEqual(usageView.effectiveObservation?.tokens, continuedRun.result?.detailedTokens);
+    await t.test(
+      continuedTokens === undefined
+        ? 'resumed usage view is unavailable because no verified baseline was available'
+        : 'resumed usage view is complete with verified per-run usage',
+      () => {},
+    );
+  } finally {
     await runtime?.close();
     rmSync(directory, { recursive: true, force: true });
   }

@@ -29,12 +29,14 @@ import { currentRunWorkspaceBinding, renderCurrentWorkspaceSnapshot } from './bi
 import type { AgentRun, AgentRunStatus, RunFailureClass, RunObserver, RunWorkspaceBinding } from './model.ts';
 import type { RunReplaySnapshot, RunStore } from './store.ts';
 import type { SessionKeyIdentity, SessionKeyStore } from './session-key-store.ts';
+import { workingDirectoryId } from './session-key-store.ts';
 import type { TaskContextProvider, TaskRunObserver } from './task-link.ts';
 import {
   engineHostProfileForPlatform,
   environmentEngineHost,
   executionModeMismatchReason,
   isEngineHostedPlacement,
+  legacySessionScope,
   type ExecutionPlacement,
   type SessionKeyScope,
 } from '../execution-placement.ts';
@@ -47,6 +49,21 @@ async function defaultEngineRetryBackoff(failedAttempt: number): Promise<void> {
   const jitter = Math.floor(Math.random() * 101);
   await new Promise<void>((resolve) => setTimeout(resolve, exponential + jitter));
 }
+
+async function hasUnscopedLegacySessionKey(store: SessionKeyStore, identity: SessionKeyIdentity): Promise<boolean> {
+  const legacyScope = legacySessionScope();
+  const directoryId = workingDirectoryId(identity.workingDirectory);
+  return (await store.list()).some((record) =>
+    record.agentId === identity.agentId &&
+    record.engine === identity.engine &&
+    record.environmentInstanceId === identity.environmentInstanceId &&
+    record.workingDirectoryId === directoryId &&
+    record.scope.kind === legacyScope.kind && record.scope.id === legacyScope.id,
+  );
+}
+
+const UNSCOPED_LEGACY_SESSION_MESSAGE =
+  'A previous native session key was preserved, but its legacy authorization scope is unknown. This run did not reuse it, and no new conversation was started.';
 
 /**
  * Run orchestration: the one place where agent identity, environment leases, and
@@ -957,6 +974,10 @@ export class RunOrchestrator {
       const stored = this.#sessionKeys && identity !== undefined
         ? await this.#sessionKeys.get(identity)
         : undefined;
+      if (stored === undefined && this.#sessionKeys !== undefined && identity !== undefined &&
+          await hasUnscopedLegacySessionKey(this.#sessionKeys, identity)) {
+        return this.#finish(prepared, 'failed', { status: 'failed', message: UNSCOPED_LEGACY_SESSION_MESSAGE });
+      }
       const publishCatalog = async (): Promise<void> => {
         if (catalogPublished) return;
         bindingFence?.publish();
@@ -1478,6 +1499,10 @@ export class RunOrchestrator {
       const stored = this.#sessionKeys && identity !== undefined
         ? await this.#sessionKeys.get(identity)
         : undefined;
+      if (stored === undefined && this.#sessionKeys !== undefined && identity !== undefined &&
+          await hasUnscopedLegacySessionKey(this.#sessionKeys, identity)) {
+        return this.#finish(prepared, 'failed', { status: 'failed', message: UNSCOPED_LEGACY_SESSION_MESSAGE });
+      }
       let attempt = await this.#runSession(
         adapter,
         agent,

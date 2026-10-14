@@ -16,11 +16,13 @@ import { EnvironmentWorker } from '../worker/server.ts';
 // Keep adapter-policy tests from overlaying the developer's real Pi settings.
 const previousPiAgentDir = process.env.PI_CODING_AGENT_DIR;
 const piTestAgentDir = mkdtempSync(join(tmpdir(), 'sprout-oar-test-agent-'));
+const oarTestWorkingDirectory = mkdtempSync(join(tmpdir(), 'sprout-oar-test-work-'));
 process.env.PI_CODING_AGENT_DIR = piTestAgentDir;
 process.on('exit', () => {
   if (previousPiAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = previousPiAgentDir;
   rmSync(piTestAgentDir, { recursive: true, force: true });
+  rmSync(oarTestWorkingDirectory, { recursive: true, force: true });
 });
 
 class FakeOarRunner implements OarRunnerProcess {
@@ -35,6 +37,7 @@ class FakeOarRunner implements OarRunnerProcess {
   #exitListeners: ((code: number | null, signal: NodeJS.Signals | null) => void)[] = [];
   #errorListeners: ((err: Error) => void)[] = [];
   #buffer = '';
+  #activeActivationId: string | undefined;
 
   killHandler?: ((signal?: NodeJS.Signals) => void) | undefined;
   ignoreDispose = false;
@@ -53,6 +56,7 @@ class FakeOarRunner implements OarRunnerProcess {
         if (line) {
           const cmd = JSON.parse(line) as RunnerCommand;
           this.receivedCommands.push(cmd);
+          if (cmd.op === 'prompt') this.#activeActivationId = cmd.activationId;
           if (this.#onCommand) {
             this.#onCommand(cmd, this);
           }
@@ -67,8 +71,14 @@ class FakeOarRunner implements OarRunnerProcess {
   }
 
   send(msg: RunnerMessage): void {
-    if (this.stdout.writable && !this.stdout.destroyed) {
-      this.stdout.write(`${JSON.stringify(msg)}\n`);
+    if (!this.stdout.writable || this.stdout.destroyed) return;
+    let message = msg;
+    if ((msg.kind === 'event' || msg.kind === 'turn_ended' || msg.kind === 'prompt_rejected') && msg.activationId === undefined && this.#activeActivationId !== undefined) {
+      message = { ...msg, activationId: this.#activeActivationId };
+    }
+    this.stdout.write(`${JSON.stringify(message)}\n`);
+    if (message.kind === 'turn_ended' || message.kind === 'prompt_rejected') {
+      this.#activeActivationId = undefined;
     }
   }
 
@@ -183,7 +193,7 @@ test('AC2: Missing working directory is rejected at session start', async () => 
 test('AC2: Resume refusal error is properly classified so core can retry from a fresh session', async () => {
   const runner = new FakeOarRunner((cmd, r) => {
     if (cmd.op === 'start') {
-      r.send({ kind: 'error', message: 'no rollout found for thread id stale-thread-1' });
+      r.send({ kind: 'error', code: 'session_not_found', message: 'OAR SessionNotFoundError for supplied native key' });
     }
   });
 
@@ -193,10 +203,28 @@ test('AC2: Resume refusal error is properly classified so core can retry from a 
   });
 
   await assert.rejects(
-    () => adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp', resumeSessionKey: 'stale-thread-1' }),
+    () => adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory, resumeSessionKey: 'stale-thread-1' }),
     (err: Error) => {
       assert.ok(err instanceof EngineResumeRefusedError);
       assert.equal(err.sessionKey, 'stale-thread-1');
+      return true;
+    },
+  );
+});
+
+test('AC2: Message text alone cannot classify a resume refusal', async () => {
+  const runner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      r.send({ kind: 'error', message: 'no rollout found for thread id saved-native-session' });
+    }
+  });
+  const adapter = new OarEngineAdapter({ runtimeId: 'codex', spawnProcess: () => runner });
+
+  await assert.rejects(
+    () => adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory, resumeSessionKey: 'saved-native-session' }),
+    (error: Error) => {
+      assert.ok(error instanceof EngineStartError);
+      assert.ok(!(error instanceof EngineResumeRefusedError));
       return true;
     },
   );
@@ -256,16 +284,16 @@ test('AC5: Configured custom sessionDirectory for Pi reports bounded compatibili
   });
 
   await assert.rejects(
-    () => adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' }),
+    () => adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory }),
     (err: Error) => {
       assert.ok(err instanceof EngineStartError);
-      assert.match(err.message, /OAR Pi adapter does not support custom session directory/);
+      assert.match(err.message, /configured Pi session directory/);
       return true;
     },
   );
 });
 
-test('AC5: Configured custom sessionDirectory for Pi reports bounded compatibility refusal on session resume', async () => {
+test('AC5: Configured custom sessionDirectory for Pi refuses reuse without deleting the saved key', async () => {
   const adapter = new OarEngineAdapter({
     runtimeId: 'pi',
     sessionDirectory: '/var/sprout/pi-sessions',
@@ -275,13 +303,13 @@ test('AC5: Configured custom sessionDirectory for Pi reports bounded compatibili
     () =>
       adapter.startSession({
         agentId: 'scout',
-        workingDirectory: '/tmp',
+        workingDirectory: oarTestWorkingDirectory,
         resumeSessionKey: 'prior-pi-key-1',
       }),
     (err: Error) => {
-      assert.ok(err instanceof EngineResumeRefusedError);
-      assert.equal(err.sessionKey, 'prior-pi-key-1');
-      assert.match(err.message, /OAR Pi adapter does not support custom session directory/);
+      assert.ok(err instanceof EngineStartError, 'unsupported storage is not a stale-key refusal');
+      assert.match(err.message, /this run did not start and any saved session key was preserved/i);
+      assert.doesNotMatch(err.message, /pi-sessions|\/var\//, 'the user-facing error does not expose a host path');
       return true;
     },
   );
@@ -351,8 +379,8 @@ test('AC5: Missing resume session for Pi classifies as EngineResumeRefusedError'
     if (cmd.op === 'start') {
       r.send({
         kind: 'error',
-        message:
-          'pi session missing-pi-session-99 not found: no session file with that id under /tmp/sessions (0 session(s) there for cwd /tmp)',
+        code: 'session_not_found',
+        message: 'OAR SessionNotFoundError while opening a native Pi session',
       });
     }
   });
@@ -366,7 +394,7 @@ test('AC5: Missing resume session for Pi classifies as EngineResumeRefusedError'
     () =>
       adapter.startSession({
         agentId: 'scout',
-        workingDirectory: '/tmp',
+        workingDirectory: oarTestWorkingDirectory,
         resumeSessionKey: 'missing-pi-session-99',
       }),
     (err: Error) => {
@@ -408,7 +436,13 @@ rl.on('line', (line) => {
     }) + '\\n');
   } else if (cmd.op === 'prompt') {
     process.stdout.write(JSON.stringify({
+      kind: 'prompt_accepted',
+      activationId: cmd.activationId,
+      seq: 1,
+    }) + '\\n');
+    process.stdout.write(JSON.stringify({
       kind: 'event',
+      activationId: cmd.activationId,
       event: {
         kind: 'text_delta',
         text: JSON.stringify(reportedEnv),
@@ -420,6 +454,8 @@ rl.on('line', (line) => {
     }) + '\\n');
     process.stdout.write(JSON.stringify({
       kind: 'turn_ended',
+      activationId: cmd.activationId,
+      seq: 3,
       outcome: { kind: 'completed' },
     }) + '\\n');
   } else if (cmd.op === 'dispose') {
@@ -752,7 +788,7 @@ test('AC3 & AC4: Root turn completion persists correct terminal answer and filte
     spawnProcess: () => runner,
   });
 
-  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
   const turn = session.run('Hello');
 
   const observedEvents: any[] = [];
@@ -797,7 +833,7 @@ test('AC5: Refused / busy prompt fails immediately without implicit queueing', a
     spawnProcess: () => runner,
   });
 
-  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
   const turn = session.run('Second prompt');
 
   const result = await turn.completion;
@@ -825,7 +861,7 @@ test('AC5: Empty successful output settles cleanly without hanging', async () =>
     spawnProcess: () => runner,
   });
 
-  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
   const turn = session.run('Silent turn');
 
   const result = await turn.completion;
@@ -852,7 +888,7 @@ test('AC5: Empty error output settles with sanitized failure text', async () => 
     spawnProcess: () => runner,
   });
 
-  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
   const turn = session.run('Fail turn');
 
   const result = await turn.completion;
@@ -881,7 +917,7 @@ test('AC5: Spawn or early-exit failure settles turn without hanging', async () =
     },
   });
 
-  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
   const turn = session.run('Crash turn');
 
   const result = await turn.completion;
@@ -915,7 +951,7 @@ test('AC6: Bounded abort and close preserve uncertainty and settle turns as inte
     spawnProcess: () => runner,
   });
 
-  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
   const turn = session.run('Long run');
 
   const interrupted = await session.interrupt();
@@ -971,7 +1007,7 @@ test('AC5: Multiple events sharing a single record sequence are all processed wi
     spawnProcess: () => runner,
   });
 
-  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
   const turn = session.run('Multi seq test');
 
   const events: any[] = [];
@@ -1006,7 +1042,7 @@ test('AC2 & Substrate: Remote workspace tools are exposed over MCP bridge to OAR
 
   const session = await adapter.startSession({
     agentId: 'scout',
-    workingDirectory: '/tmp',
+    workingDirectory: oarTestWorkingDirectory,
     remoteWorkspace: {
       binding: {
         projectId: 'proj-1',
@@ -1134,7 +1170,7 @@ test('AC7: Usage attribution preserves deltas across multiple turns and redacts 
     spawnProcess: () => runner,
   });
 
-  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
 
   // Turn 1
   const turn1 = session.run('First');
@@ -1150,6 +1186,144 @@ test('AC7: Usage attribution preserves deltas across multiple turns and redacts 
   assert.deepEqual(result2.tokenUsage, { promptTokens: 150, completionTokens: 50, totalTokens: 200 });
   assert.deepEqual(result2.detailedTokens, { inputTokens: 150, outputTokens: 50, reasoningOutputTokens: 10, cachedInputTokens: 20 });
 
+  await session.close();
+});
+
+test('AC7: Cumulative snapshots settle once, and zero-sequence stale data is ignored', async () => {
+  const runner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      r.send({ kind: 'ready', sessionId: 'sess-usage-snapshot', engineSessionKey: 'native-session-key' });
+    } else if (cmd.op === 'prompt') {
+      r.send({ kind: 'prompt_accepted', activationId: cmd.activationId, seq: 10 });
+      r.send({
+        kind: 'usage_snapshot', activationId: cmd.activationId, seq: 10,
+        usage: { total: { input: 60, output: 11, reasoning: 5, cacheRead: 8 } },
+      });
+      r.send({
+        kind: 'usage_snapshot', activationId: cmd.activationId, seq: 11,
+        usage: { total: { input: 160, output: 42, reasoning: 15, cacheRead: 28 } },
+      });
+      r.send({
+        kind: 'event', activationId: cmd.activationId,
+        event: { kind: 'text_delta', text: 'stale', sessionId: 'sess-usage-snapshot', agentPath: [], seq: 0, receivedAt: Date.now() },
+      });
+      r.send({
+        kind: 'turn_ended', activationId: cmd.activationId, seq: 0,
+        outcome: { kind: 'completed' },
+        usage: { total: { input: 900, output: 900, reasoning: 900, cacheRead: 900 } },
+      });
+      r.send({
+        kind: 'event', activationId: cmd.activationId,
+        event: { kind: 'text_delta', text: 'PONG', sessionId: 'sess-usage-snapshot', agentPath: [], seq: 11, receivedAt: Date.now() },
+      });
+      r.send({
+        kind: 'turn_ended', activationId: cmd.activationId, seq: 12,
+        outcome: { kind: 'completed' },
+        usage: { total: { input: 160, output: 42, reasoning: 15, cacheRead: 28 } },
+      });
+    }
+  });
+  const session = await new OarEngineAdapter({ runtimeId: 'codex', spawnProcess: () => runner })
+    .startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
+  const result = await session.run('continue').completion;
+  assert.equal(result.status, 'completed');
+  assert.equal(result.text, 'PONG');
+  assert.deepEqual(result.tokenUsage, { promptTokens: 160, completionTokens: 42, totalTokens: 202 });
+  assert.deepEqual(result.detailedTokens, {
+    inputTokens: 160, outputTokens: 42, reasoningOutputTokens: 15, cachedInputTokens: 28,
+  });
+  assert.equal(result.source, 'oar');
+  assert.equal(result.sourceVersion, '0.59.1');
+  await session.close();
+});
+
+test('AC7: Usage snapshots survive runner loss, while genuinely missing usage remains unavailable', async () => {
+  const runner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      r.send({ kind: 'ready', sessionId: 'sess-partial-usage', engineSessionKey: 'native-partial-session' });
+    } else if (cmd.op === 'prompt') {
+      r.send({ kind: 'prompt_accepted', activationId: cmd.activationId, seq: 1 });
+      r.send({
+        kind: 'usage_snapshot', activationId: cmd.activationId, seq: 2,
+        usage: { total: { input: 45, output: 12, reasoning: 4 } },
+      });
+      r.exit(1);
+    }
+  });
+  const session = await new OarEngineAdapter({ runtimeId: 'pi', spawnProcess: () => runner })
+    .startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
+  const interrupted = await session.run('partial response').completion;
+  assert.equal(interrupted.status, 'failed');
+  assert.deepEqual(interrupted.tokenUsage, { promptTokens: 45, completionTokens: 12, totalTokens: 57 });
+  assert.deepEqual(interrupted.detailedTokens, { inputTokens: 45, outputTokens: 12, reasoningOutputTokens: 4 });
+  await session.close();
+
+  const noUsageRunner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      r.send({ kind: 'ready', sessionId: 'sess-no-usage', engineSessionKey: 'native-no-usage' });
+    } else if (cmd.op === 'prompt') {
+      r.send({ kind: 'prompt_accepted', activationId: cmd.activationId, seq: 4 });
+      r.send({ kind: 'turn_ended', activationId: cmd.activationId, seq: 5, outcome: { kind: 'completed' }, usage: { total: null } });
+    }
+  });
+  const noUsageSession = await new OarEngineAdapter({ runtimeId: 'codex', spawnProcess: () => noUsageRunner })
+    .startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
+  const unavailable = await noUsageSession.run('no usage report').completion;
+  assert.equal(unavailable.status, 'completed');
+  assert.equal(unavailable.tokenUsage, undefined);
+  assert.equal(unavailable.detailedTokens, undefined);
+  await noUsageSession.close();
+});
+
+test('AC7: A resumed conversation reports only usage above its verified native-session baseline', async () => {
+  const runner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      r.send({
+        kind: 'ready', sessionId: 'sess-resumed-usage', engineSessionKey: 'native-resumed-key',
+        freshSession: false,
+        usageBaseline: { total: { input: 700, output: 120, reasoning: 30, cacheRead: 80 } },
+      });
+    } else if (cmd.op === 'prompt') {
+      r.send({ kind: 'prompt_accepted', activationId: cmd.activationId, seq: 7 });
+      r.send({
+        kind: 'usage_snapshot', activationId: cmd.activationId, seq: 8,
+        usage: { total: { input: 742, output: 134, reasoning: 34, cacheRead: 90 } },
+      });
+      r.send({
+        kind: 'turn_ended', activationId: cmd.activationId, seq: 9,
+        outcome: { kind: 'completed' },
+        usage: { total: { input: 742, output: 134, reasoning: 34, cacheRead: 90 } },
+      });
+    }
+  });
+  const session = await new OarEngineAdapter({ runtimeId: 'pi', spawnProcess: () => runner })
+    .startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory, resumeSessionKey: 'native-resumed-key' });
+  const result = await session.run('continue').completion;
+  assert.deepEqual(result.tokenUsage, { promptTokens: 42, completionTokens: 14, totalTokens: 56 });
+  assert.deepEqual(result.detailedTokens, {
+    inputTokens: 42, outputTokens: 14, reasoningOutputTokens: 4, cachedInputTokens: 10,
+  });
+  await session.close();
+});
+
+test('AC7: A resumed run without a native usage baseline keeps usage unavailable', async () => {
+  const runner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      r.send({ kind: 'ready', sessionId: 'sess-resumed-no-baseline', engineSessionKey: 'native-no-baseline', freshSession: false });
+    } else if (cmd.op === 'prompt') {
+      r.send({ kind: 'prompt_accepted', activationId: cmd.activationId, seq: 1 });
+      r.send({
+        kind: 'usage_snapshot', activationId: cmd.activationId, seq: 2,
+        usage: { total: { input: 742, output: 134 } },
+      });
+      r.send({ kind: 'turn_ended', activationId: cmd.activationId, seq: 3, outcome: { kind: 'completed' } });
+    }
+  });
+  const session = await new OarEngineAdapter({ runtimeId: 'codex', spawnProcess: () => runner })
+    .startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory, resumeSessionKey: 'native-no-baseline' });
+  const result = await session.run('continue').completion;
+  assert.equal(result.tokenUsage, undefined);
+  assert.equal(result.detailedTokens, undefined);
   await session.close();
 });
 
@@ -1194,7 +1368,7 @@ test('AC4 (F1): Background or stale root turn_ended during admitted prompt neith
     spawnProcess: () => runner,
   });
 
-  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
   const turn = session.run('Prompt with background interference');
 
   // Verify the turn is NOT settled by the background turn_ended
@@ -1206,6 +1380,7 @@ test('AC4 (F1): Background or stale root turn_ended during admitted prompt neith
   // Now emit the real admitted turn events
   runner.send({
     kind: 'event',
+    activationId: promptCmd.activationId,
     event: {
       kind: 'text_delta',
       text: 'Admitted terminal answer.',
@@ -1251,7 +1426,7 @@ test('AC5 (F6): Spawn failure (runner process emits error before ready) rejects 
   });
 
   await assert.rejects(
-    () => adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' }),
+    () => adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory }),
     (err: Error) => {
       assert.ok(err instanceof EngineStartError);
       assert.match(err.message, /Failed to spawn OAR runner: spawn ENOENT/);
@@ -1295,7 +1470,7 @@ test('AC6 (F3): Non-cooperative runner failure to exit preserves stop uncertaint
     recoveryJournal: journal,
   });
 
-  input.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'session/start', params: { engine: 'codex', agentId: 'scout', workingDirectory: '/tmp' } })}\n`);
+  input.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'session/start', params: { engine: 'codex', agentId: 'scout', workingDirectory: oarTestWorkingDirectory } })}\n`);
   await new Promise<void>((resolve) => output.once('data', () => resolve()));
 
   // Worker shutdown with uncooperative runner: close throws, fenced remains false
@@ -1362,7 +1537,7 @@ test('AC7 (F5): Synthetic absolute paths and credentials in tool input and outpu
     spawnProcess: () => runner,
   });
 
-  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
   const turn = session.run('Privacy test prompt');
 
   const events: any[] = [];
@@ -1644,7 +1819,7 @@ test('AC3 & AC4 (pi): Root turn completion persists correct terminal answer and 
     spawnProcess: () => runner,
   });
 
-  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
   const turn = session.run('Hello');
 
   const observedEvents: any[] = [];
@@ -1696,7 +1871,7 @@ test('AC5 (pi): Refused / busy prompt fails immediately without implicit queuein
     spawnProcess: () => runner,
   });
 
-  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
   const turn = session.run('Second prompt');
 
   const result = await turn.completion;
@@ -1724,7 +1899,7 @@ test('AC5 (pi): Empty successful output settles cleanly without hanging', async 
     spawnProcess: () => runner,
   });
 
-  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
   const turn = session.run('Silent turn');
 
   const result = await turn.completion;
@@ -1751,7 +1926,7 @@ test('AC5 (pi): Empty error output settles with sanitized failure text', async (
     spawnProcess: () => runner,
   });
 
-  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
   const turn = session.run('Failing turn');
 
   const result = await turn.completion;
@@ -1776,7 +1951,7 @@ test('AC5 (pi): Spawn or early-exit failure settles turn without hanging', async
     },
   });
 
-  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
   const turn = session.run('Early exit turn');
 
   // Runner dies mid-turn
@@ -1813,7 +1988,7 @@ test('AC6 (pi): Bounded abort and close preserve uncertainty and settle turns as
     spawnProcess: () => runner,
   });
 
-  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
   const turn = session.run('Long run');
 
   const interrupted = await session.interrupt();
@@ -1869,7 +2044,7 @@ test('AC5 (pi): Multiple events sharing a single record sequence are all process
     spawnProcess: () => runner,
   });
 
-  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
   const turn = session.run('Multi seq test');
 
   const events: any[] = [];
@@ -1904,7 +2079,7 @@ test('AC2 & Substrate (pi): Remote workspace tools are exposed over MCP bridge t
 
   const session = await adapter.startSession({
     agentId: 'scout',
-    workingDirectory: '/tmp',
+    workingDirectory: oarTestWorkingDirectory,
     remoteWorkspace: {
       binding: {
         projectId: 'proj-pi-1',
@@ -2030,7 +2205,7 @@ test('AC7 (pi): Usage attribution preserves deltas across multiple turns and red
     spawnProcess: () => runner,
   });
 
-  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
 
   // Turn 1
   const turn1 = session.run('First');
@@ -2089,7 +2264,7 @@ test('AC4 (F1) (pi): Background or stale root turn_ended during admitted prompt 
     spawnProcess: () => runner,
   });
 
-  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
   const turn = session.run('Prompt with background interference');
 
   // Verify the turn is NOT settled by the background turn_ended
@@ -2103,6 +2278,7 @@ test('AC4 (F1) (pi): Background or stale root turn_ended during admitted prompt 
   // Now emit the real admitted turn events
   runner.send({
     kind: 'event',
+    activationId: promptCmd.activationId,
     event: {
       kind: 'text_delta',
       text: 'Admitted terminal answer.',
@@ -2126,7 +2302,9 @@ test('AC4 (F1) (pi): Background or stale root turn_ended during admitted prompt 
   await session.close();
 });
 
-test('AC7 (F5) (pi): Synthetic absolute paths and credentials in tool input and output are redacted from progress events', async () => {
+test('AC7 (F5) (pi): Synthetic absolute paths and credentials in tool input and output are redacted from progress events', async (t) => {
+  const workingDirectory = mkdtempSync(join(tmpdir(), 'oar-privacy-pi-'));
+  t.after(() => rmSync(workingDirectory, { recursive: true, force: true }));
   const runner = new FakeOarRunner((cmd, r) => {
     if (cmd.op === 'start') {
       r.send({ kind: 'ready', sessionId: 'sess-privacy-pi', engineSessionKey: 'sess-privacy-pi' });
@@ -2188,7 +2366,7 @@ test('AC7 (F5) (pi): Synthetic absolute paths and credentials in tool input and 
     spawnProcess: () => runner,
   });
 
-  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: '/tmp' });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory });
   const turn = session.run('Privacy test');
 
   const progressEvents: any[] = [];
