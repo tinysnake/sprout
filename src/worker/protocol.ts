@@ -454,6 +454,11 @@ export interface CloseParams {
   readonly sessionId: string;
 }
 
+export interface CloseResult {
+  /** True only when the Worker observed its supervised engine tree stop. */
+  readonly stopped: boolean;
+}
+
 export interface TurnEventParams {
   readonly sessionId: string;
   readonly turnId: string;

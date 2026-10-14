@@ -15,6 +15,7 @@ import {
   WORKER_NOTIFICATIONS,
   WORKER_PROTOCOL_VERSION,
   type CloseParams,
+  type CloseResult,
   type InterruptParams,
   type InterruptResult,
   type RunParams,
@@ -507,17 +508,26 @@ export class EnvironmentWorker {
     return { interrupted: await live.session.interrupt() };
   }
 
-  async #closeSession(params: CloseParams): Promise<Record<string, never>> {
+  async #closeSession(params: CloseParams): Promise<CloseResult> {
     const live = this.#sessions.get(params.sessionId);
-    if (live) {
-      await live.closeTaskGroupMessageBridge?.();
-      await live.session.close();
-      if (live.running !== undefined) await settleOrTimeout([live.running]);
-      this.#sessions.delete(params.sessionId);
-      if (this.#sessions.size === 0) this.#options.recoveryJournal?.engineStopped();
-      if (this.#options.recoveryJournal !== undefined) this.#transport.notify(WORKER_NOTIFICATIONS.recoveryChanged);
+    if (!live) return { stopped: true };
+
+    let stopped = true;
+    const bridgeClosed = await settleWithin(
+      Promise.resolve().then(() => live.closeTaskGroupMessageBridge?.()), 12_000,
+    );
+    try {
+      const close = await settleWithin(live.session.close(), 12_000);
+      stopped = bridgeClosed.fulfilled === true && close.settled && close.fulfilled === true &&
+        live.session.terminationEvidence !== 'uncertain';
+    } catch {
+      stopped = false;
     }
-    return {};
+    if (live.running !== undefined) await settleOrTimeout([live.running]);
+    this.#sessions.delete(params.sessionId);
+    if (this.#sessions.size === 0 && stopped) this.#options.recoveryJournal?.engineStopped();
+    if (this.#options.recoveryJournal !== undefined) this.#transport.notify(WORKER_NOTIFICATIONS.recoveryChanged);
+    return { stopped };
   }
 
   #require(sessionId: string): LiveSession {
@@ -536,15 +546,22 @@ export class EnvironmentWorker {
     let fenced = true;
     const mcpStopped = await this.#projectMcp?.shutdown() ?? true;
     const running: Promise<void>[] = [];
-    for (const [sessionId, live] of this.#sessions) {
-      await live.closeTaskGroupMessageBridge?.();
+    const closes = [...this.#sessions.entries()].map(async ([sessionId, live]) => {
       this.#sessions.delete(sessionId);
+      const bridgeClosed = await settleWithin(
+        Promise.resolve().then(() => live.closeTaskGroupMessageBridge?.()), 12_000,
+      );
       if (live.running !== undefined) running.push(live.running);
-      await live.session.close().catch(() => { fenced = false; });
-    }
+      const closed = await settleWithin(Promise.resolve().then(() => live.session.close()), 12_000);
+      return bridgeClosed.fulfilled === true && closed.settled && closed.fulfilled === true &&
+        live.session.terminationEvidence !== 'uncertain';
+    });
+    const sessionClosures = await Promise.all(closes);
+    if (sessionClosures.some((closed) => !closed)) fenced = false;
     if (!mcpStopped) fenced = false;
+    const turnsSettled = await settleOrTimeout(running);
+    if (!turnsSettled) fenced = false;
     if (fenced) {
-      await settleOrTimeout(running);
       // A new process cannot fence an unknown engine left by an earlier killed
       // process simply by shutting down with no sessions of its own.
       if (this.#ownedEngineSession) this.#options.recoveryJournal?.engineStopped();
@@ -553,10 +570,27 @@ export class EnvironmentWorker {
 }
 
 /** Engine close can succeed even if its event iterator never settles. */
-async function settleOrTimeout(running: readonly Promise<void>[]): Promise<void> {
-  if (running.length === 0) return;
-  await Promise.race([
-    Promise.allSettled(running),
-    new Promise<void>((resolve) => { const timer = setTimeout(resolve, 1_000); timer.unref(); }),
+async function settleOrTimeout(running: readonly Promise<void>[]): Promise<boolean> {
+  if (running.length === 0) return true;
+  return await Promise.race([
+    Promise.allSettled(running).then(() => true),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1_000)),
   ]);
+}
+
+async function settleWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<{
+  readonly settled: boolean;
+  readonly fulfilled: boolean;
+  readonly value?: T;
+}> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const outcome = await Promise.race([
+    promise.then((value) => ({ settled: true as const, fulfilled: true as const, value }),
+      () => ({ settled: true as const, fulfilled: false as const })),
+    new Promise<{ readonly settled: false; readonly fulfilled: false }>((resolve) => {
+      timer = setTimeout(() => resolve({ settled: false, fulfilled: false }), timeoutMs);
+    }),
+  ]);
+  if (timer !== undefined) clearTimeout(timer);
+  return outcome;
 }

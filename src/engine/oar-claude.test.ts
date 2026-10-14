@@ -72,6 +72,7 @@ test('Claude streams all root progress but settles only the last root message wi
     assert.equal((await eventsPromise).filter(event => event.type === 'message').length, 3);
   }
   await session.close();
+  assert.equal(session.terminationEvidence, 'uncertain', 'a scripted runner without a process identity cannot prove process-tree termination');
 });
 
 // Risk: adding the candidate must not silently grant unproved Host-run isolation.

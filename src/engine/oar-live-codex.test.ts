@@ -204,6 +204,39 @@ test('AC8: Bounded live macOS Codex Message-to-reply demonstration through the e
     assert.equal(usageObservation?.source, 'oar');
     assert.equal(usageObservation?.sourceVersion, '0.59.1');
     assert.deepEqual(usageObservation?.tokens, continuedRun.result?.detailedTokens);
+
+    const interruption = await runtime.collaboration.deliver({
+      scopeId: `channel-${PROJECT_ID}`,
+      author: { id: 'operator', kind: 'human' },
+      body: '@scout Write 300 numbered lines, each containing only ALPHA, and do not stop early.',
+      deliveryKey: `live-codex-interruption-${Date.now()}`,
+      awaitReply: false,
+    });
+    assert.equal(interruption.admittedRunIds.length, 1);
+    const interruptionRunId = interruption.admittedRunIds[0]!;
+    let observedProgress = false;
+    let liveRun = await runtime.orchestrator.load(interruptionRunId);
+    const progressDeadline = Date.now() + 30_000;
+    while (Date.now() < progressDeadline) {
+      liveRun = await runtime.orchestrator.load(interruptionRunId);
+      observedProgress = liveRun?.events.some((event) => event.type === 'message') === true;
+      if (observedProgress || liveRun?.status !== 'running') break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(liveRun?.status, 'running', 'the live model was still producing the admitted turn');
+    assert.equal(observedProgress, true, 'the real model emitted progress before interruption');
+    const interruptedRun = await runtime.orchestrator.interrupt(interruptionRunId);
+    assert.equal(interruptedRun.status, 'interrupted');
+    assert.equal(interruptedRun.result?.status, 'interrupted');
+    const interruptionLease = runtime.pool.getLease(interruptedRun.leaseId!);
+    assert.equal(interruptionLease?.state,
+      interruptedRun.result?.outcomeCertainty === 'uncertain' || interruptedRun.result?.engineSessionTermination === 'uncertain'
+        ? 'recovering' : 'released',
+      'the live run lease is protected exactly when settlement or execution termination is uncertain');
+    assert.equal((await runtime.collaboration.listMessages()).filter((message) =>
+      message.author.kind === 'agent' && message.inReplyTo === interruption.message.id).length, 0,
+    'the interrupted live model turn does not project a reply');
+
     await t.test(
       continuedTokens === undefined
         ? 'resumed usage view is unavailable because no verified baseline was available'

@@ -142,6 +142,8 @@ export interface RunOrchestratorOptions {
    * stays ignorant of the Task service's shape.
    */
   readonly onTaskRunSettled?: TaskRunObserver;
+  /** Opens Environment recovery when a one-round run cannot prove engine cleanup. */
+  readonly onUncertainRunExecution?: (input: { readonly run: AgentRun; readonly leaseId: string }) => Promise<void>;
   readonly taskGroupPosts?: (run: AgentRun, assertActive: () => void) => NonNullable<import('../engine/port.ts').StartSessionRequest['postTaskGroupMessage']>;
   readonly leaseTtlMs?: number;
   /** Wait before a bounded engine retry; injectable for deterministic tests. */
@@ -291,6 +293,7 @@ export class RunOrchestrator {
   readonly #tasks: TaskContextProvider | undefined;
   /** Told when a Task-linked run settles, so the Task can advance its state. */
   readonly #onTaskRunSettled: TaskRunObserver | undefined;
+  readonly #onUncertainRunExecution: RunOrchestratorOptions['onUncertainRunExecution'];
   readonly #leaseTtlMs: number;
   readonly #retryBackoff: (failedAttempt: number) => Promise<void>;
   readonly #clock: { now(): number };
@@ -339,6 +342,7 @@ export class RunOrchestrator {
     this.#runHistory = options.runs ?? (() => options.store.list());
     this.#tasks = options.tasks;
     this.#onTaskRunSettled = options.onTaskRunSettled;
+    this.#onUncertainRunExecution = options.onUncertainRunExecution;
     this.#leaseTtlMs = options.leaseTtlMs ?? 300_000;
     this.#retryBackoff = options.retryBackoff ?? defaultEngineRetryBackoff;
     this.#ids = options.ids ?? createIdFactory();
@@ -1611,7 +1615,22 @@ export class RunOrchestrator {
         message: error instanceof Error ? error.message : String(error),
       });
     } finally {
-      if (acquired !== undefined && acquired.ok) this.#pool.releaseLease(acquired.lease.id);
+      if (acquired !== undefined && acquired.ok) {
+        const settledRun = this.#runs.get(initial.id);
+        const uncertainExecution = settledRun?.result?.outcomeCertainty === 'uncertain' ||
+          settledRun?.result?.engineSessionTermination === 'uncertain';
+        if (uncertainExecution) {
+          this.#pool.markRecovering(acquired.lease.id);
+          try {
+            await this.#onUncertainRunExecution?.({ run: settledRun!, leaseId: acquired.lease.id });
+          } catch {
+            // The recovering lease remains the conservative durable boundary;
+            // restart reconciliation can restore its missing recovery record.
+          }
+        } else {
+          this.#pool.releaseLease(acquired.lease.id);
+        }
+      }
     }
   }
 
@@ -1685,6 +1704,7 @@ export class RunOrchestrator {
 
     this.#sessions.set(running.id, session);
     let current = running;
+    let terminalResult: EngineTurnResult | undefined;
     try {
       await beforePrompt?.();
       current = this.#runs.get(running.id) ?? current;
@@ -1705,6 +1725,7 @@ export class RunOrchestrator {
         streamError = error;
       }
       const result = await turn.completion;
+      terminalResult = result;
       if (result.status === 'failed') {
         // A turn-level failure is an attempt failure, not a completed run. It is
         // retryable only when the engine classified it as a refused resume;
@@ -1743,7 +1764,14 @@ export class RunOrchestrator {
       };
     } finally {
       this.#sessions.delete(running.id);
-      await session.close();
+      let closeError: unknown;
+      try { await session.close(); } catch (error) { closeError = error; }
+      if (terminalResult !== undefined &&
+          (closeError !== undefined || session.terminationEvidence === 'uncertain')) {
+        Object.assign(terminalResult, { engineSessionTermination: 'uncertain' as const });
+      } else if (closeError !== undefined) {
+        throw closeError;
+      }
     }
   }
 
@@ -1839,7 +1867,21 @@ export class RunOrchestrator {
   ): Promise<AgentRun> {
     const stopWins = this.#stopRequests.has(run.id) && status !== 'completed';
     const finalStatus = stopWins ? this.#stopOutcomes.get(run.id) ?? 'stopped' : status;
-    const finalResult: EngineTurnResult = stopWins ? { status: 'interrupted' } : result;
+    const finalResult: EngineTurnResult = stopWins
+      ? {
+          status: 'interrupted',
+          ...(result.outcomeCertainty === 'uncertain' ? { outcomeCertainty: 'uncertain' } : {}),
+          ...(result.engineSessionTermination === 'uncertain' ? { engineSessionTermination: 'uncertain' } : {}),
+          ...(result.tokenUsage !== undefined ? { tokenUsage: result.tokenUsage } : {}),
+          ...(result.detailedTokens !== undefined ? { detailedTokens: result.detailedTokens } : {}),
+          ...(result.engineTurnDurationMs !== undefined ? { engineTurnDurationMs: result.engineTurnDurationMs } : {}),
+          ...(result.costEstimate !== undefined ? { costEstimate: result.costEstimate } : {}),
+          ...(result.billingBasis !== undefined ? { billingBasis: result.billingBasis } : {}),
+          ...(result.source !== undefined ? { source: result.source } : {}),
+          ...(result.sourceVersion !== undefined ? { sourceVersion: result.sourceVersion } : {}),
+          ...(result.pricingContext !== undefined ? { pricingContext: result.pricingContext } : {}),
+        }
+      : result;
     const settled = await this.#advance(run, {
       status: finalStatus,
       result: finalResult,

@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { spawn } from 'node:child_process';
+import { spawn, type SpawnOptions } from 'node:child_process';
 import { existsSync, rmSync, mkdirSync, mkdtempSync, writeFileSync, readFileSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { OarEngineAdapter } from './oar.ts';
+import { OarEngineAdapter, type OarRunnerProcess } from './oar.ts';
 import { EngineStartError } from './port.ts';
 import { assertOarRuntimePolicy, hostPiConfigurationProvider, prepareOarRuntimePolicy } from './oar-runtime-policy.ts';
 
@@ -140,6 +140,100 @@ test('Pi policy fails closed on tampering and restores after runner spawn failur
     await assert.rejects(adapter.startSession({ agentId: 'fixture', workingDirectory: root }), /spawn failure/);
     assert.equal(existsSync(join(root, '.pi')), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Pi host policy restores exact settings only after forced runner termination is proved', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('Windows process-tree proof remains an explicit acceptance prerequisite');
+    return;
+  }
+  const root = mkdtempSync(join(tmpdir(), 'sprout-pi-process-fence-'));
+  const agentDir = join(root, 'host-agent');
+  mkdirSync(agentDir);
+  mkdirSync(join(root, '.pi'));
+  const originalProject = '{ "theme": "project" }\n';
+  const originalAgent = '{ "extensions": ["host-extension"] }\n';
+  writeFileSync(join(root, '.pi', 'settings.json'), originalProject);
+  writeFileSync(join(agentDir, 'settings.json'), originalAgent);
+  const runnerScript = join(root, 'runner.mjs');
+  const descendantPidFile = join(root, 'descendant.pid');
+  const heartbeatFile = join(root, 'descendant.heartbeat');
+  writeFileSync(runnerScript, `
+import { createInterface } from 'node:readline';
+import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+process.on('SIGINT', () => {});
+process.on('SIGTERM', () => {});
+let descendant;
+createInterface({ input: process.stdin }).on('line', (line) => {
+  const command = JSON.parse(line);
+  if (command.op === 'start') {
+    descendant = spawn(process.execPath, ['-e', \`
+      const fs = require('node:fs');
+      process.on('SIGINT', () => {});
+      process.on('SIGTERM', () => {});
+      fs.writeFileSync(${JSON.stringify(heartbeatFile)}, String(Date.now()));
+      setInterval(() => fs.writeFileSync(${JSON.stringify(heartbeatFile)}, String(Date.now())), 50);
+    \`], { stdio: ['ignore', 'ignore', 'ignore'] });
+    writeFileSync(${JSON.stringify(descendantPidFile)}, String(descendant.pid));
+    process.stdout.write(JSON.stringify({ kind: 'ready', sessionId: 'pi-policy-session', engineSessionKey: 'pi-policy-session' }) + '\\n');
+  }
+});
+setInterval(() => {}, 1000);
+`);
+  let child: ReturnType<typeof spawn> | undefined;
+  let session: Awaited<ReturnType<OarEngineAdapter['startSession']>> | undefined;
+  let descendantPid: number | undefined;
+  try {
+    const adapter = new OarEngineAdapter({
+      runtimeId: 'pi', runnerScriptPath: runnerScript,
+      piConfigurationProvider: { resolve: () => ({ agentDir }) },
+      spawnProcess: (command, args, options) => {
+        child = spawn(command, [...args], options as unknown as SpawnOptions);
+        return child as unknown as OarRunnerProcess;
+      },
+    });
+    session = await adapter.startSession({ agentId: 'fixture', workingDirectory: root });
+    assert.equal(existsSync(join(agentDir, '.sprout-oar-policy')), true, 'the exclusive host policy lease remains held while the runner is live');
+    assert.deepEqual(JSON.parse(readFileSync(join(agentDir, 'settings.json'), 'utf8')).defaultTools, []);
+
+    const runner = child;
+    assert.ok(runner);
+    descendantPid = Number(readFileSync(descendantPidFile, 'utf8'));
+    assert.ok(Number.isInteger(descendantPid) && descendantPid > 0);
+    const heartbeatDeadline = Date.now() + 2_000;
+    while (!existsSync(heartbeatFile) && Date.now() < heartbeatDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(existsSync(heartbeatFile), true, 'the descendant started its execution heartbeat');
+    const initialHeartbeat = readFileSync(heartbeatFile, 'utf8');
+    const runnerExited = new Promise<void>((resolve) => runner.once('exit', () => resolve()));
+    runner.kill('SIGKILL');
+    await runnerExited;
+    await new Promise((resolve) => setTimeout(resolve, 2_200));
+
+    assert.notEqual(readFileSync(heartbeatFile, 'utf8'), initialHeartbeat, 'the descendant continues executing after its runner parent dies');
+    assert.equal(existsSync(join(agentDir, '.sprout-oar-policy')), true, 'parent death does not release the exclusive host policy lease');
+    assert.deepEqual(JSON.parse(readFileSync(join(agentDir, 'settings.json'), 'utf8')).defaultTools, [], 'settings remain overlaid while the descendant lives');
+
+    await session.close();
+
+    assert.equal(session.terminationEvidence, 'proved');
+    assert.equal(runner.signalCode, 'SIGKILL', 'the runner parent was forcibly terminated');
+    assert.equal(readFileSync(join(root, '.pi', 'settings.json'), 'utf8'), originalProject);
+    assert.equal(readFileSync(join(agentDir, 'settings.json'), 'utf8'), originalAgent);
+    assert.equal(existsSync(join(agentDir, '.sprout-oar-policy')), false);
+    assert.equal(existsSync(join(root, '.pi', '.sprout-oar-policy')), false);
+  } finally {
+    if (session !== undefined && session.terminationEvidence === undefined) await session.close();
+    if (child !== undefined && child.exitCode === null && child.signalCode === null) {
+      try { process.kill(-child.pid!, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+    }
+    if (descendantPid !== undefined) {
+      try { process.kill(descendantPid, 'SIGKILL'); } catch { /* Already stopped. */ }
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // Risk: a direct start command enters the vendor loader despite a missing policy.

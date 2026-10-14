@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { spawn } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -89,6 +90,18 @@ class FakeOarRunner implements OarRunnerProcess {
     }
     this.exit(0, signal);
     return true;
+  }
+
+  exitBeforeStdoutDrain(): void {
+    if (this.exitCode !== null || this.signalCode !== null) return;
+    this.exitCode = 0;
+    this.signalCode = null;
+    this.stdin.end();
+    for (const listener of this.#exitListeners) listener(0, null);
+    setImmediate(() => {
+      this.stdout.resume();
+      this.stdout.end();
+    });
   }
 
   exit(code: number | null, signal: NodeJS.Signals | null = null): void {
@@ -597,6 +610,7 @@ rl.on('line', (line) => {
     }) + '\\n');
   } else if (cmd.op === 'abort') {
     appendFileSync(logFile, 'OP_ABORT_RECEIVED\\n');
+    process.stdout.write(JSON.stringify({ kind: 'abort_result', activationId: cmd.activationId, accepted: true }) + '\\n');
     // Intentionally does NOT complete turn or exit, driving escalation
   }
 });
@@ -626,6 +640,7 @@ rl.on('line', (line) => {
   const elapsedMs = Date.now() - interruptStartedAt;
 
   assert.equal(result.status, 'interrupted', 'Turn settled as interrupted upon escalation termination');
+  assert.equal(result.outcomeCertainty, 'uncertain', 'no terminal event means the turn outcome remains uncertain');
 
   // Escalation timers in oar.ts:
   // 4,000ms -> SIGINT, then 2,000ms -> SIGTERM, then 2,000ms -> SIGKILL
@@ -922,9 +937,129 @@ test('AC5: Spawn or early-exit failure settles turn without hanging', async () =
 
   const result = await turn.completion;
   assert.equal(result.status, 'failed');
-  assert.match(result.status === 'failed' ? result.message : '', /OAR runner connection was lost/);
+  assert.match(result.status === 'failed' ? result.message : '', /outcome is uncertain/i);
+  assert.equal(result.status === 'failed' ? result.outcomeCertainty : undefined, 'uncertain');
 
   await session.close();
+});
+
+test('runner parent death leaves a surviving descendant visible until the process-group fence kills it', async (t) => {
+  if (process.platform === 'win32') {
+    t.skip('Windows process-tree proof remains an explicit platform prerequisite');
+    return;
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'oar-descendant-fence-'));
+  const runnerPath = join(dir, 'runner.mjs');
+  const childPidPath = join(dir, 'child.pid');
+  let runner: OarRunnerProcess | undefined;
+  let closeSession: (() => Promise<void>) | undefined;
+  t.after(async () => {
+    try { await closeSession?.(); } catch { /* keep test cleanup moving */ }
+    if (runner?.pid !== undefined && process.platform !== 'win32') {
+      try { process.kill(-runner.pid, 'SIGKILL'); } catch { /* already stopped */ }
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+  writeFileSync(runnerPath, `
+import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import { createInterface } from 'node:readline';
+const rl = createInterface({ input: process.stdin });
+rl.on('line', (line) => {
+  const command = JSON.parse(line);
+  if (command.op === 'start') process.stdout.write(JSON.stringify({ kind: 'ready', sessionId: 'tree-session', engineSessionKey: 'tree-session' }) + '\\n');
+  if (command.op === 'prompt') {
+    const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: 'ignore' });
+    writeFileSync(${JSON.stringify(childPidPath)}, String(child.pid));
+    process.exit(19);
+  }
+});
+`);
+
+  const adapter = new OarEngineAdapter({
+    runtimeId: 'codex',
+    runnerScriptPath: runnerPath,
+    spawnProcess: (command, args, options) => {
+      runner = spawn(command, [...args], options as unknown as Parameters<typeof spawn>[2]) as unknown as OarRunnerProcess;
+      return runner;
+    },
+  });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: dir });
+  closeSession = () => session.close();
+  const turn = session.run('Start the supervised child');
+  const result = await turn.completion;
+  assert.equal(result.status, 'failed');
+  assert.equal(result.outcomeCertainty, 'uncertain', 'parent death did not manufacture a terminal turn result');
+
+  const parentPid = runner?.pid;
+  assert.ok(parentPid);
+  let childPid: number | undefined;
+  const pidDeadline = Date.now() + 2_000;
+  while (childPid === undefined && Date.now() < pidDeadline) {
+    try { childPid = Number(readFileSync(childPidPath, 'utf8')); } catch { await new Promise(resolve => setTimeout(resolve, 20)); }
+  }
+  assert.ok(childPid && Number.isSafeInteger(childPid), 'the runner recorded its surviving descendant');
+  assert.doesNotThrow(() => process.kill(childPid!, 0), 'the descendant survived its parent');
+  assert.doesNotThrow(() => process.kill(-parentPid!, 0), 'the runner process group still contains the descendant');
+
+  await session.close();
+  assert.equal(session.terminationEvidence, 'proved', 'close proved the whole process group empty');
+  assert.throws(() => process.kill(-parentPid!, 0), { code: 'ESRCH' });
+});
+
+test('a rejected late abort preserves the terminal completed turn that wins the race', async () => {
+  const runner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      r.send({ kind: 'ready', sessionId: 'sess-late-abort', engineSessionKey: 'sess-late-abort' });
+    } else if (cmd.op === 'prompt') {
+      r.send({ kind: 'prompt_accepted', activationId: cmd.activationId, seq: 1 });
+    } else if (cmd.op === 'abort') {
+      r.send({ kind: 'abort_result', activationId: cmd.activationId, accepted: false });
+      setTimeout(() => {
+        r.send({ kind: 'event', event: {
+          kind: 'text_delta', text: 'actual completed answer', sessionId: 'sess-late-abort',
+          agentPath: [], seq: 2, receivedAt: Date.now(),
+        } });
+        r.send({ kind: 'turn_ended', seq: 3, outcome: { kind: 'completed' } });
+      }, 20);
+    }
+  });
+  const adapter = new OarEngineAdapter({ runtimeId: 'codex', spawnProcess: () => runner });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
+  const turn = session.run('Complete before the late abort');
+  assert.equal(await session.interrupt(), true);
+  const close = session.close();
+  const result = await turn.completion;
+  await close;
+  assert.equal(result.status, 'completed');
+  assert.equal(result.status === 'completed' ? result.text : '', 'actual completed answer');
+  assert.equal(result.outcomeCertainty, undefined);
+  assert.equal(session.terminationEvidence, 'proved');
+});
+
+test('terminal stdout buffered at runner exit wins before uncertain runner-loss settlement', async () => {
+  const runner = new FakeOarRunner((cmd, r) => {
+    if (cmd.op === 'start') {
+      r.send({ kind: 'ready', sessionId: 'sess-exit-drain', engineSessionKey: 'sess-exit-drain' });
+    } else if (cmd.op === 'prompt') {
+      r.send({ kind: 'prompt_accepted', activationId: cmd.activationId, seq: 1 });
+      r.send({ kind: 'event', activationId: cmd.activationId, event: {
+        kind: 'text_delta', text: 'completed before exit', sessionId: 'sess-exit-drain',
+        agentPath: [], seq: 2, receivedAt: Date.now(),
+      } });
+      r.stdout.pause();
+      r.send({ kind: 'turn_ended', activationId: cmd.activationId, seq: 3, outcome: { kind: 'completed' } });
+      r.exitBeforeStdoutDrain();
+    }
+  });
+  const adapter = new OarEngineAdapter({ runtimeId: 'codex', spawnProcess: () => runner });
+  const session = await adapter.startSession({ agentId: 'scout', workingDirectory: oarTestWorkingDirectory });
+  const result = await session.run('Finish before the runner exits').completion;
+  assert.equal(result.status, 'completed');
+  assert.equal(result.status === 'completed' ? result.text : '', 'completed before exit');
+  assert.equal(result.outcomeCertainty, undefined);
+  await session.close();
+  assert.equal(session.terminationEvidence, 'proved');
 });
 
 test('AC6: Bounded abort and close preserve uncertainty and settle turns as interrupted', async () => {
@@ -937,7 +1072,7 @@ test('AC6: Bounded abort and close preserve uncertainty and settle turns as inte
       // Running indefinitely
     } else if (cmd.op === 'abort') {
       abortReceived = true;
-      r.send({ kind: 'abort_delivered' });
+      r.send({ kind: 'abort_result', activationId: cmd.activationId, accepted: true });
       r.send({ kind: 'turn_ended', outcome: { kind: 'aborted' } });
     } else if (cmd.op === 'dispose') {
       disposeReceived = true;
@@ -1513,7 +1648,7 @@ test('AC6 (F3): Non-cooperative runner failure to exit preserves stop uncertaint
   input.write(`${JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'session/start', params: { engine: 'codex', agentId: 'scout', workingDirectory: oarTestWorkingDirectory } })}\n`);
   await new Promise<void>((resolve) => output.once('data', () => resolve()));
 
-  // Worker shutdown with uncooperative runner: close throws, fenced remains false
+  // Worker shutdown with an uncooperative runner records no termination proof.
   await workerWithIO.shutdown();
 
   // Recovery journal MUST NOT record engineStopped: stop uncertainty is preserved!
@@ -1999,7 +2134,8 @@ test('AC5 (pi): Spawn or early-exit failure settles turn without hanging', async
 
   const result = await turn.completion;
   assert.equal(result.status, 'failed');
-  assert.match(result.status === 'failed' ? result.message : '', /OAR runner connection was lost/);
+  assert.match(result.status === 'failed' ? result.message : '', /outcome is uncertain/i);
+  assert.equal(result.status === 'failed' ? result.outcomeCertainty : undefined, 'uncertain');
 
   await session.close();
 });
@@ -2014,7 +2150,7 @@ test('AC6 (pi): Bounded abort and close preserve uncertainty and settle turns as
       // Running indefinitely
     } else if (cmd.op === 'abort') {
       abortReceived = true;
-      r.send({ kind: 'abort_delivered' });
+      r.send({ kind: 'abort_result', activationId: cmd.activationId, accepted: true });
       r.send({ kind: 'turn_ended', outcome: { kind: 'aborted' } });
     } else if (cmd.op === 'dispose') {
       disposeReceived = true;

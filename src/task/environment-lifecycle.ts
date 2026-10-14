@@ -454,7 +454,8 @@ export class TaskEnvironmentLifecycle {
     if (!task || task.activeRunId !== run.id) return; // idempotent restart redelivery
     if (run.status === 'queued' || run.status === 'running') return;
     if (task.environmentLifecycleState === 'recovery') return; // channel loss already protected it
-    if (run.status === 'interrupted' || isWorkerLoss(run)) {
+    if (run.result?.outcomeCertainty === 'uncertain' || run.result?.engineSessionTermination === 'uncertain' ||
+        run.status === 'interrupted' || isWorkerLoss(run)) {
       await this.#toRecovery(task, 'running', true);
       return;
     }

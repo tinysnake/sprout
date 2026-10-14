@@ -41,14 +41,14 @@ function sanitizedExtensionId(resolvedPath: string): string {
 
 async function listenOnReservedPort(runtime: any): Promise<number> {
   let lastError: unknown;
-  for (let port = 41000; port <= 41009; port += 1) {
+  for (let port = 41010; port <= 41019; port += 1) {
     try {
       return (await runtime.api.listen(port)).port;
     } catch (error) {
       lastError = error;
     }
   }
-  throw new Error('No port in the reserved 41000–41009 block was available', { cause: lastError });
+  throw new Error('No port in the reserved 41010–41019 block was available', { cause: lastError });
 }
 
 /** Resolve the live model and tool inventory from the host's published Pi configuration. */
@@ -376,6 +376,38 @@ test('AC2: Bounded live macOS Pi Message-to-reply demonstration through the enro
     assert.equal(firstUsageView.effectiveObservation?.source, 'oar');
     assert.equal(firstUsageView.effectiveObservation?.sourceVersion, '0.59.1');
     assert.deepEqual(firstUsageView.effectiveObservation?.tokens, run.result?.detailedTokens);
+
+    const interruption = await runtime.collaboration.deliver({
+      scopeId: `channel-${PROJECT_ID}`,
+      author: { id: 'operator', kind: 'human' },
+      body: '@scout Write 300 numbered lines, each containing only ALPHA, and do not stop early.',
+      deliveryKey: `live-pi-interruption-${Date.now()}`,
+      awaitReply: false,
+    });
+    assert.equal(interruption.admittedRunIds.length, 1);
+    const interruptionRunId = interruption.admittedRunIds[0]!;
+    let observedProgress = false;
+    let liveRun = await runtime.orchestrator.load(interruptionRunId);
+    const progressDeadline = Date.now() + 30_000;
+    while (Date.now() < progressDeadline) {
+      liveRun = await runtime.orchestrator.load(interruptionRunId);
+      observedProgress = liveRun?.events.some((event: any) => event.type === 'message') === true;
+      if (observedProgress || liveRun?.status !== 'running') break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(liveRun?.status, 'running', 'the live Pi model was still producing the admitted turn');
+    assert.equal(observedProgress, true, 'the real Pi model emitted progress before interruption');
+    const interruptedRun = await runtime.orchestrator.interrupt(interruptionRunId);
+    assert.equal(interruptedRun.status, 'interrupted');
+    assert.equal(interruptedRun.result?.status, 'interrupted');
+    const interruptionLease = runtime.pool.getLease(interruptedRun.leaseId!);
+    assert.equal(interruptionLease?.state,
+      interruptedRun.result?.outcomeCertainty === 'uncertain' || interruptedRun.result?.engineSessionTermination === 'uncertain'
+        ? 'recovering' : 'released',
+      'the live Pi run lease is protected exactly when settlement or execution termination is uncertain');
+    assert.equal((await runtime.collaboration.listMessages()).filter((message: any) =>
+      message.author.kind === 'agent' && message.inReplyTo === interruption.message.id).length, 0,
+    'the interrupted live Pi turn does not project a reply');
   } finally {
     await worker?.shutdown();
     connection?.close();

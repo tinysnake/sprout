@@ -204,10 +204,16 @@ export class OarEngineAdapter implements EngineAdapter {
       await mcpBridge?.close();
       throw error;
     }
-    // Parent owns restoration even when the runner is killed before graceful disposal.
-    runner.on('exit', () => policy?.close());
+    runner.on('exit', () => {
+      // Forced runner death preserves restoration only after the detached
+      // process group is observed empty; parent exit alone does not release it.
+      void waitForProcessTreeStopped(runner, 2_000).then((stopped) => {
+        if (stopped) policy?.close();
+      }).catch(() => undefined);
+    });
     runner.on('error', () => {
-      // Spawn errors have no process; other errors must not release a still-live loader.
+      // A spawn error without a process has no descendants; otherwise the
+      // bounded start-failure cleanup releases this only after tree proof.
       if (runner.pid === undefined) policy?.close();
     });
 
@@ -217,10 +223,21 @@ export class OarEngineAdapter implements EngineAdapter {
       let settled = false;
       let buffer = '';
 
+      const cleanupPolicyAfterProvedTreeStop = () => {
+        if (runner.pid === undefined) {
+          policy?.close();
+          return;
+        }
+        void waitForProcessTreeStopped(runner, 2_000).then((stopped) => {
+          if (stopped) policy?.close();
+        }).catch(() => undefined);
+      };
+
       const startTimer = setTimeout(() => {
         if (settled) return;
         settled = true;
         killProcessTree(runner);
+        cleanupPolicyAfterProvedTreeStop();
         void mcpBridge?.close();
         reject(new EngineStartError('OAR runner failed to become ready within timeout'));
       }, 25_000);
@@ -230,6 +247,7 @@ export class OarEngineAdapter implements EngineAdapter {
         settled = true;
         clearTimeout(startTimer);
         killProcessTree(runner);
+        cleanupPolicyAfterProvedTreeStop();
         void mcpBridge?.close();
         reject(error);
       };
@@ -268,6 +286,7 @@ export class OarEngineAdapter implements EngineAdapter {
                     freshSession: msg.freshSession ?? request.resumeSessionKey === undefined,
                     ...(msg.usageBaseline !== undefined ? { usageBaseline: msg.usageBaseline } : {}),
                     mcpBridge,
+                    onTerminationProved: () => policy?.close(),
                     clock,
                   });
                   // Feed any trailing buffer into the session
@@ -326,6 +345,7 @@ interface OarEngineSessionParams {
   readonly freshSession: boolean;
   readonly usageBaseline?: SessionUsage | null | undefined;
   readonly mcpBridge?: OarMcpBridgeHandle | undefined;
+  readonly onTerminationProved?: (() => void) | undefined;
   readonly clock: () => number;
 }
 
@@ -338,10 +358,12 @@ export class OarEngineSession implements EngineSession {
   readonly #sourceVersion: string;
   readonly #runtimeId: string;
   readonly #mcpBridge: OarMcpBridgeHandle | undefined;
+  readonly #onTerminationProved: (() => void) | undefined;
   readonly #clock: () => number;
 
   #closed = false;
   #currentTurnFinish: ((result: EngineTurnResult) => void) | undefined;
+  #currentTurnCompletion: Promise<EngineTurnResult> | undefined;
   #currentEventQueue: EventQueue | undefined;
   #buffer = '';
   #baselineUsage: TokenTotals | undefined;
@@ -350,6 +372,10 @@ export class OarEngineSession implements EngineSession {
   #latestObservedTotals: TokenTotals | undefined;
   #usageInvalid = false;
   #interrupted = false;
+  #escalation: Promise<boolean> | undefined;
+  #runnerExited = false;
+  #runnerOutputClosed = false;
+  terminationEvidence: 'proved' | 'uncertain' | undefined;
 
   constructor(params: OarEngineSessionParams) {
     this.#runner = params.runner;
@@ -358,6 +384,7 @@ export class OarEngineSession implements EngineSession {
     this.#sourceVersion = params.sourceVersion;
     this.#runtimeId = params.runtimeId;
     this.#mcpBridge = params.mcpBridge;
+    this.#onTerminationProved = params.onTerminationProved;
     const baseline = params.usageBaseline?.total;
     this.#baselineUsage = params.freshSession
       ? { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 }
@@ -368,9 +395,12 @@ export class OarEngineSession implements EngineSession {
     this.#runner.stdout?.on('data', (chunk: Buffer | string) => {
       this.pushData(chunk.toString());
     });
+    this.#runner.stdout?.on('end', () => this.#observeRunnerOutputClosed());
+    this.#runner.stdout?.on('close', () => this.#observeRunnerOutputClosed());
 
     this.#runner.on('exit', () => {
-      this.#onRunnerExit();
+      this.#runnerExited = true;
+      if (this.#runner.stdout === null || this.#runnerOutputClosed) this.#onRunnerExit();
     });
   }
 
@@ -415,6 +445,7 @@ export class OarEngineSession implements EngineSession {
       if (turnSettled) return;
       turnSettled = true;
       this.#currentTurnFinish = undefined;
+      this.#currentTurnCompletion = undefined;
       this.#currentEventQueue = undefined;
       const duration = Math.max(0, this.#clock() - startedAt);
       const measured: EngineTurnResult = {
@@ -430,6 +461,7 @@ export class OarEngineSession implements EngineSession {
     };
 
     this.#currentTurnFinish = finish;
+    this.#currentTurnCompletion = completion;
 
     let currentSpanId: string | undefined;
     let sequenceFloor: number | undefined;
@@ -673,7 +705,7 @@ export class OarEngineSession implements EngineSession {
             source: 'oar',
             sourceVersion: this.#sourceVersion,
           });
-        } else if (outcome.kind === 'aborted' || this.#interrupted) {
+        } else if (outcome.kind === 'aborted') {
           turn.finish({
             status: 'interrupted',
             ...usage,
@@ -695,6 +727,11 @@ export class OarEngineSession implements EngineSession {
         break;
       }
 
+      case 'abort_result': {
+        // Only the native terminal event settles the turn's actual outcome.
+        break;
+      }
+
       case 'error': {
         const sanitized = redactSensitiveText(msg.message) || 'OAR runner error';
         turn?.finish({
@@ -710,35 +747,11 @@ export class OarEngineSession implements EngineSession {
   }
 
   async interrupt(): Promise<boolean> {
-    if (this.#closed || this.#runner.exitCode !== null) return false;
+    if (this.#closed || this.#currentTurnFinish === undefined ||
+        this.#runner.exitCode !== null || this.#runner.signalCode !== null) return false;
     this.#interrupted = true;
-    try {
-      this.#runner.stdin?.write('{"op":"abort"}\n');
-    } catch {
-      // Stream may be closed
-    }
-
-    // Schedule bounded escalation
-    const child = this.#runner;
-    const escalationTimer = setTimeout(() => {
-      if (this.#currentTurnFinish !== undefined) {
-        killProcessTree(child, 'SIGINT');
-        const termTimer = setTimeout(() => {
-          if (this.#currentTurnFinish !== undefined) {
-            killProcessTree(child, 'SIGTERM');
-            const killTimer = setTimeout(() => {
-              if (this.#currentTurnFinish !== undefined) {
-                killProcessTree(child, 'SIGKILL');
-              }
-            }, 2_000);
-            killTimer.unref?.();
-          }
-        }, 2_000);
-        termTimer.unref?.();
-      }
-    }, 4_000);
-    escalationTimer.unref?.();
-
+    this.#sendAbort();
+    this.#beginEscalation();
     return true;
   }
 
@@ -746,122 +759,150 @@ export class OarEngineSession implements EngineSession {
     if (this.#closed) return;
     this.#closed = true;
 
-    if (this.#currentTurnFinish !== undefined) {
-      this.#currentTurnFinish({
-        status: 'interrupted',
-        ...this.#settledUsage(),
-        source: 'oar',
-        sourceVersion: this.#sourceVersion,
-      });
+    const activeTurn = this.#currentTurnCompletion;
+    if (activeTurn !== undefined && this.#currentTurnFinish !== undefined) {
+      this.#interrupted = true;
+      if (this.#escalation === undefined) this.#sendAbort();
+      this.#beginEscalation();
+      // Let an observed native terminal event win. Escalation records explicit
+      // uncertainty when the native terminal never arrives.
+      await activeTurn;
     }
 
-    if (this.#runner.exitCode !== null) {
-      if (this.#mcpBridge) {
-        await this.#mcpBridge.close();
+    let stopped = false;
+    try {
+      stopped = await this.#disposeAndProveTreeStopped();
+      this.terminationEvidence = stopped ? 'proved' : 'uncertain';
+      if (stopped) this.#onTerminationProved?.();
+    } finally {
+      await this.#mcpBridge?.close();
+    }
+  }
+
+  #sendAbort(): void {
+    const activationId = this.#activeTurnContext?.activationId;
+    if (activationId === undefined) return;
+    try {
+      this.#runner.stdin?.write(JSON.stringify({ op: 'abort', activationId }) + '\n');
+    } catch {
+      // Stream may be closed; bounded process-tree escalation still applies.
+    }
+  }
+
+  #beginEscalation(): void {
+    if (this.#escalation !== undefined) return;
+    this.#escalation = this.#escalateAbort();
+  }
+
+  async #escalateAbort(): Promise<boolean> {
+    await delay(4_000);
+    for (const [signal, graceMs] of [['SIGINT', 2_000], ['SIGTERM', 2_000], ['SIGKILL', 2_000]] as const) {
+      if (this.#currentTurnFinish === undefined) return true;
+      killProcessTree(this.#runner, signal);
+      if (await waitForProcessTreeStopped(this.#runner, graceMs)) {
+        this.#finishUncertainTurn();
+        return true;
       }
-      return;
     }
+    this.#finishUncertainTurn();
+    return await waitForProcessTreeStopped(this.#runner, 0);
+  }
 
+  async #disposeAndProveTreeStopped(): Promise<boolean> {
+    if (await waitForProcessTreeStopped(this.#runner, 0)) return true;
     try {
       if (this.#runner.stdin && !this.#runner.stdin.destroyed && this.#runner.stdin.writable) {
         this.#runner.stdin.write('{"op":"dispose"}\n');
       }
     } catch {
-      // Child stdin might be closed
+      // Child stdin might be closed; process-tree fencing still follows.
     }
+    if (await waitForProcessTreeStopped(this.#runner, 1_000)) return true;
+    killProcessTree(this.#runner, 'SIGKILL');
+    return await waitForProcessTreeStopped(this.#runner, 2_000);
+  }
 
-    if (this.#runner.exitCode !== null) {
-      if (this.#mcpBridge) {
-        await this.#mcpBridge.close();
-      }
-      return;
-    }
+  #finishUncertainTurn(): void {
+    if (this.#currentTurnFinish === undefined) return;
+    const usage = this.#settledUsage();
+    this.#currentTurnFinish(this.#interrupted
+      ? { status: 'interrupted', outcomeCertainty: 'uncertain', ...usage, source: 'oar', sourceVersion: this.#sourceVersion }
+      : {
+          status: 'failed', outcomeCertainty: 'uncertain',
+          message: 'OAR turn outcome is uncertain because no terminal turn event was observed.',
+          ...usage, source: 'oar', sourceVersion: this.#sourceVersion,
+        });
+  }
 
-    // Wait for exit with bounded escalation to killProcessTree
-    const exited = await new Promise<boolean>((resolve) => {
-      let settled = false;
-      const onExit = () => {
-        if (!settled) {
-          settled = true;
-          clearTimeout(disposeTimer);
-          clearTimeout(killTimer);
-          resolve(true);
-        }
-      };
-
-      this.#runner.on('exit', onExit);
-
-      const disposeTimer = setTimeout(() => {
-        if (settled) return;
-        killProcessTree(this.#runner, 'SIGKILL');
-      }, 1_000);
-      disposeTimer.unref?.();
-
-      const killTimer = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          clearTimeout(disposeTimer);
-          resolve(false);
-        }
-      }, 2_500);
-      killTimer.unref?.();
-    });
-
-    if (this.#mcpBridge) {
-      await this.#mcpBridge.close();
-    }
-
-    if (!exited && this.#runner.exitCode === null && this.#runner.signalCode === null) {
-      throw new Error('OAR runner process tree did not terminate; stop uncertainty preserved');
-    }
+  #observeRunnerOutputClosed(): void {
+    this.#runnerOutputClosed = true;
+    if (this.#runnerExited) this.#onRunnerExit();
   }
 
   #onRunnerExit(): void {
-    if (this.#currentTurnFinish !== undefined) {
-      const usage = this.#settledUsage();
-      if (this.#interrupted) {
-        this.#currentTurnFinish({
-          status: 'interrupted',
-          ...usage,
-          source: 'oar',
-          sourceVersion: this.#sourceVersion,
+    if (this.#currentTurnFinish === undefined) return;
+    const usage = this.#settledUsage();
+    this.#currentTurnFinish(this.#interrupted
+      ? {
+          status: 'interrupted', outcomeCertainty: 'uncertain', ...usage,
+          source: 'oar', sourceVersion: this.#sourceVersion,
+        }
+      : {
+          status: 'failed', outcomeCertainty: 'uncertain',
+          message: 'OAR turn outcome is uncertain because the runner exited before terminal settlement.',
+          ...usage, source: 'oar', sourceVersion: this.#sourceVersion,
         });
-      } else {
-        this.#currentTurnFinish({
-          status: 'failed',
-          message: 'OAR runner connection was lost',
-          ...usage,
-          source: 'oar',
-          sourceVersion: this.#sourceVersion,
-        });
-      }
-    }
   }
 }
 
 function killProcessTree(child: OarRunnerProcess, signal: NodeJS.Signals = 'SIGKILL'): void {
   const pid = child.pid;
-  if (pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+  if (pid === undefined) return;
 
   if (process.platform === 'win32') {
     try {
-      execFileSync('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+      execFileSync('taskkill', ['/pid', String(pid), '/T', '/F'], {
+        stdio: 'ignore', windowsHide: true, timeout: 2_000,
+      });
     } catch {
-      try {
-        child.kill(signal);
-      } catch {
-        // Ignore
+      if (child.exitCode === null && child.signalCode === null) {
+        try { child.kill(signal); } catch { /* Ignore */ }
       }
     }
   } else {
     try {
       process.kill(-pid, signal);
     } catch {
-      try {
-        child.kill(signal);
-      } catch {
-        // Ignore
+      if (child.exitCode === null && child.signalCode === null) {
+        try { child.kill(signal); } catch { /* Ignore */ }
       }
     }
+  }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function waitForProcessTreeStopped(child: OarRunnerProcess, timeoutMs: number): Promise<boolean> {
+  // Windows taskkill can request tree termination but is not an established
+  // fence. Keep termination and lease settlement uncertain until Windows
+  // Job-object or equivalent proof is implemented and accepted.
+  if (process.platform === 'win32' || child.pid === undefined) return false;
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const parentExited = child.exitCode !== null || child.signalCode !== null;
+    if (parentExited && !processGroupExists(child.pid)) return true;
+    if (Date.now() >= deadline) return false;
+    await delay(Math.min(50, Math.max(1, deadline - Date.now())));
+  } while (true);
+}
+
+function processGroupExists(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
   }
 }

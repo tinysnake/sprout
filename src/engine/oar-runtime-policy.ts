@@ -80,7 +80,7 @@ export function assertOarRuntimePolicy(runtimeId: string, options?: SessionOptio
   } catch { refused(); }
 }
 
-/** Exclusive host and project settings lease, held until the runner exits, including forced termination. */
+/** Exclusive host and project settings lease, held until supervised process-tree termination is proved. */
 export function prepareOarRuntimePolicy(runtimeId: string, cwd: string, input: {
   readonly agentDir?: string;
   readonly approvedMcp?: McpServer;

@@ -32,6 +32,7 @@ export const WORKER_DIAGNOSTICS = {
   sessionStartFailed: 'the engine session could not be started',
   resumeRefused: 'the engine refused the saved session',
   turnFailed: 'the engine turn failed',
+  turnOutcomeUncertain: 'the engine turn outcome is uncertain because terminal evidence was not received',
   channelClosed: 'the Environment Worker channel closed',
   coreGoingAway: 'the Sprout instance is going away; the Worker connection closed',
   contractAgentsMd: 'project contract delivery: engine instruction file',
@@ -80,15 +81,19 @@ export function staticRefusalReason(reason: string): string | undefined {
 export function sanitizeEngineTurnResult(result: EngineTurnResult, engine?: string): EngineTurnResult {
   if (result.status !== 'failed') return result;
   const cause = classifyEngineTurnFailure(result) ?? trustedTurnFailureCause(result.message);
-  const message = result.resumeRefused === true
-    ? WORKER_DIAGNOSTICS.resumeRefused
-    : cause !== undefined && engine !== undefined
-      ? trustedTurnFailureMessage(sanitizedTurnFailure(engine, cause)) ?? WORKER_DIAGNOSTICS.turnFailed
-      : trustedTurnFailureMessage(result.message) ?? WORKER_DIAGNOSTICS.turnFailed;
+  const message = result.outcomeCertainty === 'uncertain'
+    ? WORKER_DIAGNOSTICS.turnOutcomeUncertain
+    : result.resumeRefused === true
+      ? WORKER_DIAGNOSTICS.resumeRefused
+      : cause !== undefined && engine !== undefined
+        ? trustedTurnFailureMessage(sanitizedTurnFailure(engine, cause)) ?? WORKER_DIAGNOSTICS.turnFailed
+        : trustedTurnFailureMessage(result.message) ?? WORKER_DIAGNOSTICS.turnFailed;
   // Select the neutral result fields explicitly. Never spread a decoded engine
   // error, response body, code or diagnostic into Worker JSON-RPC/journal data.
   return {
     status: 'failed', message,
+    ...(result.outcomeCertainty === 'uncertain' ? { outcomeCertainty: 'uncertain' as const } : {}),
+    ...(result.engineSessionTermination === 'uncertain' ? { engineSessionTermination: 'uncertain' as const } : {}),
     ...(cause !== undefined && isRetryableEngineTurnFailure(cause) ? { retryable: true as const } : {}),
     ...(result.stopReason === 'error' ? { stopReason: result.stopReason } : {}),
     ...(result.resumeRefused === true ? { resumeRefused: true } : {}),

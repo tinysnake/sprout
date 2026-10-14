@@ -328,6 +328,8 @@ export interface EngineSession {
    * there is nothing worth persisting.
    */
   readonly engineSessionKey: string | undefined;
+  /** Whether close proved the supervised execution tree stopped. */
+  readonly terminationEvidence?: 'proved' | 'uncertain' | undefined;
   /** Send one prompt and observe its events. Resolves when the turn ends. */
   run(prompt: string): EngineTurn;
   /** Interrupt the in-progress turn. Returns whether an interrupt was possible. */
@@ -354,7 +356,13 @@ export interface EngineTurn {
   readonly completion: Promise<EngineTurnResult>;
 }
 
-export type EngineTurnResult = { readonly pricingContext?: import('../usage/valuation.ts').LocalPricingContext } & (
+export type EngineTurnResult = {
+  readonly pricingContext?: import('../usage/valuation.ts').LocalPricingContext;
+  /** The terminal record is explicitly uncertain when no native turn end was observed. */
+  readonly outcomeCertainty?: 'uncertain';
+  /** The turn may be settled while its supervised engine tree remains unproved. */
+  readonly engineSessionTermination?: 'uncertain';
+} & (
   | {
       readonly status: 'completed';
       readonly text: string;
