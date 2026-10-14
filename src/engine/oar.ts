@@ -17,7 +17,12 @@ import type {
 import { EngineResumeRefusedError, EngineStartError } from './port.ts';
 import { EventQueue } from './event-queue.ts';
 import { assertSupportedNodeVersion } from './oar-node-support.ts';
-import { prepareOarRuntimePolicy } from './oar-runtime-policy.ts';
+import {
+  prepareOarRuntimePolicy,
+  hostPiConfigurationProvider,
+  OAR_PI_DISALLOWED_BUILTIN_TOOLS,
+  type OarPiConfigurationProvider,
+} from './oar-runtime-policy.ts';
 import { createOarMcpBridge, type OarMcpBridgeHandle } from './oar-mcp-bridge.ts';
 import type { RunnerCommand, RunnerMessage } from './oar-runner-protocol.ts';
 import type { SessionOptions, TokenTotals } from '@botiverse/oar';
@@ -69,8 +74,8 @@ export interface OarAdapterOptions {
   readonly sandbox?: CodexSandboxMode;
   /** Optional Pi session directory (checked for bounded compatibility refusal). */
   readonly sessionDirectory?: string;
-  /** Optional Pi agent directory (maps to OAR_PI_AGENT_DIR in runner). */
-  readonly agentDirectory?: string;
+  /** Replaceable source of the host Pi agent directory; resolved once per OAR Pi session. */
+  readonly piConfigurationProvider?: OarPiConfigurationProvider;
   /** Injectable process spawner for tests or customized environments. */
   readonly spawnProcess?: (
     command: string,
@@ -82,8 +87,6 @@ export interface OarAdapterOptions {
       readonly stdio?: readonly ['pipe', 'pipe', 'pipe'];
     },
   ) => OarRunnerProcess;
-  /** Host-owned provider configuration; never copied from ambient Pi directories. */
-  readonly piModels?: Readonly<Record<string, unknown>>;
   readonly runnerScriptPath?: string;
   readonly clock?: () => number;
   readonly sourceVersion?: string;
@@ -132,6 +135,7 @@ export class OarEngineAdapter implements EngineAdapter {
     // Build SessionOptions
     const sessionOptions: SessionOptions = {
       ...(this.id === 'claude' ? { disallowedTools: [...OAR_CLAUDE_DISALLOWED_TOOLS] } : {}),
+      ...(this.id === 'pi' ? { disallowedTools: [...OAR_PI_DISALLOWED_BUILTIN_TOOLS] } : {}),
       cwd: request.workingDirectory,
       ...(request.projectWorkspacePath !== undefined && this.#options.runtimeId !== 'pi'
         ? { additionalDirectories: [request.projectWorkspacePath] }
@@ -160,9 +164,12 @@ export class OarEngineAdapter implements EngineAdapter {
 
     let policy;
     try {
+      const piConfiguration = this.id === 'pi'
+        ? (this.#options.piConfigurationProvider ?? hostPiConfigurationProvider).resolve()
+        : undefined;
       policy = prepareOarRuntimePolicy(this.id, request.workingDirectory, {
+        ...(piConfiguration ? { agentDir: piConfiguration.agentDir } : {}),
         ...(mcpBridge ? { approvedMcp: mcpBridge.mcpServer } : {}),
-        ...(this.#options.piModels ? { models: this.#options.piModels } : {}),
       });
       if (policy) (sessionOptions as { cwd: string }).cwd = policy.descriptor.cwd;
     } catch (error) {
@@ -182,7 +189,6 @@ export class OarEngineAdapter implements EngineAdapter {
             ...process.env,
             ...(request.sessionEnvironment ?? {}),
             ...(this.#options.sandbox ? { OAR_CODEX_SANDBOX: this.#options.sandbox } : {}),
-            ...(this.#options.agentDirectory ? { OAR_PI_AGENT_DIR: this.#options.agentDirectory } : {}),
           },
           detached: true,
           stdio: ['pipe', 'pipe', 'pipe'],
@@ -193,7 +199,6 @@ export class OarEngineAdapter implements EngineAdapter {
             ...process.env,
             ...(request.sessionEnvironment ?? {}),
             ...(this.#options.sandbox ? { OAR_CODEX_SANDBOX: this.#options.sandbox } : {}),
-            ...(this.#options.agentDirectory ? { OAR_PI_AGENT_DIR: this.#options.agentDirectory } : {}),
           },
           detached: true,
           stdio: ['pipe', 'pipe', 'pipe'],
