@@ -57,10 +57,11 @@ test('Claude streams all root progress but settles only the last root message wi
     const eventsPromise = (async () => { const events = []; for await (const event of turn.events) events.push(event); return events; })();
     const prompt = runner.commands.at(-1);
     assert.ok(prompt?.op === 'prompt');
+    runner.send({ kind: 'prompt_accepted', activationId: prompt.activationId, seq: 0 });
     for (const [messageId, text] of [['commentary', 'Checking now.'], ['answer', 'FINAL_'], ['answer', 'ANSWER']] as const) {
-      runner.send({ kind: 'event', event: { kind: 'text_delta', sessionId: 'claude-session', agentPath: [], seq: 1, receivedAt: 1, messageId, text } });
+      runner.send({ kind: 'event', activationId: prompt.activationId, event: { kind: 'text_delta', sessionId: 'claude-session', agentPath: [], seq: 1, receivedAt: 1, messageId, text } });
     }
-    runner.send({ kind: 'turn_ended', activationId: prompt.activationId, outcome: { kind: 'completed' }, usage: { total: { input: total, output: total, cacheRead: total, cacheWrite: total } } });
+    runner.send({ kind: 'turn_ended', activationId: prompt.activationId, seq: 2, outcome: { kind: 'completed' }, usage: { total: { input: total, output: total, cacheRead: total, cacheWrite: total } } });
     const result = await turn.completion;
     assert.equal(result.status, 'completed');
     if (result.status === 'completed') {

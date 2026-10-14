@@ -26,11 +26,22 @@ export type RunnerMessage =
       readonly kind: 'ready';
       readonly sessionId: string;
       readonly engineSessionKey: string;
+      /** True only when this OAR session opened a new native conversation. */
+      readonly freshSession?: boolean | undefined;
+      /** Cumulative usage at native session open, when the runtime can report it. */
+      readonly usageBaseline?: SessionUsage | null | undefined;
     }
   | {
       readonly kind: 'event';
       readonly event: Event;
       readonly activationId?: string | undefined;
+    }
+  | {
+      /** A session-cumulative usage snapshot observed during an admitted turn. */
+      readonly kind: 'usage_snapshot';
+      readonly activationId: string;
+      readonly seq: number;
+      readonly usage: SessionUsage;
     }
   | {
       readonly kind: 'prompt_accepted';
@@ -48,6 +59,7 @@ export type RunnerMessage =
       readonly kind: 'turn_ended';
       readonly activationId?: string | undefined;
       readonly spanId?: string | undefined;
+      readonly seq?: number | undefined;
       readonly outcome: TurnOutcome;
       readonly usage?: SessionUsage | null | undefined;
     }

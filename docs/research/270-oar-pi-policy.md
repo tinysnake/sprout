@@ -14,6 +14,16 @@ Ticket #273 supersedes this document's earlier controlled-root and fail-closed p
 
 Ticket #273's scripted probes prove unrestricted positive controls for all nine names in the policy list (`bash`, `edit`, `write`, `read`, `grep`, `find`, `ls`, `powershell`, `codemode`) and provider-visible denied attempts with no side effects for each. Because this host is macOS and Pi's built-in `powershell` tool is Windows-only, its unrestricted control uses a temporary `pwsh.exe` shell stub that creates an observable receipt; it does not test the PowerShell interpreter. The probes also execute a host-extension tool and confirm the extension-registered provider resolves. The real enrolled Worker test supplies model-issued proof that the host extension-registered provider resolves and returns a reply. The real host inventory check observes 28 loaded extensions with sanitized identifiers. See the #273 Work record for exact run counts and evidence classes. Historical #270 boundary measurements below remain a record of that earlier acceptance, not the current Pi route contract.
 
+## Continuation boundary (#233)
+
+OAR stores the runtime-native `Session.id` as the Sprout continuation key and offers it back through `SessionOptions.resume`. The key remains in the existing Agent, engine, host/Environment, working-directory, and authorized conversation-scope slot. A migrated pre-scope key is retained in its legacy slot; because its authorization scope is unknown, a returning run reports that it did not reuse the key and did not start a replacement conversation.
+
+OAR Pi cannot honor a separately configured Pi session directory on this route. When that unsupported configuration is selected, the run fails before runner startup with a user-facing explanation that the run did not start and any saved key was preserved. The native Pi adapter remains the supported route for that configuration.
+
+Resumed usage is reported only as a delta from the native session's usage baseline observed when OAR opens it. If the runtime cannot provide that baseline, usage for the resumed turn remains unavailable; the adapter does not infer zero or count old history as current work. Fresh sessions use their known zero baseline. Usage source and OAR version remain attached to settled results.
+
+For event attribution, the wrapper activation ID alone does not relabel an opening or queued native event as new work. An event without a matching native turn span must have a sequence strictly after the accepted prompt request; sequence-zero opening activity without a matching span is ignored. The same boundary applies to usage snapshots and turn completion.
+
 ## Historical delivered control (superseded for the OAR Pi route by #273)
 
 A fresh host-owned agent directory contained only suppression settings and optional host-supplied `OarAdapterOptions.piModels` provider configuration. No ambient auth, models, packages or extensions were copied. Global settings used `defaultTools: []`, `extensions: ['!**/*']` and `packages: []`. The same suppression overrides were applied in `<cwd>/.pi/settings.json`: project exclusion was essential; global exclusion alone did not exclude project discovery. `!` was a normal exclusion pattern; `-` exact-path force exclusion was deliberately not used. OAR pre-trusted cwd; this control did not alter trust.

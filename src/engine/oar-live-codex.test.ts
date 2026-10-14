@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 import { defaultRuntimes } from '@botiverse/oar';
 
 import { OarEngineAdapter } from './oar.ts';
 import { CodexEngineAdapter } from './codex.ts';
 import {
-  build,
+  createRuntime,
+  hostConfiguration,
+  INSTANCE_ID,
   PROJECT_ID,
   scriptedEnvironment,
 } from '../runtime-test-harness.ts';
@@ -86,18 +91,35 @@ test('AC8: Bounded live macOS Codex Message-to-reply demonstration through the e
     sandbox: 'danger-full-access',
   });
 
-  // Full Runtime Message admission and reply projection demonstration through enrolled path
-  const { runtime } = await build({
-    environment: scriptedEnvironment({
-      adapters: new Map([['scripted', adapter]]),
-    }),
+  const directory = mkdtempSync(join(tmpdir(), 'sprout-oar-codex-live-'));
+  const databasePath = join(directory, 'runtime.db');
+  const runtimeConfiguration = hostConfiguration({
+    databasePath,
+    workingDirectory: directory,
+    engineId: 'codex',
+    runtimeConfiguration: {
+      agents: [{ id: 'scout', name: 'Live Codex Agent', engine: 'codex', capability: 'agent-run' }],
+      project: {
+        id: PROJECT_ID,
+        goal: 'Continue the same native Codex conversation after runtime restart.',
+        rules: [],
+        availableEnvironmentInstanceIds: [INSTANCE_ID],
+        memberships: [{ agentId: 'scout', responsibilities: [], collaborationInstructions: '' }],
+      },
+    },
   });
+  const createLiveRuntime = () => createRuntime({
+    configuration: runtimeConfiguration,
+    projectRoot: directory,
+    environment: scriptedEnvironment({ adapters: new Map([['codex', adapter]]) }),
+  });
+  let runtime = await createLiveRuntime();
 
   try {
     const delivered = await runtime.collaboration.deliver({
       scopeId: `channel-${PROJECT_ID}`,
       author: { id: 'operator', kind: 'human' },
-      body: '@scout please reply with only the word PONG',
+      body: '@scout Remember the word VIOLET. Reply with only the word PONG.',
       deliveryKey: `live-codex-admission-${Date.now()}`,
       awaitReply: true,
     });
@@ -127,8 +149,70 @@ test('AC8: Bounded live macOS Codex Message-to-reply demonstration through the e
     assert.equal(projected.length, 1, 'Exactly one reply was projected from the root turn');
     assert.equal(projected[0]?.author.id, 'scout');
     assert.match(projected[0]?.body ?? '', /PONG/i);
+
+    const persistedFirst = await runtime.stores.runs.get(run.id);
+    assert.equal(persistedFirst?.result?.status, 'completed');
+    const savedKeysBeforeRestart = await runtime.stores.sessionKeys.list();
+    assert.equal(savedKeysBeforeRestart.length, 1);
+    assert.equal(savedKeysBeforeRestart[0]?.scope.kind, 'conversation');
+    assert.equal(savedKeysBeforeRestart[0]?.scope.id, `channel-${PROJECT_ID}`);
+
+    await runtime.close();
+    runtime = await createLiveRuntime();
+
+    const continued = await runtime.collaboration.deliver({
+      scopeId: `channel-${PROJECT_ID}`,
+      author: { id: 'operator', kind: 'human' },
+      body: '@scout What word did I ask you to remember? Reply with only that word.',
+      deliveryKey: `live-codex-continuation-${Date.now()}`,
+      awaitReply: true,
+    });
+    assert.equal(continued.duplicate, false);
+    assert.equal(continued.admittedRunIds.length, 1);
+    const continuedRun = await runtime.orchestrator.waitFor(continued.admittedRunIds[0]!);
+    assert.equal(continuedRun.status, 'completed');
+    assert.equal(continuedRun.result?.status, 'completed');
+    assert.match(continuedRun.result?.status === 'completed' ? continuedRun.result.text : '', /VIOLET/i,
+      'the second model-issued run recalls a fact supplied only in the first native conversation');
+    const continuedTokens = continuedRun.result?.tokenUsage;
+    if (continuedTokens === undefined) {
+      assert.equal(continuedRun.result?.detailedTokens, undefined,
+        'a resumed turn without a verified usage baseline remains unavailable');
+    } else {
+      assert.ok(continuedTokens.promptTokens > 0);
+      assert.ok(continuedTokens.completionTokens > 0);
+    }
+    const continuedMessages = await runtime.collaboration.listMessages();
+    const continuedReply = continuedMessages.filter(
+      (m) => m.author.kind === 'agent' && m.inReplyTo === continued.message.id,
+    );
+    assert.equal(continuedReply.length, 1);
+    assert.match(continuedReply[0]?.body ?? '', /VIOLET/i);
+    const persistedContinued = await runtime.stores.runs.get(continuedRun.id);
+    assert.equal(persistedContinued?.result?.status, 'completed');
+    assert.match(persistedContinued?.result?.status === 'completed' ? persistedContinued.result.text : '', /VIOLET/i);
+    assert.deepEqual(persistedContinued?.result?.tokenUsage, continuedRun.result?.tokenUsage,
+      'the persisted usage view matches the completed run result');
+    const savedKeysAfterRestart = await runtime.stores.sessionKeys.list();
+    assert.equal(savedKeysAfterRestart.length, 1);
+    assert.equal(savedKeysAfterRestart[0]?.key, savedKeysBeforeRestart[0]?.key,
+      'the durable native key survives runtime/database reopen in its authorized conversation scope');
+    const usageView = await runtime.usage.getRunUsage(continuedRun.id);
+    assert.ok(usageView, 'the live runtime exposes a persisted usage view for this run');
+    const usageObservation = usageView.effectiveObservation;
+    assert.equal(usageObservation?.completeness, continuedTokens === undefined ? 'unavailable' : 'complete');
+    assert.equal(usageObservation?.source, 'oar');
+    assert.equal(usageObservation?.sourceVersion, '0.59.1');
+    assert.deepEqual(usageObservation?.tokens, continuedRun.result?.detailedTokens);
+    await t.test(
+      continuedTokens === undefined
+        ? 'resumed usage view is unavailable because no verified baseline was available'
+        : 'resumed usage view is complete with verified per-run usage',
+      () => {},
+    );
   } finally {
     await runtime.close();
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 

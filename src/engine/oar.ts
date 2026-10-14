@@ -25,7 +25,7 @@ import {
 } from './oar-runtime-policy.ts';
 import { createOarMcpBridge, type OarMcpBridgeHandle } from './oar-mcp-bridge.ts';
 import type { RunnerCommand, RunnerMessage } from './oar-runner-protocol.ts';
-import type { SessionOptions, TokenTotals } from '@botiverse/oar';
+import type { SessionOptions, SessionUsage, TokenTotals } from '@botiverse/oar';
 import { redactSensitiveText } from '../environment/privacy.ts';
 import type { CodexSandboxMode } from './codex.ts';
 
@@ -123,13 +123,9 @@ export class OarEngineAdapter implements EngineAdapter {
     }
 
     if (this.#options.runtimeId === 'pi' && this.#options.sessionDirectory !== undefined) {
-      const message =
-        `OAR Pi adapter does not support custom session directory (${this.#options.sessionDirectory}); ` +
-        `use native Pi adapter to preserve configured session storage location`;
-      if (request.resumeSessionKey) {
-        throw new EngineResumeRefusedError(request.resumeSessionKey, message);
-      }
-      throw new EngineStartError(message);
+      throw new EngineStartError(
+        'OAR Pi cannot use the configured Pi session directory on this route. This run did not start and any saved session key was preserved; use the native Pi adapter for this configuration.',
+      );
     }
 
     // Build SessionOptions
@@ -269,6 +265,8 @@ export class OarEngineAdapter implements EngineAdapter {
                     engineSessionKey: msg.engineSessionKey,
                     runtimeId: this.#options.runtimeId,
                     sourceVersion: this.#options.sourceVersion ?? OAR_PACKAGE_VERSION,
+                    freshSession: msg.freshSession ?? request.resumeSessionKey === undefined,
+                    ...(msg.usageBaseline !== undefined ? { usageBaseline: msg.usageBaseline } : {}),
                     mcpBridge,
                     clock,
                   });
@@ -282,17 +280,11 @@ export class OarEngineAdapter implements EngineAdapter {
                 }
                 if (msg.kind === 'error') {
                   const sanitized = redactSensitiveText(msg.message);
-                  if (
-                    request.resumeSessionKey &&
-                    (sanitized.includes('no rollout') ||
-                      sanitized.includes('SessionNotFoundError') ||
-                      sanitized.includes('session not found') ||
-                      sanitized.includes('unknown thread') ||
-                      sanitized.includes('resume refused') ||
-                      /\bsession\b.*\bnot found\b/i.test(sanitized) ||
-                      sanitized.includes('no session file'))
-                  ) {
-                    failStart(new EngineResumeRefusedError(request.resumeSessionKey, sanitized));
+                  if (request.resumeSessionKey !== undefined && msg.code === 'session_not_found') {
+                    failStart(new EngineResumeRefusedError(
+                      request.resumeSessionKey,
+                      'The OAR runtime could not find the saved native session. No work was started; the existing one-time fresh-session retry may now run.',
+                    ));
                   } else {
                     failStart(new EngineStartError(sanitized));
                   }
@@ -331,6 +323,8 @@ interface OarEngineSessionParams {
   readonly engineSessionKey: string;
   readonly runtimeId: string;
   readonly sourceVersion: string;
+  readonly freshSession: boolean;
+  readonly usageBaseline?: SessionUsage | null | undefined;
   readonly mcpBridge?: OarMcpBridgeHandle | undefined;
   readonly clock: () => number;
 }
@@ -350,7 +344,11 @@ export class OarEngineSession implements EngineSession {
   #currentTurnFinish: ((result: EngineTurnResult) => void) | undefined;
   #currentEventQueue: EventQueue | undefined;
   #buffer = '';
-  #baselineUsage: TokenTotals = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
+  #baselineUsage: TokenTotals | undefined;
+  #hasUsageBaseline: boolean;
+  #latestTurnUsage: { readonly tokenUsage: TokenUsage; readonly detailedTokens: DetailedTokenDimensions } | undefined;
+  #latestObservedTotals: TokenTotals | undefined;
+  #usageInvalid = false;
   #interrupted = false;
 
   constructor(params: OarEngineSessionParams) {
@@ -360,6 +358,11 @@ export class OarEngineSession implements EngineSession {
     this.#sourceVersion = params.sourceVersion;
     this.#runtimeId = params.runtimeId;
     this.#mcpBridge = params.mcpBridge;
+    const baseline = params.usageBaseline?.total;
+    this.#baselineUsage = params.freshSession
+      ? { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 }
+      : baseline ?? undefined;
+    this.#hasUsageBaseline = params.freshSession || (baseline !== null && baseline !== undefined);
     this.#clock = params.clock;
 
     this.#runner.stdout?.on('data', (chunk: Buffer | string) => {
@@ -395,6 +398,8 @@ export class OarEngineSession implements EngineSession {
     const queue = new EventQueue();
     this.#currentEventQueue = queue;
     this.#interrupted = false;
+    this.#latestTurnUsage = undefined;
+    this.#latestObservedTotals = undefined;
 
     let rootTurnText = '';
     let rootMessageId: string | undefined;
@@ -426,8 +431,9 @@ export class OarEngineSession implements EngineSession {
 
     this.#currentTurnFinish = finish;
 
-    const activationId = randomUUID();
     let currentSpanId: string | undefined;
+    let sequenceFloor: number | undefined;
+    const activationId = randomUUID();
 
     // Attach local state handlers before sending the command, so synchronous
     // test fixtures or fast responses cannot race turn context attachment.
@@ -437,6 +443,10 @@ export class OarEngineSession implements EngineSession {
       setSpanId: (spanId: string) => {
         if (!currentSpanId) currentSpanId = spanId;
       },
+      setSequenceFloor: (seq: number) => {
+        sequenceFloor = seq;
+      },
+      getSequenceFloor: () => sequenceFloor,
       appendRootText: (text: string, messageId?: string) => {
         if (OAR_RUNTIME_REGISTRATIONS[this.#runtimeId as keyof typeof OAR_RUNTIME_REGISTRATIONS]?.finalAnswer === 'last-message' && messageId !== undefined && messageId !== rootMessageId) {
           rootTurnText = '';
@@ -465,10 +475,75 @@ export class OarEngineSession implements EngineSession {
     activationId: string;
     getSpanId(): string | undefined;
     setSpanId(spanId: string): void;
+    setSequenceFloor(seq: number): void;
+    getSequenceFloor(): number | undefined;
     appendRootText(text: string, messageId?: string): void;
     getRootText(): string;
     finish(result: EngineTurnResult): void;
   };
+
+  #observeUsage(usage: SessionUsage | null | undefined): void {
+    const total = usage?.total;
+    if (total === null || total === undefined) return;
+
+    const previous = this.#latestObservedTotals;
+    this.#latestObservedTotals = total;
+    if (previous !== undefined && (total.input < previous.input || total.output < previous.output)) {
+      this.#usageInvalid = true;
+      this.#latestTurnUsage = undefined;
+      return;
+    }
+    if (this.#usageInvalid || !this.#hasUsageBaseline || this.#baselineUsage === undefined) return;
+
+    const inputDelta = total.input - this.#baselineUsage.input;
+    const outputDelta = total.output - this.#baselineUsage.output;
+    if (inputDelta < 0 || outputDelta < 0) {
+      this.#usageInvalid = true;
+      this.#latestTurnUsage = undefined;
+      return;
+    }
+
+    const optionalDelta = (current: number | undefined, baseline: number | undefined): number | undefined => {
+      if (current === undefined || baseline === undefined || current < baseline) return undefined;
+      return current - baseline;
+    };
+    const reasoningOutputTokens = optionalDelta(total.reasoning, this.#baselineUsage.reasoning);
+    const cachedInputTokens = optionalDelta(total.cacheRead, this.#baselineUsage.cacheRead);
+    const cacheWriteInputTokens = this.#runtimeId === 'claude'
+      ? optionalDelta(total.cacheWrite, this.#baselineUsage.cacheWrite)
+      : undefined;
+
+    this.#latestTurnUsage = {
+      tokenUsage: {
+        promptTokens: inputDelta,
+        completionTokens: outputDelta,
+        totalTokens: inputDelta + outputDelta,
+      },
+      detailedTokens: {
+        inputTokens: inputDelta,
+        outputTokens: outputDelta,
+        ...(reasoningOutputTokens !== undefined ? { reasoningOutputTokens } : {}),
+        ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
+        ...(cacheWriteInputTokens !== undefined ? { cacheWriteInputTokens } : {}),
+      },
+    };
+  }
+
+  #settledUsage(usage?: SessionUsage | null): {
+    readonly tokenUsage?: TokenUsage;
+    readonly detailedTokens?: DetailedTokenDimensions;
+  } {
+    this.#observeUsage(usage);
+    if (this.#latestObservedTotals !== undefined) {
+      this.#baselineUsage = this.#latestObservedTotals;
+      this.#hasUsageBaseline = true;
+    }
+    const latest = this.#usageInvalid ? undefined : this.#latestTurnUsage;
+    this.#latestTurnUsage = undefined;
+    this.#latestObservedTotals = undefined;
+    this.#usageInvalid = false;
+    return latest ?? {};
+  }
 
   #handleRunnerLine(line: string): void {
     let msg: RunnerMessage;
@@ -486,38 +561,49 @@ export class OarEngineSession implements EngineSession {
           if (msg.spanId) {
             turn.setSpanId(msg.spanId);
           }
+          turn.setSequenceFloor(msg.seq);
         }
         break;
       }
 
       case 'prompt_rejected': {
         if (!turn) return;
-        if (msg.activationId && msg.activationId !== turn.activationId) return;
+        if (msg.activationId !== turn.activationId) return;
         const sanitized = redactSensitiveText(msg.reason);
         turn.finish({
           status: 'failed',
           message: `OAR prompt rejected (${msg.code}): ${sanitized || 'engine busy or refused'}`,
+          ...this.#settledUsage(),
+          source: 'oar',
+          sourceVersion: this.#sourceVersion,
         });
         break;
       }
 
       case 'event': {
-        if (turn && msg.activationId !== undefined && msg.activationId !== turn.activationId) {
+        if (turn && msg.activationId !== turn.activationId) {
           break;
         }
 
         const ev = msg.event;
+        if (turn) {
+          const boundSpanId = turn.getSpanId();
+          const matchingNativeSpan = boundSpanId !== undefined && ev.spanId === boundSpanId;
+          if (boundSpanId !== undefined && ev.spanId !== undefined && ev.spanId !== boundSpanId) {
+            break;
+          }
+          const sequenceFloor = turn.getSequenceFloor();
+          if (sequenceFloor !== undefined && !matchingNativeSpan && ev.seq <= sequenceFloor) {
+            break;
+          }
+        }
         const isRoot = (!ev.agentPath || ev.agentPath.length === 0) && ev.sessionId === this.sessionId;
 
         if (isRoot) {
-          // If turn is active, enforce span attribution:
-          // A background or stale root event must NOT contribute text or progress to the active turn.
+          // A span matching the accepted native turn is direct attribution. Without
+          // it, only events after the prompt request's stream position are eligible.
           if (turn) {
             const boundSpanId = turn.getSpanId();
-            if (boundSpanId !== undefined && ev.spanId !== undefined && ev.spanId !== boundSpanId) {
-              // Stale or background root event — do NOT attribute to active turn
-              break;
-            }
             if (boundSpanId === undefined && ev.spanId !== undefined) {
               if (this.#runtimeId === 'pi') {
                 break;
@@ -552,70 +638,45 @@ export class OarEngineSession implements EngineSession {
         break;
       }
 
+      case 'usage_snapshot': {
+        if (!turn || msg.activationId !== turn.activationId) break;
+        const sequenceFloor = turn.getSequenceFloor();
+        if (sequenceFloor === undefined || msg.seq <= sequenceFloor) break;
+        this.#observeUsage(msg.usage);
+        break;
+      }
+
       case 'turn_ended': {
         if (!turn) return;
 
-        // Verify activation and span attribution:
-        // Background or stale root endings must neither settle nor contribute to the current turn.
-        if (msg.activationId !== undefined && msg.activationId !== turn.activationId) {
+        // Background or stale root endings cannot settle the current activation.
+        if (msg.activationId !== turn.activationId) return;
+        const boundSpanId = turn.getSpanId();
+        const matchingNativeSpan = boundSpanId !== undefined && msg.spanId === boundSpanId;
+        if (boundSpanId !== undefined && msg.spanId !== undefined && msg.spanId !== boundSpanId) {
           return;
         }
-
-        const boundSpanId = turn.getSpanId();
-        if (boundSpanId !== undefined && msg.spanId !== undefined && msg.spanId !== boundSpanId) {
+        const sequenceFloor = turn.getSequenceFloor();
+        if (sequenceFloor !== undefined && !matchingNativeSpan &&
+            (msg.seq === undefined || msg.seq <= sequenceFloor)) {
           return;
         }
 
         const outcome = msg.outcome;
-        const usage = msg.usage;
-
-        let tokenUsage: TokenUsage | undefined;
-        let detailedTokens: DetailedTokenDimensions | undefined;
-
-        if (usage?.total) {
-          const inputDelta = Math.max(0, usage.total.input - this.#baselineUsage.input);
-          const outputDelta = Math.max(0, usage.total.output - this.#baselineUsage.output);
-          tokenUsage = {
-            promptTokens: inputDelta,
-            completionTokens: outputDelta,
-            totalTokens: inputDelta + outputDelta,
-          };
-          detailedTokens = {
-            inputTokens: inputDelta,
-            outputTokens: outputDelta,
-            ...(usage.total.reasoning !== undefined
-              ? { reasoningOutputTokens: Math.max(0, usage.total.reasoning - (this.#baselineUsage.reasoning ?? 0)) }
-              : {}),
-            ...(usage.total.cacheRead !== undefined
-              ? { cachedInputTokens: Math.max(0, usage.total.cacheRead - (this.#baselineUsage.cacheRead ?? 0)) }
-              : {}),
-            ...(this.#runtimeId === 'claude' && usage.total.cacheWrite !== undefined
-              ? { cacheWriteInputTokens: Math.max(0, usage.total.cacheWrite - (this.#baselineUsage.cacheWrite ?? 0)) }
-              : {}),
-          };
-          this.#baselineUsage = {
-            input: usage.total.input,
-            output: usage.total.output,
-            ...(usage.total.reasoning !== undefined ? { reasoning: usage.total.reasoning } : {}),
-            ...(usage.total.cacheRead !== undefined ? { cacheRead: usage.total.cacheRead } : {}),
-            ...(usage.total.cacheWrite !== undefined ? { cacheWrite: usage.total.cacheWrite } : {}),
-          };
-        }
+        const usage = this.#settledUsage(msg.usage);
 
         if (outcome.kind === 'completed') {
           turn.finish({
             status: 'completed',
             text: turn.getRootText(),
-            ...(tokenUsage !== undefined ? { tokenUsage } : {}),
-            ...(detailedTokens !== undefined ? { detailedTokens } : {}),
+            ...usage,
             source: 'oar',
             sourceVersion: this.#sourceVersion,
           });
         } else if (outcome.kind === 'aborted' || this.#interrupted) {
           turn.finish({
             status: 'interrupted',
-            ...(tokenUsage !== undefined ? { tokenUsage } : {}),
-            ...(detailedTokens !== undefined ? { detailedTokens } : {}),
+            ...usage,
             source: 'oar',
             sourceVersion: this.#sourceVersion,
           });
@@ -626,8 +687,7 @@ export class OarEngineSession implements EngineSession {
           turn.finish({
             status: 'failed',
             message: reason,
-            ...(tokenUsage !== undefined ? { tokenUsage } : {}),
-            ...(detailedTokens !== undefined ? { detailedTokens } : {}),
+            ...usage,
             source: 'oar',
             sourceVersion: this.#sourceVersion,
           });
@@ -640,6 +700,9 @@ export class OarEngineSession implements EngineSession {
         turn?.finish({
           status: 'failed',
           message: sanitized,
+          ...this.#settledUsage(),
+          source: 'oar',
+          sourceVersion: this.#sourceVersion,
         });
         break;
       }
@@ -684,7 +747,12 @@ export class OarEngineSession implements EngineSession {
     this.#closed = true;
 
     if (this.#currentTurnFinish !== undefined) {
-      this.#currentTurnFinish({ status: 'interrupted' });
+      this.#currentTurnFinish({
+        status: 'interrupted',
+        ...this.#settledUsage(),
+        source: 'oar',
+        sourceVersion: this.#sourceVersion,
+      });
     }
 
     if (this.#runner.exitCode !== null) {
@@ -750,12 +818,21 @@ export class OarEngineSession implements EngineSession {
 
   #onRunnerExit(): void {
     if (this.#currentTurnFinish !== undefined) {
+      const usage = this.#settledUsage();
       if (this.#interrupted) {
-        this.#currentTurnFinish({ status: 'interrupted' });
+        this.#currentTurnFinish({
+          status: 'interrupted',
+          ...usage,
+          source: 'oar',
+          sourceVersion: this.#sourceVersion,
+        });
       } else {
         this.#currentTurnFinish({
           status: 'failed',
           message: 'OAR runner connection was lost',
+          ...usage,
+          source: 'oar',
+          sourceVersion: this.#sourceVersion,
         });
       }
     }
