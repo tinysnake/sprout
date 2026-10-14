@@ -1,0 +1,107 @@
+{
+  "ticket": 271,
+  "evidenceClass": "scripted",
+  "pins": {
+    "oar": "0.59.1",
+    "cli": "2.1.294 (Claude Code)",
+    "node": "26.11.1",
+    "platform": "darwin",
+    "macOS": "27.0.1"
+  },
+  "engineAuth": {
+    "statusRan": true,
+    "reachable": true
+  },
+  "credentialFile": {
+    "present": true,
+    "openableWithoutIsolation": true,
+    "profileRunOk": true,
+    "openDeniedUnderDeclaredProfile": true
+  },
+  "childAccess": {
+    "unrestrictedPositiveControl": {
+      "attempted": true,
+      "readSucceeded": true
+    },
+    "hook": {
+      "processLaunched": true,
+      "exitCode": 0,
+      "attempted": true,
+      "readSucceeded": true,
+      "denied": false,
+      "timedOut": false,
+      "descendantsTracked": 0,
+      "descendantsGone": 0
+    },
+    "plugin": {
+      "processLaunched": true,
+      "exitCode": 0,
+      "attempted": true,
+      "readSucceeded": true,
+      "denied": false,
+      "timedOut": false,
+      "descendantsTracked": 0,
+      "descendantsGone": 0
+    },
+    "mcp": {
+      "processLaunched": true,
+      "exitCode": 0,
+      "attempted": true,
+      "readSucceeded": true,
+      "denied": false,
+      "initializeObserved": true,
+      "launchContext": "standalone-stdio-mcp-harness",
+      "protocolHandshakeEvidenceClass": "protocol-only",
+      "timedOut": false,
+      "descendantsTracked": 0,
+      "descendantsGone": 0
+    }
+  },
+  "brokerPresenceCheck": {
+    "processScanExecuted": true,
+    "processRowsScanned": 628,
+    "brokerNamePatternProcessRows": 0,
+    "credentialRelatedBrokerNamePatternProcessRows": 0,
+    "launchdScanExecuted": true,
+    "launchdRowsScanned": 572,
+    "brokerNamePatternServiceRows": 2,
+    "credentialRelatedBrokerNamePatternServiceRows": 1
+  },
+  "toolSurface": {
+    "fresh": {
+      "turnCompleted": true,
+      "forcedReadAttemptObserved": true,
+      "providerReceivedToolResult": true,
+      "denied": true,
+      "credentialMaterialObserved": false
+    },
+    "resumed": {
+      "resumeAccepted": true,
+      "turnCompleted": true,
+      "forcedReadAttemptObserved": true,
+      "providerReceivedToolResult": true,
+      "denied": true,
+      "credentialMaterialObserved": false
+    },
+    "unrestrictedControl": {
+      "turnCompleted": true,
+      "providerReceivedToolResult": true,
+      "markerObserved": true
+    }
+  },
+  "supervisor": {
+    "preCloseRunnerAlive": true,
+    "preCloseDescendantCount": 3,
+    "freshTurnCompleted": true,
+    "runnerGoneAfterClose": true,
+    "descendantsTracked": 3,
+    "descendantsGoneAfterClose": 3,
+    "resumeRunnerGoneAfterClose": true
+  },
+  "providerRequests": 9,
+  "ok": true,
+  "providerListener": {
+    "bound": true,
+    "allocation": "environment-range"
+  }
+}
